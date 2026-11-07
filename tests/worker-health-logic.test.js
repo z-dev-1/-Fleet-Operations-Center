@@ -3,7 +3,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall,
-  unavailableStatus, canReEnable, createVisiblePoller, STATUS_LABELS,
+  unavailableStatus, canReEnable, createVisiblePoller, STATUS_LABELS, akiLaneStatus,
 } from '../renderer/src/js/views/worker-health-logic.js';
 
 const NOW = 1730000000000;
@@ -115,6 +115,13 @@ describe('authStatus / laneStatus / aiOverall / unavailableStatus', () => {
     expect(laneStatus('down')).toMatchObject({ key: 'failed', label: 'Failed' });
     expect(laneStatus('fallback')).toMatchObject({ key: 'waiting', label: 'Waiting', reason: 'fallback only' });
     expect(laneStatus('unknown')).toMatchObject({ key: 'unknown', label: 'Unknown' });
+  });
+  it('akiLaneStatus', () => {
+    expect(akiLaneStatus('up')).toMatchObject({ key: 'healthy', label: 'Healthy' });
+    expect(akiLaneStatus('down')).toMatchObject({ key: 'failed', label: 'Failed' });
+    expect(akiLaneStatus('not-found')).toMatchObject({ key: 'failed', label: 'Not found', reason: 'aki not found' });
+    expect(akiLaneStatus('idle')).toMatchObject({ key: 'unknown', label: 'Unknown' });
+    expect(akiLaneStatus(undefined)).toMatchObject({ key: 'unknown' });
   });
   it('aiOverall', () => {
     expect(aiOverall('up').key).toBe('healthy');

@@ -79,6 +79,32 @@ function _gw() {
   return _gwCache;
 }
 
+// ── AKI LANE FLAGS ────────────────────────────────────────────────────────────
+// settings.ai.aki.* via perf-flags.loadAiAki (env FLEET_AI_AKI wins). Cached
+// like the gateway flags (15 s) AND re-read as soon as the 'settings' store
+// generation changes, so a Settings save applies to the next request.
+const { createAkiLane } = require('./aki-lane');
+let _akiLane = createAkiLane();
+let _akiOverride = null;  // test seam: setAkiFlags
+let _akiCache = null;
+let _akiCacheAt = 0;
+let _akiCacheGen = -1;
+function _settingsGen() {
+  try { return require('../store').generation('settings'); } catch (_) { return -1; }
+}
+function _aki() {
+  if (_akiOverride) return _akiOverride;
+  const now = Date.now();
+  const gen = _settingsGen();
+  if (_akiCache && gen === _akiCacheGen && (now - _akiCacheAt) < GW_FLAG_TTL_MS && now >= _akiCacheAt) return _akiCache;
+  let f = null;
+  try { f = perfFlags.loadAiAki(); } catch (_) { f = null; }
+  _akiCache = Object.freeze(Object.assign({}, perfFlags.AKI_DEFAULTS, (f && typeof f === 'object') ? f : {}));
+  _akiCacheAt = now;
+  _akiCacheGen = gen;
+  return _akiCache;
+}
+
 // ── CONFIG ────────────────────────────────────────────────────────────────────
 const DEFAULTS  = require('../config/defaults');
 const MODEL_ID    = DEFAULTS.AI_MODEL_ID;
@@ -109,7 +135,11 @@ let _lastError    = null;
 let _status       = 'unknown'; // 'connected' | 'expired' | 'error' | 'unknown'
 let _requestCount = 0;
 let _errorCount   = 0;
-let _aiPreference = 'auto'; // 'auto' | 'orcha' | 'claude' | 'balanced'
+// 'auto' | 'orcha' | 'claude' | 'balanced' (legacy cascade paths) |
+// 'balanced3' | 'aki' | 'aki-orcha' | 'aki-claude' (N-lane router, AKI_MODES)
+let _aiPreference = 'auto';
+const VALID_PREFERENCES = Object.freeze(['auto', 'orcha', 'claude', 'balanced', 'balanced3', 'aki', 'aki-orcha', 'aki-claude']);
+const AKI_MODES = new Set(['balanced3', 'aki', 'aki-orcha', 'aki-claude']);
 // Orcha agent id used for every WS/headless request (Settings -> AI -> Orcha
 // Agent). The agent selects the server-side model. Was hardcoded to
 // 'orcha_default' in both transports, so the Settings dropdown had no effect.
@@ -140,31 +170,46 @@ let _orchaBusy = 0;
 let _claudeBusy = 0;
 let _orchaDownUntil  = 0;  // epoch ms; while now < this, treat Orcha lane as down
 let _claudeDownUntil = 0;
+// Third lane (Aki CLI, src/orcha/aki-lane.js) — used only by AKI_MODES.
+let _akiBusy = 0;
+let _akiDownUntil = 0;
 const LANE_COOLDOWN_MS = 60000; // how long a lane stays "down" after a failure
 
 function _laneHealthy(lane) {
   const now = Date.now();
+  if (lane === 'aki') return now >= _akiDownUntil;
   return lane === 'orcha' ? now >= _orchaDownUntil : now >= _claudeDownUntil;
 }
 function _markLaneDown(lane) {
   const until = Date.now() + LANE_COOLDOWN_MS;
-  if (lane === 'orcha') _orchaDownUntil = until; else _claudeDownUntil = until;
+  if (lane === 'aki') { _akiDownUntil = until; _akiLane.markState('down'); }
+  else if (lane === 'orcha') _orchaDownUntil = until; else _claudeDownUntil = until;
   logger.warn('[balanced] lane "' + lane + '" marked down for ' + (LANE_COOLDOWN_MS / 1000) + 's');
 }
 function _markLaneHealthy(lane) {
+  if (lane === 'aki') { _akiDownUntil = 0; _akiLane.markState('up'); return; }
   if (lane === 'orcha') _orchaDownUntil = 0; else _claudeDownUntil = 0;
 }
 
+function _laneBusy(lane) { return lane === 'aki' ? _akiBusy : (lane === 'orcha' ? _orchaBusy : _claudeBusy); }
+
+// N-lane start pick: least-busy healthy lane of `set` (Aki also needs its
+// binary); ties go to the earliest lane in `set`; none healthy -> set[0].
+function _pickLaneN(set) {
+  let best = null;
+  for (const l of set) {
+    const ok = _laneHealthy(l) && (l !== 'aki' || _akiLane.available());
+    if (!ok) continue;
+    if (best === null || _laneBusy(l) < _laneBusy(best)) best = l;
+  }
+  return best === null ? set[0] : best;
+}
+
 // Decide which lane a new balanced-mode request should START on.
+// Same truth table as before: one healthy -> it; none -> orcha; both -> the
+// least busy, ties to Orcha (pinned by tests/relay-preference-parity.test.js).
 function _pickLane() {
-  const orchaOk  = _laneHealthy('orcha');
-  const claudeOk = _laneHealthy('claude');
-  // If exactly one lane is healthy, use it exclusively (single-backend mode).
-  if (orchaOk && !claudeOk) return 'orcha';
-  if (claudeOk && !orchaOk) return 'claude';
-  if (!orchaOk && !claudeOk) return 'orcha'; // both cooling down — try Orcha, it'll fall through
-  // Both healthy: least-busy wins; ties go to Orcha (primary).
-  return _claudeBusy < _orchaBusy ? 'claude' : 'orcha';
+  return _pickLaneN(['orcha', 'claude']);
 }
 
 // ── SLOT GATE: PRIORITIES, RESERVATION, AGING (Phase 3) ──────────────────────
@@ -367,7 +412,21 @@ function queueStats() {
     inflightDedupe: _inflight.size,
     flags: { priorities: gw.priorities, abortOnTimeout: gw.abortOnTimeout, dedupe: gw.dedupe, routerDecides: gw.routerDecides },
     claudePool: _claudePoolStats(),
+    akiLane: _akiLaneStats(),
   };
+}
+
+function _akiLaneStats() {
+  const f = _aki();
+  const st = _akiLane.stats();
+  // `active` is the "an Aki mode is in use" flag here; the lane's running-job
+  // count (stats().active) is kept as `busy`.
+  return Object.assign({}, st, {
+    busy: st.active,
+    enabled: !!f.enabled,
+    active: AKI_MODES.has(_aiPreference) && !!f.enabled,
+    allowUntrusted: f.allowUntrusted === true,
+  });
 }
 
 // ── ASK ───────────────────────────────────────────────────────────────────────
@@ -556,6 +615,9 @@ async function _runCascade(prompt, ctx) {
     // Isolated lane (opts.isolated === true, Just Me context turns): ONLY the
     // tool-less Claude pool worker. No fleet-brain (its session / _localHistory
     // would retain the content), no WS, no Bedrock, no lane-health changes.
+    // Aki joins the isolated lane only with an Aki mode AND ai.aki.enabled AND
+    // ai.aki.allowUntrusted === true (_runIsolatedSet); otherwise unchanged.
+    if (opts.isolated === true && _akiIsolatedAllowed()) return await _runIsolatedSet(prompt, ctx, _aiPreference);
     if (opts.isolated === true) {
       const t = await _tryClaudeCode(prompt, { ..._ccOpts(ctx), isolated: true });
       rec.via = 'claude-code/isolated';
@@ -568,6 +630,9 @@ async function _runCascade(prompt, ctx) {
       const routed = await _routerPrestep(prompt, ctx);
       if (routed) return routed;
     }
+
+    // Aki modes: N-lane router (balanced3 / aki / aki-orcha / aki-claude).
+    if (AKI_MODES.has(_aiPreference)) return await _runLaneSet(prompt, ctx, _aiPreference);
 
     // Preference: 'claude' -- skip Orcha entirely, go straight to Claude Code
     if (_aiPreference === 'claude') {
@@ -620,6 +685,18 @@ async function _runCascade(prompt, ctx) {
       }
     }
 
+    return await _orchaCascade(prompt, ctx);
+  } finally {
+    if (_balancedOrchaHeld) _orchaBusy--; // release the balanced Orcha-lane hold
+  }
+}
+
+// The Orcha-first cascade (fleet-brain → direct WS → Claude Code → optional
+// Bedrock), moved verbatim out of _runCascade so the N-lane router can run it
+// as its "orcha" lane. ctx.orchaClaudeFallback === false (Aki modes only)
+// skips the in-cascade Claude Code fallback; undefined for every legacy mode.
+async function _orchaCascade(prompt, ctx) {
+  const { signal, requestId, gw, rec } = ctx;
     // PRIMARY: Route through fleet-brain (persistent session with full fleet context).
     // fleet-brain.getStatus().ready is true in BOTH WS mode (Orcha running) AND
     // local mode (claude-code fallback wired in). Either way fleet-brain manages
@@ -680,7 +757,7 @@ async function _runCascade(prompt, ctx) {
         // 4799. orcha-supervisor.js now keeps ONE background agent alive and
         // fleet-brain reaches it over the WebSocket.
         // Skip Claude Code fallback when preference is 'orcha'
-        if (_aiPreference !== 'orcha') {
+        if (_aiPreference !== 'orcha' && ctx.orchaClaudeFallback !== false) {
           // CLAUDE CODE FALLBACK: claude -p via Cecelia shared account
           try {
             logger.info('[' + requestId + '] Claude Code attempt ' + attempt);
@@ -735,9 +812,151 @@ async function _runCascade(prompt, ctx) {
       }
     }
     throw new Error('Max retries exhausted');
-  } finally {
-    if (_balancedOrchaHeld) _orchaBusy--; // release the balanced Orcha-lane hold
+}
+
+// ── N-LANE ROUTER (Aki modes) ─────────────────────────────────────────────────
+// Start on the least-busy healthy lane of the mode's set, fall through the rest
+// of the set in list order, then the mode's safety net. Each lane runs at most
+// once per request (the Orcha lane runs without its in-cascade Claude fallback).
+const MODE_LANES = Object.freeze({
+  balanced3: ['orcha', 'claude', 'aki'],
+  aki: ['aki'],
+  'aki-orcha': ['aki', 'orcha'],
+  'aki-claude': ['aki', 'claude'],
+});
+const SAFETY_NET = Object.freeze({
+  balanced3: [],
+  aki: [],
+  'aki-orcha': ['claude'],
+  'aki-claude': ['orcha'],
+});
+
+function _akiAsk(prompt, ctx, o) {
+  o = o || {};
+  const f = _aki();
+  _akiLane.configure({ concurrency: f.concurrency, timeoutMs: f.timeoutMs, profile: f.profile, model: f.model });
+  return _akiLane.ask(prompt, {
+    signal: ctx.signal,
+    requestId: ctx.requestId,
+    rank: ctx.gw.priorities ? _CQ_RANK[ctx.prio] : null,
+    isolated: !!o.isolated,
+    onTooLong: o.onTooLong,
+  });
+}
+
+function _setBusy(lane, d) {
+  if (lane === 'aki') _akiBusy += d;
+  else if (lane === 'orcha') _orchaBusy += d;
+  else _claudeBusy += d;
+}
+
+async function _runLaneSet(prompt, ctx, mode) {
+  const { signal, requestId, rec } = ctx;
+  const akiOn = !!_aki().enabled;
+  // Kill switch: 'aki' alone with Aki disabled runs the auto cascade.
+  if (mode === 'aki' && !akiOn) {
+    logger.info('[' + requestId + '] preference=aki but Aki lane disabled — using the auto cascade');
+    return await _orchaCascade(prompt, ctx);
   }
+  const set = MODE_LANES[mode].filter((l) => l !== 'aki' || akiOn);
+  const start = _pickLaneN(set);
+  const order = [start].concat(set.filter((l) => l !== start));
+  for (const l of SAFETY_NET[mode]) if (!order.includes(l)) order.push(l);
+  rec.routedLane = start;
+  logger.info('[' + requestId + '] ' + mode + ' -> lanes ' + order.join(' > ') +
+    ' (orchaBusy=' + _orchaBusy + ' claudeBusy=' + _claudeBusy + ' akiBusy=' + _akiBusy + ')');
+
+  let lastErr = null;
+  for (let i = 0; i < order.length; i++) {
+    const lane = order[i];
+    if (lane === 'aki' && !_akiLane.available()) {
+      // Binary missing: skip without touching lane health (stats show 'not-found').
+      lastErr = Object.assign(new Error('aki not found'), { code: 'AKI_NOT_FOUND' });
+      logger.warn('[' + requestId + '] ' + mode + '/aki skipped (aki not found) — next lane ' + (order[i + 1] || 'none'));
+      continue;
+    }
+    _setBusy(lane, 1);
+    try {
+      let text;
+      if (lane === 'aki') {
+        text = await _akiAsk(prompt, ctx, { onTooLong: (mode === 'aki' && set.length === 1) ? 'truncate' : 'reject' });
+      } else if (lane === 'claude') {
+        text = await _tryClaudeCode(prompt, _ccOpts(ctx));
+        if (!text) throw new Error('claude-code empty');
+      } else {
+        text = await _orchaCascade(prompt, Object.assign({}, ctx, { orchaClaudeFallback: false }));
+      }
+      if (lane !== 'orcha') {
+        _markLaneHealthy(lane);
+        _lastHealthy = Date.now(); _lastError = null;
+        _status = lane === 'aki' ? 'connected-aki' : 'connected-claude';
+        _saveStatus();
+        rec.via = lane === 'aki' ? 'aki' : 'claude-code';
+      }
+      rec.routedLane = start;
+      logger.info('[' + requestId + '] OK via ' + mode + '/' + lane + ' (' + String(text).length + ' chars)');
+      return text;
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      lastErr = e;
+      const code = (e && e.code) || '';
+      if (code !== 'AKI_PROMPT_TOO_LONG' && lane !== 'orcha') _markLaneDown(lane); // the cascade marks Orcha itself
+      const next = order[i + 1] || 'none';
+      logger.warn('[' + requestId + '] ' + mode + '/' + lane + ' failed (' + (code || (e && e.message) || 'error') + ') — next lane ' + next);
+    } finally {
+      _setBusy(lane, -1);
+    }
+  }
+  _lastError = (lastErr && (lastErr.code || lastErr.message)) || 'All AI lanes failed';
+  _status = 'error'; _errorCount++;
+  _saveStatus();
+  throw new Error(mode === 'aki' ? 'Aki unavailable (preference=aki)' : 'All AI lanes failed (preference=' + mode + ')');
+}
+
+// ── ISOLATED LANE SET (untrusted content: emails, attachments, links) ────────
+function _akiIsolatedAllowed() {
+  if (!AKI_MODES.has(_aiPreference)) return false;
+  const f = _aki();
+  return !!f.enabled && f.allowUntrusted === true;
+}
+
+// Aki and/or the tool-less Claude worker only. Never fleet-brain, WS, Orcha
+// or Bedrock; no lane-health mutation; Aki errors are code-only (isolated).
+async function _runIsolatedSet(prompt, ctx, mode) {
+  const { signal, rec } = ctx;
+  const akiOk = _akiLane.available();
+  let claudeOk = false;
+  try { claudeOk = !!_claudeBinExists(); } catch (_) { claudeOk = false; }
+  let order;
+  if (mode === 'aki' || mode === 'aki-orcha') {
+    order = ['aki', 'claude-iso'];
+  } else {
+    const ps = _claudePoolStats();
+    const isoLoad = ps.busy + ps.queued;
+    const akiLoad = _akiLane.load();
+    const akiFirst = mode === 'aki-claude' ? akiLoad <= isoLoad : akiLoad < isoLoad;
+    order = akiFirst ? ['aki', 'claude-iso'] : ['claude-iso', 'aki'];
+  }
+  order = order.filter((l) => (l === 'aki' ? akiOk : claudeOk));
+  if (!order.length) order = ['claude-iso']; // nothing available: same error as today's isolated lane
+  let lastErr = null;
+  for (const lane of order) {
+    try {
+      if (lane === 'aki') {
+        const t = await _akiAsk(prompt, ctx, { isolated: true, onTooLong: 'reject' });
+        rec.via = 'aki/isolated';
+        return t;
+      }
+      const t = await _tryClaudeCode(prompt, { ..._ccOpts(ctx), isolated: true });
+      rec.via = 'claude-code/isolated';
+      return t;
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      lastErr = e;
+      logger.warn('[' + ctx.requestId + '] isolated ' + lane + ' failed (' + ((e && e.code) || 'error') + ')');
+    }
+  }
+  throw lastErr;
 }
 
 // Router pre-step (ai.gateway.routerDecides + preference 'auto'). Returns the
@@ -1476,8 +1695,14 @@ function getStatus() {
     model: MODEL_ID,
     region: REGION,
     preference: _aiPreference,
-    backends: { orcha: orchaUp, claude: claudeUp },
+    backends: { orcha: orchaUp, claude: claudeUp, aki: _akiBackendUp() },
   };
+}
+
+function _akiBackendUp() {
+  try {
+    return !!(_aki().enabled && AKI_MODES.has(_aiPreference) && _akiLane.available() && _laneHealthy('aki'));
+  } catch (_) { return false; }
 }
 
 // ── MWINIT ───────────────────────────────────────────────────────────────────
@@ -1596,8 +1821,7 @@ function detectClaudeModel() {
 }
 
 function setPreference(pref) {
-  const valid = ['auto', 'orcha', 'claude', 'balanced'];
-  _aiPreference = valid.includes(pref) ? pref : 'auto';
+  _aiPreference = VALID_PREFERENCES.includes(pref) ? pref : 'auto';
   logger.info('AI preference set to: ' + _aiPreference);
 }
 function getPreference() { return _aiPreference; }
@@ -1616,6 +1840,14 @@ function testClaude() {
   return _tryClaudeCode('Reply with exactly one word: ONLINE')
     .then(text => ({ ok: true, response: text.trim().slice(0, 80) }))
     .catch(e  => ({ ok: false, error: e.message }));
+}
+
+// testAki() — direct health-check of the Aki lane (smoke script / Settings).
+function testAki() {
+  const ctx = { signal: null, requestId: 'aki-test', prio: 'normal', gw: _gw() };
+  return _akiAsk('Reply with exactly PONG', ctx, { onTooLong: 'reject' })
+    .then(text => ({ ok: true, response: String(text).trim().slice(0, 80) }))
+    .catch(e  => ({ ok: false, error: (e && (e.code || e.message)) || 'error' }));
 }
 
 
@@ -1781,12 +2013,40 @@ const __test__ = {
       w.proc = null; w.procIsolated = false; w.busy = false; w.currentJob = null; w.stdoutBuf = ''; w.idleTimer = null;
     }
     _orchaDownUntil = 0; _claudeDownUntil = 0; _orchaBusy = 0; _claudeBusy = 0;
+    _akiDownUntil = 0; _akiBusy = 0;
+    _akiLane.reset();
     return leaked;
+  },
+  // Aki lane seams: flags override (null = settings/env) and fake lane deps
+  // (null = real deps). setAkiLaneDeps recreates the lane, so call it after
+  // vi.useFakeTimers() when a test needs fake timers inside the lane.
+  setAkiFlags(obj) {
+    _akiOverride = obj ? Object.freeze(Object.assign({}, perfFlags.AKI_DEFAULTS, obj)) : null;
+    _akiCache = null; _akiCacheAt = 0; _akiCacheGen = -1;
+  },
+  setAkiLaneDeps(deps) { _akiLane = createAkiLane(deps || undefined); },
+  akiLane: () => _akiLane,
+  pickLaneN: (set) => _pickLaneN(set),
+  pickLane: () => _pickLane(),
+  markLaneDown: (l) => _markLaneDown(l),
+  laneState() {
+    return {
+      orchaBusy: _orchaBusy, claudeBusy: _claudeBusy, akiBusy: _akiBusy,
+      downUntil: { orcha: _orchaDownUntil, claude: _claudeDownUntil, aki: _akiDownUntil },
+    };
+  },
+  setLaneBusy(lane, n) {
+    if (lane === 'aki') _akiBusy = n; else if (lane === 'orcha') _orchaBusy = n; else _claudeBusy = n;
   },
 };
 
-// True when the isolated (tool-less) Claude lane can run, i.e. the claude binary
-// exists. Just Me context turns check this before building a content prompt.
-function isolatedLaneAvailable() { return !!_claudeBinExists(); }
+// True when an isolated lane can run: the tool-less Claude worker (claude
+// binary exists) or, only when allowed (Aki mode + ai.aki.enabled +
+// ai.aki.allowUntrusted), Aki. Just Me / email-intel check this before
+// building a content prompt.
+function isolatedLaneAvailable() {
+  if (_claudeBinExists()) return true;
+  return _akiIsolatedAllowed() && _akiLane.available();
+}
 
-module.exports = { ask, askWithTimeout, isolatedLaneAvailable, runWithTimeout, runInSlot, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, listAgents, __test__ };
+module.exports = { ask, askWithTimeout, isolatedLaneAvailable, runWithTimeout, runInSlot, queueStats, healthCheck, getStatus, runMwinit, refreshCredentials, setPreference, getPreference, setAgent, getAgent, setClaudePoolSize, getClaudePoolSize, setClaudeTimeout, setClaudeModel, getClaudeModel, detectClaudeModel, testClaude, testAki, listAgents, VALID_PREFERENCES, __test__ };

@@ -178,6 +178,21 @@ describe('health snapshot — shape', () => {
     expect(a.claudePool).toMatchObject({ size: 2, busy: 1, queued: 0 });
     expect(a.flags).toEqual({ priorities: true, abortOnTimeout: false, dedupe: true, routerDecides: false });
     expect(a.at).toBe(T);
+    expect('akiLane' in a).toBe(false);
+  });
+
+  it('ai: akiLane mapped (state + numbers/booleans only) when the relay provides it', () => {
+    const { deps } = mkDeps();
+    const base = deps.relay.queueStats;
+    deps.relay = { queueStats: () => Object.assign(base(), {
+      akiLane: { state: 'up', active: true, busy: 1, queued: 2, max: 2, calls: 5, ok: 4, failed: 1, toolsUsed: 3,
+        enabled: true, allowUntrusted: false, lastErrorCode: 'AKI_EXIT', lastTools: { Bash: 2 }, secret: 'x' },
+    }) };
+    const a = health.buildSnapshot(deps).ai;
+    expect(a.akiLane).toMatchObject({ state: 'up', active: true, busy: 1, queued: 2, max: 2, calls: 5, ok: 4, failed: 1,
+      toolsUsed: 3, enabled: true, allowUntrusted: false });
+    expect(a.akiLane.secret).toBeUndefined();
+    expect(a.akiLane.lastErrorCode).toBeUndefined();
   });
 
   it('auth: whitelisted fields only, no nextRetryAt / aapProbe / lastRecovery', () => {

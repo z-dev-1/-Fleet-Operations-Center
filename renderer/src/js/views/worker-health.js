@@ -12,7 +12,7 @@
  * manual Refresh button.
  */
 import {
-  esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall,
+  esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall, akiLaneStatus,
   unavailableStatus, canReEnable, createVisiblePoller, jobsStatus,
 } from './worker-health-logic.js';
 import bus from '../bus.js';
@@ -114,17 +114,20 @@ function _aiCard(a) {
   ]);
   const ov = aiOverall(a.overall && a.overall.status);
   if (a.overall && a.overall.reasons && a.overall.reasons.length) ov.reason = a.overall.reasons.join('; ');
+  const ak = a.akiLane || null;
   return _kv([
     ['Overall', _pill(ov)],
     ['Fleet Brain', _pill(laneStatus(l.fleetBrain))],
     ['Orcha', _pill(laneStatus(l.orcha))],
     ['Claude', _pill(laneStatus(l.claude))],
     ['Bedrock', _pill(laneStatus(l.bedrock))],
+  ].concat(ak ? [['Aki', _pill(akiLaneStatus(ak.state))]] : []).concat([
     ['Queue a/w', '<span class="wh-mono">C ' + aw('critical') + ' H ' + aw('high') + ' N ' + aw('normal') + ' L ' + aw('low') + '</span>'],
     ['Active', _v(q.active) + ' / ' + _v(q.max) + ' (reserve ' + _v(q.reserve) + ')'],
     ['Oldest wait', q.oldestWaitMs == null ? '—' : esc(dur(q.oldestWaitMs))],
     ['Claude pool', _v(pool.busy) + ' / ' + _v(pool.size) + ' busy · ' + _v(pool.queued) + ' queued'],
-  ].concat(latRows.length ? latRows : [['p95 latency', '—']]).concat([['As of', esc(relTime(a.at, Date.now()))]]));
+  ]).concat(ak ? [['Aki lane', (ak.active === false ? '<span class="wh-reason">not in use</span> ' : '') + _v(ak.busy) + ' / ' + _v(ak.max) + ' busy · ' + _v(ak.queued) + ' queued · tools used ' +
+    _v(ak.toolsUsed) + ' · ' + _v(ak.ok) + ' ok / ' + _v(ak.failed) + ' failed']] : []).concat(latRows.length ? latRows : [['p95 latency', '—']]).concat([['As of', esc(relTime(a.at, Date.now()))]]));
 }
 
 function _authCard(a) {

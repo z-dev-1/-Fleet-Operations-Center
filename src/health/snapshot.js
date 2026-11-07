@@ -216,7 +216,10 @@ function _aiSection(deps, now) {
     latency = { sampleSize: _num(s.gateway.sampleSize), byPriority: lbp };
   }
   const overall = s.overall || {};
-  return {
+  const akiLane = (q.akiLane && typeof q.akiLane === 'object' && !Array.isArray(q.akiLane))
+    ? Object.assign({ state: _str(q.akiLane.state, 20) || 'unknown' }, _nums(q.akiLane) || {})
+    : null;
+  const out = {
     at: memo.at,
     overall: {
       status: _str(overall.status, 20) || 'unknown',
@@ -231,6 +234,8 @@ function _aiSection(deps, now) {
     claudePool: _nums(q.claudePool),
     flags: _nums(q.flags, 1),
   };
+  if (akiLane) out.akiLane = akiLane;
+  return out;
 }
 
 function _authSection(deps) {

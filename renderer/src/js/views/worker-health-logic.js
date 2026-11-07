@@ -115,6 +115,14 @@ export function laneStatus(s) {
   return _st('unknown');
 }
 
+/** Aki lane pill from relay queueStats().akiLane.state. */
+export function akiLaneStatus(s) {
+  if (s === 'up') return _st('healthy');
+  if (s === 'down') return _st('failed', '', 'Failed');
+  if (s === 'not-found') return _st('failed', 'aki not found', 'Not found');
+  return _st('unknown');
+}
+
 export function aiOverall(s) {
   if (s === 'up') return _st('healthy');
   if (s === 'degraded') return _st('degraded');
