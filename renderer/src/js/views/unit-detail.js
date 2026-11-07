@@ -1493,7 +1493,11 @@ async function _injectAISplitDraft(webview, unit, side) {
 }
 
 // ── repair pane ───────────────────────────────────────────────────────────────
-function _openInlineSplit(leftUrl, rightUrl, unitId) {
+function _openInlineSplit(leftUrl, rightUrl, unitId, opts) {
+  // opts.noDraft: open the panes WITHOUT pre-filling AI drafts (used by the
+  // History tab work-order "Open" button — past WOs must never get today's
+  // daily-note draft dropped into their comment boxes).
+  var _splitOpts = opts || {};
   var existing = document.getElementById('dp-split-container');
   if (existing) existing.remove();
   if (!leftUrl && !rightUrl) return;
@@ -1527,10 +1531,15 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
     if (rightUrl.indexOf('volvopg') > -1 || rightUrl.indexOf('asist.decisiv') > -1) vendorPartition = 'persist:vendor-volvo';
     else if (rightUrl.indexOf('dtna') > -1 || rightUrl.indexOf('daimlertruck') > -1) vendorPartition = 'persist:vendor-dtna';
     else if (rightUrl.indexOf('pssmfleet') > -1) vendorPartition = 'persist:vendor-paccar-pssmfleet';
+    // AAP offsite-event pages (History tab WOs) are Amazon pages: they need the
+    // default (Midway) session, not a vendor partition.
+    var _rightIsAmazon = false;
+    try { _rightIsAmazon = /(^|\.)amazon\.(com|dev)$/i.test(new URL(rightUrl).hostname); } catch (_) {}
+    var _partAttr = _rightIsAmazon ? '' : ' partition="' + vendorPartition + '"';
 
     html += '<div class="dp-split-pane dp-split-pane--offsite">' +
       '<div class="dp-split-pane-label">OFFSITE</div>' +
-      '<webview id="dp-wv-offsite" src="' + rightUrl + '" class="dp-split-webview" partition="' + vendorPartition + '" allowpopups></webview></div>';
+      '<webview id="dp-wv-offsite" src="' + rightUrl + '" class="dp-split-webview"' + _partAttr + ' allowpopups></webview></div>';
   }
   html += '</div>';
 
@@ -1752,7 +1761,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       })();
 
       // Pre-fill Relay comment box with AI-generated draft
-      var _u = window.__splitUnit;
+      var _u = _splitOpts.noDraft ? null : window.__splitUnit;
       if (_u) {
         setTimeout(function() {
           _injectAISplitDraft(relayWv, _u, 'relay');
@@ -1817,7 +1826,7 @@ function _openInlineSplit(leftUrl, rightUrl, unitId) {
       offsiteWv.executeJavaScript('function waitForNotes(){var nb=document.querySelector("[data-testid=note-body]");var ta=document.querySelector("textarea[name=user-reply]");if(!nb){setTimeout(waitForNotes,1000);return;}var el=nb;while(el.parentElement&&el.parentElement!==document.body){el=el.parentElement;if(el.querySelector("[data-testid=note-body]")&&el.querySelector("textarea[name=user-reply]"))break;}el.style.cssText="position:fixed;top:0;left:0;right:0;bottom:0;overflow-y:auto;background:#fff;z-index:99999;padding:0";var sib=el.parentElement?el.parentElement.children:[];for(var i=0;i<sib.length;i++){if(sib[i]!==el)sib[i].style.display="none";}} setTimeout(waitForNotes,2000)').catch(function(){});
 
       // Pre-fill offsite notes textarea with AI-generated escalation/update
-      var _u2 = window.__splitUnit;
+      var _u2 = _splitOpts.noDraft ? null : window.__splitUnit;
       if (_u2) {
         setTimeout(function() {
           _injectAISplitDraft(offsiteWv, _u2, 'offsite');
@@ -3194,6 +3203,13 @@ function _wireRepairIntel(unit) {
         rcaEntries[e.workOrderId] = e;
         rcaHtml = '<button class="dp-rca-btn" data-wo="' + esc(e.workOrderId) + '" title="Fill the AAP Root Cause Analysis form for this work order">RCA</button>';
       }
+      // Open button: same inline split view as the Daily Notes button (Relay WO
+      // + offsite event side by side), without AI drafts.
+      var refs = e.sourceRefs || {};
+      var openHtml = (refs.relay || refs.offsite)
+        ? '<button class="dp-ri-open-btn dp-launcher" data-hist-left="' + esc(refs.relay || '') + '" data-hist-right="' + esc(refs.offsite || '') + '" title="Open this work order (Relay + Offsite) in split view">\ud83d\udccb Open</button>'
+        : '';
+      rcaHtml = openHtml + rcaHtml;
       return '<div class="dp-ri-tl">' +
         '<div class="dp-ri-tl-head"><span class="dp-ri-tl-date">' + esc(fmtDate(e.reportedAt)) + '</span>' +
           '<span class="dp-ri-tl-vend">' + esc(e.vendor || 'vendor n/a') + '</span>' +
@@ -3209,6 +3225,12 @@ function _wireRepairIntel(unit) {
 
     reportEl.innerHTML = aiHtml + stats + cov + catsBlock + effBlock + rfBlock + tlBlock;
     _wireRcaButtons();
+    reportEl.querySelectorAll('.dp-ri-open-btn').forEach(function(btn){
+      btn.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        _openInlineSplit(btn.dataset.histLeft || '', btn.dataset.histRight || '', unit.equipmentId, { noDraft: true });
+      });
+    });
   }
 
   // ── RCA buttons on the Repair timeline cards ───────────────────────────────
