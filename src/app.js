@@ -831,6 +831,15 @@ function _startAutoSync() {
     try { require('./dev/timeline-audit').start({ log }); }
     catch (e) { log.warn('[timeline-audit] could not start: ' + e.message); }
   }
+  // DEV-ONLY, READ-ONLY OWA API / windowless probe for Email Triage (dev aid):
+  // FLEET_OWA_PROBE_DIR=<dir>. Completely inert unless the env var is set. A few minutes after
+  // startup it opens its OWN hidden window on the same session owa_reader uses, runs read-only
+  // probes + API-feasibility replay + windowless tiers, writes owa-probe-*.json to the dir and
+  // logs `[owa-probe] done`. Never sends/moves/flags/marks-read/deletes; never touches the scheduler.
+  if (process.env.FLEET_OWA_PROBE_DIR) {
+    try { require('./dev/dev-owa-probe').start({ log }); }
+    catch (e) { log.warn('[owa-probe] could not start: ' + e.message); }
+  }
 
   // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
   // GETs the RCA template + that WR's saved responses through the AAP page and
