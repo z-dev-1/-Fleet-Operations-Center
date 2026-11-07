@@ -548,6 +548,7 @@ export function init(container) {
     const MAP = {
       'connected':         { cls: 'tb-kpi-dot--green',   label: 'AI: Orcha'   },
       'connected-claude':  { cls: 'tb-kpi-dot--blue',    label: 'AI: Claude'  },
+      'connected-aki':     { cls: 'tb-kpi-dot--green',   label: 'AI: Aki'     },
       'connected-bedrock': { cls: 'tb-kpi-dot--amber',   label: 'AI: Bedrock' },
       'error':             { cls: 'tb-kpi-dot--red',     label: 'AI: Offline' },
       'unknown':           { cls: 'tb-kpi-dot--unknown', label: 'AI …'   },

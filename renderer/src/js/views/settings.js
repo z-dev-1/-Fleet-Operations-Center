@@ -25,6 +25,8 @@ import { asana    as asanaBridge }                 from '../bridge.js';
 import toast                                       from '../components/toast.js';
 import { setPreset, setTheme, getThemeConfig, resetTheme, PRESETS } from '../nexus-theme.js';
 import { initFasSettings } from './fas-settings.js';
+import { activeAiChipsHtml, akiUntrustedHtml, akiSettingsHtml, applyChipStyles, prefHint,
+         readAkiForm, mergeAiSettings, allowUntrustedAfterPick } from './ai-pref-logic.js';
 
 // ── Module state ────────────────────────────────────────────────────────────
 let _drawer   = null;   // the drawer DOM element
@@ -821,20 +823,10 @@ function _html() {
           <div class="sd-field" style="margin-bottom:14px">
             <div class="sd-label" style="margin-bottom:8px">Active AI</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-auto">
-                <input type="radio" name="ai-pref" value="auto" style="accent-color:#58a6ff"> Auto (fallback chain)
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-orcha">
-                <input type="radio" name="ai-pref" value="orcha" style="accent-color:#22c55e"> Orcha only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-claude">
-                <input type="radio" name="ai-pref" value="claude" style="accent-color:#818cf8"> Claude Code only
-              </label>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;padding:5px 10px;border-radius:6px;border:1px solid var(--bdr);font-size:11px;transition:border-color .2s" id="ai-chip-balanced">
-                <input type="radio" name="ai-pref" value="balanced" style="accent-color:#f0a800"> Balanced (Orcha + Claude)
-              </label>
+              ${activeAiChipsHtml()}
             </div>
             <div id="ai-pref-hint" style="margin-top:5px;font-size:10px;color:#6e7681;font-style:italic">Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.</div>
+            ${akiUntrustedHtml()}
           </div>
 
           <!-- Orcha subsection -->
@@ -927,6 +919,8 @@ function _html() {
             <div id="claude-test-status" style="margin-top:4px;font-size:11px;min-height:14px"></div>
           </div>
 
+          ${akiSettingsHtml()}
+
           <div class="sd-btn-row">
             <button class="sd-btn primary" id="save-ai-config">Save AI Config</button>
           </div>
@@ -1002,6 +996,8 @@ function _wireAIConfig() {
     const radio = document.querySelector('input[name="ai-pref"][value="' + (cfg.aiPreference || 'auto') + '"]');
     if (radio) { radio.checked = true; _updateChipStyles(cfg.aiPreference || 'auto'); }
     _updatePrefHint(cfg.aiPreference || 'auto');
+    // Aki fields (settings.ai.aki). Display only — the saved preference above is never switched here.
+    try { _fillAkiForm(readAkiForm(await settingsBridge.getAll())); } catch (_) {}
     // Orcha fields
     const modeEl = document.getElementById('orcha-mode');
     const hostEl = document.getElementById('orcha-host');
@@ -1086,6 +1082,7 @@ function _wireAIConfig() {
       'connected':         { text: '🟢 Orcha connected',  bg: '#1a2f1a', color: '#22c55e' },
       'connected-claude':  { text: '🔵 Claude active',    bg: '#1c1c30', color: '#818cf8' },
       'connected-bedrock': { text: '🟠 Bedrock active',   bg: '#2a1e0a', color: '#f59e0b' },
+      'connected-aki':     { text: '🦊 Aki active',       bg: '#2a1a26', color: '#f472b6' },
       'error':             { text: '🔴 AI offline',       bg: '#2f1a1a', color: '#f85149' },
       'unknown':           { text: '⏳ Checking...',      bg: '#21262d', color: '#8b949e' },
     };
@@ -1094,23 +1091,34 @@ function _wireAIConfig() {
   }
 
   function _updatePrefHint(pref) {
-    const hints = {
-      auto:     'Auto: tries Orcha first, falls back to Claude Code if quota is exceeded.',
-      orcha:    'Orcha only: no Claude fallback. AI is unavailable if Orcha quota runs out.',
-      claude:   'Claude Code only: skips Orcha, uses Cecelia shared Bedrock via claude -p.',
-      balanced: 'Balanced: runs Orcha + Claude as two lanes — when one is busy the next request uses the other, so work goes faster. If one is down, everything uses the other automatically.',
-    };
     const el = document.getElementById('ai-pref-hint');
-    if (el) el.textContent = hints[pref] || '';
+    if (el) el.textContent = prefHint(pref);
   }
 
   function _updateChipStyles(pref) {
-    ['auto', 'orcha', 'claude', 'balanced'].forEach(p => {
-      const chip = document.getElementById('ai-chip-' + p);
-      if (!chip) return;
-      chip.style.borderColor = p === pref ? 'var(--acc)' : 'var(--bdr)';
-      chip.style.background  = p === pref ? 'rgba(88,166,255,.08)' : '';
-    });
+    applyChipStyles(document, pref);
+  }
+
+  function _fillAkiForm(f) {
+    const set = (id, fn) => { const el = document.getElementById(id); if (el) fn(el); };
+    set('ai-aki-untrusted',   (el) => { el.checked = f.allowUntrusted; });
+    set('ai-aki-enabled',     (el) => { el.checked = f.enabled; });
+    set('ai-aki-profile',     (el) => { el.value = f.profile; });
+    set('ai-aki-model',       (el) => { el.value = f.model; });
+    set('ai-aki-concurrency', (el) => { el.value = String(f.concurrency); });
+    set('ai-aki-timeout',     (el) => { el.value = String(f.timeoutSec); });
+  }
+
+  function _readAkiFormFields() {
+    const el = (id) => document.getElementById(id) || {};
+    return {
+      enabled:        !!el('ai-aki-enabled').checked,
+      allowUntrusted: !!el('ai-aki-untrusted').checked,
+      profile:        String(el('ai-aki-profile').value || '').trim(),
+      model:          String(el('ai-aki-model').value || '').trim(),
+      concurrency:    parseInt(el('ai-aki-concurrency').value, 10),
+      timeoutSec:     parseInt(el('ai-aki-timeout').value, 10),
+    };
   }
 
   // ── Preference radio change ────────────────────────────────────────────
@@ -1118,6 +1126,8 @@ function _wireAIConfig() {
     radio.addEventListener('change', () => {
       _updatePrefHint(radio.value);
       _updateChipStyles(radio.value);
+      const cb = document.getElementById('ai-aki-untrusted');
+      if (cb) cb.checked = allowUntrustedAfterPick(cb.checked, radio.value);
     });
   });
 
@@ -1127,6 +1137,14 @@ function _wireAIConfig() {
     const pref    = (document.querySelector('input[name="ai-pref"]:checked') || {}).value || 'auto';
     const toSecs  = parseInt((document.getElementById('claude-timeout') || {}).value, 10) || 60;
     const poolN   = parseInt((document.getElementById('claude-pool') || {}).value, 10) || 1;
+    // Aki settings first (settings.ai.aki, keeping ai.gateway / ai.dbrLookup / other ai keys),
+    // so the relay sees the new flags when the preference switch below lands.
+    try {
+      const r = await settingsBridge.save('ai', mergeAiSettings(await settingsBridge.getAll(), _readAkiFormFields()));
+      if (r && r.ok === false) throw new Error(r.error || 'save failed');
+    } catch (e) {
+      toast.show('error', 'Could not save Aki settings: ' + e.message, 4000);
+    }
     await window.ai.saveAIConfig({
       aiPreference:    pref,
       mode:            (document.getElementById('orcha-mode') || {}).value || 'local',
