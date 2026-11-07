@@ -107,8 +107,10 @@ describe('NFR-8 off-limits files and import lists', () => {
     expect(files).toContain('src/config/perf-flags.js');   // the diff is real, so an empty offender list means something
     // Files changed by LATER, separately reviewed FEATs on top of this branch point. They are
     // off-limits for email-intel, not for those FEATs. Phase 8 worker isolation
-    // (feature/worker-isolation) extends the supervisor with registerHost().
-    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js']);
+    // (feature/worker-isolation) extends the supervisor with registerHost(). The Aki lane
+    // (feature/aki-lane) adds the Aki preferences / N-lane router to relay.js; email-intel still
+    // only calls relay.askWithTimeout({isolated:true}) and relay.isolatedLaneAvailable().
+    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js']);
     const offenders = files.filter((f) => !LATER_FEAT_FILES.has(f) && OFF_LIMITS.some((re) => re.test(f)));
     expect(offenders).toEqual([]);
     const untracked = (git('ls-files', '--others', '--exclude-standard') || '').split('\n').map((s) => s.trim()).filter(Boolean);
