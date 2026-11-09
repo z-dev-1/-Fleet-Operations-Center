@@ -17,6 +17,7 @@
 const logger = require('../utils/logger')('rca');
 const client = require('./client');
 const { normalizeResponse } = require('./template');
+const { extractJsonObject } = require('../utils/ai-json');
 
 const AI_TIMEOUT_MS = 120000;
 
@@ -210,11 +211,9 @@ function _fieldSpec(f) {
   return parts.join('\n');
 }
 
+// Tolerant of prose / ```json fences / trailing text around the object (Aki).
 function _parseJson(text) {
-  const s = String(text || '');
-  const start = s.indexOf('{'), end = s.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try { return JSON.parse(s.slice(start, end + 1)); } catch (_) { return null; }
+  return extractJsonObject(String(text || ''));
 }
 
 async function _aiFill(template, facts, commentsText, ev) {

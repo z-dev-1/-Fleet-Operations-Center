@@ -101,6 +101,9 @@ export function _buildAIFillPrompt(row, dd) {
     // FAS KNOWLEDGE BASE (single source of truth for SEV/escalation/ownership).
     // Fetched from main via loadKnowledge(); empty string until loaded (the
     // prompt still works, the SEV section just won't be present that one time).
+    // Output contract stated up front too: the Aki lane trims an over-long
+    // prompt from the END, which can drop the tail contract below.
+    'OUTPUT CONTRACT: return ONLY one raw JSON object {"delayReason": "...", "escalationLevel": "...", "summary": "..."} -- no markdown, no code fences, no commentary before or after it.\n\n' +
     (_kbCache ? (_kbCache + '\n\n') : '') +
     'You are Orcha, the AI brain for Fleet Operations. This unit is a LONG DWELL unit -- ' +
     'down and unavailable for an extended period -- and needs a leadership-facing status ' +

@@ -180,7 +180,10 @@ describe('NFR-8 off-limits files and import lists', () => {
     // (feature/worker-isolation) extends the supervisor with registerHost(). The Aki lane
     // (feature/aki-lane) adds the Aki preferences / N-lane router to relay.js; email-intel still
     // only calls relay.askWithTimeout({isolated:true}) and relay.isolatedLaneAvailable().
-    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js']);
+    // fix/ai-json-parse makes the Long Dwell AI Fill parse tolerant of Aki-wrapped JSON
+    // (longdwell-csv.js _aiFillRow) and states the output contract up front (longdwell-ai.js).
+    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js',
+      'renderer/src/js/views/longdwell-csv.js', 'renderer/src/js/longdwell-ai.js']);
     const offenders = files.filter((f) => !LATER_FEAT_FILES.has(f) && OFF_LIMITS.some((re) => re.test(f)));
     expect(offenders).toEqual([]);
     const untracked = (git('ls-files', '--others', '--exclude-standard') || '').split('\n').map((s) => s.trim()).filter(Boolean);
