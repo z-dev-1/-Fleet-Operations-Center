@@ -6,6 +6,7 @@
  *   buildRecord(capture, doc, ctx) -> { record, created, upgraded }      identity + segmentation, no I/O
  *   upsert(doc, record) -> { created }                                     mutates doc, keeps the header estimate
  *   conversation(doc, conversationKey) -> MessageRecord[] (oldest first)
+ *   refreshRecipients(doc, messageKey, cap, me, now) -> { refreshed, changed }   From/To/CC from an API capture
  *   applyRetention(doc, opts) -> { evicted, trimmed, bytes }              count/age retention + the byte cap
  *
  * Memory bound (F2-07): `bytesEstimate` is a header estimate maintained on every change. Above
@@ -181,6 +182,27 @@ function buildRecord(cap, doc, ctx) {
   return { record, created: true, upgraded: false, migrated: aliases.length > 0 };
 }
 
+/**
+ * refreshRecipients(doc, messageKey, cap, me, now) -> { refreshed, changed }
+ * Reply recipient refresh (apiTransport): the stored record takes the capture's From / To / CC (the authoritative
+ * Outlook REST headers), recipientsKnown:true, flags.fromMe and recipientsCheckedAt. Body, analysis and keys are
+ * never touched; the header byte estimate follows the change.
+ */
+function refreshRecipients(doc, messageKey, cap, me, now) {
+  ensureDoc(doc);
+  const rec = identity.findMessage(doc, messageKey);
+  if (!rec || !cap) return { refreshed: false, changed: false };
+  const before = estimateRecordBytes(rec);
+  const from = cap.from ? { name: cap.from.name || '', address: cap.from.address || null, quality: cap.from.quality || (cap.from.address ? 'ok' : 'name-only') } : rec.from;
+  const next = { from, to: cap.to || [], cc: cap.cc || [], toCount: cap.toCount || 0, ccCount: cap.ccCount || 0 };
+  const changed = JSON.stringify([rec.from, rec.to, rec.cc, rec.toCount, rec.ccCount, rec.recipientsKnown]) !== JSON.stringify([next.from, next.to, next.cc, next.toCount, next.ccCount, true]);
+  Object.assign(rec, next, { recipientsKnown: true });
+  rec.flags = Object.assign({}, rec.flags, { fromMe: _isFromMe(from, me) });
+  rec.recipientsCheckedAt = new Date(Number.isFinite(now) ? now : Date.now()).toISOString();
+  doc.bytesEstimate = Math.max(0, doc.bytesEstimate + estimateRecordBytes(rec) - before);
+  return { refreshed: true, changed };
+}
+
 let _apiMigrate = null;
 function apiMigrate() { return _apiMigrate || (_apiMigrate = require('./api-migrate')); }
 
@@ -286,4 +308,7 @@ function applyRetention(doc, opts) {
   return out;
 }
 
-module.exports = { emptyDoc, ensureDoc, estimateRecordBytes, recomputeBytes, buildRecord, upsert, conversation, trimOldBodies, applyRetention, isPending };
+module.exports = {
+  emptyDoc, ensureDoc, estimateRecordBytes, recomputeBytes, buildRecord, upsert, conversation, trimOldBodies, applyRetention, isPending,
+  refreshRecipients, isFromMe: _isFromMe,
+};

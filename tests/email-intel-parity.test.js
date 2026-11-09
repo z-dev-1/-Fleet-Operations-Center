@@ -64,7 +64,7 @@ describe('N1-N11 flag-OFF parity against the base-commit golden', () => {
     const ipc = require('../src/ipc/email-intel');
     ipc.registerEmailIntelIPC({});
     const channels = Object.keys(ipc.GATES);
-    expect(channels).toHaveLength(16);
+    expect(channels).toHaveLength(17);
     for (const ch of channels) expect(typeof fx.rec.handlers[ch]).toBe('function');
     for (const ch of channels) {
       const args = ch === 'emailIntel:prepare-action' ? ['send-reply', { conversationKey: 'cv_0123456789abcdef' }]

@@ -280,13 +280,30 @@ export function renderReconcileHtml(em) {
 
 const _person = (e) => esc((e && (e.name || e.address)) || 'unknown') + (e && e.address && e.name ? ' &lt;' + esc(e.address) + '&gt;' : '');
 
-/** To and CC lists; CC is visually highlighted AND labeled in text (not color alone). */
-export function renderRecipientsHtml(r) {
+// Outlook API transport: the reply recipients are confirmed with Outlook before sending.
+export const RESOLVING_RECIPIENTS_TEXT = 'Resolving recipients…';
+export const UNRESOLVED_TEXT = Object.freeze({
+  'not-found': 'This email wasn\'t found in Outlook, so its recipients can\'t be confirmed. Sending is turned off. Run a scan or reply in Outlook.',
+  'no-ids': 'This email has no Outlook id, so its recipients can\'t be confirmed. Sending is turned off. Run a scan or reply in Outlook.',
+  'blocked-auth': 'Outlook needs a sign-in to confirm the recipients. Sending is turned off.',
+  unavailable: 'Couldn\'t reach Outlook to confirm the recipients. Sending is turned off. Try Re-draft.',
+  store: 'The recipients couldn\'t be saved. Sending is turned off.',
+});
+export const NO_RECIPIENTS_TEXT = 'No one to send to besides you. Sending is turned off.';
+const SEND_OFF_TITLE = 'Sending is turned off: the recipients are not confirmed';
+export function unresolvedText(reason) { return UNRESOLVED_TEXT[reason] || UNRESOLVED_TEXT.unavailable; }
+
+/**
+ * To and CC lists; CC is visually highlighted AND labeled in text (not color alone).
+ * opts.showEmptyCc (Outlook API transport): an empty CC is shown as "CC (0): none" so CC is always visible.
+ */
+export function renderRecipientsHtml(r, opts) {
   const x = r || {};
   const to = Array.isArray(x.to) ? x.to : []; const cc = Array.isArray(x.cc) ? x.cc : [];
   return '<div class="ei-rcpt">' +
     '<div class="ei-rcpt-to"><b>To (' + to.length + '):</b> ' + (to.map(_person).join('; ') || 'none') + '</div>' +
     (cc.length ? '<div class="ei-cc" role="note"><b>CC (' + cc.length + ') - check these people:</b> ' + cc.map(_person).join('; ') + '</div>' : '') +
+    (!cc.length && opts && opts.showEmptyCc ? '<div class="ei-rcpt-cc"><b>CC (0):</b> none</div>' : '') +
     (x.external ? '<div class="ei-ext">External recipients: ' + Number(x.external) + '</div>' : '') +
     '</div>';
 }
@@ -300,19 +317,33 @@ export function renderReplyPanelHtml(em, ui) {
   const u = ui || {};
   const id = esc(em && em.id);
   const mode = u.mode === 'reply-all' ? 'Reply All' : u.mode === 'reply' ? 'Reply' : 'reply';
-  const known = !!(em && em.intel && em.intel.recipientsKnown) && u.replyAllAvailable !== false;
+  // Outlook API transport fields (resolving / source / unresolved / sendBlocked): absent -> today's HTML exactly.
+  const api = u.resolving === true || u.source !== undefined || !!u.unresolved;
+  const allOff = u.resolving === true || !!u.unresolved;
+  const known = api && !allOff ? u.replyAllAvailable === true : !!(em && em.intel && em.intel.recipientsKnown) && u.replyAllAvailable !== false;
+  const offAttr = (title) => ' disabled aria-disabled="true" title="' + esc(title) + '"';
+  const offTitle = u.resolving === true ? RESOLVING_RECIPIENTS_TEXT : SEND_OFF_TITLE;
+  const replyOff = api && (allOff || (u.sendBlocked === true && u.mode !== 'reply-all'));
+  const allSendOff = api && (allOff || (u.sendBlocked === true && u.mode === 'reply-all'));
+  let rcpt;
+  if (u.resolving === true) rcpt = '<div class="ei-rcpt ei-rcpt--resolving" role="status" aria-live="polite">' + esc(RESOLVING_RECIPIENTS_TEXT) + '</div>';
+  else if (u.unresolved) rcpt = '<div class="ei-warn ei-rcpt-unresolved" role="alert">' + esc(unresolvedText(u.unresolved.reason)) + '</div>';
+  else if (api && u.recipients) {
+    rcpt = renderRecipientsHtml(u.recipients, { showEmptyCc: true }) +
+      (u.recipients.blocked === 'NO_RECIPIENTS' ? '<div class="ei-warn ei-rcpt-unresolved" role="alert">' + esc(NO_RECIPIENTS_TEXT) + '</div>' : '');
+  } else rcpt = u.recipients ? renderRecipientsHtml(u.recipients) : '';
   const warn = (u.warnings || []).map((w) => '<li>The reply ' + esc(w.label) + '</li>').join('');
   return '<div class="et-reply-panel ei-reply-panel" data-ei-panel="' + id + '">' +
     '<div class="et-reply-label">✍️ Your ' + esc(mode) + ' draft — edit, then send:</div>' +
     '<div class="ei-mech">' + esc(u.fallback ? NOT_THREADED_LABEL + ' is available because a threaded reply was not possible' : THREADED_LABEL) + '</div>' +
-    (u.recipients ? renderRecipientsHtml(u.recipients) : '') +
+    rcpt +
     (u.stale ? '<div class="ei-warn" role="note">' + esc(STALE_DRAFT_TEXT) + '</div>' : '') +
     (warn ? '<ul class="ei-warn-list" aria-label="Check before sending">' + warn + '</ul>' : '') +
     '<textarea class="et-draft" data-draft="' + id + '" aria-label="Reply draft">' + esc((em && em.replyDraft) || '') + '</textarea>' +
     (u.confirm ? renderSendConfirmHtml(u.confirm.summary) : '') +
     '<div class="et-draft-btns">' +
-      '<button type="button" class="et-mini et-send" data-ei-send="reply" data-ei-id="' + id + '">📤 Send Reply</button>' +
-      '<button type="button" class="et-mini et-send" data-ei-send="reply-all" data-ei-id="' + id + '"' + (known ? '' : ' disabled aria-disabled="true" title="Reply All is unavailable: recipients unknown"') + '>📤 Send Reply All</button>' +
+      '<button type="button" class="et-mini et-send" data-ei-send="reply" data-ei-id="' + id + '"' + (replyOff ? offAttr(offTitle) : '') + '>📤 Send Reply</button>' +
+      '<button type="button" class="et-mini et-send" data-ei-send="reply-all" data-ei-id="' + id + '"' + (allSendOff ? offAttr(offTitle) : (known ? '' : ' disabled aria-disabled="true" title="Reply All is unavailable: recipients unknown"')) + '>📤 Send Reply All</button>' +
       (u.fallback ? '<button type="button" class="et-mini" data-ei-send="new-message" data-ei-id="' + id + '">✉ Send as ' + esc(NOT_THREADED_LABEL) + '</button>' : '') +
       '<button type="button" class="et-mini et-redraft" data-ei-redraft="' + id + '">↻ Re-draft</button>' +
       '<button type="button" class="et-mini et-dismiss" data-dismiss="' + id + '">Dismiss</button>' +
@@ -356,6 +387,8 @@ export const PANEL_CSS = `
   #email-triage .ei-gear { background:#30363d; padding:7px 10px; }
   #email-triage .ei-mech { font-size:11px; color:#8b949e; margin-bottom:6px; }
   #email-triage .ei-rcpt { font-size:11px; color:#c9d1d9; margin:4px 0 8px; display:flex; flex-direction:column; gap:3px; }
+  #email-triage .ei-rcpt--resolving { color:#8b949e; font-style:italic; }
+  #email-triage .ei-rcpt-cc { color:#8b949e; }
   #email-triage .ei-cc { background:rgba(210,153,34,.14); border:1px solid rgba(210,153,34,.45); border-radius:5px; padding:3px 6px; color:#e3b341; }
   #email-triage .ei-ext, #email-triage .ei-warn { font-size:11px; color:#e3b341; }
   #email-triage .ei-warn-list { font-size:11px; color:#e3b341; margin:4px 0; padding-left:18px; }

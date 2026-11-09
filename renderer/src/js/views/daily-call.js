@@ -65,6 +65,7 @@
 import bus   from '../bus.js';
 import state from '../state.js';
 import { quicksight, wbr as wbrBridge } from '../bridge.js';
+import { extractJsonObject } from '../util/ai-json.js';
 
 let _el = null;
 
@@ -1738,6 +1739,9 @@ RESPOND WITH JSON ONLY:
 // in order: strict parse of the outermost {...}; the same with raw control
 // characters escaped inside string literals; then a field-by-field extraction.
 function _parseWbrJson(raw) {
+  // Tolerant first (prose / ```json fences around the object, e.g. Aki).
+  const fast = extractJsonObject(raw);
+  if (fast && (fast.bridge || fast.actions)) return fast;
   const text = String(raw || '').replace(/^\s*```(?:json)?/i, '').replace(/```\s*$/, '');
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');

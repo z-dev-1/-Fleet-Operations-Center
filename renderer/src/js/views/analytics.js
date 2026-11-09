@@ -23,6 +23,7 @@ import bus   from '../bus.js';
 import state from '../state.js';
 import { longDwell as longDwellBridge, ai as aiBridge, relay as relayBridge, files as filesBridge, longDwellAi as longDwellAiBridge } from '../bridge.js';
 import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runDurableFill } from '../longdwell-fill-logic.js';
+import { extractJsonObject } from '../util/ai-json.js';
 import toast from '../components/toast.js';
 import * as longDwellCsv from './longdwell-csv.js';
 import * as longDwellSp from './longdwell-sp.js';
@@ -704,10 +705,14 @@ async function _aiFillRow(unitId, tr, onStatus,
       }
     }
     const text = result.text || '';
-    const jm = text.match(/\{[\s\S]*\}/);
-    if (!jm) throw new Error('AI response was not JSON');
-    let parsed;
-    try { parsed = JSON.parse(jm[0]); } catch (e) { throw new Error('Could not parse AI JSON: ' + e.message); }
+    // Tolerant first (Aki wraps JSON in prose / ```json fences); the original
+    // strict parse stays as the fallback so its error messages are unchanged.
+    let parsed = extractJsonObject(text);
+    if (!parsed) {
+      const jm = text.match(/\{[\s\S]*\}/);
+      if (!jm) throw new Error('AI response was not JSON');
+      try { parsed = JSON.parse(jm[0]); } catch (e) { throw new Error('Could not parse AI JSON: ' + e.message); }
+    }
 
     let delayReason     = String(parsed.delayReason || '').trim();
     let escalationLevel = String(parsed.escalationLevel || '').trim().toUpperCase();

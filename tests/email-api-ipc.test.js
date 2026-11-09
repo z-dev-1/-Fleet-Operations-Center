@@ -164,7 +164,7 @@ describe('emailIntel:* under apiTransport', () => {
     const ipc = require('../src/ipc/email-intel');
     expect(ipc.GATES['emailIntel:get-send-attempts']).toBe('threadReplies|apiTransport');
     expect(ipc.KIND_GATES['mark-send-resolution']).toBe('threadReplies|apiTransport');
-    expect(Object.keys(ipc.GATES)).toHaveLength(16);
+    expect(Object.keys(ipc.GATES)).toHaveLength(17);
     expect(await call('emailIntel:get-send-attempts', env.rec.conversationKey)).toMatchObject({ ok: true, attempts: [] });
     expect(await call('emailIntel:reconcile-send', 'sa_0123456789abcdef')).toEqual({ ok: false, code: 'NOT_FOUND' });
     expect(await call('emailIntel:prepare-action', 'mark-send-resolution', { attemptId: 'sa_0123456789abcdef', resolution: 'sent', acknowledgeCheckedOutlook: true })).toMatchObject({ ok: false, code: 'BAD_ARG', reason: 'not-unresolved' });

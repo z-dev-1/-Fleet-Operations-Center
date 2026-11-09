@@ -180,7 +180,10 @@ describe('NFR-8 off-limits files and import lists', () => {
     // (feature/worker-isolation) extends the supervisor with registerHost(). The Aki lane
     // (feature/aki-lane) adds the Aki preferences / N-lane router to relay.js; email-intel still
     // only calls relay.askWithTimeout({isolated:true}) and relay.isolatedLaneAvailable().
-    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js']);
+    // fix/ai-json-parse makes the Long Dwell AI Fill parse tolerant of Aki-wrapped JSON
+    // (longdwell-csv.js _aiFillRow) and states the output contract up front (longdwell-ai.js).
+    const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js',
+      'renderer/src/js/views/longdwell-csv.js', 'renderer/src/js/longdwell-ai.js']);
     const offenders = files.filter((f) => !LATER_FEAT_FILES.has(f) && OFF_LIMITS.some((re) => re.test(f)));
     expect(offenders).toEqual([]);
     const untracked = (git('ls-files', '--others', '--exclude-standard') || '').split('\n').map((s) => s.trim()).filter(Boolean);
@@ -269,7 +272,7 @@ describe('F-11 reply compose guard', () => {
   });
   it('F-11 select-all insert path is never used on reply', () => {
     const files = walk(path.join(ROOT, 'src/email-intel/reply'));
-    expect(files.map((f) => path.basename(f)).sort()).toEqual(['context.js', 'draft.js', 'owa_reply.js', 'page-scripts.js', 'recipients.js', 'reconcile-send.js', 'risk.js', 'send-guard.js']);
+    expect(files.map((f) => path.basename(f)).sort()).toEqual(['context.js', 'draft.js', 'owa_reply.js', 'page-scripts.js', 'recipients.js', 'reconcile-send.js', 'resolve-recipients.js', 'risk.js', 'send-guard.js', 'target.js']);
     for (const f of files) {
       const src = read(f);                                                     // raw text: not even a comment may name them
       expect(src, rel(f)).not.toMatch(/_insertBody|_buildInsertScript/);

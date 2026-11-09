@@ -256,9 +256,7 @@ function _apiOn() {
 }
 /** R4-M1: the newest Outlook REST record of a conversation (a leftover DOM-era md_ twin never wins), else the last. */
 function _apiLatest(records) {
-  const list = Array.isArray(records) ? records : [];
-  for (let i = list.length - 1; i >= 0; i--) if (list[i] && list[i].source === 'api') return list[i];
-  return list[list.length - 1] || null;
+  return require('./reply/target').replyTarget(records, true);
 }
 
 function deleteTarget(conversationKey) {
@@ -466,7 +464,7 @@ function validateSendReply(payload) {
   // Outlook REST transport: a threaded reply needs a message read through the API (no DOM fallback).
   if (api && mode !== 'new-message' && !(latest.source === 'api' && latest.itemId)) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-api-id' };
   const me = (require('./config').normalize(require('./stores').load('config')).me) || {};
-  const rec = require('./reply/recipients').computeRecipients(latest, mode, me);
+  const rec = require('./reply/recipients').computeRecipients(latest, mode, me, { selfOnlyFallback: api });
   if (mode === 'reply-all' && rec.blocked === 'RECIPIENTS_UNKNOWN') return { ok: false, code: 'RECIPIENTS_UNKNOWN' };
   const legacy = _legacyRecord(conversationKey, latest.legacyId);
   let to = rec.to; let cc = rec.cc;

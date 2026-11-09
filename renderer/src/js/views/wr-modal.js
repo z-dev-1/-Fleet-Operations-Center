@@ -22,6 +22,7 @@ import { aap, files, relay } from '../bridge.js';
 import bus from '../bus.js';
 import toast           from '../components/toast.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
+import { extractJsonObject } from '../util/ai-json.js';
 
 // ── Vendor list (mirrors aap_create_wr.js VENDOR_IDS) ─────────────────────
 const VENDORS = [
@@ -2193,9 +2194,13 @@ async function _runAIAssist() {
     else if (result && typeof result === 'object') { try { text = JSON.stringify(result); } catch (_) { text = ''; } }
     else text = String(result || '');
 
-    const match = typeof text === 'string' ? text.match(/\{[\s\S]*\}/) : null;
-    if (!match) { toast.show('warn', 'AI returned no data (AI service may be down) — fill fields manually', 4000); return; }
-    const ai = JSON.parse(match[0]);
+    // Tolerant first (Aki wraps JSON in prose / ```json fences); original parse is the fallback.
+    let ai = typeof text === 'string' ? extractJsonObject(text) : null;
+    if (!ai) {
+      const match = typeof text === 'string' ? text.match(/\{[\s\S]*\}/) : null;
+      if (!match) { toast.show('warn', 'AI returned no data (AI service may be down) — fill fields manually', 4000); return; }
+      ai = JSON.parse(match[0]);
+    }
     
     if (ai.title) { titleEl.value = String(ai.title).slice(0, 90); titleEl.dispatchEvent(new Event('input')); } // enforce 90-char cap + refresh counter
     if (ai.issue) { const el = _el('wr-issue'); if (el) el.value = ai.issue; }

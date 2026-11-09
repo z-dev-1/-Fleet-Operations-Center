@@ -6,6 +6,7 @@
  *   mapRecipients(list) -> [{ name, address|null }]
  *   mapAttachments(list, hasAttachments) -> attachment entries (filename-only analysis)
  *   legacyConvId(restId)   REST id alphabet -> the EWS form OWA's data-convid uses ('-' -> '/', '_' -> '+')
+ *   restConvId(legacyRaw)  the inverse (a stored convIdRaw -> the REST ConversationId)
  *   keySeedOf(msg)         'imid:<InternetMessageId>' when present, else 'id:<Id>'
  *   rowSigOf(convKey, members)
  *
@@ -27,6 +28,8 @@ const sha1 = (s) => crypto.createHash('sha1').update(String(s)).digest('hex');
 function _bump(ctx, k) { if (ctx && ctx.stats) ctx.stats[k] = (ctx.stats[k] || 0) + 1; }
 
 function legacyConvId(restId) { return String(restId == null ? '' : restId).replace(/-/g, '/').replace(/_/g, '+'); }
+/** restConvId(legacyRaw): the inverse of legacyConvId ('/' -> '-', '+' -> '_'); '' for a non-string. */
+function restConvId(legacyRaw) { return typeof legacyRaw === 'string' ? legacyRaw.replace(/\//g, '-').replace(/\+/g, '_') : ''; }
 
 function keySeedOf(msg) {
   const m = msg || {};
@@ -144,4 +147,4 @@ function toCapture(msg, ctx) {
   return cap;
 }
 
-module.exports = { toCapture, mapRecipients, mapAttachments, legacyConvId, keySeedOf, rowSigOf, parseRestTime };
+module.exports = { toCapture, mapRecipients, mapAttachments, legacyConvId, restConvId, keySeedOf, rowSigOf, parseRestTime };

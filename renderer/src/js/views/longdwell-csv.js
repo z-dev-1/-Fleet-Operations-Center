@@ -14,6 +14,7 @@
 
 import { longDwellCsv as csvBridge, ai as aiBridge, relay as relayBridge, longDwell as longDwellBridge, longDwellAi as longDwellAiBridge } from '../bridge.js';
 import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runDurableFill } from '../longdwell-fill-logic.js';
+import { extractJsonObject } from '../util/ai-json.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
 import { _buildAIFillPrompt, _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
@@ -563,18 +564,22 @@ async function _aiFillRow(rowKey, btn, onStatus,
     const result = await aiBridge.ask(prompt, { priority: onStatus ? 'low' : 'normal' }); // batch fill-all = low (AI gateway)
     if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
     const textOut = result.text || '';
-    const jm = textOut.match(/\{[\s\S]*\}/);
-    if (!jm) throw new Error('AI response was not JSON');
-    let parsed;
-    try {
-      parsed = JSON.parse(jm[0]);
-    } catch (e1) {
-      // The AI often returns JSON whose string values contain RAW control chars
-      // (literal newlines/tabs inside the multi-line "summary") and smart
-      // quotes — both illegal in strict JSON, so JSON.parse throws. Sanitize and
-      // retry before giving up.
-      try { parsed = JSON.parse(_sanitizeAiJson(jm[0])); }
-      catch (e2) { throw new Error('Could not parse AI JSON: ' + e1.message); }
+    // Tolerant first (Aki wraps JSON in prose / ```json fences); the original
+    // strict parse stays as the fallback so its error messages are unchanged.
+    let parsed = extractJsonObject(textOut);
+    if (!parsed) {
+      const jm = textOut.match(/\{[\s\S]*\}/);
+      if (!jm) throw new Error('AI response was not JSON');
+      try {
+        parsed = JSON.parse(jm[0]);
+      } catch (e1) {
+        // The AI often returns JSON whose string values contain RAW control chars
+        // (literal newlines/tabs inside the multi-line "summary") and smart
+        // quotes — both illegal in strict JSON, so JSON.parse throws. Sanitize and
+        // retry before giving up.
+        try { parsed = JSON.parse(_sanitizeAiJson(jm[0])); }
+        catch (e2) { throw new Error('Could not parse AI JSON: ' + e1.message); }
+      }
     }
 
     let delayReason = String(parsed.delayReason || '').trim();

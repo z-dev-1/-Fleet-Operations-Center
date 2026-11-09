@@ -22,6 +22,8 @@ const SELECT_LIST = 'Id,ConversationId,InternetMessageId,ReceivedDateTime,IsDraf
 const SELECT_FULL = 'Id,ConversationId,InternetMessageId,ReceivedDateTime,Subject,From,ToRecipients,CcRecipients,HasAttachments,IsRead,IsDraft,ParentFolderId,Body';
 const SELECT_LITE = 'Id,ConversationId,InternetMessageId,ReceivedDateTime,Subject,From,ToRecipients,CcRecipients,HasAttachments,IsRead,IsDraft,ParentFolderId,BodyPreview';
 const SELECT_DRAFT = 'Subject,ToRecipients,CcRecipients,Body,InternetMessageId,ConversationId';
+// Reply recipient refresh: the headers only (no Body), enough for map.toCapture.
+const SELECT_RCPT = 'Id,ConversationId,InternetMessageId,ReceivedDateTime,Subject,From,ToRecipients,CcRecipients,IsDraft,ParentFolderId';
 const WELL_KNOWN = Object.freeze(['inbox', 'sentitems', 'drafts', 'deleteditems', 'junkemail', 'archive']);
 const TS_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 const HISTORIC = '1900-01-01T00:00:00Z';
@@ -77,6 +79,7 @@ const folderConversation = (fid, convId) => BASE + '/mailfolders/' + _id(fid) + 
   + _q([['$filter', 'ConversationId eq ' + odataString(convId)], ['$top', String(TC.DELETE_CONV_MAX)], ['$select', 'Id']]);
 const message = (id) => BASE + '/messages/' + _id(id) + _q([['$select', SELECT_FULL]]);
 const messageLite = (id) => BASE + '/messages/' + _id(id) + _q([['$select', SELECT_LITE]]);
+const messageRecipients = (id) => BASE + '/messages/' + _id(id) + _q([['$select', SELECT_RCPT]]);
 const byInternetMessageId = (imid) => BASE + '/messages' + _q([['$filter', 'InternetMessageId eq ' + odataString(imid)], ['$top', '5'], ['$select', 'Id,ParentFolderId']]);
 const attachments = (id) => BASE + '/messages/' + _id(id) + '/attachments' + _q([['$select', 'Id,Name,ContentType,Size,IsInline']]);
 const attachment = (id, attId) => BASE + '/messages/' + _id(id) + '/attachments/' + _id(attId, TC.ATT_ID_MAX);
@@ -129,8 +132,8 @@ function rebaseNextLink(link, outlookHostRe) {
 }
 
 module.exports = {
-  API_HOST, BASE, SELECT_LIST, SELECT_FULL, SELECT_LITE, SELECT_DRAFT, WELL_KNOWN, TS_RE,
-  folders, childFolders, wellKnown, listSeed, listForward, listBackfill, conversation, folderConversation, message, messageLite,
+  API_HOST, BASE, SELECT_LIST, SELECT_FULL, SELECT_LITE, SELECT_DRAFT, SELECT_RCPT, WELL_KNOWN, TS_RE,
+  folders, childFolders, wellKnown, listSeed, listForward, listBackfill, conversation, folderConversation, message, messageLite, messageRecipients,
   byInternetMessageId, attachments, attachment, sentByInternetMessageId, sentByConversation, sentBySubject, probe,
   sendMail, createReply, draft, sendDraft, move,
   odataString, assertAllowed, authSourceRank, rebaseNextLink,

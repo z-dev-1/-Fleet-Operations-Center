@@ -17,6 +17,7 @@
 const store  = require('../store');
 const logger = require('../utils/logger')('heartbeat');
 const { P }  = require('../config/paths');
+const { extractJsonObject } = require('../utils/ai-json');
 
 // ─── CONFIGURATION ──────────────────────────────────────────────────────────
 const STALE_DAYS_FOLLOWUP      = 3;    // days with no note update → generate follow-up
@@ -388,9 +389,9 @@ async function _autoInferRCA(candidates) {
       const result = await askOrcha(prompt);
       const text = (result && result.text) ? result.text.trim() : (typeof result === 'string' ? result.trim() : '');
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
+      let parsed = extractJsonObject(text);
+      if (!parsed) { const jsonMatch = text.match(/\{[\s\S]*\}/); if (jsonMatch) parsed = JSON.parse(jsonMatch[0]); }
+      if (parsed) {
         rcaStore[unitId] = {
           ...rcaStore[unitId],
           ...parsed,

@@ -2,10 +2,13 @@
 /**
  * email-intel/reply/recipients.js — Reply vs Reply All recipient computation (design 6.3; R5.5, R5.6).
  *
- *   computeRecipients(latestMsg, mode, me) -> {
+ *   computeRecipients(latestMsg, mode, me, opts?) -> {
  *     ok, mode, to:[{ name, address|null, role:'sender'|'to'|'cc' }], cc:[...], toCount, ccCount,
- *     external: n|null, unknownAddress: n, blocked?: 'RECIPIENTS_UNKNOWN'|'NO_RECIPIENTS'
+ *     external: n|null, unknownAddress: n, blocked?: 'RECIPIENTS_UNKNOWN'|'NO_RECIPIENTS', selfOnly?: true
  *   }
+ *   opts.selfOnlyFallback (apiTransport only): a Reply whose every candidate is me (a self-addressed message)
+ *   returns my real address entries instead of NO_RECIPIENTS (what Outlook's createreply addresses). Reply All
+ *   is never affected. Without opts the result is unchanged.
  *   recipientKey(entry)            address (lower case) when present, else the normalized display name
  *   compareSets(expected, actual)  -> { equal, missing:[], extra:[] }   order-insensitive, duplicates collapsed
  *
@@ -46,7 +49,23 @@ function _domains(me) {
 
 const _entry = (e, role) => ({ name: String((e && e.name) || '').slice(0, 120), address: _addr(e) || null, role });
 
-function computeRecipients(latestMsg, mode, me) {
+/**
+ * Self-addressed Reply (opts.selfOnlyFallback, apiTransport only): every candidate was dropped because it is me
+ * (From me, To me only). Outlook's own createreply addresses me in that case, so the real me-entries are returned
+ * (address required, never an address-less entry): the original To first, else the sender.
+ */
+function _selfOnly(m, me) {
+  const seen = new Set(); const out = [];
+  for (const e of (m.to || [])) {
+    if (!_addr(e) || !_isMe(e, me)) continue;
+    const k = recipientKey(e);
+    if (!seen.has(k)) { seen.add(k); out.push(_entry(e, 'to')); }
+  }
+  if (!out.length && m.from && _addr(m.from) && _isMe(m.from, me)) out.push(_entry(m.from, 'sender'));
+  return out;
+}
+
+function computeRecipients(latestMsg, mode, me, opts) {
   const m = latestMsg || {};
   const md = MODES.includes(mode) ? mode : 'reply';
   const from = m.from || null;
@@ -70,6 +89,11 @@ function computeRecipients(latestMsg, mode, me) {
   } else if (from) {
     add(to, from, 'sender');
   }
+  let selfOnly = false;
+  if (opts && opts.selfOnlyFallback === true && md === 'reply' && !to.length && !cc.length) {
+    const mine = _selfOnly(m, me);
+    if (mine.length) { to.push(...mine); selfOnly = true; }
+  }
   const all = to.concat(cc);
   const doms = _domains(me);
   const external = doms.size ? all.filter((e) => e.address && !doms.has(e.address.slice(e.address.lastIndexOf('@') + 1))).length : null;
@@ -77,6 +101,7 @@ function computeRecipients(latestMsg, mode, me) {
   const out = { ok: true, mode: md, to, cc, toCount: to.length, ccCount: cc.length, external, unknownAddress };
   if (md === 'reply-all' && (!m.recipientsKnown || unknownAddress > 0)) { out.ok = false; out.blocked = 'RECIPIENTS_UNKNOWN'; }
   else if (!all.length) { out.ok = false; out.blocked = 'NO_RECIPIENTS'; }
+  if (selfOnly) out.selfOnly = true;
   return out;
 }
 

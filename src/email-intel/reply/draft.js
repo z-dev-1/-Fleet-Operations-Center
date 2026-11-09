@@ -21,6 +21,11 @@
  *    basedOnMessageKey, createdAt }) and is mirrored onto the legacy record (replyDraft, replyState 'drafted') so
  *    the legacy overlay stays coherent. An uncertain or sent legacy record is never overwritten.
  * AI unavailable: an editable starter text built from the guidance, aiUnavailable:true (legacy fallback behavior).
+ * Outlook REST transport (apiTransport only): after the gate, reply/resolve-recipients reads the real From / To / CC
+ * from the API (refreshing or ingesting the ledger record); the reply target is reply/target.replyTarget (the send
+ * path's rule) and a self-addressed Reply goes to me (selfOnlyFallback). The result then also carries
+ * recipientsSource ('api'|'stored'|null), sendable and, when the message could not be resolved, unresolved:{ reason }
+ * with empty To / CC (blocked 'RECIPIENTS_UNRESOLVED'; the draft is still written, sending is off). Flag off: unchanged.
  */
 const stores = require('../stores');
 const ledger = require('../ingest/ledger');
@@ -28,6 +33,7 @@ const cfgMod = require('../config');
 const untrusted = require('../untrusted');
 const { buildQuestions } = require('../actions/questions');
 const { computeRecipients } = require('./recipients');
+const { replyTarget } = require('./target');
 const { buildReplyContext, inScopeUnits } = require('./context');
 const { scanRisk } = require('./risk');
 const { findSecret } = require('../../justme-context/secret-scrub');
@@ -43,6 +49,10 @@ const RESOLVED = new Set(['answered', 'withdrawn']);
 const CTRL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u2028\u2029\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g;
 
 let _forced = 0;
+
+function _apiOn() {
+  try { return require('../flags').apiTransport() === true; } catch (_) { return false; }
+}
 
 /** records (oldest first) order the answers so resolvedBy is the latest answering message. */
 function resolvedGate(questions, records) {
@@ -119,16 +129,16 @@ async function draftThreadReply(input, opts) {
   const now = Number.isFinite(o.now) ? o.now : Date.now();
   const ck = i.conversationKey;
   const mode = i.mode === 'reply-all' ? 'reply-all' : 'reply';
+  const api = _apiOn();
   const doc = ledger.ensureDoc(stores.load('messages'));
-  const records = ledger.conversation(doc, ck);
+  let records = ledger.conversation(doc, ck);
   if (!records.length) return { ok: false, code: 'NOT_FOUND' };
-  const latest = records[records.length - 1];
   const cfg = cfgMod.normalize(stores.load('config'));
   const me = cfg.me || {};
 
   let stored = {};
   try { stored = require('../actions/store').load().questions || {}; } catch (_) { stored = {}; }
-  const questions = buildQuestions(records, stored, { now });
+  let questions = buildQuestions(records, stored, { now });
   const gate = resolvedGate(questions, records);
   if (gate.resolved && i.force !== true) {
     const by = gate.resolvedBy ? records.find((r) => r.messageKey === gate.resolvedBy.messageKey) : null;
@@ -140,9 +150,21 @@ async function draftThreadReply(input, opts) {
   }
   if (gate.resolved) { _forced++; logger.info('[email-intel] forced drafts=' + _forced); }
 
-  const recipients = computeRecipients(latest, mode, me);
-  const replyAll = computeRecipients(latest, 'reply-all', me);
-  if (mode === 'reply-all' && replyAll.blocked === 'RECIPIENTS_UNKNOWN') return { ok: false, code: 'RECIPIENTS_UNKNOWN' };
+  // Outlook REST transport: the real From / To / CC come from the API before anything is computed (the resolver
+  // refreshes or ingests the ledger record, so the send validator sees the same recipients).
+  let resolved = null;
+  if (api) {
+    try { resolved = await (o._resolve || require('./resolve-recipients').resolveReplyRecipients)({ conversationKey: ck, mode }, { now }); } catch (_) { resolved = null; }
+    records = ledger.conversation(ledger.ensureDoc(stores.load('messages')), ck);
+    if (!records.length) return { ok: false, code: 'NOT_FOUND' };
+    questions = buildQuestions(records, stored, { now });
+  }
+  const unresolved = api && (!resolved || resolved.ok !== true);
+  const latest = replyTarget(records, api);
+  let recipients = computeRecipients(latest, mode, me, { selfOnlyFallback: api });
+  const replyAll = computeRecipients(latest, 'reply-all', me, { selfOnlyFallback: api });
+  if (unresolved) recipients = { to: [], cc: [], external: null, blocked: 'RECIPIENTS_UNRESOLVED' };
+  else if (mode === 'reply-all' && replyAll.blocked === 'RECIPIENTS_UNKNOWN') return { ok: false, code: 'RECIPIENTS_UNKNOWN' };
 
   const guidance = typeof i.guidance === 'string' ? i.guidance.replace(CTRL_RE, '').trim().slice(0, GUIDANCE_MAX) : '';
   let ledgerEntries = []; let stagedItems = [];
@@ -168,11 +190,17 @@ async function draftThreadReply(input, opts) {
   }
   _persist(ck, latest, draft, mode, now);
   logger.info('[email-intel] draft ready mode=' + mode + ' ai=' + (aiUnavailable ? 'unavailable' : 'ok') + ' chars=' + draft.length + ' messages=' + ctx.messages.length);
-  return {
+  const out = {
     ok: true, draft, mode, aiUnavailable, warnings: scanRisk(draft), basedOnMessageKey: latest.messageKey,
     recipients: { to: recipients.to, cc: recipients.cc, external: recipients.external, blocked: recipients.blocked || null },
-    replyAllAvailable: !replyAll.blocked,
+    replyAllAvailable: !unresolved && !replyAll.blocked,
   };
+  if (api) {
+    out.recipientsSource = unresolved ? null : resolved.source;
+    out.sendable = !unresolved && !recipients.blocked && latest.source === 'api' && !!latest.itemId;
+    if (unresolved) out.unresolved = { reason: (resolved && resolved.reason) || 'unavailable' };
+  }
+  return out;
 }
 
 module.exports = { draftThreadReply, resolvedGate, buildDraftPrompt, DRAFT_MAX, GUIDANCE_MAX };

@@ -4,6 +4,9 @@
 // to base d8ac226 apart from single lines marked `// durable-gate` and the
 // `opts /* durable-gate */` parameter line. Golden:
 // tests/fixtures/longdwell-legacy-baseline.json (tests/longdwell-legacy-baseline.gen.test.js).
+// 2026-11-09 (fix/ai-json-parse): the AI-reply parse lines in BOTH _aiFillRow
+// functions changed intentionally (tolerant extractJsonObject first, original
+// strict parse kept as the fallback); only those two hashes were re-pinned.
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
