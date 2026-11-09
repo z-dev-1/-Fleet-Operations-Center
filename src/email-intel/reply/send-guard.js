@@ -90,6 +90,9 @@ function createAttempt(fields, opts) {
       toCount: (f.to || []).length, ccCount: (f.cc || []).length, subjectNorm: f.subjectNorm || '', bodyHash: f.bodyHash || '', bodyChars: f.bodyChars || 0,
       marker: f.marker || '', createdAt: iso(now), reconcile: { checks: [], resolution: null },
     };
+    // Outlook REST sends (apiTransport): the transport marker and the exact sent subject for a later reconcile.
+    if (f.transport === 'api') attempt.transport = 'api';
+    if (f.apiRef && typeof f.apiRef === 'object' && typeof f.apiRef.subject === 'string' && f.apiRef.subject) attempt.apiRef = { subject: f.apiRef.subject.slice(0, 400) };
     d.attempts[attempt.attemptId] = attempt;
     _prune(d);
     return d;
@@ -118,6 +121,22 @@ function _patch(attemptId, fn) {
 function markSending(attemptId, opts) {
   const now = opts && Number.isFinite(opts.now) ? opts.now : Date.now();
   return _patch(attemptId, (a) => { if (a.state === 'preparing') { a.state = 'sending'; a.sendClickedAt = iso(now); } });
+}
+
+/**
+ * setApiRef(attemptId, { internetMessageId?, conversationId?, subject? }): merges the string fields that are present
+ * into attempt.apiRef (ids <= 998 chars, subject <= 400). Undefined / invalid fields leave the stored value.
+ */
+function setApiRef(attemptId, ref) {
+  const r = ref && typeof ref === 'object' ? ref : {};
+  const ok = (v, max) => typeof v === 'string' && v.length > 0 && v.length <= max;
+  return _patch(attemptId, (a) => {
+    const cur = a.apiRef && typeof a.apiRef === 'object' ? a.apiRef : {};
+    if (ok(r.internetMessageId, 998)) cur.internetMessageId = r.internetMessageId;
+    if (ok(r.conversationId, 998)) cur.conversationId = r.conversationId;
+    if (typeof r.subject === 'string' && r.subject) cur.subject = r.subject.slice(0, 400);
+    a.apiRef = cur;
+  });
 }
 
 function finish(attemptId, state, extra) {
@@ -252,6 +271,6 @@ function applyOutcome(attempt, opts) {
 function _resetForTests() { _inFlight = false; }
 
 module.exports = {
-  STATES, BLOCKING, PREPARING_STALE_MS, ID_RE, ensureDoc, load, blockingAttempt, canSend, createAttempt, markSending, finish, recordCheck,
+  STATES, BLOCKING, PREPARING_STALE_MS, ID_RE, ensureDoc, load, blockingAttempt, canSend, createAttempt, markSending, setApiRef, finish, recordCheck,
   resolve, get, list, unreconciledCount, bootRecover, withSendLock, isSending, patchLegacy, applyOutcome, _resetForTests,
 };

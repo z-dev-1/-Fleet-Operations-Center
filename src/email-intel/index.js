@@ -22,6 +22,11 @@
  *
  * Every error ends in a LegacyResults object (never a throw to the caller); logs carry counts and
  * enums only (redact.js), never message content.
+ *
+ * Outlook REST transport (email.intel.apiTransport effective): the reader is transport/reader.js (no OWA page;
+ * the transport's hidden token window is the only page), with per-folder REST cursors (checkpoint folders[label].api),
+ * one conversation alias per API group (R4-M3) and a bounded scan-start auto-reconcile of uncertain API sends
+ * (R4-M5). No DOM fallback. Flag OFF: no transport file is loaded and the DOM build runs unchanged.
  */
 const crypto = require('crypto');
 const flags = require('./flags');
@@ -126,20 +131,25 @@ async function _scanBody(opts, trigger, job, triage, prevResults) {
   stores.update('checkpoints', (ck) => { ck.scan = ck.scan || {}; ck.scan.current = { scanId, startedAt: nowIso, trigger }; return ck; });
   logger.info('[email-intel] scan start id=' + scanId + ' trigger=' + trigger + ' folders=' + folders.length + ' max=' + plan.max);
 
-  const stats = { newMessages: 0, upgraded: 0, committedRows: 0 };
+  const stats = { newMessages: 0, upgraded: 0, committedRows: 0, migrated: 0 };
   const touched = new Set();
   let storeError = null;
   // Phase F (attachments): per-scan budget and the memory-only excerpts (messageKey -> [{index,status,text}], F-14).
   const att = _attachmentsOn() ? _attachSetup(cfg, startedAt, opts) : null;
   const excerpts = new Map();
 
+  const api = flags.apiTransport();                                   // Outlook REST transport (no DOM fallback)
   const onBatch = async (folder, items) => {
     const r1 = stores.update('messages', (doc) => {
       ledger.ensureDoc(doc);
       for (const it of items) {
+        if (api) _planApiGroup(doc, it, { banners: cfg.banners, now: startedAt, lookbackDays: cfg.caps.lookbackDays });
         for (const cap of it.captures) {
-          const res = ledger.buildRecord(cap, doc, { me: cfg.me, banners: cfg.banners, scanId, now: startedAt, threadContextIncomplete: !!cap.threadContextIncomplete });
+          const bctx = { me: cfg.me, banners: cfg.banners, scanId, now: startedAt, threadContextIncomplete: !!cap.threadContextIncomplete };
+          if (api) bctx.lookbackDays = cfg.caps.lookbackDays;               // R4-M2: the pass-2 window (API captures only)
+          const res = ledger.buildRecord(cap, doc, bctx);
           if (!res) continue;
+          if (api && res.migrated) stats.migrated++;
           if (res.created) { ledger.upsert(doc, res.record); stats.newMessages++; } else if (res.upgraded) stats.upgraded++;
           touched.add(res.record.conversationKey);
           if (att) _keepExcerpts(doc, res, cap, excerpts);
@@ -159,7 +169,15 @@ async function _scanBody(opts, trigger, job, triage, prevResults) {
     job.checkpoint({ scanId, folderIdx: Math.max(0, folders.indexOf(folder)), rows: stats.committedRows, newMessages: stats.newMessages });
   };
 
-  const readFn = opts._readMailbox || require('./capture/owa_capture').readMailbox;
+  // Outlook REST transport: the transport is required only here (flag OFF loads no transport file, AC-19).
+  const transport = api ? require('./transport') : null;
+  if (api) {
+    // Scan-start auto-reconcile of uncertain API sends: read-only, can only confirm `sent`, bounded (R4-M5).
+    try {
+      await _reconcilePending({ max: transport.TC.RECONCILE_AUTO_MAX, signal: opts.signal, deadlineAt: Math.min(deadlineAt, Date.now() + transport.TC.RECONCILE_AUTO_BUDGET_MS), _apiFind: opts._apiFind });
+    } catch (e) { logger.warn('[email-intel] auto-reconcile failed ' + errName(e)); }
+  }
+  const readFn = opts._readMailbox || (api ? transport.readMailbox : require('./capture/owa_capture').readMailbox);
   let reader = null;
   try {
     const readOpts = {
@@ -167,7 +185,21 @@ async function _scanBody(opts, trigger, job, triage, prevResults) {
       caps: { maxOpen: Math.min(cfg.caps.maxOpen, C.MAX_OPEN_HARD) }, lookbackDays: cfg.caps.lookbackDays, now: startedAt,
       timeoutMs: opts.readTimeoutMs, authGraceMs: opts.authGraceMs, _electron: opts._electron, _warm: opts._warm, _sleep: opts._sleep,
     };
-    if (att) Object.assign(readOpts, _attachReadOpts(att, excerpts));
+    if (api) {
+      Object.assign(readOpts, {
+        apiCursors: _apiCursors(ckSnapshot), isKnownSeed: _knownSeedFn(), _transport: opts._transport,
+        onApiCursor: async (folder, cursor) => {
+          const r = stores.update('checkpoints', (ck) => {
+            ck.folders = ck.folders || {};
+            const f = ck.folders[folder] || (ck.folders[folder] = fp.emptyFolderCheckpoint(folder));
+            f.api = cursor;
+            return ck;
+          });
+          if (!r.ok) { storeError = r.code || 'store'; throw new Error('store-write'); }
+        },
+      });
+    }
+    if (att) Object.assign(readOpts, _attachReadOpts(att, excerpts, api));
     reader = await readFn(readOpts);
   } catch (e) {
     logger.warn('[email-intel] reader threw ' + errName(e));
@@ -225,8 +257,84 @@ async function _scanBody(opts, trigger, job, triage, prevResults) {
     folders: reader ? reader.folders.map((f) => ({ folder: f.folder, status: f.status, requested: f.requested, examined: f.examined, opened: f.opened, ingested: f.ingested, skippedKnown: f.skippedKnown, caughtUp: f.caughtUp, backlog: f.backlog, backlogRemaining: f.backlogRemaining, retried: f.retried || 0 })) : [],
     counts: { newMessages: stats.newMessages, rows: stats.committedRows, opened: reader ? reader.opened : 0, rowsExamined: reader ? reader.rowsExamined : 0 },
   });
-  logger.info('[email-intel] scan end id=' + scanId + ' outcome=' + d.outcome + ' new=' + stats.newMessages + ' opened=' + (reader ? reader.opened : 0) + ' ms=' + (Date.now() - wallStart));
+  logger.info('[email-intel] scan end id=' + scanId + ' outcome=' + d.outcome + ' new=' + stats.newMessages + ' opened=' + (reader ? reader.opened : 0) + ' ms=' + (Date.now() - wallStart)
+    + (api ? ' api=1 migrated=' + stats.migrated : ''));
   return results;
+}
+
+// ── Outlook REST transport (apiTransport) helpers ──────────────────────────────
+/** Per-folder REST cursors from the scan-start checkpoint snapshot. */
+function _apiCursors(ckFolders) {
+  const out = {};
+  for (const k of Object.keys(ckFolders || {})) out[k] = (ckFolders[k] && ckFolders[k].api) || null;
+  return out;
+}
+
+/** isKnownSeed(seed): the ledger already holds the message (by key or alias) at scan start. */
+function _knownSeedFn() {
+  const identity = require('./ingest/identity');
+  const set = new Set();
+  try {
+    const doc = stores.load('messages');
+    for (const k of Object.keys(doc.messages || {})) set.add(k);
+    for (const k of Object.keys(doc.aliasIndex || {})) set.add(k);
+  } catch (_) { /* empty set: everything is fetched */ }
+  return (seed) => set.has(identity.itemKey(seed));
+}
+
+/** R4-M3: one alias for the whole API conversation group, decided before any record of the group is built. */
+function _planApiGroup(doc, it, ctx) {
+  const caps = (it.captures || []).filter((c) => c && c.source === 'api');
+  if (!caps.length) return;
+  const apiMigrate = require('./ingest/api-migrate');
+  const plan = apiMigrate.planGroup(doc, caps, ctx);
+  if (!plan) return;
+  apiMigrate.recordConvAlias(doc, caps[0].conversationKey, { conversationKey: plan.conversationKey, legacyId: plan.legacyIdOverride });
+  for (const cap of caps) {
+    cap.conversationKey = plan.conversationKey;
+    if (plan.legacyIdOverride) cap.legacyIdOverride = plan.legacyIdOverride;
+  }
+}
+
+/**
+ * _reconcilePending({ max, signal, deadlineAt }): scan-start check of uncertain Outlook REST sends (design 8.6).
+ * Attempts in delivery-uncertain / unconfirmed-not-found with transport 'api' and a usable search input, clicked at
+ * least 2 min ago and not checked in the last 10 min, newest first, at most `max`, each with onlyIfFound (can only
+ * confirm `sent`). R4-M5: past deadlineAt (min(scan deadline, now + 90 s)) or on abort the rest are deferred; a
+ * cut-off lookup is RECONCILE_INCONCLUSIVE and records no check. Counts only in the log.
+ */
+async function _reconcilePending(o) {
+  const opts = o || {};
+  const guard = require('./reply/send-guard');
+  const rs = require('./reply/reconcile-send');
+  const transport = require('./transport');
+  const TC = transport.TC;
+  const doc = ledger.ensureDoc(stores.load('messages'));
+  const now = Date.now();
+  const lastCheck = (a) => { const c = (a.reconcile && a.reconcile.checks) || []; return c.length ? (Date.parse(c[c.length - 1].at) || 0) : 0; };
+  const picked = guard.list({ limit: 500 }).filter((a) => rs.RECONCILABLE.has(a.state) && a.transport === 'api'
+    && transport.reconcileQuery(a, doc).strategies.length > 0
+    && now - (Date.parse(a.sendClickedAt || a.createdAt) || 0) >= TC.RECONCILE_AUTO_MIN_AGE_MS
+    && now - lastCheck(a) >= TC.RECONCILE_AUTO_GAP_MS).slice(0, Number.isFinite(opts.max) ? opts.max : TC.RECONCILE_AUTO_MAX);
+  const counts = { checked: 0, sent: 0, notFound: 0, inconclusive: 0, busy: 0, failed: 0, deferred: 0 };
+  for (let i = 0; i < picked.length; i++) {
+    if ((opts.signal && opts.signal.aborted) || (Number.isFinite(opts.deadlineAt) && Date.now() >= opts.deadlineAt)) { counts.deferred = picked.length - i; break; }
+    let r;
+    try {
+      r = await rs.reconcileSend(picked[i].attemptId, { onlyIfFound: true, signal: opts.signal, deadlineAt: opts.deadlineAt, messagesDoc: doc, _apiFind: opts._apiFind });
+    } catch (_) { r = { ok: false, code: 'RECONCILE_FAILED' }; }
+    counts.checked++;
+    if (r && r.ok && r.found) counts.sent++;
+    else if (r && r.ok) counts.notFound++;
+    else if (r && r.code === 'RECONCILE_INCONCLUSIVE') counts.inconclusive++;
+    else if (r && r.code === 'RECONCILE_IN_PROGRESS') counts.busy++;
+    else counts.failed++;
+  }
+  if (picked.length) {
+    logger.info('[email-intel] auto-reconcile checked=' + counts.checked + ' sent=' + counts.sent + ' notFound=' + counts.notFound + ' inconclusive=' + counts.inconclusive
+      + ' busy=' + counts.busy + ' failed=' + counts.failed + ' deferred=' + counts.deferred);
+  }
+  return counts;
 }
 
 function _multiRecipient() {
@@ -263,14 +371,16 @@ function _keepExcerpts(doc, res, cap, excerpts) {
 }
 
 /** Reader options for Phase F: the budget, the pending re-extract targets (F-14) and their commit hook. */
-function _attachReadOpts(att, excerpts) {
+function _attachReadOpts(att, excerpts, api) {
   const ex = require('./attach/extract');
   let targets = [];
   const r0 = stores.update('messages', (doc) => {
     ledger.ensureDoc(doc);
     const t = ex.reextractTargets(doc, { max: att.policy.maxPerScan });
     for (const k of t.unreachable) { const rec = doc.messages[k]; if (rec) ex.markNotFound(rec.attachments); }
-    targets = t.targets.map((x) => Object.assign({}, x, { attachments: JSON.parse(JSON.stringify(doc.messages[x.messageKey].attachments || [])) }));
+    targets = api
+      ? t.targets.map((x) => Object.assign({}, x, { attachments: JSON.parse(JSON.stringify(doc.messages[x.messageKey].attachments || [])), itemId: doc.messages[x.messageKey].itemId || null }))
+      : t.targets.map((x) => Object.assign({}, x, { attachments: JSON.parse(JSON.stringify(doc.messages[x.messageKey].attachments || [])) }));
     return doc;
   });
   if (!r0.ok) targets = [];
@@ -423,7 +533,7 @@ async function _understand(o) {
     for (const r of records) if (ledger.isPending(r)) pendingAnalysis++;
     const latest = records[records.length - 1];
     const p = prevById[latest.legacyId];
-    const behind = !p || !p.intel || p.intel.latestMessageKey !== latest.messageKey || p.intel.analysisStatus !== String((latest.analysis || {}).status || 'pending');
+    const behind = !p || !p.intel || !adapter.sameLatest(p.intel.latestMessageKey, latest) || p.intel.analysisStatus !== String((latest.analysis || {}).status || 'pending');
     if (changed.has(ck) || behind) views.push({ conversationKey: ck, records });
   }
   const d = statusMod.deriveOutcome({ reader, committed: o.committed, storeError: commitFailed, deadlineHit: o.deadlineHit, pendingAnalysis, aborted: !!(opts.signal && opts.signal.aborted) });
@@ -462,7 +572,7 @@ async function _buildLegacy(o) {
     if (records.length) views.push({ conversationKey: ck, records });
   }
   const latestOf = (v) => v.records[v.records.length - 1];
-  const needs = views.filter((v) => { const l = latestOf(v); const p = prevById[l.legacyId]; return !(p && p.intel && p.intel.latestMessageKey === l.messageKey); });
+  const needs = views.filter((v) => { const l = latestOf(v); const p = prevById[l.legacyId]; return !(p && p.intel && adapter.sameLatest(p.intel.latestMessageKey, l)); });
   const stamp = (r) => Date.parse(r.receivedAt || '') || Date.parse(r.ingestedAt || '') || 0;
   needs.sort((a, b) => stamp(latestOf(b)) - stamp(latestOf(a)));
   const batch = needs.slice(0, plan.max);
@@ -581,7 +691,12 @@ async function scheduledTick(ctx, cfg, deps) {
 /** Status document (design 8.6): enums, counts and timestamps only. */
 function getStatus() {
   let f = {}; let warnings = [];
-  try { const g = flags.get(); f = g.effective; warnings = g.warnings || []; } catch (_) { /* flags only */ }
+  try {
+    const g = flags.get();
+    // apiTransport appears in the status flags only while it is effective (flag OFF: the same object as before).
+    f = g.apiTransportEffective === true ? Object.assign({}, g.effective, { apiTransport: true }) : g.effective;
+    warnings = g.warnings || [];
+  } catch (_) { /* flags only */ }
   let laneSt = { state: 'unknown', checkedAt: null };
   const extra = [];
   if (f && f.multiRecipient) {
@@ -601,7 +716,7 @@ function getStatus() {
     try { const as = require('./actions/store'); openActions = as.openCount(as.load()); } catch (_) { /* status only */ }
   }
   let unreconciledSends = 0;
-  if (f && f.threadReplies) {
+  if (f && (f.threadReplies || f.apiTransport)) {
     try { unreconciledSends = require('./reply/send-guard').unreconciledCount(); } catch (_) { /* status only */ }
   }
   const config = cfgMod.normalize(stores.load('config'));
@@ -622,7 +737,11 @@ function getStatus() {
       st.attachments = { visionNoticePending: p.visionNoticeAcknowledged !== true, maxVision: p.maxVision, maxPerScan: p.maxPerScan, maxBytes: p.maxBytes };
     } catch (_) { /* status only */ }
   }
+  // Outlook REST transport: token presence / TTL bucket / hold and the throttle gate (no values).
+  if (f && f.apiTransport && st && typeof st === 'object') {
+    try { st.api = require('./transport').describe(); } catch (_) { /* status only */ }
+  }
   return st;
 }
 
-module.exports = { engaged, runIntelScan, scheduledTick, getStatus, AuthBlockedError, ScanFailedError, ScanAbortedError };
+module.exports = { engaged, runIntelScan, scheduledTick, getStatus, AuthBlockedError, ScanFailedError, ScanAbortedError, _reconcilePending };

@@ -132,6 +132,58 @@ describe('R8.7 / NFR-1 resolveEmailIntelFlags', () => {
   });
 });
 
+describe('apiTransport (Outlook REST transport, outside the six-key effective block)', () => {
+  afterEach(() => flags._setForTests(null));
+
+  it('FR-6.1 apiTransport defaults OFF, env override, effective = capture && apiTransport, six-key effective unchanged', () => {
+    expect(pf.EMAIL_INTEL_API_ENV).toBe('FLEET_EMAIL_INTEL_API');
+    const d = pf.resolveEmailIntelFlags({}, {});
+    expect(d).toMatchObject({ apiTransport: false, apiTransportEffective: false });
+    expect(d.effective).toEqual(ALL_OFF);
+    const on = pf.resolveEmailIntelFlags(ON({ enabled: true, capture: true, apiTransport: true }), {});
+    expect(on).toMatchObject({ apiTransport: true, apiTransportEffective: true });
+    expect(Object.keys(on.effective).sort()).toEqual(Object.keys(ALL_OFF).sort());
+    expect(pf.resolveEmailIntelFlags(ON({ enabled: true, capture: true, apiTransport: true }), { FLEET_EMAIL_INTEL_API: '0' }).apiTransportEffective).toBe(false);
+    expect(pf.resolveEmailIntelFlags(ON({ enabled: true, capture: true }), { FLEET_EMAIL_INTEL_API: '1' }).apiTransportEffective).toBe(true);
+    expect(pf.resolveEmailIntelFlags(ON({ enabled: true, capture: true, apiTransport: true }), { FLEET_EMAIL_INTEL_API: 'yes' }).apiTransportEffective).toBe(true);   // junk ignored
+    expect(pf.resolveEmailIntelFlags(ON({ enabled: true, apiTransport: true }), {})).toMatchObject({ apiTransport: true, apiTransportEffective: false });   // needs capture
+    for (const bad of ['true', 1, {}, null]) expect(pf.resolveEmailIntelFlags(ON({ enabled: true, capture: true, apiTransport: bad }), {}).apiTransport).toBe(false);
+    flags._setForTests({ effective: { capture: true, apiTransport: true } });
+    expect(flags.apiTransport()).toBe(true);
+    expect(Object.keys(flags.get().effective).sort()).toEqual(Object.keys(ALL_OFF).sort());
+    flags._setForTests({ effective: { apiTransport: true } });
+    expect(flags.apiTransport()).toBe(false);
+    flags._setForTests({ enabled: true, capture: true, apiTransport: true });
+    expect(flags.apiTransport()).toBe(true);
+  });
+
+  it('FR-6.3 apiTransport resolves correctly with every phase-flag combination', () => {
+    const phases = ['multiRecipient', 'timelineWrites', 'actionsView', 'threadReplies', 'attachments'];
+    for (let mask = 0; mask < (1 << phases.length); mask++) {
+      const o = { enabled: true, capture: true, apiTransport: true };
+      phases.forEach((p, i) => { if (mask & (1 << i)) o[p] = true; });
+      const f = pf.resolveEmailIntelFlags(ON(o), {});
+      expect(f.apiTransportEffective).toBe(true);
+      const g = pf.resolveEmailIntelFlags(ON(Object.assign({}, o, { capture: false })), {});
+      expect(g.apiTransportEffective).toBe(false);
+      const without = pf.resolveEmailIntelFlags(ON(Object.assign({}, o, { apiTransport: false })), {});
+      expect(without.effective).toEqual(f.effective);                         // apiTransport never changes the phase flags
+    }
+  });
+
+  it('FR-6.4 default settings leave apiTransport OFF', () => {
+    flags._setForTests(null);
+    expect(flags.apiTransport()).toBe(false);
+    expect(flags.get().apiTransportEffective).toBe(false);
+    expect(pf.loadEmailIntel({ load: () => ({}), env: {} }).apiTransportEffective).toBe(false);
+    expect(pf.loadEmailIntel({ load: () => { throw new Error('io'); }, env: {} }).apiTransportEffective).toBe(false);
+  });
+
+  it('NFR-5 test setup forces FLEET_EMAIL_INTEL_API=0', () => {
+    expect(process.env.FLEET_EMAIL_INTEL_API).toBe('0');
+  });
+});
+
 describe('email-intel/flags.js memoized wrapper', () => {
   afterEach(() => flags._setForTests(null));
 

@@ -75,7 +75,10 @@ function _quotedHash(segments) {
 
 /**
  * buildRecord(capture, doc, ctx) -> { record, created, upgraded } | null (stub captures yield null)
- * ctx: { me, banners, scanId, now, threadContextIncomplete }
+ * ctx: { me, banners, scanId, now, threadContextIncomplete, lookbackDays? (API captures only, R4-M2) }
+ * API captures (cap.source === 'api', apiTransport only) are keyed by their key seed, merge DOM-era derived twins
+ * (ingest/api-migrate.js) and carry source/internetMessageId/apiConversationId/zoneExplicit; the result then also
+ * has `migrated`. DOM captures take the unchanged path.
  * When the message is already in the ledger (same key) the stored record is returned and its
  * received time is upgraded in place if the new capture has better quality (key never changes).
  */
@@ -87,12 +90,21 @@ function buildRecord(cap, doc, ctx) {
   const contentHash = identity.contentHash(seg.newContent);
   const sender = identity.senderNorm(cap.from);
   const subjectNorm = identity.normalizeSubject(cap.subject);
-  const resolved = identity.resolveMessageKey({
+  const api = cap.source === 'api';                                   // Outlook REST capture (apiTransport only)
+  if (api) apiMigrate().remapConversation(doc, cap);
+  const keyInput = {
     itemId: cap.itemId, conversationKey: cap.conversationKey, sender, subject: subjectNorm, contentHash,
     receivedAt: cap.receivedAt, receivedAtQuality: cap.receivedAtQuality,
-  }, doc);
+  };
+  if (api) keyInput.keySeed = cap.keySeed;                            // DOM captures: no keySeed key at all
+  const resolved = identity.resolveMessageKey(keyInput, doc);
   const existing = identity.findMessage(doc, resolved.messageKey);
   if (existing) {
+    if (api) {
+      // A moved message gets a new REST id; the key (InternetMessageId) stays.
+      if (cap.itemId && existing.itemId !== cap.itemId) existing.itemId = cap.itemId;
+      if (cap.folder && Array.isArray(existing.foldersSeen) && !existing.foldersSeen.includes(cap.folder)) existing.foldersSeen.push(cap.folder);
+    }
     const upgraded = identity.upgradeTime(existing, cap);
     if (upgraded) doc.byConv[existing.conversationKey] = _resort(doc, existing.conversationKey);
     return { record: existing, created: false, upgraded };
@@ -102,6 +114,22 @@ function buildRecord(cap, doc, ctx) {
     // A message first seen without an item id: link the derived key as an alias (fact dedupe is content-keyed).
     const derived = identity.baseKeyOf({ conversationKey: cap.conversationKey, sender, subject: subjectNorm, contentHash });
     if (doc.messages[derived]) aliases.push(derived);
+  }
+  let migratedFrom = null;
+  if (api) {
+    // DOM records keyed by the display name (the DOM often had no address), then the fuzzy match (design 6.2 step 4).
+    const byName = identity.baseKeyOf({ conversationKey: cap.conversationKey, sender: identity.senderNorm({ name: cap.from && cap.from.name }), subject: subjectNorm, contentHash });
+    if (doc.messages[byName] && !aliases.includes(byName)) aliases.push(byName);
+    if (!aliases.length) {
+      const m = apiMigrate().matchDerived(doc, cap, seg, ctx);
+      if (m && doc.messages[m.key]) {
+        aliases.push(m.key);
+        if (m.crossConversation) {
+          apiMigrate().recordConvAlias(doc, cap.conversationKey, { conversationKey: m.conversationKey, legacyId: m.legacyId });
+          migratedFrom = m;
+        }
+      }
+    }
   }
   const now = Number.isFinite(ctx.now) ? ctx.now : Date.now();
   const stored = seg.newContent.slice(0, C.STORED_BODY_CAP);
@@ -142,8 +170,19 @@ function buildRecord(cap, doc, ctx) {
     ingestedAt: new Date(now).toISOString(), scanId: ctx.scanId || null,
     analysis: { status: 'pending', attempts: 0, promptVersion: null, analyzedAt: null, result: null, validation: null },
   };
-  return { record, created: true, upgraded: false };
+  if (!api) return { record, created: true, upgraded: false };
+  // Outlook REST record: real ids, explicit zone; a cross-conversation DOM twin keeps its conversation and legacy id.
+  if (migratedFrom) { record.conversationKey = migratedFrom.conversationKey; if (migratedFrom.legacyId) record.legacyId = migratedFrom.legacyId; }
+  else if (typeof cap.legacyIdOverride === 'string' && cap.legacyIdOverride) record.legacyId = cap.legacyIdOverride;
+  record.source = 'api';
+  record.internetMessageId = (cap.apiIds && typeof cap.apiIds.internetMessageId === 'string' && cap.apiIds.internetMessageId) || undefined;
+  record.apiConversationId = (cap.apiIds && typeof cap.apiIds.conversationId === 'string' && cap.apiIds.conversationId) || undefined;
+  record.zoneExplicit = true;
+  return { record, created: true, upgraded: false, migrated: aliases.length > 0 };
 }
+
+let _apiMigrate = null;
+function apiMigrate() { return _apiMigrate || (_apiMigrate = require('./api-migrate')); }
 
 function _sortKey(rec) { return [timeOf(rec), Date.parse(rec.ingestedAt || '') || 0, rec.messageKey]; }
 function _cmp(a, b) {

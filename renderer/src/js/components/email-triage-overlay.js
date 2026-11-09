@@ -162,6 +162,9 @@ function _repliesOn() {
   return !!(_intel && _intel.flags && _intel.flags.threadReplies === true);
 }
 function _ck(em) { return em && em.intel && em.intel.conversationKey ? em.intel.conversationKey : null; }
+// Reconcile of an uncertain send: with threaded replies, or with the Outlook API transport (status flags.apiTransport,
+// present only while it is effective), whose legacy Send can leave an attempt uncertain.
+function _reconcileOn() { return _repliesOn() || !!(_intel && _intel.flags && _intel.flags.apiTransport === true); }
 const _replyUi = {};
 
 let _actionsView = null;
@@ -471,7 +474,7 @@ function _deleteButtonsHtml(em) {
 // The compact Reply button that lives in the footer (right side).
 function _replyButtonHtml(em) {
   const state = em.replyState || 'none';
-  if (state === 'uncertain') return '<span class="et-uncertain" role="status">Reply status uncertain - check Outlook</span>' + (_repliesOn() && _ck(em) ? renderReconcileHtml(em) : '');
+  if (state === 'uncertain') return '<span class="et-uncertain" role="status">Reply status uncertain - check Outlook</span>' + (_reconcileOn() && _ck(em) ? renderReconcileHtml(em) : '');
   if (state === 'sent') return '<span class="et-sent">✉️ Reply sent</span>';
   if (state === 'drafted') return '<span class="et-draft-flag">✍️ Draft ready below ↓</span>';
   if (_repliesOn() && _ck(em)) return renderReplyButtonsHtml(em);
@@ -509,6 +512,10 @@ function _wireCard(id) {
     if (ok) ok.addEventListener('click', () => _intelConfirmSend(id));
     const cancel = card.querySelector('[data-ei-cancel]');
     if (cancel) cancel.addEventListener('click', () => { if (_replyUi[id]) delete _replyUi[id].confirm; _toast('Not sent.'); _render(); });
+    const rec = card.querySelector('[data-ei-reconcile]');
+    if (rec) rec.addEventListener('click', () => _intelReconcile(id));
+  } else if (_reconcileOn()) {
+    // Outlook API transport without threaded replies: only the reconcile control of an uncertain legacy Send.
     const rec = card.querySelector('[data-ei-reconcile]');
     if (rec) rec.addEventListener('click', () => _intelReconcile(id));
   }
@@ -655,6 +662,14 @@ async function _sendReply(id) {
       if (em) { em.replyState = 'sent'; em.replyDraft = body; }
       _render();
       _toast('Reply sent.');
+    } else if (r && r.transport === 'api') {
+      // Outlook API transport: the main process returns the full user text (it already says what happened).
+      if (r.status === 'delivery-uncertain') {
+        const em = _results.emails.find((e) => e.id === id);
+        if (em) em.replyState = 'uncertain';
+        _render();
+      }
+      _toast(r.error || 'Nothing was sent.');
     } else {
       _toast('Send failed: ' + ((r && r.error) || 'unknown'));
     }
@@ -745,9 +760,14 @@ async function _intelReconcile(id) {
   try { r = await window.emailIntel.reconcileSend(attempt.attemptId); } catch (e) { _toast('Reconcile failed: ' + (e.message || e)); return; }
   if (r && r.state === 'sent') { em.replyState = 'sent'; _render(); _toast('Found in Sent Items: the reply was sent.'); return; }
   if (r && r.code === 'blocked-auth') { _toast('Outlook needs a sign-in. Open Outlook on the web once, then reconcile again.'); return; }
-  if (!r || !r.ok) { _toast('Reconcile failed: ' + ((r && r.code) || 'unknown')); return; }
+  // Outlook API transport only: these codes come from the API reconcile branch (no check was recorded).
+  if (r && r.code === 'RECONCILE_IN_PROGRESS') { _toast('A Sent Items check for this reply is already running. Try again in a moment.'); return; }
+  let first = 'The reply was not found in Sent Items yet.\n\nCheck Outlook yourself. Did you find this reply in your Sent Items?\nOK = yes, mark it sent. Cancel = no.';
+  if (r && r.code === 'RECONCILE_UNAVAILABLE') first = 'This reply cannot be looked up in Sent Items automatically.\n\nCheck Outlook yourself. Did you find this reply in your Sent Items?\nOK = yes, mark it sent. Cancel = no.';
+  else if (r && r.code === 'RECONCILE_INCONCLUSIVE') first = 'Sent Items has too many matching messages to check automatically.\n\nCheck Outlook yourself. Did you find this reply in your Sent Items?\nOK = yes, mark it sent. Cancel = no.';
+  else if (!r || !r.ok) { _toast('Reconcile failed: ' + ((r && r.code) || 'unknown')); return; }
   // Not found yet: the user may resolve it after checking Outlook themselves (token + system dialog).
-  const sent = confirm('The reply was not found in Sent Items yet.\n\nCheck Outlook yourself. Did you find this reply in your Sent Items?\nOK = yes, mark it sent. Cancel = no.');
+  const sent = confirm(first);
   let resolution = sent ? 'sent' : null;
   if (!sent && confirm('Mark this reply as NOT sent so you can send it again?\nOnly do this after checking Outlook Sent Items; a second send may be a duplicate.')) resolution = 'not-sent';
   if (!resolution) { _toast(UNCERTAIN_RECONCILE_TEXT + '.'); return; }
@@ -896,4 +916,7 @@ function _injectStyle() {
   `;
   document.head.appendChild(style);
 }
-export const __test__ = { _cardHtml, _replyButtonHtml, _replyPanelHtml, _setIntelForTests: (s) => { _intel = s || null; }, _setReplyUiForTests: (id, ui) => { if (ui) _replyUi[id] = ui; else delete _replyUi[id]; } };
+export const __test__ = {
+  _cardHtml, _replyButtonHtml, _replyPanelHtml, _setIntelForTests: (s) => { _intel = s || null; }, _setReplyUiForTests: (id, ui) => { if (ui) _replyUi[id] = ui; else delete _replyUi[id]; },
+  _sendReply, _intelReconcile, _setResultsForTests: (r) => { _results = r || { emails: [] }; }, _results: () => _results,
+};

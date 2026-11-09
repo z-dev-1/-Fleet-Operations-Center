@@ -28,4 +28,4 @@ process.env.FLEET_AUTH_PROPAGATION = '0';
 // Email Triage Intelligence (master + per-phase sub-flags + durable job) forced OFF so legacy
 // suites run the flag-off parity path. Flag-ON tests use src/email-intel/flags._setForTests.
 for (const k of ['FLEET_EMAIL_INTEL', 'FLEET_EMAIL_INTEL_CAPTURE', 'FLEET_EMAIL_INTEL_MULTI', 'FLEET_EMAIL_INTEL_TIMELINE',
-  'FLEET_EMAIL_INTEL_ACTIONS', 'FLEET_EMAIL_INTEL_REPLIES', 'FLEET_EMAIL_INTEL_ATTACH', 'FLEET_JOBS_EMAIL_TRIAGE']) process.env[k] = '0';
+  'FLEET_EMAIL_INTEL_ACTIONS', 'FLEET_EMAIL_INTEL_REPLIES', 'FLEET_EMAIL_INTEL_ATTACH', 'FLEET_EMAIL_INTEL_API', 'FLEET_JOBS_EMAIL_TRIAGE']) process.env[k] = '0';

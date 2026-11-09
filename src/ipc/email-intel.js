@@ -50,8 +50,8 @@ const GATES = Object.freeze({
   'emailIntel:prepare-action': 'per-kind',
   'emailIntel:confirm-action': 'capture',
   'emailIntel:draft-thread-reply': 'threadReplies',
-  'emailIntel:get-send-attempts': 'threadReplies',
-  'emailIntel:reconcile-send': 'threadReplies',
+  'emailIntel:get-send-attempts': 'threadReplies|apiTransport',
+  'emailIntel:reconcile-send': 'threadReplies|apiTransport',
   'emailIntel:dom-probe': 'capture',
   'emailIntel:set-tz-verified': 'capture',
   'emailIntel:ack-vision-notice': 'attachments',
@@ -64,7 +64,7 @@ const KIND_GATES = Object.freeze({
   'delete-batch': 'actionsView',
   'approve-staged': 'timelineWrites',
   'reject-staged': 'actionsView',
-  'mark-send-resolution': 'threadReplies',
+  'mark-send-resolution': 'threadReplies|apiTransport',
   'send-ready-dm': 'capture',
 });
 
@@ -126,6 +126,11 @@ const OFF = () => ({ ok: true, enabled: false });
 const NOT_YET = () => ({ ok: false, code: 'NOT_IMPLEMENTED', error: 'not available in this build phase' });
 const BAD = (field) => ({ ok: false, code: 'BAD_ARG', field });
 const _isPlain = (o) => !!o && typeof o === 'object' && !Array.isArray(o);
+// Outlook REST transport: the DOM probes are not available (the transport's token window is the only page).
+const DOM_DISABLED = () => ({ ok: false, code: 'DOM_DISABLED', error: 'The Outlook page probe is not used with the Outlook API transport.' });
+function _apiTransport() {
+  try { return flags.apiTransport() === true; } catch (_) { return false; }
+}
 
 function effective() {
   try { return flags.get().effective || {}; } catch (_) { return {}; }
@@ -133,7 +138,8 @@ function effective() {
 function gateOpen(gate) {
   if (gate == null) return true;
   const eff = effective();
-  return String(gate).split('|').some((g) => eff[g] === true);
+  // 'apiTransport' is not a key of the effective block: it is read through flags.apiTransport() (Outlook REST transport).
+  return String(gate).split('|').some((g) => (g === 'apiTransport' ? _apiTransport() : eff[g] === true));
 }
 
 function _notifyUpdated(payload) {
@@ -227,12 +233,14 @@ function registerEmailIntelIPC(_ctx) {
     const p = payload == null ? {} : payload;
     if (!_isPlain(p)) return BAD('payload');
     if (p.n !== undefined && (!Number.isInteger(p.n) || p.n < 1 || p.n > 5)) return BAD('n');
+    if (_apiTransport()) return DOM_DISABLED();
     const probe = require('../email-intel/capture/dom-probe');
     return probe.domProbe({ n: p.n || 1 });
   });
 
   handle('emailIntel:set-tz-verified', (_e, payload) => {
     if (!gateOpen('capture')) return OFF();
+    if (_apiTransport()) return DOM_DISABLED();
     if (!_isPlain(payload) || typeof payload.probeId !== 'string' || !PROBE_RE.test(payload.probeId)) return BAD('probeId');
     const probe = require('../email-intel/capture/dom-probe');
     const r = probe.consumeTzProbe(payload.probeId);
@@ -344,7 +352,7 @@ function registerEmailIntelIPC(_ctx) {
   });
 
   handle('emailIntel:get-send-attempts', (_e, payload) => {
-    if (!gateOpen('threadReplies')) return OFF();
+    if (!gateOpen(GATES['emailIntel:get-send-attempts'])) return OFF();
     // The preload bridge passes the conversation key itself; an object { conversationKey } is accepted too.
     const p = payload == null ? {} : (typeof payload === 'string' ? { conversationKey: payload } : payload);
     if (!_isPlain(p)) return BAD('payload');
@@ -354,7 +362,7 @@ function registerEmailIntelIPC(_ctx) {
   });
 
   handle('emailIntel:reconcile-send', async (_e, payload) => {
-    if (!gateOpen('threadReplies')) return OFF();
+    if (!gateOpen(GATES['emailIntel:reconcile-send'])) return OFF();
     const p = typeof payload === 'string' ? { attemptId: payload } : payload;           // the preload bridge passes the id itself
     if (!_isPlain(p) || typeof p.attemptId !== 'string' || !ATTEMPT_RE.test(p.attemptId)) return BAD('attemptId');
     const r = await require('../email-intel/reply/reconcile-send').reconcileSend(p.attemptId);

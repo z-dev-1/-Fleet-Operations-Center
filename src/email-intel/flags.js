@@ -5,6 +5,7 @@
  *   get()      -> { enabled, capture, ..., effective:{capture,multiRecipient,timelineWrites,
  *                  actionsView,threadReplies,attachments}, warnings:[] }
  *   engaged()  -> effective.capture (the master switch for the whole module)
+ *   apiTransport() -> apiTransportEffective (Outlook REST transport; outside the six-key effective block)
  *   _setForTests(obj|null)
  *
  * The value is read once per process (restart to change), like the other
@@ -36,9 +37,17 @@ function _setForTests(obj) {
     const eff = {};
     for (const k of ['capture', 'multiRecipient', 'timelineWrites', 'actionsView', 'threadReplies', 'attachments']) eff[k] = obj.effective[k] === true;
     _memo = Object.assign({ enabled: eff.capture, warnings: [] }, obj, { effective: eff });
+    // Outlook REST transport: read from the effective block given, but kept out of `effective` (six keys).
+    _memo.apiTransportEffective = obj.effective.apiTransport === true && eff.capture;
+    _memo.apiTransport = _memo.apiTransportEffective;
     return;
   }
   _memo = perfFlags.resolveEmailIntelFlags({ email: { intel: obj } }, {});
 }
 
-module.exports = { get, engaged, _setForTests };
+/** apiTransport(): the Outlook REST transport is effective (capture && apiTransport). Any failure -> false. */
+function apiTransport() {
+  try { return get().apiTransportEffective === true; } catch (_) { return false; }
+}
+
+module.exports = { get, engaged, apiTransport, _setForTests };

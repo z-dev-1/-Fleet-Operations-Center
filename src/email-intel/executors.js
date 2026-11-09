@@ -29,6 +29,11 @@
  *                  channel always returns CONFIRMATION_REQUIRED while threadReplies is effective (plan 2.3, F2-03).
  *   mark-send-resolution payload { attemptId, resolution:'sent'|'not-sent', acknowledgeCheckedOutlook:true, override? }
  *
+ * Outlook REST transport (email.intel.apiTransport effective): send-reply uses transport/mail-actions apiReply /
+ * apiSendMail (mechanism api-thread / api-new; the attempt carries transport:'api' and apiRef), delete / delete-batch
+ * and the legacy channels (apiLegacyDelete) use apiMoveToDeleted. No DOM entry point is reached and nothing falls back
+ * to the DOM. The newest API record of a conversation is the send / delete target (_apiLatest, R4-M1).
+ *
  * Later phases extend registerAll().
  */
 const confirm = require('./confirm');
@@ -245,12 +250,24 @@ const DELETE_REASON_TEXT = Object.freeze({
  * no question or decision for me, and at most one message without a message-level id. Fleet-relevant mail may be
  * deleted by the user (the recorded facts and evidence stay in the app) and the summary says so.
  */
+// ── Outlook REST transport (apiTransport) helpers ─────────────────────────────
+function _apiOn() {
+  try { return require('./flags').apiTransport() === true; } catch (_) { return false; }
+}
+/** R4-M1: the newest Outlook REST record of a conversation (a leftover DOM-era md_ twin never wins), else the last. */
+function _apiLatest(records) {
+  const list = Array.isArray(records) ? records : [];
+  for (let i = list.length - 1; i >= 0; i--) if (list[i] && list[i].source === 'api') return list[i];
+  return list[list.length - 1] || null;
+}
+
 function deleteTarget(conversationKey) {
   const stores = require('./stores');
   const ledger = require('./ingest/ledger');
   const recs = ledger.conversation(ledger.ensureDoc(stores.load('messages')), conversationKey);
   if (!recs.length) return { ok: false, reason: 'unknown-conversation' };
-  const latest = recs[recs.length - 1];
+  const api = _apiOn();
+  const latest = api ? _apiLatest(recs) : recs[recs.length - 1];
   if (latest.convIdSource === 'derived' || !latest.convIdRaw) return { ok: false, reason: 'no-conversation-id' };
   try {
     const as = require('./actions/store');
@@ -267,13 +284,12 @@ function deleteTarget(conversationKey) {
   let legacy = null;
   try { legacy = (_results().emails || []).find((e) => e.id === latest.legacyId) || null; } catch (_) { legacy = null; }
   if (legacy && legacy.deleted) return { ok: false, reason: 'already-deleted' };
-  return {
-    ok: true,
-    target: {
-      conversationKey, convId: latest.convIdRaw, folder: latest.folder || 'Inbox', legacyId: latest.legacyId || null, legacy,
-      senderName: (latest.from && latest.from.name) || '', subject: latest.subject || '', messages: recs.length, units: Array.from(units).slice(0, 10),
-    },
+  const target = {
+    conversationKey, convId: latest.convIdRaw, folder: latest.folder || 'Inbox', legacyId: latest.legacyId || null, legacy,
+    senderName: (latest.from && latest.from.name) || '', subject: latest.subject || '', messages: recs.length, units: Array.from(units).slice(0, 10),
   };
+  if (api && typeof latest.apiConversationId === 'string') target.apiConversationId = latest.apiConversationId;
+  return { ok: true, target };
 }
 
 /**
@@ -303,11 +319,27 @@ function _deleteLine(t) {
   return 'From: ' + cleanLabel(t.senderName || 'unknown') + ' | Subject: ' + cleanLabel(t.subject || '(no subject)') + (t.messages > 1 ? ' | ' + t.messages + ' messages' : '');
 }
 
+/** apiMoveToDeleted failure -> the result the callers return (NOT_FOUND = the DOM row-not-found result, design 9). */
+function _apiDeleteFailure(r, folder) {
+  const code = r && r.code;
+  if (code === 'NO_API_ID') return { ok: false, error: 'not read through the Outlook API yet' };
+  if (code === 'NOT_FOUND') return { ok: false, status: 'row-not-found', error: 'message not found in ' + folder + ' (already moved?)' };
+  if (code === 'FOLDER_NOT_FOUND') return { ok: false, status: 'folder-not-found', error: 'folder not found in Outlook' };
+  if (code === 'blocked-auth') return { ok: false, status: 'blocked-auth', error: 'Outlook needs a sign-in. Nothing was deleted.' };
+  if (code === 'PARTIAL') return { ok: false, status: 'partial', error: 'only ' + (r.moved || 0) + ' of ' + ((r.moved || 0) + (r.failed || 0)) + ' messages moved to Deleted Items', moved: r.moved || 0, failed: r.failed || 0 };
+  return { ok: false, error: 'delete failed' };
+}
+
 /** One OWA delete (moves the conversation to Deleted Items) plus the legacy bookkeeping. */
 async function _deleteOne(t) {
-  const del = require('../scrapers/owa_reader').deleteMessage;
-  const r = await del({ convId: t.convId, folder: t.folder });
-  if (!(r && r.ok)) return { ok: false, error: (r && r.error) || 'delete failed', status: r && r.status };
+  if (_apiOn()) {
+    const r = await require('./transport/mail-actions').apiMoveToDeleted({ deps: require('./transport').deps(), folderLabel: t.folder, apiConversationId: t.apiConversationId });
+    if (!(r && r.ok)) return _apiDeleteFailure(r, t.folder);
+  } else {
+    const del = require('../scrapers/owa_reader').deleteMessage;
+    const r = await del({ convId: t.convId, folder: t.folder });
+    if (!(r && r.ok)) return { ok: false, error: (r && r.error) || 'delete failed', status: r && r.status };
+  }
   try {
     const triage = require('../scrapers/email_triage');
     const store = require('../store');
@@ -426,10 +458,13 @@ function validateSendReply(payload) {
   if (require('../justme-context/secret-scrub').findSecret(body)) return { ok: false, code: 'BAD_ARG', field: 'bodyText', reason: 'secret-like' };
   const records = _conv(conversationKey);
   if (!records.length) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'unknown-conversation' };
-  const latest = records[records.length - 1];
+  const api = _apiOn();
+  const latest = api ? _apiLatest(records) : records[records.length - 1];
   const guard = require('./reply/send-guard');
   const can = guard.canSend(conversationKey);
   if (!can.ok) return { ok: false, code: 'UNRECONCILED_ATTEMPT', attemptId: can.attemptId, state: can.state };
+  // Outlook REST transport: a threaded reply needs a message read through the API (no DOM fallback).
+  if (api && mode !== 'new-message' && !(latest.source === 'api' && latest.itemId)) return { ok: false, code: 'BAD_ARG', field: 'conversationKey', reason: 'no-api-id' };
   const me = (require('./config').normalize(require('./stores').load('config')).me) || {};
   const rec = require('./reply/recipients').computeRecipients(latest, mode, me);
   if (mode === 'reply-all' && rec.blocked === 'RECIPIENTS_UNKNOWN') return { ok: false, code: 'RECIPIENTS_UNKNOWN' };
@@ -447,7 +482,7 @@ function validateSendReply(payload) {
   const external = doms.size ? to.concat(cc).filter((e) => e.address && !doms.has(e.address.slice(e.address.lastIndexOf('@') + 1))).length : null;
   return {
     ok: true, conversationKey, mode, body, records, latest, legacy, to, cc, external,
-    mechanism: mode === 'new-message' ? 'compose-new' : 'owa-thread',
+    mechanism: api ? (mode === 'new-message' ? 'api-new' : 'api-thread') : (mode === 'new-message' ? 'compose-new' : 'owa-thread'),
     stale: _storedDraftStale(conversationKey, latest.messageKey),
     warnings: require('./reply/risk').scanRisk(body),
   };
@@ -493,6 +528,34 @@ function _replyHtml(body) {
     body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
 }
 
+/**
+ * Outlook REST send (apiTransport): reply / reply-all through the conversation's reply endpoints, new-message through
+ * sendmail. One token cache (transport.deps()); `sending` is persisted by beforeSend right before the final POST;
+ * the draft's real ids and subject reach the attempt through onRef first. R4-M4: compareSets is injected here.
+ */
+async function _sendViaApi(v, id, reSubject, marker, guard, mailer) {
+  const transport = require('./transport');
+  const mailActions = require('./transport/mail-actions');
+  const deps = transport.deps();
+  const attemptHooks = { beforeSend: () => { const m = guard.markSending(id); return !!(m.ok && m.attempt.state === 'sending'); } };
+  const onRef = (ref) => { try { guard.setApiRef(id, ref); } catch (_) { /* bookkeeping only */ } };
+  const html = mailer.embedMarker(_replyHtml(v.body), marker);
+  try {
+    if (v.mode === 'new-message') {
+      return await mailActions.apiSendMail({ deps, to: v.to, subject: reSubject, html, marker, attemptHooks, onRef });
+    }
+    return await mailActions.apiReply({
+      deps, compareSets: require('./reply/recipients').compareSets, itemId: v.latest.itemId, internetMessageId: v.latest.internetMessageId,
+      mode: v.mode, expected: { to: v.to, cc: v.cc }, html, marker, subject: reSubject, subjectNorm: mailer.normalizeSubject(reSubject),
+      conversationId: v.latest.apiConversationId, attemptHooks, onRef,
+    });
+  } catch (e) {
+    logger.warn('[email-intel] api send threw ' + safeErr(e));
+    const a = guard.get(id);
+    return { status: a && a.state === 'sending' ? 'delivery-uncertain' : 'failed-before-send', detail: { code: 'EXCEPTION' } };
+  }
+}
+
 const sendReplyExec = {
   summarize(payload) {
     const v = validateSendReply(payload);
@@ -509,14 +572,21 @@ const sendReplyExec = {
       const subject = String(v.latest.subject || (v.legacy && v.legacy.subject) || '');
       const reSubject = /^re:/i.test(subject) ? subject : (v.mode === 'new-message' ? 'Re: ' : 'RE: ') + (subject || '(no subject)');
       const marker = mailer.genCorrelationMarker();
-      const c = guard.createAttempt({
+      const api = _apiOn();
+      const fields = {
         conversationKey: v.conversationKey, targetMessageKey: v.latest.messageKey, mode: v.mode, mechanism: v.mechanism, to: v.to, cc: v.cc,
         subjectNorm: mailer.normalizeSubject(reSubject), bodyHash: crypto.createHash('sha256').update(v.body).digest('hex').slice(0, 16), bodyChars: v.body.length, marker,
-      });
+      };
+      if (api) Object.assign(fields, { transport: 'api', apiRef: { subject: reSubject.slice(0, 400) } });
+      const c = guard.createAttempt(fields);
       if (!c.ok) return { ok: false, code: c.code, attemptId: c.attemptId, state: c.state };
       const id = c.attempt.attemptId;
       let status; let detail = {};
-      if (v.mode === 'new-message') {
+      if (api) {
+        const res = await _sendViaApi(v, id, reSubject, marker, guard, mailer);
+        status = res.status;
+        detail = res.detail || {};
+      } else if (v.mode === 'new-message') {
         guard.markSending(id);                                         // conservative: the unchanged sender hides its click
         let res;
         try { res = await require('../scrapers/email_actions').sendReply(v.legacy, v.body); status = _mapLegacyStatus(res); } catch (e) {
@@ -614,7 +684,27 @@ function registerAll() {
 }
 function isRegistered() { return _registered && confirm.hasExecutor('send-ready-dm'); }
 
+/**
+ * apiLegacyDelete(email) (apiTransport, legacy emailTriage:delete / delete-suggested): the ledger record of the legacy
+ * email's latest message, then the newest Outlook REST record of its conversation (R4-M1), moved to Deleted Items.
+ * Same result shapes as _deleteOne's failures; NOT_FOUND is the DOM row-not-found result (no bookkeeping here).
+ */
+async function apiLegacyDelete(email) {
+  const stores = require('./stores');
+  const ledger = require('./ingest/ledger');
+  const identity = require('./ingest/identity');
+  const doc = ledger.ensureDoc(stores.load('messages'));
+  const key = email && email.intel && email.intel.latestMessageKey;
+  const rec0 = key ? identity.findMessage(doc, key) : null;
+  if (!rec0) return _apiDeleteFailure({ code: 'NO_API_ID' }, 'Inbox');
+  const rec = _apiLatest(ledger.conversation(doc, rec0.conversationKey)) || rec0;
+  const folder = rec.folder || 'Inbox';
+  const r = await require('./transport/mail-actions').apiMoveToDeleted({ deps: require('./transport').deps(), folderLabel: folder, apiConversationId: rec.apiConversationId });
+  if (r && r.ok) return { ok: true, moved: r.moved };
+  return _apiDeleteFailure(r, folder);
+}
+
 module.exports = {
   validateReadyDm, validateStaged, validateDelete, validateSendReply, validateResolution, deleteTarget, DELETE_REASON_TEXT, NOT_THREADED_LABEL,
-  SEND_MESSAGES, notifyOverlay, registerAll, isRegistered,
+  SEND_MESSAGES, notifyOverlay, registerAll, isRegistered, apiLegacyDelete, _apiLatest,
 };

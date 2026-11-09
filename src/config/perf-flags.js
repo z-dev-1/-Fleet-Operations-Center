@@ -667,6 +667,11 @@ function loadLongDwellSp(deps = {}) {
 // timelineWrites set while actionsView is not effective leaves the system in
 // shadow mode and yields the warning 'timelineWrites-needs-actionsView'.
 // No new store key for flags: 'settings' is already in the store REGISTRY.
+// Outlook REST transport: settings.email.intel.apiTransport / FLEET_EMAIL_INTEL_API '0'|'1' (default OFF).
+// Resolved outside `effective` (which keeps exactly its six keys): top-level apiTransport (raw) and
+// apiTransportEffective = effective.capture && apiTransport. ON: Email Triage reads and sends only through the
+// Outlook REST API (no DOM fallback). OFF: the DOM build, unchanged.
+const EMAIL_INTEL_API_ENV = 'FLEET_EMAIL_INTEL_API';
 const EMAIL_INTEL_ENV = {
   enabled: 'FLEET_EMAIL_INTEL',
   capture: 'FLEET_EMAIL_INTEL_CAPTURE',
@@ -695,7 +700,12 @@ function resolveEmailIntelFlags(settings, env) {
   effective.attachments = effective.capture && effective.multiRecipient && raw.attachments;
   const warnings = [];
   if (raw.timelineWrites && !effective.actionsView) warnings.push('timelineWrites-needs-actionsView');
-  return Object.assign({}, raw, { effective, warnings });
+  // Outlook REST transport (separate from the pinned `effective` block): raw apiTransport and
+  // apiTransportEffective = effective.capture && apiTransport.
+  let api = i.apiTransport === true;
+  const eApi = _envBool(env, EMAIL_INTEL_API_ENV);
+  if (eApi !== null) api = eApi;
+  return Object.assign({}, raw, { effective, apiTransport: api, apiTransportEffective: effective.capture && api, warnings });
 }
 
 function loadEmailIntel(deps = {}) {
@@ -726,5 +736,5 @@ module.exports = {
   resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
-  resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV,
+  resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV, EMAIL_INTEL_API_ENV,
 };

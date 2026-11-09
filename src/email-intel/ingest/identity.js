@@ -111,9 +111,11 @@ function resolveDerivedKey(cap, ledger) {
 
 /**
  * resolveMessageKey(cap, ledger) -> { messageKey, messageIdSource, baseKey|null }
- * cap: { itemId, conversationKey, sender, subject, contentHash, receivedAt, receivedAtQuality }
+ * cap: { keySeed?, itemId, conversationKey, sender, subject, contentHash, receivedAt, receivedAtQuality }
  */
 function resolveMessageKey(cap, ledger) {
+  // Outlook REST captures (apiTransport) carry a key seed (InternetMessageId, else the REST id); DOM captures never do.
+  if (typeof cap.keySeed === 'string' && cap.keySeed) return { messageKey: itemKey(cap.keySeed), messageIdSource: 'owa-item', baseKey: null };
   if (cap.itemId) return { messageKey: itemKey(cap.itemId), messageIdSource: 'owa-item', baseKey: null };
   const baseKey = baseKeyOf({ conversationKey: cap.conversationKey, sender: cap.sender, subject: cap.subject, contentHash: cap.contentHash });
   return { messageKey: resolveDerivedKey({ baseKey, receivedAt: cap.receivedAt, receivedAtQuality: cap.receivedAtQuality }, ledger), messageIdSource: 'derived', baseKey };

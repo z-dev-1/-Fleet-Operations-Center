@@ -80,10 +80,20 @@ function _intelMeta(view, prev) {
   };
 }
 
+/**
+ * sameLatest(prevLatestKey, latest): the stored legacy record points at this latest message. An Outlook REST record
+ * (apiTransport) also matches through its aliases (the DOM-era key it replaced). For a DOM record this is the plain ===.
+ * Every caller keeps its own null / intel guard.
+ */
+function sameLatest(prevLatestKey, latest) {
+  if (prevLatestKey === latest.messageKey) return true;
+  return latest.source === 'api' && Array.isArray(latest.aliases) && latest.aliases.includes(prevLatestKey);
+}
+
 /** Fields carried from the previous record: only when the latest message is unchanged (or the prev record predates intel). */
-function _carry(prev, latestKey) {
+function _carry(prev, latest) {
   if (!prev) return { replyDraft: '', replyState: 'none', unitUpdateApplied: false, readyDmSent: false, kept: false, deleted: false };
-  const sameMessage = !prev.intel || prev.intel.latestMessageKey === latestKey;
+  const sameMessage = !prev.intel || sameLatest(prev.intel.latestMessageKey, latest);
   const uncertain = prev.replyState === 'uncertain';
   if (!sameMessage && !uncertain) return { replyDraft: '', replyState: 'none', unitUpdateApplied: false, readyDmSent: false, kept: false, deleted: false };
   const out = {
@@ -130,7 +140,7 @@ function buildResults(input) {
     const intel = _intelMeta(view, p);
     if (t) {
       freshIds[id] = 1;
-      const carry = _carry(p, latest.messageKey);
+      const carry = _carry(p, latest);
       fresh.push(Object.assign({}, t, carry, {
         id, convId: latest.convIdRaw || '', from: (latest.from && latest.from.address) || t.from || '', fromName: (latest.from && latest.from.name) || t.fromName || '',
         subject: latest.subject || t.subject, receivedText: latest.receivedAtRaw || t.receivedText || '', folder: latest.folder || t.folder || 'Inbox',
@@ -140,7 +150,7 @@ function buildResults(input) {
         unitRefs: _filterUnitRefs(t.unitRefs, input.cfg, input.canonicalFor),
         intel,
       }));
-    } else if (p && p.intel && p.intel.latestMessageKey === latest.messageKey) {
+    } else if (p && p.intel && sameLatest(p.intel.latestMessageKey, latest)) {
       freshIds[id] = 1;
       // Same latest message: keep the stored legacy decision, refresh the additive intel summary.
       fresh.push(Object.assign({}, p, { convId: p.convId || latest.convIdRaw || '', unitRefs: _filterUnitRefs(p.unitRefs, input.cfg, input.canonicalFor), intel }));
@@ -196,7 +206,7 @@ function phaseBRecord(view, prev, ctx) {
   const res = a.status === 'ok' ? a.result : null;
   const d = a.determinations || null;
   const det = a.deterministic || {};
-  const carry = _carry(prev, latest.messageKey);
+  const carry = _carry(prev, latest);
   const facts = _topFacts(res);
   const relevance = d ? d.informationRelevance : null;
   const reply = d ? d.replyRequirement.value : 'unknown';
@@ -218,7 +228,7 @@ function phaseBRecord(view, prev, ctx) {
     const claim = _readyClaim(facts, unit);
     const verified = claim && _canonStatus(unit, ctx.canonicalFor) === 'ready_for_pickup';      // verifiedBy canonical only
     if (verified) verifiedReady = true;
-    const sameMsg = prev && prev.intel && prev.intel.latestMessageKey === latest.messageKey;
+    const sameMsg = prev && prev.intel && sameLatest(prev.intel.latestMessageKey, latest);
     const ref = {
       unit, operator: String(row.operator || ''), domicile: String(row.domicileSite || ''),
       update: top ? (_label(top.f.kind) + ': ' + top.f.value).slice(0, 160) : '',
@@ -305,4 +315,4 @@ function failedResults(prev, readError, errorCode) {
   return Object.assign({}, base, { authBlocked: false, readError: readError || 'read failed', intel: { scanId: null, outcome: 'failed', partial: false, coalesced: false, errorCode: errorCode || 'read-failed' } });
 }
 
-module.exports = { CONFLICTING_CANONICAL, LEGACY_CAP, legacyAttachments, toLegacyEmail, buildResults, phaseBRecord, buildPhaseBResults, skippedResults, failedResults };
+module.exports = { CONFLICTING_CANONICAL, LEGACY_CAP, legacyAttachments, toLegacyEmail, buildResults, phaseBRecord, buildPhaseBResults, skippedResults, failedResults, sameLatest };

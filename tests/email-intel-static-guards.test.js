@@ -3,6 +3,12 @@
 // unchanged, NFR-8 off-limits files untouched + import allow/deny lists (F-30), F-10 owa_reader.js
 // pinned by hash, R7.5 no send/delete outside confirm executors, R7.7 isolated lane only,
 // no Promise.all over AI calls, F-11 reply-compose guard (placeholder until reply/** exists).
+//
+// 2026-11-07 (email API transport): the Outlook REST v2.0 host and /api/v2.0/me/ paths are allowed in
+// src/email-intel/transport/endpoints.js only, by user decision ('only use api'); Graph, EWS, service.svc,
+// /owa/service, Exchange.asmx and OAuth endpoints stay forbidden everywhere. Transport files may not touch
+// session hooks, other windows, cookies or child processes; no transport file requires reply/; no worker
+// requires the transport; no module requires src/dev/. R7.5 also lists the API senders (R4-L9).
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
@@ -42,9 +48,73 @@ describe('module inventory', () => {
 });
 
 describe('R8.6 no Graph / EWS / OWA service endpoints and no auth modules', () => {
-  const ENDPOINT_RE = /graph\.microsoft\.com|graph\.windows\.net|\/EWS\/|Exchange\.asmx|service\.svc|\/owa\/service|outlook\.office365\.com\/api|\/api\/v2\.0|login\.microsoftonline\.com\/.*\/oauth2/i;
-  it('no source file under src/email-intel or src/ipc/email-intel.js mentions those endpoints', () => {
-    for (const f of OWN_FILES) expect(stripComments(read(f)), rel(f)).not.toMatch(ENDPOINT_RE);
+  // Deliberate change (2026-11-07): the REST v2.0 strings are allowed in transport/endpoints.js only.
+  const FORBIDDEN_ALWAYS = /graph\.microsoft\.com|graph\.windows\.net|\/EWS\/|Exchange\.asmx|service\.svc|\/owa\/service|login\.microsoftonline\.com\/.*\/oauth2/i;
+  const REST_V2 = /outlook\.office365\.com\/api|\/api\/v2\.0|outlook\.cloud\.microsoft\/api/i;
+  const ENDPOINTS_FILE = 'src/email-intel/transport/endpoints.js';
+  const TRANSPORT = path.join(ROOT, 'src/email-intel/transport');
+  const transportFiles = () => walk(TRANSPORT);
+
+  it('AC-17 REST v2.0 strings only in transport/endpoints.js; Graph, service.svc, EWS and OAuth forbidden everywhere', () => {
+    for (const f of OWN_FILES) {
+      const src = stripComments(read(f));
+      expect(src, rel(f)).not.toMatch(FORBIDDEN_ALWAYS);
+      expect(src, rel(f)).not.toMatch(/\/api\/beta/i);
+      if (rel(f) !== ENDPOINTS_FILE) expect(src, rel(f)).not.toMatch(REST_V2);
+    }
+  });
+
+  it('transport/endpoints.js holds only the allowed /api/ literals, the API host once, no /api/beta and no graph', () => {
+    const p = path.join(ROOT, ENDPOINTS_FILE);
+    expect(fs.existsSync(p)).toBe(true);
+    const raw = read(p);
+    const src = stripComments(raw);
+    for (const m of src.matchAll(/(['"`])((?:\\.|(?!\1).)*)\1/g)) {
+      if (m[2].includes('/api/')) expect(['/api/v2.0/me', '/api/v2.0/', '/api/'], m[2]).toContain(m[2]);
+    }
+    for (const m of src.matchAll(/\/\^?\\\/api[^\n]*?\/[gimsuy]*(?=[,;)\]\s])/g)) expect(m[0], m[0]).toMatch(/v2\\\.0\\\/me/);
+    expect(raw).not.toMatch(/\/api\/beta|graph/i);
+    expect((raw.match(/outlook\.cloud\.microsoft/g) || []).length).toBe(1);
+    expect(raw).not.toMatch(/outlook\.office365\.com|outlook\.office\.com/);
+  });
+
+  it('no other transport file and not transport/constants.js contains cloud.microsoft', () => {
+    for (const f of transportFiles()) if (rel(f) !== ENDPOINTS_FILE) expect(read(f), rel(f)).not.toMatch(/cloud\.microsoft/);
+  });
+
+  it('FR-5.2 no webRequest, getAllWindows, cookies or clearStorageData in transport files', () => {
+    for (const f of transportFiles()) {
+      expect(stripComments(read(f)), rel(f)).not.toMatch(/session\.webRequest|getAllWindows|cookies\.get|cookies\.set|cookies\.remove|clearStorageData|fs\.write|child_process|warmOwaSession/);
+    }
+  });
+
+  it('NFR-1 transport uses electron.net, never https, http or child_process', () => {
+    for (const f of transportFiles()) {
+      for (const m of read(f).matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)) expect(['https', 'http', 'child_process', 'net', 'node:https', 'node:http'], rel(f)).not.toContain(m[2]);
+    }
+    expect(stripComments(read(path.join(TRANSPORT, 'http.js')))).toMatch(/electron\.net\.request\(/);
+  });
+
+  it('no transport/ file requires reply/', () => {
+    for (const f of transportFiles()) expect(read(f), rel(f)).not.toMatch(/require\(\s*['"][^'"]*\breply\//);
+  });
+
+  it('FR-7.2 no src/email-intel/** file requires src/dev/**', () => {
+    for (const f of OWN_FILES) {
+      for (const m of read(f).matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)) {
+        if (!m[2].startsWith('.')) continue;
+        expect(rel(path.resolve(path.dirname(f), m[2])), rel(f)).not.toMatch(/^src\/dev\//);
+      }
+    }
+  });
+
+  it('FR-1.1 no src/workers/** file requires src/email-intel/transport', () => {
+    for (const f of walk(path.join(ROOT, 'src/workers'))) {
+      for (const m of read(f).matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)) {
+        if (!m[2].startsWith('.')) continue;
+        expect(rel(path.resolve(path.dirname(f), m[2])), rel(f)).not.toMatch(/^src\/email-intel\/transport/);
+      }
+    }
   });
 });
 
@@ -123,7 +193,7 @@ describe('NFR-8 off-limits files and import lists', () => {
     /^src\/ipc\/long-dwell-sp/, /^src\/scrapers\/aap_custom_form_probe$/, /bak-agent-wiring/, /long_dwell/i, /^src\/longdwell\//, /^src\/cluster\/aea-keepalive$/, /graph|ews/i,
   ];
   const ALLOW = new Set([
-    'src/justme-context/extract-host', 'src/justme-context/secret-scrub', 'src/justme-context/constants', 'src/orcha/fas/injection-guard', 'src/orcha/fas/roster-lookup',
+    'src/justme-context/extract-host', 'src/justme-context/secret-scrub', 'src/justme-context/extract', 'src/justme-context/constants', 'src/orcha/fas/injection-guard', 'src/orcha/fas/roster-lookup',
     'src/orcha/relay', 'src/orcha/reason', 'src/orcha/canonical_state', 'src/orcha/repair-history',
     'src/scrapers/owa_reader', 'src/scrapers/owa-mailer', 'src/scrapers/email_actions', 'src/scrapers/email_intel', 'src/scrapers/email_triage',
     'src/store/index', 'src/store', 'src/config/perf-flags', 'src/config/paths', 'src/jobs/index', 'src/jobs', 'src/workers/supervisor',
@@ -161,14 +231,30 @@ describe('F-10 owa_reader.js is never edited', () => {
 
 describe('R7.5 no send / delete / approve outside confirm executors', () => {
   // Calls that mutate the mailbox, post a message, or write the timeline on a user's behalf.
-  const CONSEQUENTIAL_CALLS = /\b(sendReply|sendViaOwa|sendThreadReply|deleteMessage|sendReadyDm|sendSlackMessage|postMessage)\s*\(/;
-  // owa_reply.js defines sendThreadReply (the Send click); executors.js is its only caller (after token + native dialog).
-  const EXECUTOR_FILE = /^src\/email-intel\/(.*\/)?(executors?\.js|[^/]*-executor\.js|reply\/owa[-_]reply\.js)$/;
+  const CONSEQUENTIAL_CALLS = /\b(sendReply|sendViaOwa|sendThreadReply|deleteMessage|sendReadyDm|sendSlackMessage|postMessage|apiSendMail|apiReply|apiMoveToDeleted|apiLegacyDelete)\s*\(/;
+  // owa_reply.js defines sendThreadReply (the Send click); transport/mail-actions.js defines the API senders;
+  // executors.js is their only caller (after token + native dialog).
+  const EXECUTOR_FILE = /^src\/email-intel\/(.*\/)?(executors?\.js|[^/]*-executor\.js|reply\/owa[-_]reply\.js|transport\/mail-actions\.js)$/;
   it('only executor files (registered through confirm.registerExecutor) may call them', () => {
     for (const f of OWN_FILES) {
       if (EXECUTOR_FILE.test(rel(f))) continue;
       expect(stripComments(read(f)), rel(f)).not.toMatch(CONSEQUENTIAL_CALLS);
     }
+  });
+  it('R4-L9 apiLegacyDelete and the api* senders are CONSEQUENTIAL_CALLS outside executor files', () => {
+    for (const name of ['apiSendMail', 'apiReply', 'apiMoveToDeleted', 'apiLegacyDelete']) expect(name + '(x)').toMatch(CONSEQUENTIAL_CALLS);
+    expect(EXECUTOR_FILE.test('src/email-intel/transport/mail-actions.js')).toBe(true);
+    expect(EXECUTOR_FILE.test('src/email-intel/transport/http.js')).toBe(false);
+    expect(EXECUTOR_FILE.test('src/email-intel/index.js')).toBe(false);
+    const callers = OWN_FILES.filter((f) => !EXECUTOR_FILE.test(rel(f)) && /\b(apiSendMail|apiReply|apiMoveToDeleted|apiLegacyDelete)\s*\(/.test(stripComments(read(f)))).map(rel);
+    expect(callers).toEqual([]);
+  });
+  it('R4-L9 only transport/endpoints.js and transport/mail-actions.js call endpoints.(sendMail|sendDraft|createReply|move|draft)(', () => {
+    const ALLOWED = new Set(['src/email-intel/transport/endpoints.js', 'src/email-intel/transport/mail-actions.js']);
+    const RE = /endpoints\.(sendMail|sendDraft|createReply|move|draft)\s*\(/;
+    const offenders = OWN_FILES.filter((f) => !ALLOWED.has(rel(f)) && RE.test(stripComments(read(f)))).map(rel);
+    expect(offenders).toEqual([]);
+    expect(stripComments(read(path.join(ROOT, 'src/email-intel/transport/mail-actions.js')))).toMatch(RE);
   });
   it('confirm.js itself calls no sender; executors run only through confirm()', () => {
     const src = stripComments(read(path.join(ROOT, 'src/email-intel/confirm.js')));
