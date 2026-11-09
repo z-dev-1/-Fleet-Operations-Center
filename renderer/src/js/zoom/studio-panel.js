@@ -565,21 +565,30 @@ async function _setMode(mode) {
   if (!S) return;
   S.pipeline.setEffect({ mode: m });
   S.message = '';
-  if (S.previewing) {
-    if (m === 'image' && prev !== 'image') {
-      // Image mode keeps the camera closed.
-      S.devices.stopVideo();
-      S.video.srcObject = null;
-      S.previewing = true;
-    } else if (prev === 'image' && m !== 'image') {
-      S.pipeline.stop();
-      S.previewing = false;
-      S.message = 'Press Start preview to open the camera.';
-    } else if (m === 'nativeBlur') {
-      await _nativeBlur(true);
-    }
-  }
+  await _afterModeChange(prev, m);
+  if (!S) return;
   _render();
+}
+
+/**
+ * _afterModeChange(prev, m) -- keep a live preview consistent after the effect mode changed (from the
+ * Effect picker or a loaded preset): image mode closes the camera, leaving image mode stops the preview
+ * and asks for Start preview, nativeBlur applies the camera constraint. Never opens a camera.
+ */
+async function _afterModeChange(prev, m) {
+  if (!S || !S.previewing || prev === m) return;
+  if (m === 'image' && prev !== 'image') {
+    // Image mode keeps the camera closed.
+    S.devices.stopVideo();
+    S.video.srcObject = null;
+    S.previewing = true;
+  } else if (prev === 'image' && m !== 'image') {
+    S.pipeline.stop();
+    S.previewing = false;
+    S.message = 'Press Start preview to open the camera.';
+  } else if (m === 'nativeBlur') {
+    await _nativeBlur(true);
+  }
 }
 
 function _onClick(e) {
@@ -711,10 +720,27 @@ export function applyPreset(preset) {
   };
   const cam = match(S.cameras, p.camera);
   const mic = match(S.mics, p.mic);
+  const prevCamera = S.cameraId;
   if (cam) { S.cameraId = cam.deviceId; S.cameraAuto = false; }
   if (mic) S.micId = mic.deviceId;
+  const prevMode = S.pipeline.getState().effect.mode;
   S.pipeline.setPreset(p);
+  const mode = S.pipeline.getState().effect.mode;
   _render();
+  // A preset loaded while the preview is live goes through the same rules as the Effect / Camera
+  // pickers (camera-native blur switched off, image mode closes the camera, a live camera follows the
+  // preset's camera). With the preview stopped nothing here touches a camera.
+  if (S.previewing) {
+    const s = S;
+    (async () => {
+      if (prevMode === 'nativeBlur' && mode !== 'nativeBlur') await s.pipeline.applyNativeBlur(false);
+      if (S !== s) return;
+      await _afterModeChange(prevMode, mode);
+      if (S !== s) return;
+      if (S.previewing && mode !== 'image' && S.cameraId !== prevCamera) { startPreview(); return; }
+      _render();
+    })().catch(() => {});
+  }
   return { cameraFound: !!cam || !(p.camera && (p.camera.id || p.camera.label)), micFound: !!mic || !(p.mic && (p.mic.id || p.mic.label)) };
 }
 

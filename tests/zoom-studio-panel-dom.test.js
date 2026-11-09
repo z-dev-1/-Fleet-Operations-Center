@@ -261,6 +261,35 @@ describe('controls', () => {
     expect(panel.applyPreset({ camera: { id: 'x', label: 'Gone Cam' } }).cameraFound).toBe(false);
     expect(panel.getObsState()).toBe('absent');
   });
+
+  it('integration: a preset loaded during a live preview follows the picker rules (image mode closes the camera, a camera change restarts on the new camera)', async () => {
+    const { S, fm } = setup();
+    await panel.show();
+    click('start');
+    await tick();
+    expect(fm.liveTracks().length).toBe(1);
+    const before = fm.calls.getUserMedia.length;
+    // Camera change while live: the preview moves to the preset's camera (no new camera while stopped).
+    panel.applyPreset({ camera: { id: 'cam-emeet', label: 'EMEET SmartCam S600' }, effect: { mode: 'none' } });
+    await tick();
+    expect(S.cameraId).toBe('cam-emeet');
+    expect(fm.calls.getUserMedia.length).toBe(before + 1);
+    expect(fm.liveTracks().length).toBe(1);
+    expect(S.previewing).toBe(true);
+    // Full-frame image preset while live: the camera is closed, the image preview keeps running.
+    panel.applyPreset({ camera: { id: 'cam-emeet', label: 'EMEET SmartCam S600' }, effect: { mode: 'image', imageId: 'l_aaaaaaaaaaaa' } });
+    await tick();
+    expect(fm.liveTracks()).toEqual([]);
+    expect(S.previewing).toBe(true);
+    expect(S.pipeline.getState().effect.mode).toBe('image');
+    // Back to a camera preset: the preview stops and asks for Start preview (never reopens by itself).
+    const n = fm.calls.getUserMedia.length;
+    panel.applyPreset({ camera: { id: 'cam-hp', label: 'HP 5MP Camera' }, effect: { mode: 'none' } });
+    await tick();
+    expect(fm.calls.getUserMedia.length).toBe(n);
+    expect(S.previewing).toBe(false);
+    expect(S.status.innerHTML).toContain('Press Start preview to open the camera.');
+  });
 });
 
 describe('pipeline smoke (fake 2D context)', () => {
