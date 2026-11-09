@@ -13,6 +13,7 @@ import bus from '../bus.js';
 import {
   renderBannersHtml, renderIdentityHtml, wireBanners, wireIdentityPanel, errorsFromResult, PANEL_CSS, renderAttachmentStatusHtml,
   renderReplyButtonsHtml, renderReconcileHtml, renderReplyPanelHtml, UNCERTAIN_RECONCILE_TEXT, NOT_THREADED_LABEL,
+  RESOLVING_RECIPIENTS_TEXT, NO_RECIPIENTS_TEXT, unresolvedText,
 } from './email-intel-panels.js';
 
 let _open = false;
@@ -165,7 +166,10 @@ function _ck(em) { return em && em.intel && em.intel.conversationKey ? em.intel.
 // Reconcile of an uncertain send: with threaded replies, or with the Outlook API transport (status flags.apiTransport,
 // present only while it is effective), whose legacy Send can leave an attempt uncertain.
 function _reconcileOn() { return _repliesOn() || !!(_intel && _intel.flags && _intel.flags.apiTransport === true); }
+// Outlook API transport: reply recipients are resolved with Outlook (main process) before they are shown.
+function _apiOn() { return !!(_intel && _intel.flags && _intel.flags.apiTransport === true); }
 const _replyUi = {};
+const _resolvingIds = new Set();
 
 let _actionsView = null;
 function _mountTabs() {
@@ -487,7 +491,14 @@ function _replyButtonHtml(em) {
 // exists), so it is unmistakable and roomy — not jammed into the footer corner.
 function _replyPanelHtml(em) {
   if ((em.replyState || 'none') !== 'drafted') return '';
-  if (_repliesOn() && _ck(em)) return renderReplyPanelHtml(em, _replyUi[em.id]);
+  if (_repliesOn() && _ck(em)) {
+    // A draft from an earlier session has no recipients on screen yet: resolve them with Outlook once.
+    if (_apiOn() && !_replyUi[em.id]) {
+      _replyUi[em.id] = { mode: 'reply', resolving: true, recipients: null };
+      setTimeout(() => _intelResolve(em.id, 'reply'), 0);
+    }
+    return renderReplyPanelHtml(em, _replyUi[em.id]);
+  }
   return '<div class="et-reply-panel">' +
     '<div class="et-reply-label">✍️ Your reply draft — edit, then Send:</div>' +
     '<textarea class="et-draft" data-draft="' + _esc(em.id) + '">' + _esc(em.replyDraft || '') + '</textarea>' +
@@ -684,21 +695,66 @@ async function _intelDraft(id, mode, force) {
   const ck = _ck(em);
   if (!ck) { _toast('Open the email in Outlook to reply.'); return; }
   _toast('Drafting ' + (mode === 'reply-all' ? 'Reply All' : 'Reply') + '… (the AI can take a few seconds)');
+  // Outlook API transport: an open panel shows "Resolving recipients…" (sending off) until the draft returns.
+  const prevUi = _apiOn() ? _replyUi[id] : null;
+  if (prevUi) { prevUi.resolving = true; _render(); }
+  const unmark = () => { if (prevUi && prevUi.resolving) { prevUi.resolving = false; _render(); } };
   let r;
-  try { r = await window.emailIntel.draftThreadReply({ conversationKey: ck, mode, force: !!force }); } catch (e) { _toast('Draft failed: ' + (e.message || e)); return; }
+  try { r = await window.emailIntel.draftThreadReply({ conversationKey: ck, mode, force: !!force }); } catch (e) { unmark(); _toast('Draft failed: ' + (e.message || e)); return; }
   if (r && r.code === 'ALREADY_RESOLVED') {
+    unmark();
     const who = r.resolvedBy && r.resolvedBy.senderName ? r.resolvedBy.senderName : 'someone else in the thread';
     if (!confirm('This question was already answered by ' + who + '. No reply is needed from you.\n\nDraft a reply anyway?')) { _toast('No reply needed.'); return; }
     await _intelDraft(id, mode, true);
     return;
   }
-  if (r && r.code === 'RECIPIENTS_UNKNOWN') { _toast('Reply All is unavailable: the recipients of this email are not known.'); return; }
-  if (!r || !r.ok) { _toast('Draft failed: ' + ((r && (r.error || r.code)) || 'unknown')); return; }
+  if (r && r.code === 'RECIPIENTS_UNKNOWN') { unmark(); _toast('Reply All is unavailable: the recipients of this email are not known.'); return; }
+  if (!r || !r.ok) { unmark(); _toast('Draft failed: ' + ((r && (r.error || r.code)) || 'unknown')); return; }
   em.replyDraft = r.draft; em.replyState = 'drafted';
   _replyUi[id] = { mode: r.mode, recipients: r.recipients, warnings: r.warnings || [], stale: false, replyAllAvailable: r.replyAllAvailable, basedOnMessageKey: r.basedOnMessageKey };
+  if (r.recipientsSource !== undefined) {
+    Object.assign(_replyUi[id], { source: r.recipientsSource || 'none', sendBlocked: r.sendable === false, unresolved: r.unresolved || null, resolving: false });
+  }
   _render();
   try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); ta.focus(); } } catch (_) { /* focus only */ }
-  _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
+  if (r.unresolved) _toast('Draft ready. ' + unresolvedText(r.unresolved.reason));
+  else _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
+}
+
+/**
+ * Outlook API transport: resolve the reply recipients with Outlook for an open panel (no AI). The panel shows
+ * "Resolving recipients…" with both Send buttons off, then the real To / CC, or a clear message with sending off
+ * when the email cannot be found. A newer draft result for the same card always wins over a late resolve.
+ */
+async function _intelResolve(id, mode) {
+  const em = (_results.emails || []).find((e) => e.id === id);
+  const ck = _ck(em);
+  if (_resolvingIds.has(id)) return;
+  const bridge = typeof window !== 'undefined' && window.emailIntel && typeof window.emailIntel.resolveReplyRecipients === 'function';
+  if (!_apiOn() || !ck || !bridge) {
+    const seeded = _replyUi[id];
+    if (seeded && seeded.resolving) { seeded.resolving = false; _render(); }
+    return;
+  }
+  const ui = _replyUi[id] || (_replyUi[id] = { mode: mode === 'reply-all' ? 'reply-all' : 'reply' });
+  _resolvingIds.add(id);
+  ui.resolving = true;
+  _render();
+  let r;
+  try { r = await window.emailIntel.resolveReplyRecipients({ conversationKey: ck, mode: mode === 'reply-all' ? 'reply-all' : 'reply' }); } catch (_) { r = null; }
+  _resolvingIds.delete(id);
+  if (_replyUi[id] !== ui) return;                                    // a draft replaced the panel state meanwhile
+  const empty = { to: [], cc: [], external: null, blocked: 'RECIPIENTS_UNRESOLVED' };
+  if (r && r.ok && r.source) {
+    Object.assign(ui, { recipients: r.recipients, replyAllAvailable: r.replyAllAvailable === true, source: r.source, sendBlocked: r.sendable === false, unresolved: null, basedOnMessageKey: r.basedOnMessageKey });
+  } else if (r && r.ok && r.enabled === false) {
+    /* not under the API transport: nothing to resolve */
+  } else {
+    const reason = r && r.code === 'RECIPIENTS_UNRESOLVED' ? r.reason : (r && r.code === 'NOT_FOUND' ? 'not-found' : 'unavailable');
+    Object.assign(ui, { recipients: (r && r.recipients) || empty, replyAllAvailable: false, source: 'none', sendBlocked: true, unresolved: { reason } });
+  }
+  ui.resolving = false;
+  _render();
 }
 
 async function _intelPrepareSend(id, mode) {
@@ -708,6 +764,12 @@ async function _intelPrepareSend(id, mode) {
   const body = ta ? ta.value : '';
   if (!ck) return;
   if (!body.trim()) { _toast('Reply is empty.'); return; }
+  // Outlook API transport: no send while the recipients are being resolved or could not be confirmed
+  // (the main process refuses too; this only avoids a pointless round trip).
+  const cur = _apiOn() ? _replyUi[id] : null;
+  if (cur && cur.resolving) { _toast(RESOLVING_RECIPIENTS_TEXT + ' Try again in a moment.'); return; }
+  if (cur && cur.unresolved) { _toast(unresolvedText(cur.unresolved.reason)); return; }
+  if (cur && cur.sendBlocked && (mode === 'reply-all') === (cur.mode === 'reply-all')) { _toast(NO_RECIPIENTS_TEXT); return; }
   em.replyDraft = body;
   let prep;
   try { prep = await window.emailIntel.prepareAction('send-reply', { conversationKey: ck, mode, bodyText: body }); } catch (e) { _toast('Not sent: ' + (e.message || e)); return; }
@@ -919,4 +981,5 @@ function _injectStyle() {
 export const __test__ = {
   _cardHtml, _replyButtonHtml, _replyPanelHtml, _setIntelForTests: (s) => { _intel = s || null; }, _setReplyUiForTests: (id, ui) => { if (ui) _replyUi[id] = ui; else delete _replyUi[id]; },
   _sendReply, _intelReconcile, _setResultsForTests: (r) => { _results = r || { emails: [] }; }, _results: () => _results,
+  _intelDraft, _intelResolve, _intelPrepareSend, _render, _replyUi: (id) => _replyUi[id],
 };

@@ -157,7 +157,7 @@ describe('IPC and preload skeleton', () => {
   });
 
   it('preload exposes emailIntel with the full D§9 key list; the emailTriage bridge keys are unchanged', () => {
-    expect(fx.preloadKeys('emailIntel')).toEqual(['status', 'scan', 'getConfig', 'setConfig', 'getActions', 'actionUpdate', 'getStaged', 'prepareAction', 'confirmAction', 'draftThreadReply', 'getSendAttempts', 'reconcileSend', 'domProbe', 'probeLane', 'setTzVerified', 'ackVisionNotice', 'onUpdated']);
+    expect(fx.preloadKeys('emailIntel')).toEqual(['status', 'scan', 'getConfig', 'setConfig', 'getActions', 'actionUpdate', 'getStaged', 'prepareAction', 'confirmAction', 'draftThreadReply', 'resolveReplyRecipients', 'getSendAttempts', 'reconcileSend', 'domProbe', 'probeLane', 'setTzVerified', 'ackVisionNotice', 'onUpdated']);
     expect(fx.preloadKeys('emailTriage')).toEqual(['getConfig', 'setConfig', 'getResults', 'run', 'probe', 'draftReply', 'sendReply', 'dismissReply', 'deleteEmail', 'keepEmail', 'deleteSuggested', 'draftReadyDm', 'sendReadyDm', 'onUpdated']);
   });
 

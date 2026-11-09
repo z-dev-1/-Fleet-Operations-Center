@@ -165,6 +165,7 @@ expose('emailIntel', {
   prepareAction:    (kind, payload)     => ipcRenderer.invoke('emailIntel:prepare-action', kind, payload),
   confirmAction:    (token)             => ipcRenderer.invoke('emailIntel:confirm-action', token),
   draftThreadReply: (payload)           => ipcRenderer.invoke('emailIntel:draft-thread-reply', payload),
+  resolveReplyRecipients: (payload)     => ipcRenderer.invoke('emailIntel:resolve-reply-recipients', payload),
   getSendAttempts:  (conversationKey)   => ipcRenderer.invoke('emailIntel:get-send-attempts', conversationKey),
   reconcileSend:    (attemptId)         => ipcRenderer.invoke('emailIntel:reconcile-send', attemptId),
   domProbe:         (opts)              => ipcRenderer.invoke('emailIntel:dom-probe', opts),

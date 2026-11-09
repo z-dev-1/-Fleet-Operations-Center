@@ -269,7 +269,7 @@ describe('F-11 reply compose guard', () => {
   });
   it('F-11 select-all insert path is never used on reply', () => {
     const files = walk(path.join(ROOT, 'src/email-intel/reply'));
-    expect(files.map((f) => path.basename(f)).sort()).toEqual(['context.js', 'draft.js', 'owa_reply.js', 'page-scripts.js', 'recipients.js', 'reconcile-send.js', 'risk.js', 'send-guard.js']);
+    expect(files.map((f) => path.basename(f)).sort()).toEqual(['context.js', 'draft.js', 'owa_reply.js', 'page-scripts.js', 'recipients.js', 'reconcile-send.js', 'resolve-recipients.js', 'risk.js', 'send-guard.js', 'target.js']);
     for (const f of files) {
       const src = read(f);                                                     // raw text: not even a comment may name them
       expect(src, rel(f)).not.toMatch(/_insertBody|_buildInsertScript/);

@@ -59,3 +59,45 @@ describe('compareSets (R5.6 / AC-8 verification)', () => {
     expect(d.extra).toEqual([{ name: 'B', address: 'b@x.test' }]);
   });
 });
+
+describe('selfOnlyFallback (apiTransport, "To (0): none" fix)', () => {
+  const OPT = { selfOnlyFallback: true };
+  it('Reply (From only) is identical with and without the option', () => {
+    for (const o of [undefined, OPT]) {
+      const r = R.computeRecipients(msg(), 'reply', ME, o);
+      expect(r.to).toEqual([{ name: 'Dealer Parts Desk', address: 'parts@dealer.example.test', role: 'sender' }]);
+      expect(r.cc).toEqual([]);
+      expect(r.selfOnly).toBeUndefined();
+    }
+  });
+
+  it('Reply All = From + To + CC minus self (address and name), deduped, CC separate, identical with the option', () => {
+    const m = msg({ to: [ZILA, COWORKER, DEALER], cc: [person(1), DEALER, { name: 'Zila', address: null }, COWORKER] });
+    const a = R.computeRecipients(m, 'reply-all', ME);
+    const b = R.computeRecipients(m, 'reply-all', ME, OPT);
+    expect(b).toEqual(a);
+    expect(b.to.map((e) => e.address)).toEqual(['parts@dealer.example.test', 'mike.rivera@example.test']);
+    expect(b.cc.map((e) => e.address)).toEqual(['person01@example.test']);
+  });
+
+  it('a self-addressed message: Reply goes to my real address, Reply All stays NO_RECIPIENTS; no option -> today', () => {
+    const m = msg({ from: ZILA, to: [ZILA], cc: [], flags: { fromMe: true } });
+    const r = R.computeRecipients(m, 'reply', ME, OPT);
+    expect(r).toMatchObject({ ok: true, toCount: 1, selfOnly: true });
+    expect(r.blocked).toBeUndefined();
+    expect(r.to).toEqual([{ name: 'Zila Santiago', address: 'zila.santiago@example.test', role: 'to' }]);
+    expect(R.computeRecipients(m, 'reply-all', ME, OPT)).toMatchObject({ ok: false, blocked: 'NO_RECIPIENTS', toCount: 0 });
+    expect(R.computeRecipients(m, 'reply', ME)).toMatchObject({ ok: false, blocked: 'NO_RECIPIENTS', toCount: 0 });
+  });
+
+  it('From me -> someone else: Reply still goes to them (no fallback)', () => {
+    const r = R.computeRecipients(msg({ from: ZILA, to: [COWORKER], cc: [], flags: { fromMe: true } }), 'reply', ME, OPT);
+    expect(r.to).toEqual([{ name: 'Mike Rivera', address: 'mike.rivera@example.test', role: 'to' }]);
+    expect(r.selfOnly).toBeUndefined();
+  });
+
+  it('a name-only me entry never becomes an address-less recipient', () => {
+    const r = R.computeRecipients(msg({ from: { name: 'Zila', address: null }, to: [{ name: 'Zila Santiago', address: null }], cc: [] }), 'reply', ME, OPT);
+    expect(r).toMatchObject({ ok: false, blocked: 'NO_RECIPIENTS', toCount: 0 });
+  });
+});

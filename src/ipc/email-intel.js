@@ -13,7 +13,8 @@
  * delete / delete-batch prepare validation (R7.6 rule in executors.deleteTarget; derived conversation keys excluded).
  * Phase E adds draft-thread-reply (resolved-question gate, isolated lane), get-send-attempts, reconcile-send (read-only
  * Sent Items re-check) and the send-reply / mark-send-resolution prepare validation; boot recovery of send attempts
- * runs at registration when threadReplies is effective.
+ * runs at registration when threadReplies is effective. resolve-reply-recipients (threadReplies + apiTransport) reads a
+ * reply's real To / CC from the Outlook REST API for the panel display (read-only GETs; inert without the API).
  * Phase F adds ack-vision-notice (F-28: the one-time vision notice; sets visionNoticeAcknowledged and maxVision).
  * Channels owned by later phases return { ok:false, code:'NOT_IMPLEMENTED' } when their gate is open.
  * The legacy emailTriage:* channels are untouched here.
@@ -50,6 +51,7 @@ const GATES = Object.freeze({
   'emailIntel:prepare-action': 'per-kind',
   'emailIntel:confirm-action': 'capture',
   'emailIntel:draft-thread-reply': 'threadReplies',
+  'emailIntel:resolve-reply-recipients': 'threadReplies',
   'emailIntel:get-send-attempts': 'threadReplies|apiTransport',
   'emailIntel:reconcile-send': 'threadReplies|apiTransport',
   'emailIntel:dom-probe': 'capture',
@@ -74,6 +76,7 @@ const IMPLEMENTED = new Set([
   'emailIntel:set-tz-verified', 'emailIntel:prepare-action', 'emailIntel:confirm-action', 'emailIntel:probe-lane',
   'emailIntel:get-staged', 'emailIntel:get-actions', 'emailIntel:action-update',
   'emailIntel:draft-thread-reply', 'emailIntel:get-send-attempts', 'emailIntel:reconcile-send', 'emailIntel:ack-vision-notice',
+  'emailIntel:resolve-reply-recipients',
 ]);
 const CONV_RE = /^cv_[0-9a-f]{16}$/;
 const ATTEMPT_RE = /^sa_[0-9a-f]{16}$/;
@@ -86,6 +89,14 @@ function validateDraftThreadReply(payload) {
   if (payload.guidance !== undefined && (typeof payload.guidance !== 'string' || payload.guidance.length > 1000)) return BAD('guidance');
   if (payload.force !== undefined && typeof payload.force !== 'boolean') return BAD('force');
   return { conversationKey: payload.conversationKey, mode: payload.mode, guidance: payload.guidance || '', force: payload.force === true };
+}
+
+/** resolve-reply-recipients (apiTransport): { conversationKey, mode:'reply'|'reply-all' }. */
+function validateResolveReplyRecipients(payload) {
+  if (!_isPlain(payload)) return BAD('payload');
+  if (typeof payload.conversationKey !== 'string' || !CONV_RE.test(payload.conversationKey)) return BAD('conversationKey');
+  if (payload.mode !== 'reply' && payload.mode !== 'reply-all') return BAD('mode');
+  return { conversationKey: payload.conversationKey, mode: payload.mode };
 }
 const STAGED_STATES = ['open', 'approved', 'rejected', 'superseded', 'expired', 'all'];
 const ACTION_RE = /^ac_[0-9a-f]{16}$/;
@@ -351,6 +362,16 @@ function registerEmailIntelIPC(_ctx) {
     return r;
   });
 
+  // Outlook REST transport: the real To / CC of a reply (display refresh; no AI, read-only GETs). Inert without the API.
+  handle('emailIntel:resolve-reply-recipients', async (_e, payload) => {
+    if (!gateOpen('threadReplies') || !_apiTransport()) return OFF();
+    const v = validateResolveReplyRecipients(payload);
+    if (v.ok === false) return v;
+    const r = await require('../email-intel/reply/resolve-recipients').resolveReplyRecipients(v);
+    if (r && r.ok && r.source === 'api') { try { executors.notifyOverlay(require('../scrapers/email_triage').loadResults()); } catch (_) { /* push only */ } }
+    return r;
+  });
+
   handle('emailIntel:get-send-attempts', (_e, payload) => {
     if (!gateOpen(GATES['emailIntel:get-send-attempts'])) return OFF();
     // The preload bridge passes the conversation key itself; an object { conversationKey } is accepted too.
@@ -423,4 +444,4 @@ function registerEmailIntelIPC(_ctx) {
   logger.info('Email Intelligence IPC handlers registered (' + Object.keys(GATES).length + ' channels; inert unless flags are effective)');
 }
 
-module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan, validateGetActions, validateActionUpdate, validateDraftThreadReply };
+module.exports = { registerEmailIntelIPC, GATES, KIND_GATES, validateScan, validateGetActions, validateActionUpdate, validateDraftThreadReply, validateResolveReplyRecipients };
