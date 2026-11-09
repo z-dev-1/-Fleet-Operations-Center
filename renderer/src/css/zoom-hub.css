@@ -105,3 +105,41 @@
 #view-zoom .zh-chip-x:focus-visible,
 #view-zoom .zh-link-q:focus-visible,
 #view-zoom .zh-link-kind:focus-visible { outline: 2px solid var(--accent, #58a6ff); outline-offset: 2px; }
+
+/* Studio (FEAT-B1): camera preview + canvas effects. Preview only. */
+#view-zoom .zs-studio { display: flex; flex-direction: column; gap: 10px; }
+#view-zoom .zs-honesty {
+  margin: 0; padding: 8px 12px; border-radius: 8px;
+  border: 1px solid var(--amber, #d29922); background: rgba(210, 153, 34, 0.12);
+}
+#view-zoom .zs-head { display: flex; align-items: center; gap: 10px; }
+#view-zoom .zs-title { margin: 0; font-size: 15px; }
+#view-zoom .zs-badge {
+  color: #fff; background: var(--red, #da3633); border-radius: 10px; padding: 1px 8px; font-size: 12px; font-weight: 600;
+}
+#view-zoom .zs-privacy-row,
+#view-zoom .zs-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#view-zoom .zs-privacy-row { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--red, #da3633); }
+#view-zoom .zs-obs, #view-zoom .zs-note { margin: 0; font-size: 12px; opacity: 0.85; }
+#view-zoom .zs-controls { display: flex; flex-direction: column; gap: 8px; }
+#view-zoom .zs-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+#view-zoom .zs-select {
+  font: inherit; color: inherit; background: var(--surface, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border, #30363d); border-radius: 6px; padding: 3px 6px; max-width: 320px;
+}
+#view-zoom .zs-effects,
+#view-zoom .zs-adjust {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0;
+  border: 1px solid var(--border, #30363d); border-radius: 8px; padding: 6px 10px;
+}
+#view-zoom .zs-slider { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+#view-zoom .zs-level { width: 200px; height: 8px; border-radius: 4px; background: var(--border, #30363d); overflow: hidden; }
+#view-zoom .zs-level-fill { height: 100%; width: 0; background: var(--green, #3fb950); transition: width 60ms linear; }
+#view-zoom .zs-stage { position: relative; max-width: 960px; }
+#view-zoom .zs-canvas { width: 100%; height: auto; background: #000; border-radius: 8px; aspect-ratio: 16 / 9; }
+#view-zoom .zs-studio button:focus-visible,
+#view-zoom .zs-studio select:focus-visible,
+#view-zoom .zs-studio input:focus-visible { outline: 2px solid var(--accent, #58a6ff); outline-offset: 2px; }
+.tb-tab.zs-camera-on::after {
+  content: '●'; color: var(--red, #da3633); margin-left: 4px; font-size: 10px; vertical-align: super;
+}

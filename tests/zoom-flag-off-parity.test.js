@@ -53,6 +53,23 @@ describe('main: registerZoomHubIPC with no area effective', () => {
     });
   }
 
+  it('FEAT-B1: data ON / studio OFF -> every zoomStudio:* is DISABLED and media-status.js is never loaded', async () => {
+    freshZoom(require);
+    logger = installFakeLogger(require);
+    const fx = createFakeElectron();
+    restoreE = installFakeElectron(require, fx.electron);
+    const handlers = new Map();
+    const wc = { id: 1, mainFrame: { processId: 2, routingId: 1 } };
+    const fakeCtx = { mainWindow: { isDestroyed: () => false, webContents: wc }, sendToWindow: () => {} };
+    const hub = require('../src/ipc/zoom-hub');
+    hub.registerZoomHubIPC(fakeCtx, { flags: pf.resolveZoomFlags({ zoom: { enabled: true, data: true } }, {}), handle: (ch, fn) => handlers.set(ch, fn) });
+    const event = { sender: wc, senderFrame: { processId: 2, routingId: 1, url: 'file:///C:/Fleet/renderer/src/index.html' } };
+    for (const ch of hub.CHANNELS.studio) {
+      expect([ch, await handlers.get(ch)(event, { which: 'camera' })]).toEqual([ch, { ok: false, code: 'DISABLED' }]);
+    }
+    expect(Object.keys(require.cache).some((k) => k.replace(/\\/g, '/').includes('/src/zoom/studio/'))).toBe(false);
+  });
+
   it('src/ipc/index.js has exactly one registerZoomHubIPC(ctx) line', () => {
     const src = fs.readFileSync(require.resolve('../src/ipc/index.js'), 'utf8');
     const hits = src.split(/\r?\n/).filter((l) => l.includes("require('./zoom-hub').registerZoomHubIPC(ctx)"));
@@ -98,6 +115,32 @@ describe('renderer: zoom-hub-boot with no area effective', () => {
       }
     });
   }
+
+  it('FEAT-B1: data ON / studio OFF -> the hub view never touches navigator.mediaDevices (studio panel not mounted)', async () => {
+    const prevNav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const touched = [];
+    const nav = {};
+    Object.defineProperty(nav, 'mediaDevices', { get() { touched.push('mediaDevices'); throw new Error('mediaDevices must not be touched'); } });
+    Object.defineProperty(globalThis, 'navigator', { value: nav, configurable: true, writable: true });
+    if (typeof globalThis.window === 'undefined') globalThis.window = { app: { platform: 'win32' } };
+    const view = await import('../renderer/src/js/views/zoom-hub.js');
+    try {
+      view._resetForTests();
+      const { document, dom } = createExtDom();
+      const subs = new Map();
+      const bus = { on: (ev, fn) => { subs.set(ev, fn); }, emit: (ev, p) => { const fn = subs.get(ev); if (fn) fn(p); } };
+      const r = async () => ({ ok: false, code: 'DISABLED' });
+      const zoomHub = new Proxy({}, { get: (_t, k) => (k === 'onAuthChanged' || k === 'onSummaryProgress' ? () => () => {} : r) });
+      const h = view.init(new ExtElement('views-mount', 'div', dom), { enabled: true, data: true, studio: false, write: false }, { bus, addTab: () => {}, zoomHub, document });
+      expect(h.root.querySelector('#zh-panel-studio')).toBe(null);
+      for (const to of ['zoom', 'settings', 'fleet', 'zoom']) bus.emit('ui:view-change', { to });
+      await new Promise((res) => setTimeout(res, 0));
+      expect(touched).toEqual([]);
+    } finally {
+      view._resetForTests();
+      if (prevNav) Object.defineProperty(globalThis, 'navigator', prevNav); else delete globalThis.navigator;
+    }
+  });
 
   it('the boot module source never references navigator.mediaDevices', () => {
     const src = fs.readFileSync(require.resolve('../renderer/src/js/views/zoom-hub-boot.js'), 'utf8');

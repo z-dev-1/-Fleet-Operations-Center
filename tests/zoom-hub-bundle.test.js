@@ -13,11 +13,11 @@ function loadEsbuild() {
   }
 }
 
-async function bundle(rel) {
+async function bundle(rel, plugins = []) {
   const esbuild = loadEsbuild();
   const r = await esbuild.build({
     entryPoints: [path.join(ROOT, rel)], bundle: true, write: false, format: 'esm', platform: 'browser',
-    loader: { '.css': 'empty' }, logLevel: 'silent',
+    loader: { '.css': 'empty' }, logLevel: 'silent', plugins,
   });
   expect(r.errors).toEqual([]);
   return r.outputFiles.map((f) => f.text).join('\n');
@@ -36,7 +36,22 @@ describe('esbuild bundle (Zoom hub)', () => {
     expect(out).toContain('zoom-hub-boot');
   }, 60000);
   it('views/zoom-hub-boot.js bundles and never references navigator.mediaDevices', async () => {
-    const out = await bundle('renderer/src/js/views/zoom-hub-boot.js');
+    // FEAT-B1: the Studio devices module (reached only through the area-gated dynamic import of
+    // views/zoom-hub.js) references mediaDevices lazily inside functions. esbuild inlines dynamic
+    // imports, so keep that import external here: the boot gate and its static deps must stay clean.
+    const externalView = {
+      name: 'external-view',
+      setup(b) {
+        b.onResolve({ filter: /^\.\/zoom-hub\.js$/ }, (a) => (/zoom-hub-boot\.js$/.test(a.importer) ? { path: a.path, external: true } : undefined));
+      },
+    };
+    const out = await bundle('renderer/src/js/views/zoom-hub-boot.js', [externalView]);
+    expect(out).toContain('./zoom-hub.js');
     expect(out).not.toContain('mediaDevices');
+  }, 60000);
+  it('FEAT-B1: views/zoom-hub.js bundles the real Studio panel (honesty banner, no forbidden phrase)', async () => {
+    const out = await bundle('renderer/src/js/views/zoom-hub.js');
+    expect(out).toContain('zs-honesty');
+    expect(out).toContain("Zoom can't see this video.");
   }, 60000);
 });

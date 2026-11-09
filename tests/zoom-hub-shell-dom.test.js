@@ -42,16 +42,19 @@ function mountHub(flags, hub = fakeHub()) {
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('stub panels (F-6)', () => {
-  it('the studio stub mounts "Not available yet."; every panel exposes mount/show/hide/stopAll/destroy', async () => {
-    // FEAT-A2 replaced the meetings / recordings stubs with real panels (same interface).
+  it('every panel exposes mount/show/hide/stopAll/destroy; the real studio panel mounts with its honesty banner', async () => {
+    // FEAT-A2 replaced the meetings / recordings stubs and FEAT-B1 the studio stub (same interface).
     for (const name of ['meetings-panel', 'recordings-panel', 'studio-panel']) {
       const m = await vi.importActual('../renderer/src/js/zoom/' + name + '.js');
       for (const fn of ['mount', 'show', 'hide', 'stopAll', 'destroy']) expect(typeof m[fn]).toBe('function');
     }
     const m = await vi.importActual('../renderer/src/js/zoom/studio-panel.js');
-    const el = new ExtElement('', 'div');
-    m.mount(el, { zoomHub: {}, flags: {}, bus: createBus() });
-    expect(el.textContent).toBe('Not available yet.');
+    const { document } = createExtDom();
+    const el = document.createElement('div');
+    m.mount(el, { zoomHub: {}, flags: {}, bus: createBus(), document, mediaDevices: {} });
+    expect(el.textContent).toBe('');
+    expect(el.querySelector('.zs-honesty')).not.toBe(null);
+    m.destroy();
   });
 });
 

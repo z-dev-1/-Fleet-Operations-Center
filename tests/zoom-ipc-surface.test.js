@@ -99,7 +99,9 @@ describe('Zoom hub IPC surface', () => {
       'zoomData:ai-consent', 'zoomData:get-summary', 'zoomData:get-transcript', 'zoomData:import-transcript',
       'zoomData:link', 'zoomData:link-targets', 'zoomData:links', 'zoomData:summarize', 'zoomData:unlink', 'zoomData:write-open',
     ]);
-    expect(Object.keys(hub.REAL).sort()).toEqual(hub.CHANNELS.data.slice().sort());
+    const sblock = (a, b) => (src.slice(a, b).match(/'(zoom(?:Data|Studio):[a-z-]+)':/g) || []).map((s) => s.slice(1, -2)).sort();
+    expect(sblock(i3, i4)).toEqual(['zoomStudio:media-status', 'zoomStudio:open-privacy']);
+    expect(Object.keys(hub.REAL).sort()).toEqual(hub.CHANNELS.data.concat(['zoomStudio:media-status', 'zoomStudio:open-privacy']).sort());
     for (const k of Object.keys(hub.REAL)) expect(ALL).toContain(k);
   });
 });

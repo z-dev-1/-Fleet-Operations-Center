@@ -80,6 +80,8 @@ const REAL = {
   'zoomData:links': () => require('../zoom/data/links').links,
   'zoomData:write-open': () => require('../zoom/data/write').writeOpen,
   // B1
+  'zoomStudio:media-status': () => require('../zoom/studio/media-status').status,
+  'zoomStudio:open-privacy': () => require('../zoom/studio/media-status').openPrivacy,
   // B2
 };
 
