@@ -86,6 +86,7 @@ function registerAllIPC(ctx) {
   registerHealthIPC(ctx);
   // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).
   try { require('./rca').registerRcaIPC(); } catch (e) { logger.warn('RCA IPC registration failed: ' + e.message); }
+  try { require('./zoom-hub').registerZoomHubIPC(ctx); } catch (e) { logger.warn('Zoom hub IPC registration failed: ' + (e && e.name)); }
   logger.info('All IPC handlers registered');
 }
 

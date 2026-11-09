@@ -43,6 +43,7 @@ import { init as initRcaQueue }           from './views/rca-queue.js';
 import { init as initDailyCall }          from './views/daily-call.js';
 import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
 import { init as initTrends }             from './views/trends.js';
+import { boot as bootZoomHub }            from './views/zoom-hub-boot.js';
 
 function boot() {
   // Global error boundary — prevent white screen
@@ -139,6 +140,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initDailyCall(viewsMount);
   initWorkflowIntel(viewsMount);
   initTrends(viewsMount);
+  bootZoomHub(viewsMount);   // flag-gated (zoom.*); does nothing unless an area is effective
 
   // ── Settings drawer ────────────────────────────────────────────────────────
   initSettings();

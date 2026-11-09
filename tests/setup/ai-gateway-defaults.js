@@ -29,3 +29,6 @@ process.env.FLEET_AUTH_PROPAGATION = '0';
 // suites run the flag-off parity path. Flag-ON tests use src/email-intel/flags._setForTests.
 for (const k of ['FLEET_EMAIL_INTEL', 'FLEET_EMAIL_INTEL_CAPTURE', 'FLEET_EMAIL_INTEL_MULTI', 'FLEET_EMAIL_INTEL_TIMELINE',
   'FLEET_EMAIL_INTEL_ACTIONS', 'FLEET_EMAIL_INTEL_REPLIES', 'FLEET_EMAIL_INTEL_ATTACH', 'FLEET_EMAIL_INTEL_API', 'FLEET_JOBS_EMAIL_TRIAGE']) process.env[k] = '0';
+// Zoom AI studio (master + data/studio/write sub-flags, plus the FLEET_ZOOM_ENABLED alias) forced OFF so legacy
+// suites run the flag-off parity path. Flag-ON tests pass flags explicitly (registerZoomHubIPC deps / src/zoom/flags._setForTests).
+for (const k of ['FLEET_ZOOM', 'FLEET_ZOOM_ENABLED', 'FLEET_ZOOM_DATA', 'FLEET_ZOOM_STUDIO', 'FLEET_ZOOM_WRITE']) process.env[k] = '0';

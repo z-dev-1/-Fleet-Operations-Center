@@ -1,0 +1,49 @@
+/* zoom-hub.css -- Zoom hub view. Injected by views/zoom-hub.js only when a zoom.* area flag is on. */
+#view-zoom {
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 16px;
+  gap: 12px;
+  overflow: auto;
+}
+#view-zoom .zh-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+#view-zoom .zh-conn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border, #30363d);
+  border-radius: 8px;
+  background: var(--surface, rgba(255, 255, 255, 0.03));
+}
+#view-zoom .zh-conn-ok { color: var(--green, #3fb950); }
+#view-zoom .zh-conn-err { color: var(--amber, #d29922); }
+#view-zoom .zh-conn-note { font-size: 12px; opacity: 0.8; }
+#view-zoom .zh-tabs { display: flex; gap: 4px; }
+#view-zoom .zh-tab,
+#view-zoom .zh-btn {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border, #30363d);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+#view-zoom .zh-tab.active,
+#view-zoom .zh-tab[aria-selected="true"] {
+  background: var(--accent-bg, rgba(88, 166, 255, 0.15));
+  border-color: var(--accent, #58a6ff);
+}
+#view-zoom .zh-btn-primary { border-color: var(--accent, #58a6ff); }
+#view-zoom .zh-btn:disabled { opacity: 0.5; cursor: default; }
+#view-zoom .zh-tab:focus-visible,
+#view-zoom .zh-btn:focus-visible { outline: 2px solid var(--accent, #58a6ff); outline-offset: 2px; }
+#view-zoom .zh-body { flex: 1 1 auto; min-height: 0; }
+#view-zoom .zh-panel { padding: 8px 0; }

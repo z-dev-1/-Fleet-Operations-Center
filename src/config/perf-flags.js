@@ -722,6 +722,54 @@ function loadEmailIntel(deps = {}) {
   }
 }
 
+// Zoom AI studio (all default OFF): settings.zoom.{enabled,data,studio,write} === true, or
+// FLEET_ZOOM / FLEET_ZOOM_DATA / FLEET_ZOOM_STUDIO / FLEET_ZOOM_WRITE '0'|'1' (env wins over settings;
+// FLEET_ZOOM_ENABLED is an alias for FLEET_ZOOM, used only when the primary is unset). Effective chain:
+//   enabled = raw.enabled
+//   data    = enabled && raw.data
+//   studio  = enabled && raw.studio
+//   write   = data(eff) && raw.write
+// No area effective (data and studio both off) is the flag-OFF parity state, even with enabled:true.
+const ZOOM_ENV = { enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE' };
+const ZOOM_ENV_ALIASES = { enabled: ['FLEET_ZOOM_ENABLED'] };
+
+function resolveZoomFlags(settings, env) {
+  const z = _obj(_obj(settings).zoom);
+  const raw = {};
+  for (const k of Object.keys(ZOOM_ENV)) {
+    let on = z[k] === true;
+    let e = _envBool(env, ZOOM_ENV[k]);
+    if (e === null && ZOOM_ENV_ALIASES[k]) {
+      for (const a of ZOOM_ENV_ALIASES[k]) { const v = _envBool(env, a); if (v !== null) { e = v; break; } }
+    }
+    if (e !== null) on = e;
+    raw[k] = on;
+  }
+  const effective = {};
+  effective.enabled = raw.enabled;
+  effective.data = raw.enabled && raw.data;
+  effective.studio = raw.enabled && raw.studio;
+  effective.write = effective.data && raw.write;
+  const warnings = [];
+  if (raw.write && !effective.data) warnings.push('write-needs-data');
+  if (raw.enabled && !raw.data && !raw.studio) warnings.push('enabled-without-area');
+  return Object.assign({}, raw, { effective, warnings });
+}
+
+function loadZoom(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveZoomFlags(settings, env);
+  } catch (_) {
+    return resolveZoomFlags({}, {});
+  }
+}
+
 module.exports = {
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
@@ -737,4 +785,5 @@ module.exports = {
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
   resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV, EMAIL_INTEL_API_ENV,
+  resolveZoomFlags, loadZoom, ZOOM_ENV, ZOOM_ENV_ALIASES,
 };
