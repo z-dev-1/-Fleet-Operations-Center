@@ -168,13 +168,19 @@ export function createFakeElectron(opts = {}) {
     req.setHeader = (k, v) => { info.headers[k] = v; };
     req.write = (b) => { info.body = (info.body || '') + (Buffer.isBuffer(b) ? b.toString('utf8') : String(b)); };
     req.abort = () => { if (info.aborted) return; info.aborted = true; req.emit('abort'); };
-    req.followRedirect = () => { info.followed = (info.followed || 0) + 1; };
-    req.end = () => {
+    // followRedirect() continues the SAME request at the redirect target: info.url moves to it
+    // (info.urls keeps every hop) and the net handler is asked again.
+    req.followRedirect = () => {
+      info.followed = (info.followed || 0) + 1;
+      if (info._redirectTo && !info.aborted) { info.url = info._redirectTo; info.urls.push(info.url); info._redirectTo = null; run(); }
+    };
+    info.urls = [options.url];
+    const run = () => {
       Promise.resolve().then(() => netHandler(info)).then((script) => {
         const s = script || {};
         if (s.hang || info.aborted) return;
         if (s.error) { req.emit('error', s.error); return; }
-        if (s.redirect) { req.emit('redirect', s.status || 302, info.method, s.redirect, {}); return; }
+        if (s.redirect) { info._redirectTo = s.redirect; req.emit('redirect', s.status || 302, info.method, s.redirect, {}); return; }
         const res = new EventEmitter();
         res.statusCode = s.status == null ? 200 : s.status;
         res.headers = s.headers || {};
@@ -188,6 +194,7 @@ export function createFakeElectron(opts = {}) {
         if (!info.aborted) res.emit('end');
       }).catch((e) => { req.emit('error', e); });
     };
+    req.end = run;
     return req;
   }
 

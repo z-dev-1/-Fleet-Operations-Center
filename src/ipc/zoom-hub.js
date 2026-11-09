@@ -69,6 +69,16 @@ const REAL = {
   'zoomData:list-recordings': () => require('../zoom/data/client').listRecordings,
   'zoomData:recording-info': () => require('../zoom/data/client').recordingInfo,
   // A2
+  'zoomData:get-transcript': () => require('../zoom/data/transcript').getTranscript,
+  'zoomData:import-transcript': () => require('../zoom/data/transcript').importTranscript,
+  'zoomData:summarize': () => require('../zoom/data/summary').summarize,
+  'zoomData:ai-consent': () => require('../zoom/data/summary').aiConsent,
+  'zoomData:get-summary': () => require('../zoom/data/summary').getSummary,
+  'zoomData:link-targets': () => require('../zoom/data/links').linkTargets,
+  'zoomData:link': () => require('../zoom/data/links').link,
+  'zoomData:unlink': () => require('../zoom/data/links').unlink,
+  'zoomData:links': () => require('../zoom/data/links').links,
+  'zoomData:write-open': () => require('../zoom/data/write').writeOpen,
   // B1
   // B2
 };

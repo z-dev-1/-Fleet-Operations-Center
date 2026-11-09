@@ -66,7 +66,8 @@ export function createExtDom() {
   const document = {
     head,
     body,
-    createElement: (tag) => new ExtElement('', tag, dom),
+    // ownerDocument lets panel modules create elements without a global document (as in a real DOM).
+    createElement: (tag) => { const e = new ExtElement('', tag, dom); e.ownerDocument = document; return e; },
     createTextNode: (t) => ({ nodeType: 3, textContent: String(t) }),
     getElementById: (id) => {
       if (registered.has(id)) return registered.get(id);

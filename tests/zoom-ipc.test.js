@@ -6,6 +6,8 @@ import { createFakeElectron, installFakeElectron, installFakeLogger, freshZoom, 
 import { containsSentinel, SENTINEL_URL } from './fixtures/zoom/sentinels.js';
 
 const require = createRequire(import.meta.url);
+// A2 channels read the store: keep it in a temp data dir (never the fake electron app path).
+require('../src/config/paths').setDataDir(require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'zoom-ipc-')));
 const pf = require('../src/config/perf-flags');
 const UP = 'https://amazon.zoom.us/meeting#/upcoming';
 
@@ -98,18 +100,20 @@ describe('area stubs', () => {
     for (const ch of hub.CHANNELS.studio) expect(await call(ch, {})).toEqual({ ok: false, code: 'DISABLED' });
   });
 
-  it('data ON: A2 channels without a REAL entry -> NOT_IMPLEMENTED; write-open -> WRITE_DISABLED unless write', async () => {
+  it('data ON: every zoomData:* has a REAL entry (A2 landed); write-open -> WRITE_DISABLED unless write', async () => {
     setup({ enabled: true, data: true });
-    for (const ch of ['zoomData:get-transcript', 'zoomData:summarize', 'zoomData:link', 'zoomData:links']) {
-      expect(await call(ch, {})).toEqual({ ok: false, code: 'NOT_IMPLEMENTED' });
+    for (const ch of hub.CHANNELS.data) expect(typeof hub.REAL[ch]).toBe('function');
+    for (const ch of ['zoomData:get-transcript', 'zoomData:summarize', 'zoomData:link']) {
+      expect(await call(ch, {})).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
     }
     expect(await call('zoomData:write-open', { action: 'schedule' })).toEqual({ ok: false, code: 'WRITE_DISABLED' });
     expect(Object.keys(require.cache).some((k) => k.replace(/\\/g, '/').endsWith('/src/zoom/data/write.js'))).toBe(false);
   });
 
-  it('data + write ON: write-open has no REAL entry yet -> NOT_IMPLEMENTED', async () => {
+  it('data + write ON: write-open reaches write.js (Cancel on the confirm -> CANCELLED, no window)', async () => {
     setup({ enabled: true, data: true, write: true });
-    expect(await call('zoomData:write-open', { action: 'schedule' })).toEqual({ ok: false, code: 'NOT_IMPLEMENTED' });
+    expect(await call('zoomData:write-open', { action: 'schedule' })).toEqual({ ok: false, code: 'CANCELLED' });
+    expect(fx.calls.windows.length).toBe(0);
   });
 
   it('A1 REAL channels are registered through zh() and lazy-require their module', async () => {
@@ -211,6 +215,49 @@ describe('validators (AC-24, review F-2)', () => {
     const err = logger.lines.find((l) => l.level === 'error');
     expect(err.args[1]).toEqual({ name: 'Error', code: 'EBOOM' });
     expect(containsSentinel(logger.text())).toBe(null);
+  });
+});
+
+describe('A2 channels (FEAT-A2)', () => {
+  const loaded = (name) => Object.keys(require.cache).some((k) => k.replace(/\\/g, '/').endsWith('/src/zoom/data/' + name + '.js'));
+
+  it('get-transcript / import-transcript with a url or path field -> INVALID_INPUT field:payload, no request, unlogged', async () => {
+    setup({ enabled: true, data: true });
+    expect(await call('zoomData:get-transcript', { key: 'abc', url: 'https://amazon.zoom.us/rec/x.vtt' })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'payload' });
+    expect(await call('zoomData:import-transcript', { key: 'abc', path: 'C:\\x.vtt' })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'payload' });
+    expect(fx.calls.net.length + fx.calls.dialogs.length + fx.calls.fromPartition.length).toBe(0);
+    expect(loaded('transcript')).toBe(false);
+    expect(logger.lines).toEqual([]);
+  });
+
+  it('get-transcript for an unlisted key -> TRANSCRIPT_UNAVAILABLE reason not-listed, no request', async () => {
+    setup({ enabled: true, data: true });
+    expect(await call('zoomData:get-transcript', { key: 'unlisted' })).toEqual({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'not-listed' });
+    expect(fx.calls.net.length).toBe(0);
+    expect(loaded('transcript')).toBe(true);
+  });
+
+  it('summarize without a loaded transcript -> TRANSCRIPT_UNAVAILABLE not-loaded; get-summary -> null; links -> {}', async () => {
+    setup({ enabled: true, data: true });
+    expect(await call('zoomData:summarize', { key: 'abc' })).toEqual({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'not-loaded' });
+    expect(await call('zoomData:get-summary', { key: 'abc' })).toEqual({ ok: true, summary: null });
+    const l = await call('zoomData:links');
+    expect(l.ok).toBe(true);
+    expect(typeof l.links).toBe('object');
+  });
+
+  it('link / unlink validate kind + targetId before any store access', async () => {
+    setup({ enabled: true, data: true });
+    expect(await call('zoomData:link', { key: 'abc', kind: 'unit', id: 'ab' })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'id' });
+    expect(await call('zoomData:unlink', { key: 'abc', kind: 'site', id: '59083' })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'kind' });
+    expect(loaded('links')).toBe(false);
+  });
+
+  it('write-open: data on + write off -> WRITE_DISABLED and write.js never required', async () => {
+    setup({ enabled: true, data: true });
+    expect(await call('zoomData:write-open', { action: 'delete-recording', key: 'abc' })).toEqual({ ok: false, code: 'WRITE_DISABLED' });
+    expect(loaded('write')).toBe(false);
+    expect(fx.calls.dialogs.length + fx.calls.windows.length).toBe(0);
   });
 });
 

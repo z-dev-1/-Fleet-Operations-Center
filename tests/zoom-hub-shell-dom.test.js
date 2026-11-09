@@ -42,14 +42,16 @@ function mountHub(flags, hub = fakeHub()) {
 beforeEach(() => { vi.clearAllMocks(); });
 
 describe('stub panels (F-6)', () => {
-  it('each A1 stub mounts "Not available yet." and exposes show/hide/stopAll/destroy', async () => {
+  it('the studio stub mounts "Not available yet."; every panel exposes mount/show/hide/stopAll/destroy', async () => {
+    // FEAT-A2 replaced the meetings / recordings stubs with real panels (same interface).
     for (const name of ['meetings-panel', 'recordings-panel', 'studio-panel']) {
       const m = await vi.importActual('../renderer/src/js/zoom/' + name + '.js');
-      const el = new ExtElement('', 'div');
-      m.mount(el, { zoomHub: {}, flags: {}, bus: createBus() });
-      expect(el.textContent).toBe('Not available yet.');
-      for (const fn of ['show', 'hide', 'stopAll', 'destroy']) expect(typeof m[fn]).toBe('function');
+      for (const fn of ['mount', 'show', 'hide', 'stopAll', 'destroy']) expect(typeof m[fn]).toBe('function');
     }
+    const m = await vi.importActual('../renderer/src/js/zoom/studio-panel.js');
+    const el = new ExtElement('', 'div');
+    m.mount(el, { zoomHub: {}, flags: {}, bus: createBus() });
+    expect(el.textContent).toBe('Not available yet.');
   });
 });
 
@@ -74,7 +76,7 @@ describe('zoom-hub view shell', () => {
     expect(a.h.root.querySelector('.zh-tabs').getAttribute('role')).toBe('tablist');
     expect(tabs.every((t) => t.getAttribute('role') === 'tab')).toBe(true);
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
-    expect(a.h.root.querySelector('#zh-panel-meetings').textContent).toBe('Not available yet.');
+    expect(a.h.root.querySelector('#zh-panel-meetings').querySelector('.zh-panel-head').innerHTML).toContain('Upcoming');
     const b = mountHub({ enabled: true, data: false, studio: true });
     tabs = b.h.root.querySelectorAll('.zh-tab');
     expect(tabs.map((t) => t.textContent)).toEqual(['Studio']);

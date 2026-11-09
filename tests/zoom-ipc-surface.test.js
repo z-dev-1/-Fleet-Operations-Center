@@ -82,7 +82,7 @@ describe('Zoom hub IPC surface', () => {
     }
   });
 
-  it('REAL is ordered in A1 / A2 / B1 / B2 blocks and A1 fills exactly its seven channels', () => {
+  it('REAL is ordered in A1 / A2 / B1 / B2 blocks; A1 fills its seven channels and A2 its ten', () => {
     const src = fs.readFileSync(require.resolve('../src/ipc/zoom-hub.js'), 'utf8');
     const i1 = src.indexOf('  // A1\n'.replace('\n', src.includes('\r\n') ? '\r\n' : '\n'));
     const i2 = src.indexOf('  // A2');
@@ -90,10 +90,16 @@ describe('Zoom hub IPC surface', () => {
     const i4 = src.indexOf('  // B2');
     expect(i1).toBeGreaterThan(-1);
     expect(i1 < i2 && i2 < i3 && i3 < i4).toBe(true);
-    expect(Object.keys(hub.REAL).sort()).toEqual([
+    const block = (a, b) => (src.slice(a, b).match(/'(zoomData:[a-z-]+)':/g) || []).map((s) => s.slice(1, -2)).sort();
+    expect(block(i1, i2)).toEqual([
       'zoomData:connect', 'zoomData:get-meeting', 'zoomData:join', 'zoomData:list-meetings',
       'zoomData:list-recordings', 'zoomData:recording-info', 'zoomData:status',
     ]);
+    expect(block(i2, i3)).toEqual([
+      'zoomData:ai-consent', 'zoomData:get-summary', 'zoomData:get-transcript', 'zoomData:import-transcript',
+      'zoomData:link', 'zoomData:link-targets', 'zoomData:links', 'zoomData:summarize', 'zoomData:unlink', 'zoomData:write-open',
+    ]);
+    expect(Object.keys(hub.REAL).sort()).toEqual(hub.CHANNELS.data.slice().sort());
     for (const k of Object.keys(hub.REAL)) expect(ALL).toContain(k);
   });
 });

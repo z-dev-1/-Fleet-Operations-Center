@@ -5,9 +5,12 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createFakeElectron, installFakeElectron, installFakeLogger, freshZoom, settle, portalScript, srcPath } from './fixtures/zoom/fake-electron.js';
-import { SENTINEL_URL, SENTINEL_TOPIC, SENTINEL_TOKEN, SENTINEL_COOKIE, SENTINEL_PATH, containsSentinel } from './fixtures/zoom/sentinels.js';
+import { SENTINEL_URL, SENTINEL_TOPIC, SENTINEL_TOKEN, SENTINEL_COOKIE, SENTINEL_PATH, SENTINEL_TRANSCRIPT, containsSentinel } from './fixtures/zoom/sentinels.js';
 
 const require = createRequire(import.meta.url);
+// A2 flows read/write the store: keep it in a temp data dir.
+const TMP = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'zoom-redaction-'));
+require('../src/config/paths').setDataDir(TMP);
 const pf = require('../src/config/perf-flags');
 const UP = 'https://amazon.zoom.us/meeting#/upcoming';
 
@@ -163,5 +166,78 @@ describe('redaction (AC-6)', () => {
     walk(root);
     expect(offenders).toEqual([]);
     expect(fs.readFileSync(path.join(root, 'safe-json.js'), 'utf8')).toContain('JSON.parse(');
+  });
+});
+
+describe('redaction: A2 transcript / summary / links flows (FEAT-A2)', () => {
+  const REF = 'https://amazon.zoom.us/rec/download/' + SENTINEL_URL.split('/').pop() + '.vtt';
+  const listRec = (key) => {
+    const client = require('../src/zoom/data/client');
+    client.recordingByKey.set(key, { key, idHash: 'h', topic: SENTINEL_TOPIC, startIso: '2026-11-01T10:00:00.000Z', hasTranscript: true });
+    client.transcriptRefs.set(key, REF);
+  };
+
+  it('transcript GET failures (net error, offsite redirect, 403) never log the URL, redirect target or body', async () => {
+    let n = 0;
+    setup({ net: () => {
+      n += 1;
+      if (n === 1) return { error: Object.assign(new Error('net::ERR ' + SENTINEL_URL + ' ' + SENTINEL_COOKIE), { code: 'ERR_FAILED' }) };
+      if (n === 2) return { redirect: 'https://evil.test/' + SENTINEL_URL };
+      return { status: 403, headers: { 'content-type': 'text/html' }, body: '<html>' + SENTINEL_TRANSCRIPT + SENTINEL_TOKEN + '</html>' };
+    } });
+    listRec('k1');
+    const r = [];
+    for (let i = 0; i < 3; i++) r.push(await call('zoomData:get-transcript', { key: 'k1' }));
+    expect(r.map((x) => x.code)).toEqual(['NETWORK', 'TRANSCRIPT_UNAVAILABLE', 'SIGN_IN_REQUIRED']);
+    assertClean(r);
+  });
+
+  it('a transcript body with sentinels reaches the renderer only; logs carry counts; summary + links results stay clean', async () => {
+    const VTT = 'WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nAlex: Unit 59083 needs brakes ' + SENTINEL_TRANSCRIPT + '\n';
+    setup({ net: () => ({ status: 200, headers: { 'content-type': 'text/vtt' }, body: VTT }) });
+    listRec('k1');
+    const t = await call('zoomData:get-transcript', { key: 'k1' });
+    expect(t.ok).toBe(true);
+    expect(JSON.stringify(t)).toContain('SENTINEL_TRANSCRIPT');   // the transcript is the data the renderer asked for
+    expect(containsSentinel(logger.text())).toBe(null);
+
+    const store = require('../src/store');
+    store.save('zoomSummaries', { version: 1, consentAt: '2026-11-01T00:00:00.000Z', items: {} });
+    const prompts = [];
+    const relay = {
+      isolatedLaneAvailable: () => true,
+      ask: vi.fn(async (p) => { prompts.push(p); throw new Error('relay failed ' + SENTINEL_TRANSCRIPT + ' ' + SENTINEL_URL); }),
+      runWithTimeout: (run) => run(undefined),
+    };
+    require('../src/zoom/data/summary')._setDeps({ relay });
+    const s1 = await call('zoomData:summarize', { key: 'k1' });
+    expect(s1).toMatchObject({ ok: false, code: 'AI_UNAVAILABLE' });
+    relay.ask = vi.fn(async (p) => { prompts.push(p); return JSON.stringify({ keyPoints: [{ text: 'Unit 59083 needs brakes', refs: [1] }], actionItems: [], decisions: [] }); });
+    const s2 = await call('zoomData:summarize', { key: 'k1' });
+    expect(s2.ok).toBe(true);
+    for (const p of prompts) { expect(p).not.toContain('SENTINEL_TOPIC'); expect(p).not.toContain('SENTINEL_URL'); }
+    const g = await call('zoomData:get-summary', { key: 'k1' });
+    expect(g.ok).toBe(true);
+
+    store.save('fleetData', { rows: [{ equipmentId: '59083', operator: 'AGNLI' }] });
+    const l1 = await call('zoomData:link', { key: 'k1', kind: 'unit', id: '59083' });
+    expect(l1.ok).toBe(true);
+    const l2 = await call('zoomData:links');
+    const l3 = await call('zoomData:link-targets', { kind: 'carrier', q: '' });
+    const l4 = await call('zoomData:unlink', { key: 'k1', kind: 'unit', id: '59083' });
+    assertClean([s1, s2, g, l3, l4]);
+    assertClean([l1, l2], { topicAllowedInResults: true });   // the stored topic snapshot is for display
+  });
+
+  it('import: an fs error on a sentinel path -> NOT_FOUND / INVALID_FILE with no path in logs or results', async () => {
+    setup();
+    listRec('k1');
+    fx.electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SENTINEL_PATH.replace('file.txt', 'gone.vtt')] });
+    const a = await call('zoomData:import-transcript', { key: 'k1' });
+    fx.electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [SENTINEL_PATH] });
+    const b = await call('zoomData:import-transcript', { key: 'k1' });
+    expect(a).toEqual({ ok: false, code: 'NOT_FOUND' });
+    expect(['NOT_FOUND', 'INVALID_FILE']).toContain(b.code);
+    assertClean([a, b]);
   });
 });

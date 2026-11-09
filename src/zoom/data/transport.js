@@ -171,4 +171,136 @@ async function postReplay(path, pageKind) {
   return r;
 }
 
-module.exports = { getJson, postReplay, classify, _send, SIGNIN_MSG_RE };
+// ── Transcript file GET (design §7.1a; the single ALLOWED_GET exception, A2) ──
+const ACCEPT_TRANSCRIPT = 'text/vtt, text/plain, */*';
+const MAX_TRANSCRIPT_HOPS = 3;
+
+/** _zoomHttps(url) -> true only for https: URLs whose hostname matches ZOOM_HOST_RE. */
+function _zoomHttps(url) {
+  const u = C.parseUrl(url);
+  return !!(u && u.protocol === 'https:' && C.ZOOM_HOST_RE.test(u.hostname));
+}
+
+function _isSignInUrl(url) {
+  const u = C.parseUrl(url);
+  return !!u && (C.AUTH_HOST_RE.test(u.hostname) || C.SIGNIN_PATH_RE.test(u.pathname));
+}
+
+function _contentType(headers) {
+  if (!headers || typeof headers !== 'object') return '';
+  for (const k of Object.keys(headers)) {
+    if (String(k).toLowerCase() !== 'content-type') continue;
+    const v = headers[k];
+    return String(Array.isArray(v) ? v[0] : v || '').toLowerCase().trim();
+  }
+  return '';
+}
+
+/**
+ * _getTranscriptRaw(url) -> {ok:true, text, status, bytes} | {ok:false, code, reason?, status?, bytes?}
+ * GET with redirect:'manual'; each redirect must pass the same https + ZOOM_HOST_RE rule (max 3 hops).
+ * Never throws; the URL, redirect targets and body never reach a log line.
+ */
+function _getTranscriptRaw(url) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    let req = null;
+    let hops = 0;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      resolve(r);
+    };
+    const abort = () => { try { if (req) req.abort(); } catch (_) {} };
+    try {
+      const session = require('./session');
+      const { net } = session._electron();
+      req = net.request({
+        method: 'GET', url, session: session.getSession(), useSessionCookies: true, credentials: 'include', redirect: 'manual',
+      });
+      req.setHeader('Accept', ACCEPT_TRANSCRIPT);
+      req.on('redirect', (_statusCode, _method, redirectUrl) => {
+        try {
+          if (_isSignInUrl(redirectUrl)) { abort(); finish({ ok: false, code: 'SIGN_IN_REQUIRED' }); return; }
+          if (!_zoomHttps(redirectUrl)) { abort(); finish({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'offsite-redirect' }); return; }
+          hops += 1;
+          if (hops > MAX_TRANSCRIPT_HOPS) { abort(); finish({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'too-many-redirects' }); return; }
+          req.followRedirect();
+        } catch (e) {
+          try { log.warn('[zoom] transcript redirect', safeErr(e)); } catch (_) {}
+          abort();
+          finish({ ok: false, code: 'NETWORK' });
+        }
+      });
+      req.on('response', (res) => {
+        try {
+          const status = res.statusCode;
+          const ctype = _contentType(res.headers);
+          const chunks = [];
+          let size = 0;
+          res.on('data', (chunk) => {
+            try {
+              if (done) return;
+              const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+              size += b.length;
+              if (size > C.TRANSCRIPT_MAX_BYTES) { abort(); finish({ ok: false, code: 'RESPONSE_TOO_LARGE', status, bytes: size }); return; }
+              chunks.push(b);
+            } catch (e) { try { log.warn('[zoom] transcript data', safeErr(e)); } catch (_) {} finish({ ok: false, code: 'NETWORK' }); }
+          });
+          res.on('end', () => {
+            try {
+              if (status === 401 || status === 403) { finish({ ok: false, code: 'SIGN_IN_REQUIRED', status, bytes: size }); return; }
+              if (status === 429) { finish({ ok: false, code: 'THROTTLED', status, bytes: size }); return; }
+              if (typeof status !== 'number' || status < 200 || status >= 300) {
+                finish({ ok: false, code: 'HTTP_ERROR', status: typeof status === 'number' ? status : 0, bytes: size });
+                return;
+              }
+              const text = Buffer.concat(chunks).toString('utf8');
+              const typed = ctype.startsWith('text/vtt') || ctype.startsWith('text/plain');
+              if (!typed && !text.replace(/^\uFEFF/, '').startsWith('WEBVTT')) {
+                finish({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'not-transcript', status, bytes: size });
+                return;
+              }
+              finish({ ok: true, text, status, bytes: size });
+            } catch (e) { try { log.warn('[zoom] transcript end', safeErr(e)); } catch (_) {} finish({ ok: false, code: 'NETWORK' }); }
+          });
+          res.on('error', (e) => { try { log.warn('[zoom] transcript response', safeErr(e)); } catch (_) {} finish({ ok: false, code: 'NETWORK' }); });
+        } catch (e) {
+          try { log.warn('[zoom] transcript response', safeErr(e)); } catch (_) {}
+          finish({ ok: false, code: 'NETWORK' });
+        }
+      });
+      req.on('error', (e) => { try { if (!done) log.warn('[zoom] transcript net', safeErr(e)); } catch (_) {} finish({ ok: false, code: 'NETWORK' }); });
+      timer = setTimeout(() => { try { abort(); finish({ ok: false, code: 'TIMEOUT' }); } catch (_) {} }, C.NET_TIMEOUT_MS);
+      req.end();
+    } catch (e) {
+      try { log.warn('[zoom] transcript net', safeErr(e)); } catch (_) {}
+      finish({ ok: false, code: 'NETWORK' });
+    }
+  });
+}
+
+/**
+ * getTranscriptFile(key) -> {ok:true, text, bytes} | {ok:false, code, reason?, status?}
+ * The URL comes ONLY from the client's in-memory transcriptRefs (filled from a Zoom listing); the
+ * renderer never supplies one. It is rechecked (https + ZOOM_HOST_RE) before any request.
+ * Log line: {op:'transcript-get', idHash, code, status, bytes, ms} only.
+ */
+async function getTranscriptFile(key) {
+  const t0 = Date.now();
+  const idHash = require('../redact').keyHash(key);
+  const done = (r) => {
+    const line = { op: 'transcript-get', idHash, code: r.ok ? 'OK' : r.code, status: r.status || 0, bytes: r.bytes || 0, ms: Date.now() - t0 };
+    try { if (r.ok) log.info('[zoom] transcript', line); else log.warn('[zoom] transcript', line); } catch (_) {}
+    return r;
+  };
+  const url = require('./client').transcriptRefs.get(key);
+  if (typeof url !== 'string' || !url) return done({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'not-listed' });
+  if (!_zoomHttps(url)) return done({ ok: false, code: 'TRANSCRIPT_UNAVAILABLE', reason: 'offsite' });
+  const r = await _getTranscriptRaw(url);
+  return done(r);
+}
+
+module.exports = { getJson, postReplay, classify, _send, getTranscriptFile, SIGNIN_MSG_RE };

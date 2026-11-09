@@ -392,4 +392,6 @@ function _resetForTests() {
 module.exports = {
   getSession, ensureSeeded, allowReseed, withHiddenWindow, waitForAuthed, isAuthedUrl, load, connect,
   getCapture, clearCaptured, teardownAll, _electron, _setDeps, _resetForTests, _withLock,
+  // A2 write hand-off window reuses the §6.4 partition webPreferences and navigation guard.
+  _guardNav, _webPreferences,
 };
