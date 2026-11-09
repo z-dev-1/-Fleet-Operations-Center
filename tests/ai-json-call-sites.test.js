@@ -12,6 +12,7 @@ import os from 'os';
 import { createRequire } from 'module';
 import * as esm from '../renderer/src/js/util/ai-json.js';
 import { _stripCosts } from '../renderer/src/js/longdwell-ai.js';
+import { normalizeLongDwellSummary } from '../renderer/src/js/longdwell-summary-format.js';
 import {
   AKI_LONGDWELL_REPLY, AKI_LONGDWELL_REPLY_RAW_NL, LD_EXPECTED,
   AKI_RCA_REPLY, RCA_VALUES, AKI_WR_REPLY, WR_VALUES, AKI_WBR_REPLY, WBR_VALUES, AKI_HB_REPLY, HB_VALUES,
@@ -27,8 +28,8 @@ const CLEAN_LD = JSON.stringify(LD_EXPECTED);
 
 describe('analytics.js _aiFillRow parse', () => {
   const slice = sliceLines(aiFillRowLines('analytics.js#_aiFillRow'), "const text = result.text || '';", includes('let summary'), 'analytics parse');
-  const run = new Function('result', 'extractJsonObject', '_stripCosts', slice + '\nreturn { delayReason, escalationLevel, summary };');
-  const parse = (text) => run({ ok: true, text }, esm.extractJsonObject, _stripCosts);
+  const run = new Function('result', 'extractJsonObject', '_stripCosts', 'normalizeLongDwellSummary', slice + '\nreturn { delayReason, escalationLevel, summary };');
+  const parse = (text) => run({ ok: true, text }, esm.extractJsonObject, _stripCosts, normalizeLongDwellSummary);
   it('Aki-wrapped replies parse to the three fields', () => {
     expect(parse(AKI_LONGDWELL_REPLY)).toEqual(LD_FIELDS);
     expect(parse(AKI_LONGDWELL_REPLY_RAW_NL)).toEqual(LD_FIELDS);
@@ -44,8 +45,8 @@ describe('longdwell-csv.js _aiFillRow parse', () => {
   const sanitizeSrc = sliceLines(readLines(CSV), 'function _sanitizeAiJson(', exactly('}'), '_sanitizeAiJson');
   const _sanitizeAiJson = new Function(sanitizeSrc + '\nreturn _sanitizeAiJson;')();
   const slice = sliceLines(aiFillRowLines('longdwell-csv.js#_aiFillRow'), "const textOut = result.text || '';", includes('let notes'), 'csv parse');
-  const run = new Function('result', 'extractJsonObject', '_stripCosts', '_sanitizeAiJson', slice + '\nreturn { delayReason, escalation, notes };');
-  const parse = (text) => run({ ok: true, text }, esm.extractJsonObject, _stripCosts, _sanitizeAiJson);
+  const run = new Function('result', 'extractJsonObject', '_stripCosts', '_sanitizeAiJson', 'normalizeLongDwellSummary', slice + '\nreturn { delayReason, escalation, notes };');
+  const parse = (text) => run({ ok: true, text }, esm.extractJsonObject, _stripCosts, _sanitizeAiJson, normalizeLongDwellSummary);
   const want = { delayReason: LD_EXPECTED.delayReason, escalation: LD_EXPECTED.escalationLevel, notes: _stripCosts(LD_EXPECTED.summary).slice(0, 8000) };
   it('Aki-wrapped replies parse to the three fields', () => {
     expect(parse(AKI_LONGDWELL_REPLY)).toEqual(want);

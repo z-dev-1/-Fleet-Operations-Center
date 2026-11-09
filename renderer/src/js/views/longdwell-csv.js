@@ -18,6 +18,7 @@ import { extractJsonObject } from '../util/ai-json.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
 import { _buildAIFillPrompt, _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
+import { normalizeLongDwellSummary } from '../longdwell-summary-format.js';
 
 // Match the computed Long Dwell fill's data-freshness window: refresh + deep
 // scan a unit whose relay data is older than this before summarizing.
@@ -584,7 +585,7 @@ async function _aiFillRow(rowKey, btn, onStatus,
 
     let delayReason = String(parsed.delayReason || '').trim();
     let escalation  = String(parsed.escalationLevel || '').trim().toUpperCase();
-    let notes       = _stripCosts(String(parsed.summary || '').trim()).slice(0, 8000);
+    let notes       = _stripCosts(normalizeLongDwellSummary(String(parsed.summary || '').trim(), { maxLen: 8000 })).slice(0, 8000);
     if (!AI_DELAY_REASONS.includes(delayReason)) delayReason = '';
     if (!AI_ESCALATION_LEVELS.includes(escalation)) escalation = '';
     if (opts && opts.generateOnly) return { delayReason, escalation, notes, fp: fillFingerprint(promptRow) }; // durable-gate

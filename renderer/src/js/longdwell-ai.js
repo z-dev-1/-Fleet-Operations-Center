@@ -103,7 +103,15 @@ export function _buildAIFillPrompt(row, dd) {
     // prompt still works, the SEV section just won't be present that one time).
     // Output contract stated up front too: the Aki lane trims an over-long
     // prompt from the END, which can drop the tail contract below.
-    'OUTPUT CONTRACT: return ONLY one raw JSON object {"delayReason": "...", "escalationLevel": "...", "summary": "..."} -- no markdown, no code fences, no commentary before or after it.\n\n' +
+    // The 7-bullet summary contract is up front for the same reason: on
+    // Windows Aki head-keeps only ~32k chars, and the full field spec + gold
+    // examples below sit past that point (after the ~27k-char KB).
+    'OUTPUT CONTRACT: return ONLY one raw JSON object {"delayReason": "...", "escalationLevel": "...", "summary": "..."} -- no markdown, no code fences, no commentary before or after it.\n' +
+    'The summary value MUST be EXACTLY 7 lines separated by \\n. Each line starts with "\\u2022 " (bullet + space) ' +
+    'followed by one of these exact labels, in this exact order: Initial Issue Reported:, Primary Vendor Rejection:, ' +
+    'Primary Barrier:, Actions Taken:, Repair Status:, ETC:, Follow-up date:. No preamble, no paragraph, no headings, ' +
+    'no blank or extra lines. If a field has no information still emit its line: "N/A" for Primary Vendor Rejection, ' +
+    'otherwise "not documented \\u2014 verify". The full field spec and gold examples follow below.\n\n' +
     (_kbCache ? (_kbCache + '\n\n') : '') +
     'You are Orcha, the AI brain for Fleet Operations. This unit is a LONG DWELL unit -- ' +
     'down and unavailable for an extended period -- and needs a leadership-facing status ' +

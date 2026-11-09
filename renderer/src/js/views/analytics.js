@@ -31,6 +31,7 @@ import * as longDwellSp from './longdwell-sp.js';
 // Dwell table uses the SAME prompt builder (and FAS knowledge base) as the
 // imported-CSV table and the Slack assistant — no duplicated/drifting rubric.
 import { _buildAIFillPrompt, _stripCosts, _sourceContextForRow, loadKnowledge as _loadLdKnowledge } from '../longdwell-ai.js';
+import { normalizeLongDwellSummary } from '../longdwell-summary-format.js';
 
 let _el = null;
 let _ldSubView = 'computed';   // 'computed' | 'imported' — Long Dwell sub-view toggle
@@ -718,8 +719,9 @@ async function _aiFillRow(unitId, tr, onStatus,
     let escalationLevel = String(parsed.escalationLevel || '').trim().toUpperCase();
     // Cap generously — the detailed 7-bullet summaries (esp. dual-WO units) can
     // run ~2000+ chars; the old 1500 cap chopped them mid-sentence. Matches the
-    // server MAX_LENGTHS.summary cap in src/ipc/long-dwell.js.
-    let summary         = _stripCosts(String(parsed.summary || '').trim()).slice(0, 4000);
+    // server MAX_LENGTHS.summary cap in src/ipc/long-dwell.js. Normalize to the
+    // 7-bullet contract (Aki often returns prose) before the whitespace tidy.
+    let summary         = _stripCosts(normalizeLongDwellSummary(String(parsed.summary || '').trim(), { maxLen: 4000 })).slice(0, 4000);
 
     if (!DELAY_REASONS.includes(delayReason))     delayReason     = '';
     if (!ESCALATION_LEVELS.includes(escalationLevel)) escalationLevel = '';
