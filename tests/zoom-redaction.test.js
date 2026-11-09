@@ -229,6 +229,48 @@ describe('redaction: A2 transcript / summary / links flows (FEAT-A2)', () => {
     assertClean([l1, l2], { topicAllowedInResults: true });   // the stored topic snapshot is for display
   });
 
+  it('FEAT-B2: library import / read, launcher pick / run failures and preset names stay out of logs and error results', async () => {
+    setup();
+    const dir = path.join(TMP, 'SENTINEL_PATH_p4th9');
+    fs.mkdirSync(dir, { recursive: true });
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(80, 1)]);
+    const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(80, 1)]);
+    fs.writeFileSync(path.join(dir, 'wrong.png'), JPEG);
+    fs.writeFileSync(path.join(dir, 'thumbfail.png'), PNG);
+    fx.electron.nativeImage.createFromPath = () => ({
+      isEmpty: () => false,
+      getSize: () => ({ width: 10, height: 10 }),
+      resize: () => { throw Object.assign(new Error('thumb failed ' + SENTINEL_PATH), { code: 'EPERM' }); },
+    });
+    fx.electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(dir, 'wrong.png'), path.join(dir, 'gone.png'), path.join(dir, 'thumbfail.png')] });
+    const lib = await call('zoomStudio:library-import', { kind: 'overlay' });
+    expect(lib.rejected.map((x) => x.code)).toEqual(['INVALID_FILE', 'NOT_FOUND', 'IO_ERROR']);
+    const read = await call('zoomStudio:library-read', { id: 'l_000000000000' });
+
+    fx.electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.join(dir, 'Start Grim Reaper.bat')] });
+    const pickMissing = await call('zoomStudio:launcher-pick');
+    expect(pickMissing).toEqual({ ok: false, code: 'NOT_FOUND' });
+    fs.writeFileSync(path.join(dir, 'Start Grim Reaper.bat'), '@echo off\r\n');
+    const picked = await call('zoomStudio:launcher-pick');
+    expect(picked.ok).toBe(true);    // the renderer displays the path it picked; it is never logged
+    fx.electron.dialog.showMessageBox = async () => ({ response: 0 });
+    fx.electron.shell.openPath = async (p) => 'cannot open ' + p + ' ' + SENTINEL_PATH;
+    const run = await call('zoomStudio:launcher-run');
+    expect(run).toEqual({ ok: false, code: 'LAUNCH_FAILED' });
+
+    const p1 = await call('zoomStudio:preset-save', { preset: { name: SENTINEL_TOPIC } });
+    expect(p1.ok).toBe(true);
+    const p2 = await call('zoomStudio:preset-save', { preset: { name: SENTINEL_TOPIC } });
+    const p3 = await call('zoomStudio:preset-save', { preset: { name: SENTINEL_TOPIC + 'x', adjust: { brightness: 999 } } });
+    const p4 = await call('zoomStudio:preset-rename', { id: p1.preset.id, name: SENTINEL_TOPIC });
+    expect(p2).toEqual({ ok: false, code: 'DUPLICATE_NAME' });
+    expect(p3).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'adjust.brightness' });
+    assertClean([lib, read, pickMissing, run, p2, p3]);
+    assertClean([p4], { topicAllowedInResults: true });   // the renamed preset itself goes back to the renderer
+    expect(logger.text().includes('p4th9')).toBe(false);
+    expect(logger.text().includes('Start Grim Reaper')).toBe(false);
+  });
+
   it('import: an fs error on a sentinel path -> NOT_FOUND / INVALID_FILE with no path in logs or results', async () => {
     setup();
     listRec('k1');

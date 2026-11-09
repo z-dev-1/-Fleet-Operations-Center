@@ -89,13 +89,13 @@ describe('area stubs', () => {
     expect(await call('zoomHub:flags')).toEqual({ ok: true, enabled: true, data: true, studio: false, write: true });
   });
 
-  it('data OFF -> every zoomData:* is DISABLED; studio ON -> B1 channels real, the rest NOT_IMPLEMENTED (no REAL yet)', async () => {
+  it('data OFF -> every zoomData:* is DISABLED; studio ON -> every zoomStudio:* is REAL (B1 + B2 landed, no NOT_IMPLEMENTED left)', async () => {
     setup({ enabled: true, studio: true });
     for (const ch of hub.CHANNELS.data) expect(await call(ch, {})).toEqual({ ok: false, code: 'DISABLED' });
-    const B1 = ['zoomStudio:media-status', 'zoomStudio:open-privacy'];
     for (const ch of hub.CHANNELS.studio) {
-      if (B1.includes(ch)) expect(typeof hub.REAL[ch]).toBe('function');
-      else expect(await call(ch, {})).toEqual({ ok: false, code: 'NOT_IMPLEMENTED' });
+      expect(typeof hub.REAL[ch]).toBe('function');
+      const r = await call(ch, { bogus: 1 });   // an unknown prop is rejected by the channel validator, never NOT_IMPLEMENTED
+      expect(r).toMatchObject({ ok: false, code: 'INVALID_INPUT' });
     }
     expect(await call('zoomStudio:media-status')).toEqual({ ok: true, camera: 'granted', microphone: 'granted' });
   });

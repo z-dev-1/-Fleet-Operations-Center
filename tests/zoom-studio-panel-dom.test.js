@@ -22,7 +22,7 @@ function fakeHub(media = { ok: true, camera: 'granted', microphone: 'granted' })
   };
 }
 
-function setup({ devices = HP_DEVICES, labelsAfterGrant = false, media, withTab = true, raf } = {}) {
+function setup({ devices = HP_DEVICES, labelsAfterGrant = false, media, withTab = true, raf, hub, confirm, patchDoc } = {}) {
   const fm = createFakeMedia({ devices, labelsAfterGrant });
   const { document, body } = createExtDom();
   let tab = null;
@@ -34,9 +34,10 @@ function setup({ devices = HP_DEVICES, labelsAfterGrant = false, media, withTab 
   }
   const el = document.createElement('div');
   body.appendChild(el);
-  const zoomHub = fakeHub(media);
+  const zoomHub = Object.assign(fakeHub(media), hub || {});
+  if (patchDoc) patchDoc(document);
   const win = { listeners: {}, addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); }, removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn); } };
-  panel.mount(el, { zoomHub, flags: { studio: true }, bus: createBus(), document, window: win, mediaDevices: fm.mediaDevices, AudioContext: fm.AudioContext, raf: raf || (() => 1), caf: () => {} });
+  panel.mount(el, { zoomHub, flags: { studio: true }, bus: createBus(), document, window: win, confirm, mediaDevices: fm.mediaDevices, AudioContext: fm.AudioContext, raf: raf || (() => 1), caf: () => {} });
   return { fm, el, zoomHub, document, tab, win, S: panel._state() };
 }
 
@@ -352,7 +353,7 @@ describe('no forbidden phrase (§14.3)', () => {
     const text = snaps.join('\n');
     for (const f of FORBIDDEN) expect(text.toLowerCase().includes(f.toLowerCase())).toBe(false);
     const dir = path.dirname(require.resolve('../renderer/src/js/zoom/studio-panel.js'));
-    for (const f of ['studio-panel.js', 'studio-logic.js', 'studio-devices.js', 'studio-pipeline.js']) {
+    for (const f of ['studio-panel.js', 'studio-logic.js', 'studio-devices.js', 'studio-pipeline.js', 'presets-panel.js', 'library-panel.js']) {
       const src = fs.readFileSync(path.join(dir, f), 'utf8');
       for (const p of FORBIDDEN) expect([f, src.toLowerCase().includes(p.toLowerCase())]).toEqual([f, false]);
     }
@@ -360,8 +361,8 @@ describe('no forbidden phrase (§14.3)', () => {
 
   it('no driver / OBS configuration code; no permission handler on defaultSession', () => {
     const files = [
-      require.resolve('../src/zoom/studio/media-status.js'),
-      ...['studio-panel.js', 'studio-logic.js', 'studio-devices.js', 'studio-pipeline.js'].map((f) => require.resolve('../renderer/src/js/zoom/' + f)),
+      ...['media-status.js', 'preset-schema.js', 'presets.js', 'library.js', 'image-sniff.js', 'launcher.js'].map((f) => require.resolve('../src/zoom/studio/' + f)),
+      ...['studio-panel.js', 'studio-logic.js', 'studio-devices.js', 'studio-pipeline.js', 'presets-panel.js', 'library-panel.js'].map((f) => require.resolve('../renderer/src/js/zoom/' + f)),
     ];
     for (const f of files) {
       const src = fs.readFileSync(f, 'utf8');
@@ -405,5 +406,306 @@ describe('hub integration', () => {
       if (prevNav) Object.defineProperty(globalThis, 'navigator', prevNav); else delete globalThis.navigator;
       view._resetForTests();
     }
+  });
+});
+
+// ── FEAT-B2: presets, library, launcher (design §15.2-§15.4; review F-8) ──────────────────────────
+const LIB_PNG = 'l_aaaaaaaaaaaa';
+const LIB_WEBP = 'l_bbbbbbbbbbbb';
+const BAT = 'C:\\Users\\me\\Desktop\\Grim Reaper Zoom Face\\Start Grim Reaper.bat';
+
+function b2Hub(over = {}) {
+  const preset = {
+    id: 'p_111111111111', name: 'Desk', version: 1,
+    camera: { id: 'stale-id', label: 'EMEET SmartCam S600' }, mic: { id: null, label: null },
+    effect: { mode: 'edgeBlur', edgeBlur: { radiusPx: 22, focus: 0.5 }, chromaKey: { color: 'green', tolerance: 50, backgroundId: null }, imageId: null },
+    adjust: { brightness: 110, contrast: 100, saturation: 100, mirror: true }, overlays: [],
+  };
+  const gone = Object.assign({}, preset, { id: 'p_222222222222', name: 'Old cam', camera: { id: 'x', label: 'Gone Cam' } });
+  return Object.assign({
+    presetsList: vi.fn(async () => ({ ok: true, presets: [preset, gone], lastPresetId: preset.id })),
+    presetSave: vi.fn(async ({ preset: p }) => ({ ok: true, preset: Object.assign({ id: 'p_333333333333' }, p) })),
+    presetSelect: vi.fn(async () => ({ ok: true })),
+    presetRename: vi.fn(async () => ({ ok: true })),
+    presetDelete: vi.fn(async () => ({ ok: true })),
+    libraryList: vi.fn(async () => ({ ok: true, items: [
+      { id: LIB_PNG, name: 'Wall', kind: 'background', format: 'png', thumb: 'data:image/png;base64,UE5H', w: 640, h: 360 },
+      { id: LIB_WEBP, name: 'Logo', kind: 'overlay', format: 'webp', thumb: null, w: 320, h: 180 },
+    ] })),
+    libraryRead: vi.fn(async ({ id }) => ({ ok: true, dataUrl: 'data:image/webp;base64,' + id, w: 320, h: 180 })),
+    libraryImport: vi.fn(async () => ({ ok: true, items: [{ id: 'l_cccccccccccc' }], rejected: [{ name: '<b>x.png</b>', code: 'INVALID_FILE' }] })),
+    libraryRename: vi.fn(async () => ({ ok: true })),
+    libraryDelete: vi.fn(async () => ({ ok: true })),
+    launcherGet: vi.fn(async () => ({ ok: true, path: BAT, exists: true, isDefault: true })),
+    launcherPick: vi.fn(async () => ({ ok: true, path: BAT })),
+    launcherRun: vi.fn(async () => ({ ok: true })),
+  }, over);
+}
+
+/** Make <img> decode on src set and give canvases a 2D context + toDataURL (the WebP thumbnail path). */
+function decodingDoc(document, { fail = false } = {}) {
+  const orig = document.createElement;
+  const drawn = [];
+  document.createElement = (tag) => {
+    const e = orig(tag);
+    if (tag === 'img') {
+      Object.defineProperty(e, 'src', {
+        set(v) { this._src = v; Promise.resolve().then(() => { if (fail) { if (this.onerror) this.onerror(); return; } this.naturalWidth = 320; this.naturalHeight = 180; if (this.onload) this.onload(); }); },
+        get() { return this._src; },
+      });
+    }
+    if (tag === 'canvas') {
+      e.getContext = () => ({ drawImage: (...a) => drawn.push(a.slice(1)) });
+      e.toDataURL = () => 'data:image/png;base64,DRAWN';
+    }
+    return e;
+  };
+  return drawn;
+}
+
+describe('FEAT-B2 presets panel', () => {
+  it('the first show restores lastPresetId onto the controls WITHOUT opening the camera; Load never calls getUserMedia', async () => {
+    const hub = b2Hub();
+    const { S, fm } = setup({ hub });
+    await panel.show();
+    await tick();
+    expect(fm.calls.getUserMedia).toEqual([]);
+    expect(S.cameraId).toBe('cam-emeet');                  // restored by label (the id differs per origin)
+    expect(S.pipeline.getState().effect.mode).toBe('edgeBlur');
+    expect(S.pipeline.getState().effect.edgeBlur.radiusPx).toBe(22);
+    expect(S.pipeline.getState().adjust.mirror).toBe(true);
+    const P = S.presetsPanel;
+    expect(P._state().selectedId).toBe('p_111111111111');
+    expect(P.root.innerHTML).toContain('Preset loaded. Press Start preview to see it.');
+    // Load a preset whose camera is gone: default kept, "Saved camera not found".
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-load', id: 'p_222222222222' } } });
+    await tick();
+    expect(fm.calls.getUserMedia).toEqual([]);
+    expect(S.cameraId).toBe('cam-emeet');
+    expect(P.root.innerHTML).toContain('Saved camera not found');
+    expect(hub.presetSelect).toHaveBeenLastCalledWith({ id: 'p_222222222222' });
+    // A second show does not re-apply the stored preset over the user's edits.
+    S.wrap.dispatch('change', { target: { dataset: { role: 'mode' }, value: 'none' } });
+    panel.hide();
+    await panel.show();
+    await tick();
+    expect(S.pipeline.getState().effect.mode).toBe('none');
+    expect(fm.calls.getUserMedia).toEqual([]);
+  });
+
+  it('Save as new sends ONE {preset} object built from the current controls; errors use the field-aware message', async () => {
+    const hub = b2Hub({ presetsList: vi.fn(async () => ({ ok: true, presets: [], lastPresetId: null })) });
+    const { S } = setup({ hub });
+    await panel.show();
+    await tick();
+    const P = S.presetsPanel;
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-save-new' } } });
+    await tick();
+    expect(hub.presetSave).not.toHaveBeenCalled();
+    expect(P.root.innerHTML).toContain('Enter a preset name first.');
+    P.root.dispatch('input', { target: { dataset: { role: 'preset-name' }, value: 'Office' } });
+    S.wrap.dispatch('change', { target: { dataset: { role: 'mode' }, value: 'edgeBlur' } });
+    await tick();
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-save-new' } } });
+    await tick();
+    expect(hub.presetSave).toHaveBeenCalledTimes(1);
+    const arg = hub.presetSave.mock.calls[0];
+    expect(arg.length).toBe(1);
+    expect(Object.keys(arg[0])).toEqual(['preset']);
+    expect(arg[0].preset).toMatchObject({ name: 'Office', camera: { id: 'cam-hp', label: 'HP 5MP Camera' }, effect: { mode: 'edgeBlur' }, overlays: [] });
+    expect(hub.presetSelect).toHaveBeenCalledWith({ id: 'p_333333333333' });
+    hub.presetSave.mockImplementationOnce(async () => ({ ok: false, code: 'INVALID_INPUT', field: 'effect.chromaKey.backgroundId' }));
+    P.root.dispatch('input', { target: { dataset: { role: 'preset-name' }, value: 'Green' } });
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-save-new' } } });
+    await tick();
+    expect(P.root.innerHTML).toContain('Pick a background image in the Library before saving green-screen replace.');
+    hub.presetSave.mockImplementationOnce(async () => ({ ok: false, code: 'DUPLICATE_NAME' }));
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-save-new' } } });
+    await tick();
+    expect(P.root.innerHTML).toContain('A preset with that name already exists.');
+  });
+
+  it('inline rename and delete with confirm', async () => {
+    const hub = b2Hub();
+    const confirm = vi.fn(() => true);
+    const { S } = setup({ hub, confirm });
+    await panel.show();
+    await tick();
+    const P = S.presetsPanel;
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-rename', id: 'p_111111111111' } } });
+    expect(P.root.innerHTML).toContain('data-role="preset-rename"');
+    P.root.dispatch('input', { target: { dataset: { role: 'preset-rename', id: 'p_111111111111' }, value: 'Desk 2' } });
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-rename-save', id: 'p_111111111111' } } });
+    await tick();
+    expect(hub.presetRename).toHaveBeenCalledWith({ id: 'p_111111111111', name: 'Desk 2' });
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-delete', id: 'p_222222222222' } } });
+    await tick();
+    expect(confirm).toHaveBeenCalledWith('Delete preset "Old cam"?');
+    expect(hub.presetDelete).toHaveBeenCalledWith({ id: 'p_222222222222' });
+    confirm.mockReturnValueOnce(false);
+    P.root.dispatch('click', { target: { dataset: { action: 'preset-delete', id: 'p_111111111111' } } });
+    await tick();
+    expect(hub.presetDelete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('FEAT-B2 library panel', () => {
+  it('grid with kind filter; WebP thumbnail drawn into a 160-px canvas and cached in memory; cleared on destroy', async () => {
+    const hub = b2Hub();
+    let drawn = null;
+    const { S } = setup({ hub, patchDoc: (d) => { drawn = decodingDoc(d); } });
+    await panel.show();
+    await tick();
+    const Lp = S.libraryPanel;
+    expect(hub.libraryRead).toHaveBeenCalledWith({ id: LIB_WEBP });
+    expect(hub.libraryRead).not.toHaveBeenCalledWith({ id: LIB_PNG });
+    expect(drawn).toContainEqual([0, 0, 160, 90]);
+    expect(Lp.cache.get(LIB_WEBP)).toBe('data:image/png;base64,DRAWN');
+    expect(Lp.root.innerHTML).toContain('src="data:image/png;base64,DRAWN"');
+    expect(Lp.root.innerHTML).toContain('src="data:image/png;base64,UE5H"');
+    Lp.root.dispatch('change', { target: { dataset: { role: 'lib-filter' }, value: 'overlay' } });
+    expect(Lp.root.innerHTML).toContain('data-id="' + LIB_WEBP + '"');
+    expect(Lp.root.innerHTML).not.toContain('data-id="' + LIB_PNG + '" data-kind');
+    const cache = Lp.cache;
+    panel.destroy();
+    expect(cache.size).toBe(0);
+  });
+
+  it('an undecodable image shows the broken-thumbnail placeholder with Delete', async () => {
+    const hub = b2Hub();
+    const { S } = setup({ hub, patchDoc: (d) => decodingDoc(d, { fail: true }) });
+    await panel.show();
+    await tick();
+    const html = S.libraryPanel.root.innerHTML;
+    expect(html).toContain('Can&#39;t show this image');
+    expect(html).toContain('data-action="lib-delete" data-id="' + LIB_WEBP + '"');
+  });
+
+  it('drag onto a slot and the keyboard "Use as…" select assign images without starting the camera', async () => {
+    const hub = b2Hub({ presetsList: vi.fn(async () => ({ ok: true, presets: [], lastPresetId: null })) });
+    const { S, fm } = setup({ hub });
+    await panel.show();
+    await tick();
+    const Lp = S.libraryPanel;
+    const dt = { data: {}, setData(k, v) { this.data[k] = v; }, getData(k) { return this.data[k] || ''; } };
+    Lp.root.dispatch('dragstart', { target: { dataset: { id: LIB_WEBP } }, dataTransfer: dt });
+    let prevented = false;
+    Lp.root.dispatch('dragover', { target: { dataset: { slot: 'overlay' } }, preventDefault() { prevented = true; } });
+    expect(prevented).toBe(true);
+    Lp.root.dispatch('drop', { target: { dataset: { slot: 'overlay' } }, dataTransfer: dt });
+    expect(S.pipeline.getState().overlays).toEqual([{ imageId: LIB_WEBP, x: 0.5, y: 0.5, scale: 0.3, opacity: 1 }]);
+    Lp.root.dispatch('change', { type: 'change', target: { dataset: { role: 'lib-assign', id: LIB_PNG }, value: 'background' } });
+    expect(S.pipeline.getState().effect.chromaKey.backgroundId).toBe(LIB_PNG);
+    expect(Lp.root.innerHTML).toContain('Background set. Pick &#39;Green-screen replace&#39; under Effect to use it.');
+    Lp.root.dispatch('change', { type: 'change', target: { dataset: { role: 'lib-assign', id: LIB_PNG }, value: 'avatar' } });
+    expect(S.pipeline.getState().effect.imageId).toBe(LIB_PNG);
+    // Slots render the names; overlay sliders mirror the schema ranges.
+    expect(Lp.root.innerHTML).toContain('Background: Wall');
+    expect(Lp.root.innerHTML).toContain('data-key="scale" min="0.05" max="2"');
+    Lp.root.dispatch('input', { type: 'input', target: { dataset: { role: 'lib-overlay', index: '0', key: 'x' }, value: '0.2' } });
+    expect(S.pipeline.getState().overlays[0].x).toBe(0.2);
+    // An id that is not in the library (e.g. dragged from elsewhere) is ignored.
+    Lp.root.dispatch('drop', { target: { dataset: { slot: 'avatar' } }, dataTransfer: { getData: () => 'l_999999999999' } });
+    expect(S.pipeline.getState().effect.imageId).toBe(LIB_PNG);
+    Lp.root.dispatch('click', { target: { dataset: { action: 'lib-clear', slot: 'overlay', index: '0' } } });
+    expect(S.pipeline.getState().overlays).toEqual([]);
+    expect(fm.calls.getUserMedia).toEqual([]);
+  });
+
+  it('delete with confirm; IN_USE -> "Used by N presets — delete anyway?" -> force; import shows rejected names escaped', async () => {
+    const hub = b2Hub({ libraryDelete: vi.fn() });
+    hub.libraryDelete.mockResolvedValueOnce({ ok: false, code: 'IN_USE', usedBy: 2 }).mockResolvedValueOnce({ ok: true });
+    const confirm = vi.fn(() => true);
+    const { S } = setup({ hub, confirm });
+    await panel.show();
+    await tick();
+    const Lp = S.libraryPanel;
+    Lp.root.dispatch('change', { type: 'change', target: { dataset: { role: 'lib-assign', id: LIB_PNG }, value: 'background' } });
+    Lp.root.dispatch('click', { target: { dataset: { action: 'lib-delete', id: LIB_PNG } } });
+    await tick();
+    expect(confirm.mock.calls.map((c) => c[0])).toEqual(['Delete image "Wall"?', 'Used by 2 presets — delete anyway?']);
+    expect(hub.libraryDelete.mock.calls).toEqual([[{ id: LIB_PNG }], [{ id: LIB_PNG, force: true }]]);
+    expect(S.pipeline.getState().effect.chromaKey.backgroundId).toBe(null);   // dropped from the controls too
+    expect(hub.presetsList.mock.calls.length).toBeGreaterThan(1);              // presets refreshed (refs cleared in main)
+    Lp.root.dispatch('click', { target: { dataset: { action: 'lib-import' } } });
+    await tick();
+    expect(hub.libraryImport).toHaveBeenCalledWith({ kind: 'background' });
+    expect(Lp.root.innerHTML).toContain('Imported 1 image. Not imported: &lt;b&gt;x.png&lt;/b&gt;');
+    expect(Lp.root.innerHTML).not.toContain('<b>x.png');
+    Lp.root.dispatch('click', { target: { dataset: { action: 'lib-rename', id: LIB_WEBP } } });
+    Lp.root.dispatch('input', { type: 'input', target: { dataset: { role: 'lib-rename', id: LIB_WEBP }, value: 'Brand' } });
+    Lp.root.dispatch('click', { target: { dataset: { action: 'lib-rename-save', id: LIB_WEBP } } });
+    await tick();
+    expect(hub.libraryRename).toHaveBeenCalledWith({ id: LIB_WEBP, name: 'Brand' });
+  });
+});
+
+describe('FEAT-B2 launcher section (review F-8)', () => {
+  it('Launch stops the Fleet preview BEFORE launcherRun; note text; Change… goes through launcherPick', async () => {
+    const order = [];
+    let fmRef = null;
+    const hub = b2Hub({
+      launcherRun: vi.fn(async () => { order.push(['run', fmRef.liveTracks().length, fmRef.tracks.map((t) => t.stopped)]); return { ok: true }; }),
+    });
+    const { S, fm } = setup({ hub });
+    fmRef = fm;
+    await panel.show();
+    await tick();
+    const html = S.launcherEl.innerHTML;
+    expect(html).toContain(panel.LAUNCHER_TITLE);
+    expect(html).toContain('Virtual-camera setup (outside Fleet)');
+    expect(html).toContain('Launch virtual-camera setup');
+    expect(html).toContain('Change…');
+    expect(html).toContain('(default)');
+    expect(html).toContain(BAT.replace(/\\/g, '\\'));
+    expect(html).toContain("Starts your Grim Reaper page. OBS must capture that window and Start Virtual Camera; then pick &#39;OBS Virtual Camera&#39; in Zoom. Fleet&#39;s preview is stopped so the Grim Reaper page can use the camera.");
+    expect(html).not.toContain('OBS Virtual Camera is installed on this PC.');
+    click('start');
+    await tick();
+    expect(fm.liveTracks().length).toBe(1);
+    expect(S.badge.style.display).toBe('');
+    click('launcher-run');
+    await tick();
+    expect(order).toEqual([['run', 0, [1]]]);                       // every track already stopped
+    expect(S.badge.style.display).toBe('none');
+    expect(S.launcherEl.innerHTML).toContain('Launcher started outside Fleet.');
+    hub.launcherRun.mockResolvedValueOnce({ ok: false, code: 'BUSY' });
+    click('launcher-run');
+    await tick();
+    expect(S.launcherEl.innerHTML).toContain('Busy. Try again shortly.');
+    click('launcher-pick');
+    await tick();
+    expect(hub.launcherPick).toHaveBeenCalledTimes(1);
+    expect(hub.launcherPick.mock.calls[0].length).toBe(0);           // the renderer never supplies a path
+    expect(S.launcherEl.innerHTML).toContain('Launcher file updated.');
+  });
+
+  it("'Not set' disables Launch; the OBS found sentence is added when OBS Virtual Camera is present", async () => {
+    const withObs = HP_DEVICES.concat([{ kind: 'videoinput', deviceId: 'cam-obs', label: 'OBS Virtual Camera' }]);
+    const hub = b2Hub({ launcherGet: vi.fn(async () => ({ ok: true, path: null, exists: false, isDefault: false })) });
+    const { S } = setup({ hub, devices: withObs });
+    await panel.show();
+    await tick();
+    const html = S.launcherEl.innerHTML;
+    expect(html).toContain('Launcher: Not set');
+    expect(html).toMatch(/data-action="launcher-run" aria-label="Launch virtual-camera setup" disabled/);
+    expect(html).toContain('the camera. OBS Virtual Camera is installed on this PC.');
+    expect(panel.launcherNote('found')).toBe(panel.LAUNCHER_NOTE + ' OBS Virtual Camera is installed on this PC.');
+    expect(panel.launcherNote('unknown')).toBe(panel.LAUNCHER_NOTE);
+  });
+
+  it('no forbidden phrase in any B2 rendered state; the honesty banner stays first', async () => {
+    const hub = b2Hub();
+    const { S } = setup({ hub, confirm: () => true });
+    await panel.show();
+    await tick();
+    click('launcher-run');
+    await tick();
+    const snaps = [allText(S.wrap), panel.renderLauncher({ path: null }), panel.renderLauncher({ path: BAT, exists: false, obsState: 'found', message: 'x' })];
+    for (const code of ['INVALID_PATH', 'NOT_FOUND', 'LAUNCH_FAILED', 'CANCELLED', 'BUSY']) snaps.push(panel.launcherMessage({ ok: false, code }));
+    const text = snaps.join('\n').toLowerCase();
+    for (const f of FORBIDDEN) expect(text.includes(f.toLowerCase())).toBe(false);
+    expect(S.wrap.children[0]).toBe(S.banner);
+    expect(bannerText(S)).toBe(L.HONESTY_BANNER);
   });
 });

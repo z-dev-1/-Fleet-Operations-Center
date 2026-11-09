@@ -82,7 +82,7 @@ describe('Zoom hub IPC surface', () => {
     }
   });
 
-  it('REAL is ordered in A1 / A2 / B1 / B2 blocks; A1 fills its seven channels and A2 its ten', () => {
+  it('REAL is ordered in A1 / A2 / B1 / B2 blocks; A1 fills 7, A2 10, B1 2 and B2 the 13 remaining studio channels', () => {
     const src = fs.readFileSync(require.resolve('../src/ipc/zoom-hub.js'), 'utf8');
     const i1 = src.indexOf('  // A1\n'.replace('\n', src.includes('\r\n') ? '\r\n' : '\n'));
     const i2 = src.indexOf('  // A2');
@@ -101,7 +101,11 @@ describe('Zoom hub IPC surface', () => {
     ]);
     const sblock = (a, b) => (src.slice(a, b).match(/'(zoom(?:Data|Studio):[a-z-]+)':/g) || []).map((s) => s.slice(1, -2)).sort();
     expect(sblock(i3, i4)).toEqual(['zoomStudio:media-status', 'zoomStudio:open-privacy']);
-    expect(Object.keys(hub.REAL).sort()).toEqual(hub.CHANNELS.data.concat(['zoomStudio:media-status', 'zoomStudio:open-privacy']).sort());
+    const end = src.indexOf('};', i4);
+    expect(sblock(i4, end)).toEqual(hub.CHANNELS.studio.filter((c) => c !== 'zoomStudio:media-status' && c !== 'zoomStudio:open-privacy').slice().sort());
+    expect(sblock(i4, end).length).toBe(13);
+    // Every CHANNELS entry now has a REAL handler when its area is on: no NOT_IMPLEMENTED left.
+    expect(Object.keys(hub.REAL).sort()).toEqual(hub.CHANNELS.data.concat(hub.CHANNELS.studio).sort());
     for (const k of Object.keys(hub.REAL)) expect(ALL).toContain(k);
   });
 });

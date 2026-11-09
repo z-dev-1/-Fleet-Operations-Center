@@ -83,6 +83,19 @@ const REAL = {
   'zoomStudio:media-status': () => require('../zoom/studio/media-status').status,
   'zoomStudio:open-privacy': () => require('../zoom/studio/media-status').openPrivacy,
   // B2
+  'zoomStudio:presets-list': () => require('../zoom/studio/presets').list,
+  'zoomStudio:preset-save': () => require('../zoom/studio/presets').save,
+  'zoomStudio:preset-rename': () => require('../zoom/studio/presets').rename,
+  'zoomStudio:preset-delete': () => require('../zoom/studio/presets').remove,
+  'zoomStudio:preset-select': () => require('../zoom/studio/presets').select,
+  'zoomStudio:library-list': () => require('../zoom/studio/library').list,
+  'zoomStudio:library-import': () => require('../zoom/studio/library').importImages,
+  'zoomStudio:library-read': () => require('../zoom/studio/library').read,
+  'zoomStudio:library-rename': () => require('../zoom/studio/library').rename,
+  'zoomStudio:library-delete': () => require('../zoom/studio/library').remove,
+  'zoomStudio:launcher-get': () => require('../zoom/studio/launcher').get,
+  'zoomStudio:launcher-pick': () => require('../zoom/studio/launcher').pick,
+  'zoomStudio:launcher-run': () => require('../zoom/studio/launcher').run,
 };
 
 const DISABLED = Object.freeze({ ok: false, code: 'DISABLED' });

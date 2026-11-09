@@ -143,3 +143,45 @@
 .tb-tab.zs-camera-on::after {
   content: '●'; color: var(--red, #da3633); margin-left: 4px; font-size: 10px; vertical-align: super;
 }
+
+/* Studio presets, library, launcher (FEAT-B2) */
+#view-zoom .zs-presets-host,
+#view-zoom .zs-launcher-host { display: flex; flex-direction: column; gap: 10px; }
+#view-zoom .zs-presets,
+#view-zoom .zs-library,
+#view-zoom .zs-launcher {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--border, #30363d); border-radius: 8px; padding: 8px 10px;
+}
+#view-zoom .zs-sub { margin: 0; font-size: 14px; }
+#view-zoom .zs-input {
+  font: inherit; color: inherit; background: var(--surface, rgba(255, 255, 255, 0.03));
+  border: 1px solid var(--border, #30363d); border-radius: 6px; padding: 3px 6px;
+}
+#view-zoom .zs-preset-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+#view-zoom .zs-preset-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; }
+#view-zoom .zs-preset-row.zs-selected { border: 1px solid var(--accent, #58a6ff); }
+#view-zoom .zs-preset-name { min-width: 120px; font-weight: 600; }
+#view-zoom .zs-slots { display: flex; flex-wrap: wrap; gap: 8px; }
+#view-zoom .zs-slot {
+  flex: 1 1 200px; min-height: 48px; padding: 6px 8px;
+  border: 1px dashed var(--border, #30363d); border-radius: 6px;
+}
+#view-zoom .zs-ov-list { list-style: none; margin: 4px 0 0; padding: 0; }
+#view-zoom .zs-lib-grid {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px;
+}
+#view-zoom .zs-lib-item {
+  display: flex; flex-direction: column; gap: 4px; padding: 5px;
+  border: 1px solid var(--border, #30363d); border-radius: 6px; cursor: grab;
+}
+#view-zoom .zs-lib-thumb { width: 160px; height: auto; max-height: 120px; object-fit: contain; background: #000; border-radius: 4px; }
+#view-zoom .zs-lib-broken,
+#view-zoom .zs-lib-loading {
+  width: 160px; height: 90px; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; text-align: center; border-radius: 4px; background: rgba(218, 54, 51, 0.12);
+}
+#view-zoom .zs-lib-loading { background: rgba(255, 255, 255, 0.05); }
+#view-zoom .zs-lib-name { font-size: 12px; word-break: break-word; }
+#view-zoom .zs-launcher-file { font-size: 12px; word-break: break-all; }

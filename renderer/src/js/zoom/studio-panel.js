@@ -22,8 +22,56 @@ import {
 } from './studio-logic.js';
 import { createDevices } from './studio-devices.js';
 import { createPipeline } from './studio-pipeline.js';
+// FEAT-B2: presets + library (div.zs-presets-host) and the launcher section (div.zs-launcher-host).
+import { createPresetsPanel } from './presets-panel.js';
+import { createLibraryPanel } from './library-panel.js';
+import { codeMessage } from './data-logic.js';
+import { MAX_OVERLAYS } from './studio-logic.js';
 
 let S = null;
+
+// ── FEAT-B2 launcher section (design §15.4; review F-8) ─────────────────────
+// The launcher only starts the user's own Grim Reaper / OBS setup outside Fleet. Fleet's preview is
+// stopped first so the Grim Reaper page can use the camera.
+export const LAUNCHER_TITLE = 'Virtual-camera setup (outside Fleet)';
+export const LAUNCHER_BUTTON = 'Launch virtual-camera setup';
+export const LAUNCHER_NOTE = "Starts your Grim Reaper page. OBS must capture that window and Start Virtual Camera; then pick 'OBS Virtual Camera' in Zoom. Fleet's preview is stopped so the Grim Reaper page can use the camera.";
+export const LAUNCHER_OBS_FOUND = ' OBS Virtual Camera is installed on this PC.';
+export const LAUNCHER_STARTED = 'Launcher started outside Fleet.';
+
+/** launcherNote(obsState) -> the note under the launcher buttons. */
+export function launcherNote(obs) {
+  return LAUNCHER_NOTE + (obs === 'found' ? LAUNCHER_OBS_FOUND : '');
+}
+
+/** launcherMessage(r) -> status line for a launcher-run / launcher-pick result ('' for CANCELLED). */
+export function launcherMessage(r) {
+  if (r && r.ok) return LAUNCHER_STARTED;
+  const code = r && r.code ? r.code : 'INTERNAL';
+  if (code === 'CANCELLED') return '';
+  if (code === 'NOT_FOUND') return 'Launcher file not found. Use Change… to pick it.';
+  return codeMessage(code);
+}
+
+/** renderLauncher({path, exists, isDefault, obsState, busy, message}) -> launcher section HTML (pure). */
+export function renderLauncher(st) {
+  const s = st || {};
+  const p = typeof s.path === 'string' && s.path ? s.path : null;
+  const where = p
+    ? `<code class="zs-launcher-file">${esc(p)}</code>${s.isDefault ? ' (default)' : ''}${s.exists === false ? ' (file not found)' : ''}`
+    : 'Not set';
+  const runDis = !p || s.busy ? ' disabled' : '';
+  return `<section class="zs-launcher" aria-label="${esc(LAUNCHER_TITLE)}">` +
+    `<h4 class="zs-sub">${esc(LAUNCHER_TITLE)}</h4>` +
+    `<p class="zs-launcher-path">Launcher: ${where}</p>` +
+    '<div class="zs-row">' +
+      `<button type="button" class="zh-btn" data-action="launcher-run" aria-label="${esc(LAUNCHER_BUTTON)}"${runDis}>${esc(LAUNCHER_BUTTON)}</button> ` +
+      `<button type="button" class="zh-btn" data-action="launcher-pick" aria-label="Change launcher file"${s.busy ? ' disabled' : ''}>Change…</button>` +
+    '</div>' +
+    `<p class="zs-note">${esc(launcherNote(s.obsState))}</p>` +
+    `<div class="zs-launcher-msg" role="status" aria-live="polite">${s.message ? `<span>${esc(s.message)}</span>` : ''}</div>` +
+  '</section>';
+}
 
 const BLOCKED = new Set(['denied', 'restricted']);
 
@@ -241,6 +289,23 @@ export function mount(el, opts = {}) {
   wrap.addEventListener('input', S.onChange);
   if (win && typeof win.addEventListener === 'function') { try { win.addEventListener('beforeunload', S.onUnload); } catch (_) {} }
 
+  // FEAT-B2 mount points.
+  const confirmFn = typeof opts.confirm === 'function'
+    ? opts.confirm
+    : (win && typeof win.confirm === 'function' ? (m) => win.confirm(m) : () => false);
+  const studioApi = { applyPreset, currentPreset, assignImage, clearImage, updateOverlay, forgetImage };
+  S.launcher = { path: null, exists: false, isDefault: false, busy: false, message: '' };
+  S.launcherEl = mk('div', 'zs-launcher-panel');
+  launcherHost.appendChild(S.launcherEl);
+  S.presetsPanel = createPresetsPanel(presetsHost, {
+    zoomHub, document: doc, studio: studioApi, confirm: confirmFn,
+    onApplied: () => { if (S && S.libraryPanel) S.libraryPanel.render(); },
+  });
+  S.libraryPanel = createLibraryPanel(presetsHost, {
+    zoomHub, document: doc, studio: studioApi, confirm: confirmFn,
+    onChange: () => { if (S && S.presetsPanel) S.presetsPanel.refresh(); },
+  });
+
   _render();
   return S;
 }
@@ -271,6 +336,50 @@ function _render() {
   _renderStatus();
   _renderObs();
   _renderBadge();
+  _renderLauncher();
+}
+
+function _renderLauncher() {
+  if (!S || !S.launcherEl) return;
+  S.launcherEl.innerHTML = renderLauncher(Object.assign({}, S.launcher, { obsState: S.obsState }));
+}
+
+async function _refreshLauncher() {
+  if (!S) return;
+  let r = null;
+  try { r = typeof S.zoomHub.launcherGet === 'function' ? await S.zoomHub.launcherGet() : null; } catch (_) { r = null; }
+  if (!S) return;
+  if (r && r.ok) Object.assign(S.launcher, { path: typeof r.path === 'string' ? r.path : null, exists: !!r.exists, isDefault: !!r.isDefault });
+  _renderLauncher();
+}
+
+/** _launch() -- review F-8: stop Fleet's preview (every track) BEFORE launcherRun, so the Grim Reaper page can use the camera. */
+async function _launch() {
+  if (!S || S.launcher.busy) return;
+  stopAll();
+  S.launcher.busy = true;
+  S.launcher.message = '';
+  _renderLauncher();
+  let r = null;
+  try { r = typeof S.zoomHub.launcherRun === 'function' ? await S.zoomHub.launcherRun() : { ok: false, code: 'UNAVAILABLE' }; } catch (_) { r = { ok: false, code: 'INTERNAL' }; }
+  if (!S) return;
+  S.launcher.busy = false;
+  S.launcher.message = launcherMessage(r);
+  _renderLauncher();
+}
+
+async function _pickLauncher() {
+  if (!S || S.launcher.busy) return;
+  let r = null;
+  try { r = typeof S.zoomHub.launcherPick === 'function' ? await S.zoomHub.launcherPick() : { ok: false, code: 'UNAVAILABLE' }; } catch (_) { r = { ok: false, code: 'INTERNAL' }; }
+  if (!S) return;
+  if (r && r.ok) {
+    S.launcher.message = 'Launcher file updated.';
+    await _refreshLauncher();
+    return;
+  }
+  S.launcher.message = launcherMessage(r);
+  _renderLauncher();
 }
 
 function _renderStatus() {
@@ -482,6 +591,8 @@ function _onClick(e) {
   else if (a === 'rescan') { if (S) S.mediaState = null; refreshDevices(); }
   else if (a === 'mic-test') _toggleMic();
   else if (a === 'open-privacy') _openPrivacy(b.dataset.which);
+  else if (a === 'launcher-run') _launch();
+  else if (a === 'launcher-pick') _pickLauncher();
 }
 
 function _onChange(e) {
@@ -530,7 +641,13 @@ export function show() {
   S.visible = true;
   _subscribeDevices();
   // mediaStatus + enumerateDevices only. Never getUserMedia on show.
-  return Promise.all([refreshMedia(), refreshDevices()]).then(() => { if (S) _render(); });
+  // FEAT-B2: after the devices are known, list presets (the first show restores lastPresetId onto the
+  // controls without opening the camera), the library and the launcher path.
+  return Promise.all([refreshMedia(), refreshDevices()]).then(() => {
+    if (!S) return null;
+    _render();
+    return Promise.all([S.presetsPanel.show(), S.libraryPanel.show(), _refreshLauncher()]);
+  }).then(() => { if (S) { S.libraryPanel.render(); _render(); } });
 }
 
 export function hide() {
@@ -563,6 +680,8 @@ export function destroy() {
   try { S.wrap.removeEventListener('change', S.onChange); } catch (_) {}
   try { S.wrap.removeEventListener('input', S.onChange); } catch (_) {}
   if (S.win && typeof S.win.removeEventListener === 'function') { try { S.win.removeEventListener('beforeunload', S.onUnload); } catch (_) {} }
+  try { S.presetsPanel.destroy(); } catch (_) {}
+  try { S.libraryPanel.destroy(); } catch (_) {}   // clears the in-memory WebP thumbnail Map
   S.images.clear();
   S = null;
 }
@@ -605,6 +724,57 @@ export function currentPreset() {
   const dev = (list, id) => { const d = list.find((x) => x.deviceId === id); return { id: id || null, label: d && d.label ? d.label : null }; };
   const st = S.pipeline.getState();
   return { camera: dev(S.cameras, S.cameraId), mic: dev(S.mics, S.micId), effect: st.effect, adjust: st.adjust, overlays: st.overlays };
+}
+
+/**
+ * assignImage(slot, id) -- put a library image on the Background (chroma-key backdrop), Avatar
+ * (full-frame image mode) or Overlay slot. Never starts the camera. Returns {ok, message?}.
+ */
+export function assignImage(slot, id) {
+  if (!S) return { ok: false };
+  if (slot === 'background') S.pipeline.setEffect({ chromaKey: { backgroundId: id } });
+  else if (slot === 'avatar') S.pipeline.setEffect({ imageId: id });
+  else if (slot === 'overlay') {
+    const ov = S.pipeline.getState().overlays;
+    if (ov.length >= MAX_OVERLAYS) return { ok: false, message: 'At most ' + MAX_OVERLAYS + ' overlays. Clear one first.' };
+    S.pipeline.setOverlays(ov.concat([{ imageId: id, x: RANGES.x.def, y: RANGES.y.def, scale: RANGES.scale.def, opacity: RANGES.opacity.def }]));
+  } else {
+    return { ok: false };
+  }
+  _render();
+  const mode = S.pipeline.getState().effect.mode;
+  if (slot === 'background' && mode !== 'chromaKey') return { ok: true, message: "Background set. Pick 'Green-screen replace' under Effect to use it." };
+  if (slot === 'avatar' && mode !== 'image') return { ok: true, message: "Avatar set. Pick 'Full-frame image' under Effect to show it." };
+  return { ok: true };
+}
+
+/** clearImage(slot, index) -- empty a slot (overlay: the one at index). */
+export function clearImage(slot, index) {
+  if (!S) return;
+  if (slot === 'background') S.pipeline.setEffect({ chromaKey: { backgroundId: null } });
+  else if (slot === 'avatar') S.pipeline.setEffect({ imageId: null });
+  else if (slot === 'overlay') S.pipeline.setOverlays(S.pipeline.getState().overlays.filter((_o, i) => i !== index));
+  _render();
+}
+
+/** updateOverlay(index, patch) -- move / scale / fade one overlay (values clamped by the pipeline). */
+export function updateOverlay(index, patch) {
+  if (!S) return;
+  const ov = S.pipeline.getState().overlays;
+  if (!ov[index]) return;
+  ov[index] = Object.assign({}, ov[index], patch || {});
+  S.pipeline.setOverlays(ov);
+}
+
+/** forgetImage(id) -- a library image was deleted: drop it from the current controls and caches. */
+export function forgetImage(id) {
+  if (!S) return;
+  const st = S.pipeline.getState();
+  if (st.effect.chromaKey.backgroundId === id) S.pipeline.setEffect({ chromaKey: { backgroundId: null } });
+  if (st.effect.imageId === id) S.pipeline.setEffect({ imageId: null });
+  if (st.overlays.some((o) => o.imageId === id)) S.pipeline.setOverlays(st.overlays.filter((o) => o.imageId !== id));
+  S.images.delete(id);
+  _render();
 }
 
 /** _state() -- test seam. */
