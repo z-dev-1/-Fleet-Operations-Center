@@ -55,7 +55,11 @@ const REPLAY_MAX_BYTES = 256 * 1024;
 const PARTITION = 'persist:fleet-zoom-probe';
 const PORTAL_URL = 'https://amazon.zoom.us/';
 // Signed-in portal pages to load so the SPA fires its own authed back-end calls (CDP observes them).
-const SIGNED_IN_PAGES = Object.freeze(['/profile', '/meeting', '/meeting#/upcoming', '/recording']);
+// Live run 1 (2026-11-09) confirmed these pages drive the portal's OWN back-end calls on
+// amazon.zoom.us: GET /profile, POST /rest/meeting/list (meetings), GET /nws/recording/1.0/recording-info
+// and POST /nws/recording/1.0/host-list (recordings). The /meeting#/upcoming hash route is served by
+// the same /meeting document, so it is dropped to avoid a redundant reload.
+const SIGNED_IN_PAGES = Object.freeze(['/profile', '/meeting', '/recording']);
 
 // Zoom hosts the probe is allowed to contact: the portal origin + any *.zoom.us regional fan-out host
 // (findings §2: the captured call went to us01campaign.zoom.us with Origin amazon.zoom.us).
@@ -304,14 +308,22 @@ function createAuthCapture() {
 // The read-only GET targets the probe replays from the authenticated amazon.zoom.us context. Each is
 // a PURE GET for the user's own data and reports presence/counts/key-shape only (never topics,
 // participant names, emails, join URLs or any body text). Paths are relative to the portal origin.
+// Live run 1 (2026-11-09) correction: amazon.zoom.us is NOT the public Marketplace REST API host, so the
+// guessed /api/v2/* paths all 404'd. The CDP capture (zoom-probe-network-*.json) showed the portal's OWN
+// authed back-end calls. The portal serves its list data over POST (/rest/meeting/list for meetings,
+// /nws/recording/1.0/host-list for recordings, /wc/webapp/header for profile) and a few read endpoints over
+// GET (/nws/recording/1.0/recording-info, /account/user/assistant_host). This probe is strictly read-only
+// and issues GET ONLY, so a POST-only portal endpoint is recorded by SHAPE (portalMethod) and NOT retrieved
+// (getRetrievable:false) rather than hitting it with a mismatched GET. Each target keeps its documented
+// action name; `portalMethod` is the verb the portal itself used, recorded for the feasibility writeup.
 const REPLAY_TARGETS = Object.freeze([
-  { action: 'profile', path: '/api/v2/users/me' },
-  { action: 'meetings-upcoming', path: '/api/v2/users/me/meetings?type=upcoming&page_size=30' },
-  { action: 'meetings-previous', path: '/api/v2/users/me/meetings?type=previous_meetings&page_size=30' },
-  { action: 'meeting-detail', path: '/api/v2/meetings/{firstMeetingId}' },
-  { action: 'recordings-list', path: '/api/v2/users/me/recordings?page_size=30' },
-  { action: 'recording-transcript-availability', path: '/api/v2/meetings/{firstRecordingId}/recordings' },
-  { action: 'past-participants', path: '/api/v2/past_meetings/{firstMeetingUuid}/participants?page_size=30' },
+  { action: 'profile', path: '/account/user/assistant_host', portalMethod: 'GET', getRetrievable: true },
+  { action: 'meetings-upcoming', path: '/rest/meeting/list', portalMethod: 'POST', getRetrievable: false },
+  { action: 'meetings-previous', path: '/rest/meeting/list', portalMethod: 'POST', getRetrievable: false },
+  { action: 'meeting-detail', path: '/rest/meeting/list', portalMethod: 'POST', getRetrievable: false },
+  { action: 'recordings-list', path: '/nws/recording/1.0/host-list', portalMethod: 'POST', getRetrievable: false },
+  { action: 'recording-transcript-availability', path: '/nws/recording/1.0/recording-info', portalMethod: 'GET', getRetrievable: true },
+  { action: 'past-participants', path: '/nws/recording/1.0/host-list', portalMethod: 'POST', getRetrievable: false },
 ]);
 
 const REPLAY_AUTH_HEADER_NAMES = ['authorization', 'zoom-csrftoken', 'x-zm-csrf'];
@@ -367,6 +379,9 @@ function buildReplayScript(o) {
     '  for (var i=0;i<C.targets.length;i++){ var tgt = C.targets[i];\n' +
     '    // Skip targets whose path still contains an unresolved {placeholder} (no id discovered).\n' +
     '    if (/\\{[a-zA-Z]+\\}/.test(tgt.path)) { out[tgt.action] = { skipped:true, reason:"no-id-discovered" }; continue; }\n' +
+    '    // The portal serves some data ONLY over POST. This probe is read-only / GET-only, so such an\n' +
+    '    // endpoint is recorded by SHAPE (its real verb) and NEVER issued — not retrievable via a GET.\n' +
+    '    if (tgt.getRetrievable === false) { out[tgt.action] = { skipped:true, notRetrievableViaGet:true, portalMethod: tgt.portalMethod || "POST", pathPattern: tgt.path }; continue; }\n' +
     '    out[tgt.action] = await get(tgt.path);\n' +
     '  }\n' +
     '  out.headerNamesSent = C.headerNames;\n' +
@@ -686,8 +701,11 @@ async function _execJson(w, script) {
 }
 
 // ───────────────────────────── Tier 1 (main-process, no page) ─────────────────────────────
-// A read-only GET for the user's own upcoming meetings — a pure list read, no ids, no write pattern.
-const TIER1_PATH = '/api/v2/users/me/meetings?type=upcoming&page_size=30';
+// A read-only GET for the user's own data on the portal host. Live run 1 (2026-11-09) showed the
+// portal's meeting LIST is POST-only (/rest/meeting/list) so it is not a valid GET target; the real
+// GET-retrievable authed portal endpoint is the recordings read /nws/recording/1.0/recording-info.
+// Pure GET, no ids in the path, no write pattern — used to test windowless reuse of session material.
+const TIER1_PATH = '/nws/recording/1.0/recording-info';
 
 function _pushUnique(arr, v) { if (!arr.includes(v)) arr.push(v); }
 
@@ -970,7 +988,7 @@ function _classifyWrite(recorder) {
     observedWriteShapes: writeShapes,
     note: writeShapes.length
       ? 'Write-shaped requests were observed on the wire but the harness NEVER issued one; the replay/net/child layers hard-refuse any non-GET and any write-pattern path. These are recorded by SHAPE only (method + masked path) for the follow-up decision.'
-      : 'No write-shaped request was observed during the read-only run (expected). Zoom portal write calls (schedule/create meeting, start/join, delete recording) are non-GET POST/PUT/PATCH/DELETE on /api/v2/users/me/meetings, /api/v2/meetings/{id}, or /api/v2/meetings/{id}/recordings; identified by shape only, NEVER issued.',
+      : 'No write-shaped request was observed during the read-only run (expected). On amazon.zoom.us the portal\'s own mutating calls (schedule/create meeting, start/join, delete recording) are non-GET POST/PUT/PATCH/DELETE on portal paths such as /rest/meeting/list, /nws/recording/1.0/host-list and /wc/webapp/header; identified by shape only, NEVER issued.',
   };
 }
 
