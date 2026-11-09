@@ -41,6 +41,7 @@ import { init as initDailyNotes }         from './views/daily-notes.js';
 import { init as initNotesLinks }         from './views/notes-links.js';
 import { init as initRcaQueue }           from './views/rca-queue.js';
 import { init as initDailyCall }          from './views/daily-call.js';
+import { init as initMeetings }           from './views/meetings.js';
 import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
 import { init as initTrends }             from './views/trends.js';
 
@@ -137,6 +138,8 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initNotesLinks(viewsMount);
   initRcaQueue(viewsMount);
   initDailyCall(viewsMount);
+  // Meetings tab (zoom.enabled): self-manages visibility; no-op when the flag is off.
+  initMeetings(viewsMount).catch((e) => console.warn('[meetings] init failed:', e && e.message));
   initWorkflowIntel(viewsMount);
   initTrends(viewsMount);
 

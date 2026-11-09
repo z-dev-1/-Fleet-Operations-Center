@@ -480,6 +480,19 @@ expose('aap', {
   openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
 });
 
+// ── Zoom Meetings tab (zoom.enabled, default OFF; channels return DISABLED when off) ──
+expose('zoomMeet', {
+  status:        ()        => ipcRenderer.invoke('zoomMeet:status'),
+  join:          (payload) => ipcRenderer.invoke('zoomMeet:join', payload),
+  openHome:      ()        => ipcRenderer.invoke('zoomMeet:open-home'),
+  setBounds:     (rect)    => ipcRenderer.invoke('zoomMeet:set-bounds', rect),
+  detach:        (opts)    => ipcRenderer.invoke('zoomMeet:detach', opts),
+  dock:          ()        => ipcRenderer.invoke('zoomMeet:dock'),
+  leave:         ()        => ipcRenderer.invoke('zoomMeet:leave'),
+  openInZoomApp: ()        => ipcRenderer.invoke('zoomMeet:open-in-zoom-app'),
+  onState:       (cb)      => on('zoomMeet:state', cb),
+});
+
 // ── QuickSight DBR DATA (Daily Call) ──────────────────────────────────────────
 // captureAfp/captureDsp return raw page text (QuickSight's pivot-table DOM
 // has no stable selector shape); the renderer feeds that text to AI to

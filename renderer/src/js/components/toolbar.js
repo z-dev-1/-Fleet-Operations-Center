@@ -24,6 +24,7 @@ const TAB_VIEW = {
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
+  meetings:   'meetings',
   'workflow-intel': 'workflow-intel',
 };
 
@@ -70,6 +71,10 @@ export function init(container) {
         </button>
         <button class="tb-tab" data-view="email-composer">
           <span class="tb-tab-icon">📧</span> Email</button><button class="tb-tab" data-view="daily-call"><span class="tb-tab-icon">📞</span> Daily Call
+        </button>
+        <!-- Meetings (zoom.enabled): hidden until views/meetings.js confirms the flag is on -->
+        <button class="tb-tab" data-view="meetings" id="tb-tab-meetings" style="display:none">
+          <span class="tb-tab-icon">🎥</span> Meetings
         </button>
       </div>
 

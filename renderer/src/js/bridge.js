@@ -490,6 +490,22 @@ export const aap = {
   openUrl:           (url)                 => window.aap.openUrl(url),
 };
 
+// ── Zoom Meetings tab (zoom.enabled, default OFF) ───────────────────────────
+// Every call resolves to { ok:false, code:'DISABLED' } when the flag is off,
+// or { ok:false, code:'UNAVAILABLE' } if the preload bridge is missing.
+const _zm = (fn) => (...a) => (window.zoomMeet ? window.zoomMeet[fn](...a) : Promise.resolve({ ok: false, code: 'UNAVAILABLE' }));
+export const zoomMeet = {
+  status:        _zm('status'),
+  join:          _zm('join'),
+  openHome:      _zm('openHome'),
+  setBounds:     _zm('setBounds'),
+  detach:        _zm('detach'),
+  dock:          _zm('dock'),
+  leave:         _zm('leave'),
+  openInZoomApp: _zm('openInZoomApp'),
+  onState:       (cb) => (window.zoomMeet ? window.zoomMeet.onState(cb) : () => {}),
+};
+
 // ── QuickSight DBR DATA (Daily Call) ────────────────────────────────────────
 export const quicksight = {
   captureAfp:  () => window.quicksight.captureAfp(),

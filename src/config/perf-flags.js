@@ -722,7 +722,46 @@ function loadEmailIntel(deps = {}) {
   }
 }
 
+// ── Zoom Meetings tab (default OFF) ─────────────────────────────────────────
+//   settings.zoom.enabled  boolean (=== true) / FLEET_ZOOM_ENABLED '0'|'1' (env wins, junk ignored)
+// Non-flag options (validated, never hardcoded meeting data):
+//   settings.zoom.portalHost   tenant portal host, default 'amazon.zoom.us' (must be *.zoom.us)
+//   settings.zoom.webAppHost   Zoom web app host,  default 'app.zoom.us'    (must be *.zoom.us)
+//   settings.zoom.miniPlayer   'corner' | 'floating', default 'corner'
+// Read once at startup (restart to change). No new store key: 'settings' is already in the REGISTRY.
+const ZOOM_MEET_ENV = 'FLEET_ZOOM_ENABLED';
+const ZOOM_HOST_RE = /^([a-z0-9-]+\.)*zoom\.us$/i;
+function _zoomHost(v, dflt) {
+  return (typeof v === 'string' && ZOOM_HOST_RE.test(v.trim())) ? v.trim().toLowerCase() : dflt;
+}
+function resolveZoomMeetFlags(settings, env) {
+  const z = _obj(_obj(settings).zoom);
+  let enabled = z.enabled === true;
+  const e = _envBool(env, ZOOM_MEET_ENV);
+  if (e !== null) enabled = e;
+  return {
+    enabled,
+    portalHost: _zoomHost(z.portalHost, 'amazon.zoom.us'),
+    webAppHost: _zoomHost(z.webAppHost, 'app.zoom.us'),
+    miniPlayer: z.miniPlayer === 'floating' ? 'floating' : 'corner',
+  };
+}
+function loadZoomMeet(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveZoomMeetFlags(settings, env);
+  } catch (_) {
+    return resolveZoomMeetFlags({}, {});
+  }
+}
+
 module.exports = {
+  resolveZoomMeetFlags, loadZoomMeet, ZOOM_MEET_ENV,
   resolveFlags, load, resolveAiGatewayFlags, loadAiGateway, AI_GW_RESERVE_DEFAULT,
   resolveCommsFlags, loadComms, COMMS_POLLING_MODES,
   resolveWorkerFlags, loadWorkers, WORKER_NAMES, WORKER_ENV,

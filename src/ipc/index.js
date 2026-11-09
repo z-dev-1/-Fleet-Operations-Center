@@ -84,6 +84,8 @@ function registerAllIPC(ctx) {
   registerTelemetryIPC(ctx);
   registerWorkersIPC(ctx);
   registerHealthIPC(ctx);
+  // Meetings tab (zoom.enabled, default OFF): inert DISABLED handlers when off.
+  try { require('./zoom-meet').registerZoomMeetIPC(ctx); } catch (e) { logger.warn('Zoom Meetings IPC registration failed: ' + e.message); }
   // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).
   try { require('./rca').registerRcaIPC(); } catch (e) { logger.warn('RCA IPC registration failed: ' + e.message); }
   logger.info('All IPC handlers registered');
