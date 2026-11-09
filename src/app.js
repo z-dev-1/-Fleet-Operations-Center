@@ -844,6 +844,16 @@ function _startAutoSync() {
     catch (e) { log.warn('[owa-probe] could not start: ' + e.message); }
   }
 
+  // DEV-ONLY, READ-ONLY Zoom portal API / windowless probe (dev aid): FLEET_ZOOM_PROBE_DIR=<dir>.
+  // Completely inert unless the env var is set. A few minutes after startup it opens its OWN hidden
+  // window on a dedicated persist:fleet-zoom-probe partition seeded read-only with Midway cookies,
+  // drives the user's own amazon.zoom.us portal session, runs read-only GET replays + windowless
+  // tiers, writes zoom-probe-*.json, and logs `[zoom-probe] done`. Never sends/schedules/deletes.
+  if (process.env.FLEET_ZOOM_PROBE_DIR) {
+    try { require('./dev/dev-zoom-probe').start({ log }); }
+    catch (e) { log.warn('[zoom-probe] could not start: ' + e.message); }
+  }
+
   // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
   // GETs the RCA template + that WR's saved responses through the AAP page and
   // logs the outcome. Never submits anything.
