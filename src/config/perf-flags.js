@@ -722,31 +722,41 @@ function loadEmailIntel(deps = {}) {
   }
 }
 
-// ── Zoom Meetings tab (default OFF) ─────────────────────────────────────────
-//   settings.zoom.enabled  boolean (=== true) / FLEET_ZOOM_ENABLED '0'|'1' (env wins, junk ignored)
-// Non-flag options (validated, never hardcoded meeting data):
-//   settings.zoom.portalHost   tenant portal host, default 'amazon.zoom.us' (must be *.zoom.us)
-//   settings.zoom.webAppHost   Zoom web app host,  default 'app.zoom.us'    (must be *.zoom.us)
-//   settings.zoom.miniPlayer   'corner' | 'floating', default 'corner'
-// Read once at startup (restart to change). No new store key: 'settings' is already in the REGISTRY.
-const ZOOM_MEET_ENV = 'FLEET_ZOOM_ENABLED';
-const ZOOM_HOST_RE = /^([a-z0-9-]+\.)*zoom\.us$/i;
-function _zoomHost(v, dflt) {
-  return (typeof v === 'string' && ZOOM_HOST_RE.test(v.trim())) ? v.trim().toLowerCase() : dflt;
-}
-function resolveZoomMeetFlags(settings, env) {
+// Zoom AI studio (all default OFF): settings.zoom.{enabled,data,studio,write} === true, or
+// FLEET_ZOOM / FLEET_ZOOM_DATA / FLEET_ZOOM_STUDIO / FLEET_ZOOM_WRITE '0'|'1' (env wins over settings;
+// FLEET_ZOOM_ENABLED is an alias for FLEET_ZOOM, used only when the primary is unset). Effective chain:
+//   enabled = raw.enabled
+//   data    = enabled && raw.data
+//   studio  = enabled && raw.studio
+//   write   = data(eff) && raw.write
+// No area effective (data and studio both off) is the flag-OFF parity state, even with enabled:true.
+const ZOOM_ENV = { enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE' };
+const ZOOM_ENV_ALIASES = { enabled: ['FLEET_ZOOM_ENABLED'] };
+
+function resolveZoomFlags(settings, env) {
   const z = _obj(_obj(settings).zoom);
-  let enabled = z.enabled === true;
-  const e = _envBool(env, ZOOM_MEET_ENV);
-  if (e !== null) enabled = e;
-  return {
-    enabled,
-    portalHost: _zoomHost(z.portalHost, 'amazon.zoom.us'),
-    webAppHost: _zoomHost(z.webAppHost, 'app.zoom.us'),
-    miniPlayer: z.miniPlayer === 'floating' ? 'floating' : 'corner',
-  };
+  const raw = {};
+  for (const k of Object.keys(ZOOM_ENV)) {
+    let on = z[k] === true;
+    let e = _envBool(env, ZOOM_ENV[k]);
+    if (e === null && ZOOM_ENV_ALIASES[k]) {
+      for (const a of ZOOM_ENV_ALIASES[k]) { const v = _envBool(env, a); if (v !== null) { e = v; break; } }
+    }
+    if (e !== null) on = e;
+    raw[k] = on;
+  }
+  const effective = {};
+  effective.enabled = raw.enabled;
+  effective.data = raw.enabled && raw.data;
+  effective.studio = raw.enabled && raw.studio;
+  effective.write = effective.data && raw.write;
+  const warnings = [];
+  if (raw.write && !effective.data) warnings.push('write-needs-data');
+  if (raw.enabled && !raw.data && !raw.studio) warnings.push('enabled-without-area');
+  return Object.assign({}, raw, { effective, warnings });
 }
-function loadZoomMeet(deps = {}) {
+
+function loadZoom(deps = {}) {
   try {
     const env = deps.env || process.env;
     let settings = {};
@@ -754,9 +764,9 @@ function loadZoomMeet(deps = {}) {
       const loadFn = deps.load || require('../store').load;
       settings = loadFn('settings', {}) || {};
     } catch (_) { settings = {}; }
-    return resolveZoomMeetFlags(settings, env);
+    return resolveZoomFlags(settings, env);
   } catch (_) {
-    return resolveZoomMeetFlags({}, {});
+    return resolveZoomFlags({}, {});
   }
 }
 
@@ -776,4 +786,5 @@ module.exports = {
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
   resolveEmailIntelFlags, loadEmailIntel, EMAIL_INTEL_ENV, EMAIL_INTEL_API_ENV,
+  resolveZoomFlags, loadZoom, ZOOM_ENV, ZOOM_ENV_ALIASES,
 };

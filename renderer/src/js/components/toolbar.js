@@ -28,9 +28,48 @@ const TAB_VIEW = {
   'workflow-intel': 'workflow-intel',
 };
 
+// Topbar root, kept so addTab() can find .tb-nav after init().
+let _topbarEl = null;
+
+// Shared nav-tab click behaviour (static tabs and addTab() tabs).
+function _onTabClick(btn) {
+  _topbarEl.querySelectorAll('.tb-tab').forEach((t) => t.classList.remove('active'));
+  btn.classList.add('active');
+  const view = TAB_VIEW[btn.dataset.view] || 'fleet';
+  // Pass the raw tab key too: "Fleet" and "Dashboard" both route to the
+  // fleet view, but the Fleet Overview strip only shows on Dashboard.
+  bus.emit('ui:view-change', { from: 'fleet', to: view, tab: btn.dataset.view });
+}
+
+/**
+ * addTab({key, view, label, icon}) -- append a nav tab at runtime (used by
+ * flag-gated views such as the Zoom hub). Idempotent by key.
+ */
+export function addTab({ key, view, label, icon } = {}) {
+  if (!_topbarEl || !key) return null;
+  const nav = _topbarEl.querySelector('.tb-nav');
+  if (!nav) return null;
+  const existing = Array.from(nav.querySelectorAll('.tb-tab')).find((b) => b.dataset && b.dataset.view === key);
+  if (existing) return existing;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tb-tab';
+  btn.dataset.view = key;
+  const ic = document.createElement('span');
+  ic.className = 'tb-tab-icon';
+  ic.textContent = icon || '';
+  btn.appendChild(ic);
+  btn.appendChild(document.createTextNode(' ' + (label || key)));
+  TAB_VIEW[key] = view || key;
+  btn.addEventListener('click', () => _onTabClick(btn));
+  nav.appendChild(btn);
+  return btn;
+}
+
 export function init(container) {
   const el = document.createElement('div');
   el.id = 'topbar-wrap';
+  _topbarEl = el;
   el.innerHTML = `
     <!-- ══ TOPBAR ══ -->
     <nav id="topbar">
@@ -159,14 +198,7 @@ export function init(container) {
 
   // ── Nav tabs ────────────────────────────────────────────────────────────
   el.querySelectorAll('.tb-tab').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      el.querySelectorAll('.tb-tab').forEach((t) => t.classList.remove('active'));
-      btn.classList.add('active');
-      const view = TAB_VIEW[btn.dataset.view] || 'fleet';
-      // Pass the raw tab key too: "Fleet" and "Dashboard" both route to the
-      // fleet view, but the Fleet Overview strip only shows on Dashboard.
-      bus.emit('ui:view-change', { from: 'fleet', to: view, tab: btn.dataset.view });
-    });
+    btn.addEventListener('click', () => _onTabClick(btn));
   });
 
   // ── Window controls (minimize, maximize, close) ─────────────────────────

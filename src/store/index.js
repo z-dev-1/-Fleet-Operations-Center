@@ -351,6 +351,17 @@ const REGISTRY = {
   // sync engine so a promoted standby pulls/shows the SAME fleet scope as the
   // desktop app (device-specific settings stay local; only this list crosses).
   clusterFleetFilter:      () => path.join(P.dataDir, 'cluster_fleet_filter.json'),
+  // Zoom AI studio (flags zoom.*, default OFF; local only, never SQLite or cluster-synced).
+  // Shape: { version:1, links: { [meetingKey]: { topic, startIso, kind:'meeting'|'recording', targets:[{kind:'unit'|'carrier', id, linkedAt}] } } }
+  zoomLinks:               () => path.join(P.dataDir, 'zoom_links.json'),
+  // Shape: { version:1, consentAt:null|ISO, items: { [meetingKey]: { transcriptSha256, source:'portal'|'import', segmentCount, summary:{keyPoints,actionItems,decisions}, dropped, createdAt } } }
+  zoomSummaries:           () => path.join(P.dataDir, 'zoom_summaries.json'),
+  // Shape: { version:1, presets:[Preset] } (Preset per src/zoom/studio/preset-schema.js)
+  zoomStudioPresets:       () => path.join(P.dataDir, 'zoom_studio_presets.json'),
+  // Shape: { version:1, items:[{ id, name, kind:'background'|'overlay'|'avatar', file, thumb, w, h, bytes, addedAt }] }
+  zoomStudioLibrary:       () => path.join(P.dataDir, 'zoom_studio_library.json'),
+  // Shape: { version:1, launcherPath:null|string, launcherConfirmed:{ [sha256(path)]: ISO }, lastPresetId:null|string }
+  zoomStudioConfig:        () => path.join(P.dataDir, 'zoom_studio_config.json'),
 };
 
 function _resolvePath(name) {
