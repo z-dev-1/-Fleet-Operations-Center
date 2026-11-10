@@ -12,6 +12,8 @@
  *
  * Flag: settings.ai.fullContext !== false -> larger budgets. Env override
  * FLEET_AI_FULL_CONTEXT='1' forces ON, '0' forces OFF (other values ignored).
+ * The env override is main-process only (RCA, reconcile, repair-intel): the
+ * renderer's Long Dwell fill (longdwell-ai.js) follows settings.ai.fullContext alone.
  * Callers keep the legacy sizes when the flag is OFF; the newest-first
  * direction is unconditional.
  */

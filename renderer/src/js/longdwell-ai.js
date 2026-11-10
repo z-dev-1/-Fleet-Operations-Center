@@ -64,15 +64,21 @@ export function _tidySource(text) {
 }
 
 // ── Budgets ─────────────────────────────────────────────────────────────────
-// ai:ask (src/ipc/ai.js) rejects prompts over 64,000 chars, so the whole Long
-// Dwell prompt is kept <= 62,000. The SOURCE DATA block gets whatever is left
-// after the fixed text (KB + instructions), clamped to [6,000, 24,000].
-export const LD_PROMPT_MAX = 62000;
+// The binding ceiling is the Claude lane (src/orcha/relay.js
+// CLAUDE_PROMPT_MAX_CHARS = 60,000), which head-keeps 60k and would cut the
+// trailing gold example + RAW JSON instruction; ai:ask (src/ipc/ai.js) rejects
+// over 64,000. So the whole Long Dwell prompt is kept <= 59,500. The SOURCE
+// DATA block gets whatever is left after the fixed text (KB + instructions),
+// clamped to [6,000, 24,000].
+export const LD_PROMPT_MAX = 59500;
 export const LD_SOURCE_MAX = 24000;
 export const LD_SOURCE_MIN = 6000;
 
 // settings.ai.fullContext (default ON). false -> legacy source sizes (still
-// newest-first). Refreshed before each fill via refreshAiFillSettings().
+// newest-first). Refreshed before each fill / Fill All via
+// refreshAiFillSettings(). The FLEET_AI_FULL_CONTEXT env override
+// (src/orcha/source-budget.js) is main-process only: the renderer cannot read
+// process env, so Long Dwell follows the setting alone.
 let _fullContext = true;
 export async function refreshAiFillSettings() {
   try {
@@ -267,9 +273,55 @@ function _fromConversation(text) {
   return c;
 }
 // All lines of a feed, newest first (used when a feed gets no room at all).
+// Each undated continuation line carries its parent entry's date (see _datedLines).
 function _linesNewestFirst(body) {
-  const lines = String(body || '').split('\n');
-  return detectOrder(lines) === 'asc' ? lines.reverse() : lines;
+  const lines = _datedLines(String(body || '').split('\n'));
+  return detectOrder(String(body || '').split('\n')) === 'asc' ? lines.reverse() : lines;
+}
+
+// Date text of a line that STARTS a dated entry ("10/13/2026 ...", "[10/13] ...",
+// "- 10/13 ...", "Oct 13, 2026 ..."), copied from the line itself; else ''.
+function _entryDate(line) {
+  const s = String(line || '');
+  const m = s.match(NUM_LINE_DATE_RE);
+  if (m) {
+    const mo = parseInt(m[1], 10), d = parseInt(m[2], 10);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) return m[1] + '/' + m[2] + (m[3] ? '/' + m[3] : '');
+  }
+  const n = s.match(MON_DATE_RE);
+  if (n && n.index <= 2) return n[0];
+  return '';
+}
+
+// Physical-order lines -> same lines, where an undated continuation line of a
+// multi-line entry is prefixed "[from <parent date>] " (the date text is copied
+// from the nearest dated line above it). Dated / pre-first-date lines unchanged.
+function _datedLines(lines) {
+  let cur = '';
+  return lines.map((l) => {
+    const d = _entryDate(l);
+    if (d) { cur = d; return l; }
+    return cur && String(l).trim() ? '[from ' + cur + '] ' + String(l).trim() : l;
+  });
+}
+
+// keepNewest's droppedLines (newest first) with continuation lines dated as in
+// _datedLines. The dropped lines are one contiguous physical block; its start
+// is found from the kept anchor size. Falls back to the plain lines if the
+// block cannot be located exactly.
+function _datedDropped(body, k) {
+  if (!k.dropped) return k.droppedLines;
+  const lines = String(body).split('\n');
+  const out = k.text.split('\n');
+  const mi = out.indexOf(_marker(k.dropped));
+  if (mi < 0) return k.droppedLines;
+  const asc = detectOrder(lines) === 'asc';
+  const anchorCount = asc ? mi : out.length - mi - 1;
+  const start = asc ? anchorCount : lines.length - anchorCount - k.dropped;
+  const idxOf = (j) => (asc ? start + k.dropped - 1 - j : start + j);
+  for (let j = 0; j < k.dropped; j++) if (lines[idxOf(j)] !== k.droppedLines[j]) return k.droppedLines;
+  const dated = _datedLines(lines);
+  return k.droppedLines.map((_, j) => dated[idxOf(j)]);
 }
 
 // Render one plain feed into at most `alloc` chars (header + '\n' + body + the
@@ -281,7 +333,7 @@ function _renderFeed(f, alloc) {
     return { text: '', dropped: all.length, droppedLines: all };
   }
   const k = keepNewest(f.body, room, { anchor: f.anchor });
-  return { text: f.header + '\n' + k.text, dropped: k.dropped, droppedLines: k.droppedLines };
+  return { text: f.header + '\n' + k.text, dropped: k.dropped, droppedLines: _datedDropped(f.body, k) };
 }
 
 // Render the "Other work orders" feed: each WO gets an equal share of what is
@@ -303,7 +355,7 @@ function _renderSecondary(f, alloc) {
     const t = it.label + '\n' + k.text;
     out.push(t);
     remaining -= t.length + sep;
-    dropped += k.dropped; droppedLines.push(...k.droppedLines);
+    dropped += k.dropped; droppedLines.push(..._datedDropped(it.body, k));
   });
   return { text: out.length ? f.header + '\n' + out.join('\n\n') : '', dropped, droppedLines };
 }
@@ -462,10 +514,12 @@ export function _sourceContextForRow(row, opts = {}) {
 //
 // buildAIFillPromptWithMeta(row, dd, { knowledge, fullContext }) -> { prompt, meta }
 // The SOURCE DATA budget is sized to the real ceiling: the prompt is capped at
-// LD_PROMPT_MAX (62,000; ai:ask rejects > 64,000), and the source gets
-// 62,000 - fixedLen clamped to [6,000, 24,000] (~22.3k with the ~27k KB).
-// NOTE: if the KB grows past ~43k, the 6k floor can push the prompt over 62k;
-// ai:ask then rejects it visibly (never silently truncated).
+// LD_PROMPT_MAX (59,500; under the Claude lane's 60,000 head trim and the
+// ai:ask 64,000 reject), and the source gets 59,500 - fixedLen clamped to
+// [6,000, 24,000] (~19.8k with the ~27k KB).
+// NOTE: if the KB grows past ~40k, the 6k floor can push the prompt over
+// 60,000, and the Claude lane would then cut its tail; past ~45k ai:ask
+// rejects it. Keep KB growth in check against these two caps.
 export function _buildAIFillPrompt(row, dd, opts = {}) {
   return buildAIFillPromptWithMeta(row, dd, opts).prompt;
 }

@@ -739,6 +739,9 @@ async function _durableFill(btn, opts) {
   if (_csvDurableRunning) { toast.show('info', 'AI Fill is already running', 2500); return true; }
   const keys = _rowKeys();
   if (!keys.length) { toast.show('info', 'No rows to AI-fill', 2500); return true; }
+  // Resolve settings.ai.fullContext first so the candidate fingerprints use the
+  // same source sizes as the fp generateOnly returns after its own refresh.
+  await refreshAiFillSettings();
   const candidates = keys.map(_csvCandidate);
   _csvDurableRunning = true;
   if (btn) { btn.disabled = true; btn.innerHTML = '\u2728 Planning\u2026'; }

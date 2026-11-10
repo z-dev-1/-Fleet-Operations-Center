@@ -10,6 +10,8 @@
  * Fallback: if stdin delivery fails, the call is re-spawned once with the
  * prompt as ONE argv element, but only when the whole prompt fits the command
  * line; otherwise it rejects AKI_PROMPT_TOO_LONG. The lane never truncates.
+ * A stdin error followed promptly by a non-zero exit (Aki died: auth/crash)
+ * is reported as that exit (AKI_EXIT), not as a delivery failure.
  * Emergency override: FLEET_AKI_PROMPT_VIA=argv forces argv mode (over-limit
  * prompts reject AKI_PROMPT_TOO_LONG, never truncated).
  * Output is `--output-format stream-json` JSONL, parsed incrementally:
@@ -37,6 +39,8 @@ const AKI_TRUNC_MARKER = '\n\n[…truncated by Fleet: prompt exceeded the Window
 const AKI_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,99}$/;
 const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,40}$/;
 const BIN_CACHE_MS = 60 * 1000;
+// After a stdin write error, how long to wait for the child's 'close' so its exit result wins.
+const STDIN_CLOSE_GRACE_MS = 500;
 const DEFAULTS = Object.freeze({ concurrency: 2, timeoutMs: 120000, maxStdoutBytes: 4 * 1024 * 1024, profile: '', model: '' });
 
 function cmdLineMax(platform) { return platform === 'win32' ? AKI_CMDLINE_MAX_WIN32 : AKI_CMDLINE_MAX_OTHER; }
@@ -452,11 +456,23 @@ function createAkiLane(deps = {}) {
       if (!job.isolated && stderrHead.length < 200) stderrHead = (stderrHead + s).slice(0, 200);
     };
     const onError = (e) => finish('error', e);
-    const onClose = (code) => { exitCode = code; finish('close'); };
     let stdinDone = false;
+    let stdinErrCode = null;
+    let stdinGrace = null;
+    const onClose = (code) => {
+      exitCode = code;
+      // Exit 0 after a failed stdin write may be an answer to a partial prompt: never accept it.
+      if (stdinErrCode && code === 0) finish('stdin', { code: stdinErrCode });
+      else finish('close');
+    };
+    // A stdin write error (usually EPIPE) most often means Aki already exited
+    // (auth / profile / crash) and closed its end. Wait briefly for 'close' so
+    // the real exit code + stderr win (AKI_EXIT); only a pipe failure with the
+    // process still running is treated as a delivery failure ('stdin').
     const onStdinError = (e) => {
-      if (settled || stdinDone) return;
-      finish('stdin', { code: (e && e.code) || 'STDIN_ERROR' });
+      if (settled || stdinDone || stdinErrCode) return;
+      stdinErrCode = (e && e.code) || 'STDIN_ERROR';
+      stdinGrace = d.setTimeout(() => finish('stdin', { code: stdinErrCode }), STDIN_CLOSE_GRACE_MS);
     };
 
     function finish(kind, e) {
@@ -464,6 +480,8 @@ function createAkiLane(deps = {}) {
       settled = true;
       job.settle = null;
       if (timer) { d.clearTimeout(timer); timer = null; }
+      if (stdinGrace) { d.clearTimeout(stdinGrace); stdinGrace = null; }
+      if (stdinErrCode && !job.stdinFailCode) job.stdinFailCode = stdinErrCode;
       if (proc) {
         try { proc.stdout && proc.stdout.removeListener('data', onStdout); } catch (_) {}
         try { proc.stderr && proc.stderr.removeListener('data', onStderr); } catch (_) {}

@@ -184,6 +184,14 @@ describe('LD source context: no fabrication (D)', () => {
     let checked = 0;
     for (const line of src.split('\n')) {
       if (!line || HEADERS.has(line) || TRIM_MARKER_RE.test(line) || /^\[WO #\d+ .+\]$/.test(line)) continue;
+      // KEY LINES continuation lines carry their parent date, copied from the source.
+      const from = line.match(/^\[from ([^\]]+)\] (.*)$/);
+      if (from) {
+        expect(inputs, 'invented date: ' + from[1]).toContain(from[1]);
+        expect(inputs, 'invented: ' + from[2].slice(0, 40)).toContain(from[2]);
+        checked++;
+        continue;
+      }
       const pieces = line.startsWith('UNIT FACTS: ')
         ? line.slice('UNIT FACTS: '.length).split(' | ').map((p) => p.replace(/^[^:]+: /, ''))
         : [PREFIXES.reduce((s, p) => (s.startsWith(p) ? s.slice(p.length) : s), line)];
@@ -197,6 +205,54 @@ describe('LD source context: no fabrication (D)', () => {
     check(a, buildAIFillPromptWithMeta(a, 58, { knowledge: KB, fullContext: true }).prompt);
     const b = makeBigRow();
     check(b, buildAIFillPromptWithMeta(b, 300, { knowledge: KB, fullContext: true }).prompt);
+    const c = makeMultiLineRow();
+    check(c, buildAIFillPromptWithMeta(c, 300, { knowledge: KB, fullContext: true }).prompt);
+  });
+});
+
+// Multi-line comments: dated first line, the amount / ETC on a continuation line.
+function makeMultiLineRow() {
+  const lines = ['Conversation', '01/02/2026 ANCHOR_COMPLAINT unit reported coolant leak'];
+  let i = 0;
+  while (lines.join('\n').length < 60000) {
+    const d = mmdd(dayOf([1, 3], Math.floor(i / 2))) + '/2026';
+    lines.push(d + ' Dealer note ' + i + ': shop update follows');
+    if (i === 30) lines.push('  revised estimate total $9,876.54 for radiator and hoses');
+    else if (i === 40) lines.push('  ETC moved out pending core return');
+    else lines.push('  routine status check, no change reported by the shop today ' + i);
+    i++;
+  }
+  lines.push('11/01/2026 NEWEST_LINE dealer reports the unit is ready for pickup');
+  return { equipmentId: 'UNIT-TEST-5', fullConversation: lines.join('\n'), _lines: lines };
+}
+
+describe('LD source context: KEY LINES keep the parent date (multi-line comments)', () => {
+  const row = makeMultiLineRow();
+  const { prompt } = buildAIFillPromptWithMeta(row, 300, { knowledge: KB, fullContext: true });
+  const src = sourceBlock(prompt);
+  const key = src.slice(src.indexOf('KEY LINES FROM TRIMMED HISTORY (newest first):'), src.indexOf('Vendor/WO conversation:'));
+
+  it('prefixes a continuation key line with its parent comment date', () => {
+    const dateOf = (needle) => { const k = row._lines.findIndex((l) => l.includes(needle)); return row._lines[k - 1].slice(0, 10); };
+    expect(key).toContain('[from ' + dateOf('$9,876.54') + '] revised estimate total $9,876.54');
+    expect(key).toContain('[from ' + dateOf('ETC moved out') + '] ETC moved out pending core return');
+  });
+});
+
+describe('LD prompt vs the Claude lane 60k head trim', () => {
+  it('a heavy unit (600-line conversation, 200-line timeline, dealer notes) stays <= 60,000 with its tail', () => {
+    const conv = ['Conversation'];
+    for (let k = 0; k < 600; k++) conv.push(mmdd(dayOf([3, 1], Math.floor(k / 3))) + '/2026 vendor comment ' + k + ' with routine status filler text for sizing');
+    const tl = [];
+    for (let k = 0; k < 200; k++) tl.push(mmdd(dayOf([3, 1], k)) + ' - timeline entry ' + k + ' status reviewed and thread checked');
+    const notes = Array.from({ length: 80 }, (_, k) => mmdd(dayOf([4, 1], k)) + '/2026 Offsite note ' + k + ': dealer status unchanged').join('\n');
+    const { prompt, meta } = buildAIFillPromptWithMeta({ equipmentId: 'UNIT-TEST-6', fullConversation: conv.join('\n'), repairTimeline: tl.join('\n'), asistNotes: notes },
+      300, { knowledge: KB, fullContext: true });
+    expect(meta.totalTrimmed).toBeGreaterThan(0);
+    expect(LD_PROMPT_MAX).toBeLessThanOrEqual(60000);
+    expect(prompt.length).toBeLessThanOrEqual(60000);
+    expect(prompt.endsWith('{"delayReason": "...", "escalationLevel": "...", "summary": "..."}')).toBe(true);
+    expect(prompt).toContain('EXAMPLE 2:');
   });
 });
 

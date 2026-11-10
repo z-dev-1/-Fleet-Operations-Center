@@ -161,6 +161,34 @@ describe('aki-lane stdin delivery', () => {
     expect(lane.stats().active).toBe(0);
   });
 
+  it('stdin EPIPE from an early Aki exit -> AKI_EXIT with the exit code, no fallback, not "too long"', async () => {
+    for (const len of [40000, 200]) {
+      const { lane, spawn, procs } = setup();
+      const p = lane.ask(len === 200 ? 'q'.repeat(200) : bigPrompt(len));
+      await flush();
+      procs[0].stderr.emit('data', Buffer.from('auth expired'));
+      procs[0].stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+      procs[0].close(3);
+      const e = await p.catch((x) => x);
+      expect(e.code).toBe('AKI_EXIT');
+      expect(e.message).toMatch(/exited with code 3/);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(lane.stats()).toMatchObject({ stdinFailed: 0, stdinFallbacks: 0, tooLong: 0, failed: 1, lastErrorCode: 'AKI_EXIT' });
+    }
+  });
+
+  it('stdin EPIPE then exit 0 is never accepted as an answer (partial prompt)', async () => {
+    const { lane, spawn, procs } = setup();
+    const p = lane.ask(bigPrompt(40000));
+    await flush();
+    procs[0].stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+    procs[0].reply('answer to a partial prompt');
+    const e = await p.catch((x) => x);
+    expect(e.code).toBe('AKI_PROMPT_TOO_LONG');
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(lane.stats()).toMatchObject({ stdinFailed: 1, ok: 0 });
+  });
+
   it('stdin error after the end callback or after settle is ignored, never throws', async () => {
     const { lane, procs } = setup();
     const p = lane.ask('hello');
