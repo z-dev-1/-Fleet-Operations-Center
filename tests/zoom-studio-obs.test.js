@@ -10,6 +10,10 @@ import path from 'node:path';
 import { installFakeLogger, freshZoom } from './fixtures/zoom/fake-electron.js';
 import { createFakeObs } from './fixtures/zoom/fake-obs.js';
 
+// Each test does real temp-dir store writes (and some re-run setup()); under a loaded parallel run
+// these take far longer than the ~150 ms they take alone, so give every test explicit headroom.
+vi.setConfig({ testTimeout: 30000 });
+
 const require = createRequire(import.meta.url);
 const DEFAULT_EXE = 'C:/Program Files/obs-studio/bin/64bit/obs64.exe';
 const KEYS = ['ok', 'state', 'reason', 'hint', 'canLaunch', 'passwordSaved', 'host', 'port', 'exePath', 'obsVersion',
@@ -480,6 +484,30 @@ describe('obs.js start / stop', () => {
     expect(wc.setBackgroundThrottling).not.toHaveBeenCalledWith(false);
   });
 
+  it('store.save throwing: Stop still restores prevScene (config is an in-memory write-through copy)', async () => {
+    const save = vi.spyOn(store, 'save').mockImplementation(() => { throw Object.assign(new Error('EPERM: rename'), { code: 'EPERM' }); });
+    await goLive();
+    expect(save).toHaveBeenCalled();
+    expect(fake.obs.program).toBe(SCENE);
+    expect((await call('status')).recoveryPending).toBe(true);
+    await call('stop');
+    expect(fake.obs.program).toBe('Scene');
+    expect((await call('status')).recoveryPending).toBe(false);
+    expect(logger.lines.some((l) => /store-save/.test(JSON.stringify(l)))).toBe(true);
+  });
+
+  it('store.save throwing: a second Start still treats the Fleet scene / input as owned', async () => {
+    vi.spyOn(store, 'save').mockImplementation(() => { throw Object.assign(new Error('EPERM: rename'), { code: 'EPERM' }); });
+    await goLive();
+    await call('stop');
+    const r = await goLive();
+    expect(r.code).toBeUndefined();
+    expect(fake.obs.scenes.filter((s) => s.sceneName === SCENE)).toHaveLength(1);
+    expect(fake.obs.inputs.filter((i) => i.inputName === INPUT)).toHaveLength(1);
+    await call('stop');
+    expect(fake.obs.program).toBe('Scene');
+  });
+
   it('stop never switches scene when the user changed it or prevScene no longer exists', async () => {
     await goLive();
     fake.obs.program = 'Gaming';
@@ -680,6 +708,7 @@ describe('obs.js lifecycle / recovery', () => {
   it('F1: status.recoveryPending mirrors recovery !== null', async () => {
     expect((await call('status')).recoveryPending).toBe(false);
     store.save('zoomStudioObs', Object.assign(O.DEFAULT_CONFIG(), { recovery: { prevScene: 'Scene', vcamByFleet: false, at: 1 } }));
+    newSession();   // the config is loaded once per session (in-memory write-through copy)
     expect((await call('status')).recoveryPending).toBe(true);
     expect(O._snapshot().recoveryPending).toBe(true);
     await call('connect');

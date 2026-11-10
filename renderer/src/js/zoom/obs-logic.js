@@ -19,7 +19,7 @@ export const OBS_STEPS = Object.freeze([
   "Don't select your real camera in Zoom, because Fleet is using it.",
 ]);
 // Review F5: the one-click start needs the one-time OBS setup first.
-export const OBS_SETUP_NOTE = 'One-time setup in OBS: turn on the WebSocket server and enter its password here. After that, one click on Start OBS output does the rest.';
+export const OBS_SETUP_NOTE = 'One-time setup in OBS: turn on the WebSocket server and enter its password here. After that, one click on Start OBS output handles the OBS side; then choose OBS Virtual Camera in Zoom.';
 export const OBS_EFFECTS_NOTE = "Background replace needs a green screen. Avatar shows a full image or overlay, with no face tracking. Person-aware blur and replacement aren't available yet.";
 export const OBS_RESTORE_NOTE = "Fleet switches OBS back to your previous scene when you stop output. If Fleet or OBS closes first, OBS shows a black 'feed stopped' screen and Fleet switches it back the next time you open Studio.";
 export const OBS_TROUBLESHOOT = 'If Zoom shows something else, set OBS → Start Virtual Camera ⚙ → Output type: Program.';

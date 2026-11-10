@@ -69,7 +69,7 @@ function _fresh() {
     state: 'idle', reason: null, hint: false, canLaunch: false,
     obsVersion: null, outputLive: false, producer: false, vcamByFleet: false, launchedByFleet: false,
     liveSince: 0, launchUntil: 0, linkUp: false, closingByFleet: false,
-    pw: null, passwordSaved: null, pwLoading: null,
+    pw: null, passwordSaved: null, pwLoading: null, cfg: null,
     quitHooked: false, quitDone: false, ctx: null, client: null, feedServer: null, hookedWc: null,
     retryTimer: null, lossTimer: null, watchdog: null,
   };
@@ -125,17 +125,26 @@ function _norm(c) {
   };
 }
 
+/**
+ * In-memory write-through copy of the persisted config (code review #1): loaded once per session,
+ * mutated in memory, persisted best-effort. Runtime decisions (recovery.prevScene, owned UUIDs,
+ * vcamByFleet) always read the memory copy, so one failed store.save can't drop them.
+ */
 function _cfg() {
-  try { return _norm(_store().load(STORE_KEY, DEFAULT_CONFIG())); } catch (e) {
-    _log('warn', { op: 'store-load', err: safeErr(e) });
-    return DEFAULT_CONFIG();
+  if (!S.cfg) {
+    let raw = null;
+    try { raw = _store().load(STORE_KEY, DEFAULT_CONFIG()); } catch (e) {
+      _log('warn', { op: 'store-load', err: safeErr(e) });
+    }
+    S.cfg = _norm(raw);
   }
+  return S.cfg;
 }
 
 function _saveCfg(mut) {
   const c = _cfg();
   mut(c);
-  try { _store().save(STORE_KEY, c); } catch (e) { _log('warn', { op: 'store-save', err: safeErr(e) }); }
+  try { _store().save(STORE_KEY, structuredClone(c)); } catch (e) { _log('warn', { op: 'store-save', err: safeErr(e) }); }
   return c;
 }
 

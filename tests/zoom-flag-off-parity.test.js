@@ -198,7 +198,7 @@ describe('renderer: zoom-hub-boot with no area effective', () => {
       view._resetForTests();
       if (prevNav) Object.defineProperty(globalThis, 'navigator', prevNav); else delete globalThis.navigator;
     }
-  });
+  }, 30000);   // the first dynamic import of the hub view can take > 5 s on a loaded parallel run
 
   it('the boot module source never references navigator.mediaDevices', () => {
     const src = fs.readFileSync(require.resolve('../renderer/src/js/views/zoom-hub-boot.js'), 'utf8');

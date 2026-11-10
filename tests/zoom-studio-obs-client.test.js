@@ -210,7 +210,7 @@ describe('obs-client requests', () => {
 
   it('request timeout -> TIMEOUT', async () => {
     const s = await fakeObs({ onRequest: () => {} });
-    const c = client({ timeoutMs: 150 });
+    const c = client({ timeoutMs: 1000 });   // also bounds the handshake on a loaded runner
     await c.connect({ host: '127.0.0.1', port: s.port });
     expect(await codeOf(c.request('GetVersion'))).toBe('TIMEOUT');
   });
@@ -259,21 +259,22 @@ describe('obs-client requests', () => {
 
   it('sendRaw sends without waiting for a response', async () => {
     const s = await fakeObs({ onRequest: () => {} });
-    const c = client({ timeoutMs: 100 });
+    // timeoutMs also bounds the Hello handshake, so it has to survive a loaded parallel run
+    const c = client({ timeoutMs: 1000 });
     expect(c.sendRaw('StopVirtualCam')).toBe(false);   // not connected yet
     await c.connect({ host: '127.0.0.1', port: s.port });
     const r = c.sendRaw('SetCurrentProgramScene', { sceneName: 'Scene' });
     expect(r).toBe(true);
     expect(c.sendRaw('StopVirtualCam')).toBe(true);
-    await wait(200);   // past timeoutMs: nothing is pending, nothing rejects
+    await wait(1200);   // past timeoutMs: nothing is pending, nothing rejects
     expect(s.requests.map((x) => x.d.requestType)).toEqual(['SetCurrentProgramScene', 'StopVirtualCam']);
     expect(s.requests[0].d.requestData).toEqual({ sceneName: 'Scene' });
     expect(logger.lines.filter((l) => l.args[1] && l.args[1].code === 'TIMEOUT')).toHaveLength(0);
-  });
+  }, 15000);
 
   it('the sentinel password never appears in any log line', async () => {
     const s = await fakeObs({ password: SENTINEL, onRequest: (d, ws) => respond(ws, d, 600) });
-    const c = client({ timeoutMs: 200 });
+    const c = client({ timeoutMs: 3000 });   // the 600 reply is immediate; this only bounds a loaded handshake
     await c.connect({ host: '127.0.0.1', port: s.port, password: SENTINEL });
     await codeOf(c.request('GetVersion', { secret: SENTINEL }));
     expect(await codeOf(client().connect({ host: '127.0.0.1', port: s.port, password: SENTINEL + 'x' }))).toBe('OBS_AUTH_FAILED');
@@ -284,5 +285,5 @@ describe('obs-client requests', () => {
     const t = logger.text();
     expect(t).not.toContain(SENTINEL);
     expect(t).not.toContain(digest(SENTINEL));
-  });
+  }, 15000);
 });

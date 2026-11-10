@@ -106,6 +106,8 @@ describe('obs-logic copy', () => {
   it('copy constants exact and free of forbidden phrases', () => {
     expect(O.HONESTY_BANNER_OBS).toBe("Preview. Zoom doesn't see Fleet directly: start OBS output below, then in Zoom choose 'OBS Virtual Camera' as your camera. Fleet can't be a camera by itself.");
     expect(O.OBS_STEPS).toEqual(['Start OBS output here.', 'In Zoom, choose OBS Virtual Camera.', "Don't select your real camera in Zoom, because Fleet is using it."]);
+    // code review #4: the one click covers the OBS side only; the Zoom camera pick stays with the user
+    expect(O.OBS_SETUP_NOTE).toBe('One-time setup in OBS: turn on the WebSocket server and enter its password here. After that, one click on Start OBS output handles the OBS side; then choose OBS Virtual Camera in Zoom.');
     expect(O.OBS_EFFECTS_NOTE).toBe("Background replace needs a green screen. Avatar shows a full image or overlay, with no face tracking. Person-aware blur and replacement aren't available yet.");
     expect(O.OBS_TROUBLESHOOT).toBe('If Zoom shows something else, set OBS → Start Virtual Camera ⚙ → Output type: Program.');
     expect(O.OBS_BACKGROUNDS_NOTE).toBe("Zoom's built-in backgrounds stay inside Zoom. Fleet uses images you import into the library.");

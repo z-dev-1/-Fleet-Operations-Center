@@ -435,7 +435,7 @@ describe('hub integration', () => {
       if (prevNav) Object.defineProperty(globalThis, 'navigator', prevNav); else delete globalThis.navigator;
       view._resetForTests();
     }
-  });
+  }, 30000);   // the first dynamic import of the hub view can take > 5 s on a loaded parallel run
 });
 
 // ── FEAT-B2: presets, library, launcher (design §15.2-§15.4; review F-8) ──────────────────────────
