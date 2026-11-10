@@ -27,11 +27,19 @@
 
 const store = require('../store');
 const relay = require('../orcha/relay');
+const { keepNewest, loadFullContext } = require('../orcha/source-budget');
 let logger; try { logger = require('../utils/logger')('relay-reconcile'); } catch (_) { logger = { info() {}, warn() {}, error() {} }; }
 
 const PROMPT_CAP = 55000; // stay under the ~60k claude-code prompt cap
-const RELAY_BLOB_CAP = 6000; // chars of each long blob handed to the AI
-const OFFSITE_BLOB_CAP = 6000;
+// Blob budgets (chars). Each blob keeps its NEWEST lines (source-budget
+// keepNewest) with a visible marker at the gap; the *_FULL sizes apply when
+// settings.ai.fullContext is on (default), the legacy sizes when it is off.
+const RELAY_BLOB_CAP = 6000;       // Relay conversation, flag OFF
+const RELAY_BLOB_CAP_FULL = 12000; // Relay conversation, flag ON
+const RELAY_ANCHOR = 600;          // oldest lines kept (header + first comment)
+const OFFSITE_BLOB_CAP = 6000;     // Offsite thread (both modes)
+const TIMELINE_CAP = 2500;         // repair timeline, flag OFF
+const TIMELINE_CAP_FULL = 6000;    // repair timeline, flag ON
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG = {
@@ -65,11 +73,14 @@ function saveConfig(patch) {
 
 // ── Unit brief (the grounded facts the AI reasons over) ────────────────────────
 // Builds a compact, labelled view of one unit's Relay + Offsite state.
-function _unitBrief(row) {
+function _unitBrief(row, o = {}) {
   const r = row || {};
+  const full = o.fullContext != null ? !!o.fullContext : loadFullContext();
   const clip = (s, n) => String(s || '').trim().replace(/\u0000/g, '').slice(0, n);
-  const relayConversation = clip(r.fullConversation, RELAY_BLOB_CAP);
-  const offsiteNotes = clip(r.asistNotes, OFFSITE_BLOB_CAP);
+  const tidy = (s) => String(s || '').trim().replace(/\u0000/g, '');
+  const relayConversation = keepNewest(tidy(r.fullConversation), full ? RELAY_BLOB_CAP_FULL : RELAY_BLOB_CAP, { anchor: RELAY_ANCHOR }).text;
+  const offsiteNotes = keepNewest(tidy(r.asistNotes), OFFSITE_BLOB_CAP, { anchor: 0 }).text;
+  const relayTimeline = keepNewest(tidy(r.repairTimeline), full ? TIMELINE_CAP_FULL : TIMELINE_CAP, { anchor: 0 }).text;
   // ADDITIVE structured parse of the SAME blobs (blobs stay intact above). This
   // gives the AI an explicit, ordered who-said-what so it can tell who spoke
   // LAST and whether we already replied — instead of fuzzy-matching the blob.
@@ -94,7 +105,7 @@ function _unitBrief(row) {
     issueSummary: clip(r.issueSummary, 500),
     // Relay internal comments (what the internal team currently sees).
     relayConversation,
-    relayTimeline: clip(r.repairTimeline, 2500),
+    relayTimeline,
     // Offsite vendor update thread (the dealer's own notes/estimate/status).
     offsiteNotes,
     offsiteLabel: String(r.asistLabel || r.offsiteShopEvent || '').trim(),

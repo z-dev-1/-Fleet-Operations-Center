@@ -18,6 +18,7 @@ const logger = require('../utils/logger')('rca');
 const client = require('./client');
 const { normalizeResponse } = require('./template');
 const { extractJsonObject } = require('../utils/ai-json');
+const { keepNewest, loadFullContext } = require('../orcha/source-budget');
 
 const AI_TIMEOUT_MS = 120000;
 
@@ -216,7 +217,24 @@ function _parseJson(text) {
   return extractJsonObject(String(text || ''));
 }
 
-async function _aiFill(template, facts, commentsText, ev) {
+// Thread budget: newest comments + an anchor on the first entry (the original
+// complaint). settings.ai.fullContext OFF -> legacy tail of 9,000 chars.
+const THREAD_BUDGET = 30000;
+const THREAD_ANCHOR = 1500;
+const THREAD_TAIL_LEGACY = 9000;
+
+async function _aiFill(template, facts, commentsText, ev, opts = {}) {
+  const full = opts.fullContext != null ? !!opts.fullContext : loadFullContext();
+  let thread = '(none)', threadTrimmed = 0;
+  if (commentsText) {
+    if (full) {
+      const k = keepNewest(commentsText, THREAD_BUDGET, { anchor: THREAD_ANCHOR });
+      thread = k.text; threadTrimmed = k.dropped;
+    } else {
+      thread = commentsText.slice(-THREAD_TAIL_LEGACY);
+    }
+  }
+  if (threadTrimmed > 0) logger.info('[rca] thread ' + thread.length + 'ch dropped=' + threadTrimmed);
   let relay;
   try { relay = require('../orcha/relay'); } catch (_) { return { values: {}, error: 'AI unavailable' }; }
   if (!relay || !relay.ask) return { values: {}, error: 'AI unavailable' };
@@ -242,12 +260,12 @@ async function _aiFill(template, facts, commentsText, ev) {
       suspectedRootCause: ev && ev.suspected_root_cause, correctiveActions: ev && ev.corrective_actions,
       woType: ev && ev.wo_type, status: ev && ev.status, estimateCost: ev && ev.estimate_cost,
     }) + '\n\n' +
-    'WORK ORDER THREAD (oldest first):\n' + (commentsText ? commentsText.slice(-9000) : '(none)') + '\n';
+    'WORK ORDER THREAD (oldest first; a marked gap means older comments were trimmed):\n' + thread + '\n';
   try {
     const txt = await relay.askWithTimeout(prompt, { source: 'rca_autofill', timeoutMs: AI_TIMEOUT_MS, timeoutResult: '' });
     const parsed = _parseJson(txt);
     if (!parsed) return { values: {}, error: txt ? 'AI reply was not JSON' : 'AI timed out' };
-    return { values: parsed };
+    return threadTrimmed > 0 ? { values: parsed, threadTrimmed } : { values: parsed };
   } catch (e) {
     return { values: {}, error: 'AI failed: ' + e.message };
   }
