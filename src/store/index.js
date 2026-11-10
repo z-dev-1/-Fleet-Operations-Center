@@ -124,6 +124,12 @@ const REGISTRY = {
   // scac:[{scac,uptimePct,unitsUnavailable,unitsUnavailableEstimated,assetCount,downtimePct}],
   // scrapedAt, error? }.
   quicksightDbrDsp:     () => path.join(P.dataDir, 'quicksight_dbr_dsp.json'),
+  // Fleet DBR (Daily Call, 2026-11-10) — 24-column DBR built from fleetData. See src/dbr/fleet-dbr.js + src/ipc/fleet-dbr.js.
+  // Shape: { version:1, day:'YYYY-MM-DD', builtAt, fleetSyncedAt, rows:[builder row], conflicts:[..],
+  //          drafts:{ [key]: { fasActions, support, draftedAt, unitsHash, dropped } } }.  Day-scoped.
+  fleetDbrSnapshot:     () => path.join(P.dataDir, 'fleet_dbr_snapshot.json'),
+  // Shape: { version:1, fasName:'' (persists across days), day:'YYYY-MM-DD', rows:{ [key]: { [colId]: string } } }.
+  fleetDbrEdits:        () => path.join(P.dataDir, 'fleet_dbr_edits.json'),
   // Daily Tasks / Action Board (2026-10) — replaces the former Workflow
   // Intelligence recorder/library (Phase 8, removed). The "Workflow AI" tab is
   // now an AI-generated + manual daily task board. See src/ipc/daily-tasks.js.

@@ -32,6 +32,7 @@ const { registerLongDwellIPC }     = require('./long-dwell');
 const { registerLongDwellCsvIPC }  = require('./long-dwell-csv');
 const { registerLongDwellAiIPC }   = require('./long-dwell-ai');
 const { registerLongDwellSpIPC }   = require('./long-dwell-sp');
+const { registerFleetDbrIPC }      = require('./fleet-dbr');
 const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerSchedulerIPC }     = require('./scheduler');
@@ -68,6 +69,7 @@ function registerAllIPC(ctx) {
   registerLongDwellCsvIPC();
   registerLongDwellAiIPC();   // durable AI Fill arbiter; inert unless jobs.longDwellAiFill.durable
   registerLongDwellSpIPC();   // weekly sheet preview/write; inert unless longDwell.sharepointWrite
+  registerFleetDbrIPC(ctx);   // Daily Call Fleet DBR; inert unless dbr.fleetData
   registerBaseballCardIPC();
   registerFasRosterIPC();
   const { registerAapApiIPC } = require('./aap-api');

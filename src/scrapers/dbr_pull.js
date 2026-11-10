@@ -498,7 +498,19 @@ async function _reviewMineRows(rowsData, sectionKind, mySites, myCarriers) {
  *   { ok:false, stale:true, dataAsOf }                       -> NOT today -> caller retries
  *   { ok:false, error }                                      -> scrape/parse failed -> caller retries
  */
+// Fleet DBR (2026-11-10): while settings.dbr.fleetData is on, the Daily Call DBR is built
+// from fleet data and the QuickSight pull is retired (no capture, AI or store write).
+// Any flag-load error falls back to the legacy pull.
+function _retired() {
+  try { return require('../config/perf-flags').loadFleetDbr().enabled === true; }
+  catch (_) { return false; }
+}
+
 async function pullAfp() {
+  if (_retired()) {
+    logger.info('[DBR] QuickSight AFP pull retired (dbr.fleetData on) — skipped');
+    return { ok: true, fresh: true, retired: true, rowCount: 0, data: { dataAsOf: null, retired: true } };
+  }
   const cap = await qs.captureAfpText();
   if (!cap || !cap.ok) return { ok: false, error: (cap && cap.error) || 'AFP capture failed' };
   if (!cap.freshToday) {
@@ -523,6 +535,10 @@ async function pullAfp() {
 }
 
 async function pullDsp() {
+  if (_retired()) {
+    logger.info('[DBR] QuickSight DSP pull retired (dbr.fleetData on) — skipped');
+    return { ok: true, fresh: true, retired: true, rowCount: 0, data: { dataAsOf: null, retired: true } };
+  }
   const cap = await qs.captureDspText();
   if (!cap || !cap.ok) return { ok: false, error: (cap && cap.error) || 'DSP capture failed' };
   if (!cap.freshToday) {
