@@ -12,6 +12,12 @@
  *
  * FEAT-B2 mount points: div.zs-presets-host and div.zs-launcher-host (see getHosts()), plus
  * applyPreset(preset) / currentPreset() / getObsState() below.
+ *
+ * Flag zoom.studio.obs (opts.flags.obs) ON only: the OBS banner, an "OBS output" section
+ * (obs-panel.js in div.zs-obs-host) and the launcher inside a collapsed "Legacy" <details>. While the
+ * output feed (obs-feed.js) is live, the panel preview stays stopped and mirrors the feed canvas,
+ * every control change is forwarded with _syncFeed(), and Start preview / Mic test / the launcher are
+ * disabled. With the flag OFF none of this runs.
  */
 import { esc } from './data-logic.js';
 import {
@@ -27,6 +33,12 @@ import { createPresetsPanel } from './presets-panel.js';
 import { createLibraryPanel } from './library-panel.js';
 import { codeMessage } from './data-logic.js';
 import { MAX_OVERLAYS } from './studio-logic.js';
+// OBS output section (flag zoom.studio.obs only; with the flag OFF none of this is used).
+import { HONESTY_BANNER_OBS, HONESTY_BANNER_OBS_LEAD, IMAGE_LIVE_NOTE, STATUS_MESSAGES, containRect } from './obs-logic.js';
+import { createObsPanel } from './obs-panel.js';
+import { feed as obsFeed } from './obs-feed.js';
+
+export const LEGACY_LAUNCHER_SUMMARY = 'Legacy: Grim Reaper launcher (optional)';
 
 let S = null;
 
@@ -60,13 +72,13 @@ export function renderLauncher(st) {
   const where = p
     ? `<code class="zs-launcher-file">${esc(p)}</code>${s.isDefault ? ' (default)' : ''}${s.exists === false ? ' (file not found)' : ''}`
     : 'Not set';
-  const runDis = !p || s.busy ? ' disabled' : '';
+  const runDis = !p || s.busy || s.live ? ' disabled' : '';
   return `<section class="zs-launcher" aria-label="${esc(LAUNCHER_TITLE)}">` +
     `<h4 class="zs-sub">${esc(LAUNCHER_TITLE)}</h4>` +
     `<p class="zs-launcher-path">Launcher: ${where}</p>` +
     '<div class="zs-row">' +
       `<button type="button" class="zh-btn" data-action="launcher-run" aria-label="${esc(LAUNCHER_BUTTON)}"${runDis}>${esc(LAUNCHER_BUTTON)}</button> ` +
-      `<button type="button" class="zh-btn" data-action="launcher-pick" aria-label="Change launcher file"${s.busy ? ' disabled' : ''}>Change…</button>` +
+      `<button type="button" class="zh-btn" data-action="launcher-pick" aria-label="Change launcher file"${s.busy || s.live ? ' disabled' : ''}>Change…</button>` +
     '</div>' +
     `<p class="zs-note">${esc(launcherNote(s.obsState))}</p>` +
     `<div class="zs-launcher-msg" role="status" aria-live="polite">${s.message ? `<span>${esc(s.message)}</span>` : ''}</div>` +
@@ -124,19 +136,25 @@ export function renderControls(st) {
   } else if (e.mode === 'nativeBlur') {
     effectExtra = `<p class="zs-note">${esc(NATIVE_BLUR_NOTE)}</p>`;
   } else if (e.mode === 'image') {
-    effectExtra = '<p class="zs-note">The camera stays off in this mode.</p>';
+    // Review F12: while OBS output runs the feed keeps its camera open.
+    effectExtra = s.feedLive ? `<p class="zs-note">${esc(IMAGE_LIVE_NOTE)}</p>` : '<p class="zs-note">The camera stays off in this mode.</p>';
   }
   const live = !!s.previewing;
   const micOn = !!s.micOn;
+  const feedLive = !!s.feedLive;
+  // While OBS output runs: Start preview and Mic test are disabled and Stop becomes Stop OBS output.
+  const stopBtn = feedLive
+    ? '<button type="button" class="zh-btn" data-action="obs-stop-output" aria-label="Stop OBS output">Stop OBS output</button> '
+    : `<button type="button" class="zh-btn" data-action="stop" aria-label="Stop camera preview"${live ? '' : ' disabled'}>Stop</button> `;
   return '<div class="zs-row">' +
       `<label class="zs-field" for="zs-camera">Camera</label> <select id="zs-camera" class="zs-select" data-role="camera" aria-label="Camera">${_options(cams, s.cameraId)}</select> ` +
-      `<button type="button" class="zh-btn zs-start" data-action="start" aria-label="Start camera preview"${live ? ' disabled' : ''}>Start preview</button> ` +
-      `<button type="button" class="zh-btn" data-action="stop" aria-label="Stop camera preview"${live ? '' : ' disabled'}>Stop</button> ` +
+      `<button type="button" class="zh-btn zs-start" data-action="start" aria-label="Start camera preview"${live || feedLive ? ' disabled' : ''}>Start preview</button> ` +
+      stopBtn +
       '<button type="button" class="zh-btn" data-action="rescan" aria-label="Re-scan cameras and microphones">Re-scan</button>' +
     '</div>' +
     '<div class="zs-row">' +
       `<label class="zs-field" for="zs-mic">Microphone</label> <select id="zs-mic" class="zs-select" data-role="mic" aria-label="Microphone">${_options(mics, s.micId)}</select> ` +
-      `<button type="button" class="zh-btn zh-toggle${micOn ? ' active' : ''}" data-action="mic-test" aria-pressed="${micOn ? 'true' : 'false'}" aria-label="Microphone test">${micOn ? 'Stop mic test' : 'Mic test'}</button>` +
+      `<button type="button" class="zh-btn zh-toggle${micOn ? ' active' : ''}" data-action="mic-test" aria-pressed="${micOn ? 'true' : 'false'}" aria-label="Microphone test"${feedLive ? ' disabled' : ''}>${micOn ? 'Stop mic test' : 'Mic test'}</button>` +
     '</div>' +
     '<fieldset class="zs-effects"><legend>Effect</legend>' +
       `<select class="zs-select" data-role="mode" aria-label="Effect">${modeOpts}</select>` +
@@ -202,13 +220,18 @@ export function mount(el, opts = {}) {
   const mk = (tag, cls) => { const n = doc.createElement(tag); if (cls) n.className = cls; return n; };
   const wrap = mk('div', 'zs-studio');
 
-  // Permanent honesty banner (never re-rendered, no close button).
+  const obsOn = !!(opts.flags && opts.flags.obs);
+
+  // Permanent honesty banner (never re-rendered, no close button). With the OBS flag ON the OBS
+  // banner and its own lead are used (review F9: the leads differ in length).
+  const bannerLead = obsOn ? HONESTY_BANNER_OBS_LEAD : HONESTY_BANNER_LEAD;
+  const bannerText = obsOn ? HONESTY_BANNER_OBS : HONESTY_BANNER;
   const banner = mk('p', 'zs-honesty');
   banner.setAttribute('role', 'note');
   const lead = mk('strong', '');
-  lead.textContent = HONESTY_BANNER_LEAD;
+  lead.textContent = bannerLead;
   const rest = mk('span', '');
-  rest.textContent = HONESTY_BANNER.slice(HONESTY_BANNER_LEAD.length);
+  rest.textContent = bannerText.slice(bannerLead.length);
   banner.appendChild(lead);
   banner.appendChild(rest);
 
@@ -257,7 +280,22 @@ export function mount(el, opts = {}) {
   const presetsHost = mk('div', 'zs-presets-host');     // FEAT-B2 fills this (presets + library)
   const launcherHost = mk('div', 'zs-launcher-host');   // FEAT-B2 fills this (virtual-camera setup outside Fleet)
 
-  for (const n of [banner, head, privacy, status, obs, controls, meter, stage, presetsHost, launcherHost]) wrap.appendChild(n);
+  let obsHost = null;
+  let legacy = null;
+  if (obsOn) {
+    // OBS output section first; the Grim Reaper launcher moves into a collapsed <details> (FR7).
+    obsHost = mk('div', 'zs-obs-host');
+    legacy = mk('details', 'zs-legacy');
+    const summary = mk('summary', '');
+    summary.textContent = LEGACY_LAUNCHER_SUMMARY;
+    legacy.appendChild(summary);
+    legacy.appendChild(launcherHost);
+  }
+
+  const parts = obsOn
+    ? [banner, head, privacy, status, obs, controls, meter, stage, presetsHost, obsHost, legacy]
+    : [banner, head, privacy, status, obs, controls, meter, stage, presetsHost, launcherHost];
+  for (const n of parts) wrap.appendChild(n);
   el.appendChild(wrap);
 
   S = {
@@ -268,6 +306,7 @@ export function mount(el, opts = {}) {
     obsState: 'unknown', previewing: false, micOn: false, live: false, nativeBlurOk: false,
     mediaState: null, message: '', seq: 0, meterId: null, visible: false, unsubDevice: null,
     images: new Map(),
+    obsOn, obsHost, legacy, feed: obsOn ? (opts.feed || obsFeed) : null, obsPanel: null, unsubFeed: null, mirrorId: null,
   };
 
   S.devices = createDevices({
@@ -306,8 +345,93 @@ export function mount(el, opts = {}) {
     onChange: () => { if (S && S.presetsPanel) S.presetsPanel.refresh(); },
   });
 
+  if (obsOn) {
+    const s = S;
+    S.unsubFeed = S.feed.onLiveChange((live) => { if (S === s) _onFeedLive(live); });
+    S.obsPanel = createObsPanel(obsHost, {
+      zoomHub, feed: S.feed, document: doc,
+      studio: {
+        stopPreview: () => { if (S === s) stopAll(); },
+        startArgs: () => (S === s
+          ? { cameraId: S.cameraAuto ? null : S.cameraId, preset: currentPreset(), getImage: (id) => _getImage(id) }
+          : { cameraId: null, preset: null }),
+      },
+    });
+    if (S.feed.live) _startMirror();
+  }
+
   _render();
   return S;
+}
+
+// ── OBS output (flag zoom.studio.obs) ───────────────────────────────────────
+
+const _feedLive = () => !!(S && S.feed && S.feed.live);
+
+/** _syncFeed() -- push the current controls to the running OBS output feed. */
+function _syncFeed() {
+  if (S && S.feed && S.feed.live) S.feed.setPreset(currentPreset());
+}
+
+function _onFeedLive(live) {
+  if (!S) return;
+  if (live) {
+    _syncFeed();
+    _startMirror();
+    if (S.pipeline.getState().effect.mode === 'nativeBlur') _feedNativeBlur();
+  } else {
+    _stopMirror();
+  }
+  _render();
+}
+
+/** _feedNativeBlur() -- review F16: a feed nativeBlur failure switches the panel to none and says so. */
+async function _feedNativeBlur() {
+  if (!S || !S.feed) return;
+  const s = S;
+  const r = await S.feed.applyNativeBlur(true);
+  if (S !== s) return;
+  if (!r || !r.ok) {
+    await _setMode('none');
+    if (S !== s) return;
+    S.message = NATIVE_BLUR_UNSUPPORTED;
+    _renderStatus();
+  }
+}
+
+/** _drawMirror() -- FR5: contain-fit the feed canvas into the 16:9 preview (the same math as the OBS page). */
+function _drawMirror() {
+  if (!S || !S.feed) return;
+  const src = S.feed.canvas;
+  let ctx = null;
+  try { ctx = typeof S.canvas.getContext === 'function' ? S.canvas.getContext('2d') : null; } catch (_) { ctx = null; }
+  if (!ctx || !src) return;
+  const W = 1280;
+  const H = 720;
+  if (S.canvas.width !== W) S.canvas.width = W;
+  if (S.canvas.height !== H) S.canvas.height = H;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  const r = containRect(src.width, src.height, W, H);
+  if (r.w > 0 && r.h > 0) ctx.drawImage(src, r.x, r.y, r.w, r.h);
+}
+
+function _startMirror() {
+  if (!S || S.mirrorId !== null || !S.raf) return;
+  const tick = () => {
+    if (!S) return;
+    S.mirrorId = null;
+    if (!_feedLive()) return;
+    try { _drawMirror(); } catch (_) {}
+    S.mirrorId = S.raf(tick);
+  };
+  S.mirrorId = S.raf(tick);
+}
+
+function _stopMirror() {
+  if (!S) return;
+  if (S.mirrorId !== null && S.mirrorId !== undefined) { try { S.caf(S.mirrorId); } catch (_) {} }
+  S.mirrorId = null;
 }
 
 async function _getImage(id) {
@@ -331,6 +455,7 @@ function _render() {
   S.controls.innerHTML = renderControls({
     cameras: S.cameras, mics: S.mics, cameraId: S.cameraId, micId: S.micId, previewing: S.previewing,
     micOn: S.micOn, nativeBlurOk: S.nativeBlurOk, effect: st.effect, adjust: st.adjust,
+    feedLive: _feedLive(),
   });
   S.privacy.innerHTML = renderPrivacy(S.media);
   _renderStatus();
@@ -341,7 +466,7 @@ function _render() {
 
 function _renderLauncher() {
   if (!S || !S.launcherEl) return;
-  S.launcherEl.innerHTML = renderLauncher(Object.assign({}, S.launcher, { obsState: S.obsState }));
+  S.launcherEl.innerHTML = renderLauncher(Object.assign({}, S.launcher, { obsState: S.obsState, live: _feedLive() }));
 }
 
 async function _refreshLauncher() {
@@ -355,7 +480,7 @@ async function _refreshLauncher() {
 
 /** _launch() -- review F-8: stop Fleet's preview (every track) BEFORE launcherRun, so the Grim Reaper page can use the camera. */
 async function _launch() {
-  if (!S || S.launcher.busy) return;
+  if (!S || S.launcher.busy || _feedLive()) return;
   stopAll();
   S.launcher.busy = true;
   S.launcher.message = '';
@@ -369,7 +494,7 @@ async function _launch() {
 }
 
 async function _pickLauncher() {
-  if (!S || S.launcher.busy) return;
+  if (!S || S.launcher.busy || _feedLive()) return;
   let r = null;
   try { r = typeof S.zoomHub.launcherPick === 'function' ? await S.zoomHub.launcherPick() : { ok: false, code: 'UNAVAILABLE' }; } catch (_) { r = { ok: false, code: 'INTERNAL' }; }
   if (!S) return;
@@ -390,14 +515,15 @@ function _renderStatus() {
 
 function _renderObs() {
   if (!S) return;
-  const t = obsNote(S.obsState);
+  // With the OBS flag ON the OBS section's status line replaces the installed-or-not note.
+  const t = S.obsOn ? '' : obsNote(S.obsState);
   S.obs.textContent = t;
   S.obs.style.display = t ? '' : 'none';
 }
 
 function _renderBadge() {
   if (!S) return;
-  const live = !!S.live;
+  const live = !!S.live || _feedLive();
   S.badge.style.display = live ? '' : 'none';
   for (const b of _toolbarTabs(S.doc)) {
     try {
@@ -563,11 +689,15 @@ async function _setMode(mode) {
   const prev = S.pipeline.getState().effect.mode;
   if (prev === 'nativeBlur' && m !== 'nativeBlur') await S.pipeline.applyNativeBlur(false);
   if (!S) return;
+  if (prev === 'nativeBlur' && m !== 'nativeBlur' && _feedLive()) await S.feed.applyNativeBlur(false);
+  if (!S) return;
   S.pipeline.setEffect({ mode: m });
   S.message = '';
   await _afterModeChange(prev, m);
   if (!S) return;
   _render();
+  _syncFeed();
+  if (m === 'nativeBlur' && prev !== 'nativeBlur' && _feedLive()) await _feedNativeBlur();
 }
 
 /**
@@ -595,8 +725,11 @@ function _onClick(e) {
   const b = _actionTarget(e);
   if (!b || b.disabled) return;
   const a = b.dataset.action;
+  // While OBS output runs, Start preview / Mic test / the launcher stay off (the feed holds the camera).
+  if (_feedLive() && (a === 'start' || a === 'stop' || a === 'mic-test' || a === 'launcher-run' || a === 'launcher-pick')) return;
   if (a === 'start') startPreview();
   else if (a === 'stop') stopAll();
+  else if (a === 'obs-stop-output') { if (S && S.obsPanel) S.obsPanel.stopOutput(); }
   else if (a === 'rescan') { if (S) S.mediaState = null; refreshDevices(); }
   else if (a === 'mic-test') _toggleMic();
   else if (a === 'open-privacy') _openPrivacy(b.dataset.which);
@@ -614,7 +747,8 @@ function _onChange(e) {
     if (type !== 'change') return;
     S.cameraId = t.value || null;
     S.cameraAuto = false;
-    if (S.previewing && S.pipeline.getState().effect.mode !== 'image') startPreview();
+    if (_feedLive()) _feedSwitchCamera(S.cameraId);   // never startPreview while OBS output runs
+    else if (S.previewing && S.pipeline.getState().effect.mode !== 'image') startPreview();
   } else if (role === 'mic') {
     if (type !== 'change') return;
     S.micId = t.value || null;
@@ -633,6 +767,19 @@ function _onChange(e) {
     if (key === 'mirror') S.pipeline.setAdjust({ mirror: !!t.checked });
     else if (key === 'brightness' || key === 'contrast' || key === 'saturation') S.pipeline.setAdjust({ [key]: Number(t.value) });
   }
+  _syncFeed();
+}
+
+/** _feedSwitchCamera(id) -- the camera picker while OBS output runs: the feed switches its own camera. */
+async function _feedSwitchCamera(id) {
+  if (!S || !S.feed) return;
+  const s = S;
+  const r = await S.feed.switchCamera(id);
+  if (S !== s) return;
+  if (r && r.ok === false && r.state === 'obs-loop') {
+    S.message = STATUS_MESSAGES['obs-loop'];
+    _renderStatus();
+  }
 }
 
 function _subscribeDevices() {
@@ -649,19 +796,21 @@ export function show() {
   if (!S) return;
   S.visible = true;
   _subscribeDevices();
+  if (_feedLive()) _startMirror();
   // mediaStatus + enumerateDevices only. Never getUserMedia on show.
   // FEAT-B2: after the devices are known, list presets (the first show restores lastPresetId onto the
   // controls without opening the camera), the library and the launcher path.
   return Promise.all([refreshMedia(), refreshDevices()]).then(() => {
     if (!S) return null;
     _render();
-    return Promise.all([S.presetsPanel.show(), S.libraryPanel.show(), _refreshLauncher()]);
+    return Promise.all([S.presetsPanel.show(), S.libraryPanel.show(), _refreshLauncher(), S.obsPanel ? S.obsPanel.show() : null]);
   }).then(() => { if (S) { S.libraryPanel.render(); _render(); } });
 }
 
 export function hide() {
   if (!S) return;
   S.visible = false;
+  _stopMirror();   // the OBS output feed itself keeps running
   stopAll();
   if (typeof S.unsubDevice === 'function') { try { S.unsubDevice(); } catch (_) {} }
   S.unsubDevice = null;
@@ -691,6 +840,10 @@ export function destroy() {
   if (S.win && typeof S.win.removeEventListener === 'function') { try { S.win.removeEventListener('beforeunload', S.onUnload); } catch (_) {} }
   try { S.presetsPanel.destroy(); } catch (_) {}
   try { S.libraryPanel.destroy(); } catch (_) {}   // clears the in-memory WebP thumbnail Map
+  // The OBS output feed is a module singleton and keeps running; only this panel's views go away.
+  _stopMirror();
+  if (S.obsPanel) { try { S.obsPanel.destroy(); } catch (_) {} }
+  if (typeof S.unsubFeed === 'function') { try { S.unsubFeed(); } catch (_) {} }
   S.images.clear();
   S = null;
 }
@@ -727,6 +880,18 @@ export function applyPreset(preset) {
   S.pipeline.setPreset(p);
   const mode = S.pipeline.getState().effect.mode;
   _render();
+  _syncFeed();
+  if (_feedLive()) {
+    // OBS output running: the feed follows the preset's camera and camera-native blur.
+    const s = S;
+    (async () => {
+      if (prevMode === 'nativeBlur' && mode !== 'nativeBlur') await s.feed.applyNativeBlur(false);
+      if (S !== s) return;
+      if (S.cameraId !== prevCamera) await _feedSwitchCamera(S.cameraId);
+      if (S !== s) return;
+      if (mode === 'nativeBlur' && prevMode !== 'nativeBlur') await _feedNativeBlur();
+    })().catch(() => {});
+  }
   // A preset loaded while the preview is live goes through the same rules as the Effect / Camera
   // pickers (camera-native blur switched off, image mode closes the camera, a live camera follows the
   // preset's camera). With the preview stopped nothing here touches a camera.
@@ -768,6 +933,7 @@ export function assignImage(slot, id) {
     return { ok: false };
   }
   _render();
+  _syncFeed();
   const mode = S.pipeline.getState().effect.mode;
   if (slot === 'background' && mode !== 'chromaKey') return { ok: true, message: "Background set. Pick 'Green-screen replace' under Effect to use it." };
   if (slot === 'avatar' && mode !== 'image') return { ok: true, message: "Avatar set. Pick 'Full-frame image' under Effect to show it." };
@@ -781,6 +947,7 @@ export function clearImage(slot, index) {
   else if (slot === 'avatar') S.pipeline.setEffect({ imageId: null });
   else if (slot === 'overlay') S.pipeline.setOverlays(S.pipeline.getState().overlays.filter((_o, i) => i !== index));
   _render();
+  _syncFeed();
 }
 
 /** updateOverlay(index, patch) -- move / scale / fade one overlay (values clamped by the pipeline). */
@@ -790,6 +957,7 @@ export function updateOverlay(index, patch) {
   if (!ov[index]) return;
   ov[index] = Object.assign({}, ov[index], patch || {});
   S.pipeline.setOverlays(ov);
+  _syncFeed();
 }
 
 /** forgetImage(id) -- a library image was deleted: drop it from the current controls and caches. */
@@ -801,6 +969,7 @@ export function forgetImage(id) {
   if (st.overlays.some((o) => o.imageId === id)) S.pipeline.setOverlays(st.overlays.filter((o) => o.imageId !== id));
   S.images.delete(id);
   _render();
+  _syncFeed();
 }
 
 /** _state() -- test seam. */

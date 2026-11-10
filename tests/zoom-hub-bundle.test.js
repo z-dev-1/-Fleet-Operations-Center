@@ -54,4 +54,16 @@ describe('esbuild bundle (Zoom hub)', () => {
     expect(out).toContain('zs-honesty');
     expect(out).toContain("Zoom can't see this video.");
   }, 60000);
+  it('OBS: the hub bundle keeps the OFF HONESTY_BANNER and OBS_NOTE_FOUND and contains no forbidden phrase', async () => {
+    const out = await bundle('renderer/src/js/views/zoom-hub.js');
+    const L = await import('../renderer/src/js/zoom/studio-logic.js');
+    const O = await import('../renderer/src/js/zoom/obs-logic.js');
+    // esbuild may re-quote string literals, so compare on JSON-escaped / plain forms of the copy.
+    const has = (s) => out.includes(s) || out.includes(JSON.stringify(s).slice(1, -1)) || out.includes(s.replace(/'/g, "\\'"));
+    expect(has(L.HONESTY_BANNER)).toBe(true);
+    expect(has(L.OBS_NOTE_FOUND)).toBe(true);
+    expect(has(O.HONESTY_BANNER_OBS)).toBe(true);
+    expect(out).toContain('obs-feed');
+    for (const bad of ['Go live', 'Send to Zoom', 'Virtual camera: on']) expect(out.toLowerCase()).not.toContain(bad.toLowerCase());
+  }, 60000);
 });

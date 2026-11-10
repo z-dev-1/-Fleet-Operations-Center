@@ -1,9 +1,13 @@
 /**
  * zoom/studio-pipeline.js -- the Studio canvas preview loop (design §14.2, FEAT-B1).
  *
- * createPipeline({video, canvas, getImage, document, raf, caf, now}) ->
+ * createPipeline({video, canvas, getImage, document, raf, caf, now, fpsReadout, drawable}) ->
  *   {setPreset, setEffect, setAdjust, setOverlays, getState, start, stop, running, drawFrame,
  *    applyNativeBlur, warnings, fps, getOutputStream}
+ *
+ * fpsReadout (default true) draws the fps label; drawable (default () => video) is the base frame
+ * source drawn each frame, while `video` still provides readyState / size / srcObject. The Studio
+ * preview uses the defaults; the timer-driven output feed passes fpsReadout:false and its own drawable.
  *
  * Per frame: base (filter + mirror) -> edgeBlur | nativeBlur (camera-side, no canvas work) |
  * chromaKey | image (static library image, camera closed) -> overlays (<= 3) -> fps readout.
@@ -29,6 +33,8 @@ export function createPipeline(opts = {}) {
   const now = opts.now || (() => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()));
   const onWarning = typeof opts.onWarning === 'function' ? opts.onWarning : () => {};
   const onFps = typeof opts.onFps === 'function' ? opts.onFps : () => {};
+  const fpsReadout = opts.fpsReadout !== false;
+  const drawable = typeof opts.drawable === 'function' ? opts.drawable : () => video;
 
   let effect = normalizeEffect(null);
   let adjust = clampAdjust(null);
@@ -115,7 +121,8 @@ export function createPipeline(opts = {}) {
     ctx.save();
     ctx.filter = filter;
     if (adjust.mirror) ctx.setTransform(-1, 0, 0, 1, w, 0);
-    ctx.drawImage(video, 0, 0, w, h);
+    const src = drawable();
+    if (src) ctx.drawImage(src, 0, 0, w, h);
     ctx.restore();
   }
 
@@ -219,7 +226,7 @@ export function createPipeline(opts = {}) {
       else _drawBase(ctx, buildFilter(adjust), w, h);   // none, nativeBlur (blur happens in the camera)
     }
     _overlays(ctx, w, h);
-    _fpsReadout(ctx, w);
+    if (fpsReadout) _fpsReadout(ctx, w);
     if (effect.mode === 'chromaKey') budget.record(now() - t0);
     try { onFps(Math.round(fps)); } catch (_) {}
     return true;
