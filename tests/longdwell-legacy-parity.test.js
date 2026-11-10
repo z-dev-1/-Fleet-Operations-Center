@@ -10,6 +10,10 @@
 // 2026-11-09 (fix/longdwell-aki-format): the summary/notes line in BOTH
 // _aiFillRow functions now runs normalizeLongDwellSummary before _stripCosts;
 // only those two hashes were re-pinned.
+// 2026-11-10 (fix/timeline-data-completeness): BOTH _aiFillRow functions now
+// refresh the fullContext setting, backfill a prompt-only copy of the row from
+// the relay cache and build the prompt via buildAIFillPromptWithMeta (budgeted,
+// newest-first source + trim toast); only those two hashes were re-pinned.
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import { fileURLToPath } from 'url';

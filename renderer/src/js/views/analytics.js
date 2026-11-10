@@ -685,10 +685,13 @@ async function _aiFillRow(unitId, tr, onStatus,
     const fresh = await _ensureUnitFresh(unitId, onStatus);
     if (fresh.row) row = fresh.row;
     await refreshAiFillSettings();
-    try { row = withRelayCacheBackfill(row, await relayBridge.getUnitCache(unitId)); } catch (_) {}
+    // Backfill a COPY for the prompt only; `row` (and so fillFingerprint(row))
+    // stays the same input the bulk-fill candidate fingerprint sees.
+    let pr = row;
+    try { pr = withRelayCacheBackfill(row, await relayBridge.getUnitCache(unitId)); } catch (_) {}
     if (btn && onStatus === undefined) btn.textContent = '\u2728 Filling...';
     const dd = _downDays(row);
-    const { prompt, meta } = buildAIFillPromptWithMeta(row, dd == null ? 0 : dd);
+    const { prompt, meta } = buildAIFillPromptWithMeta(pr, dd == null ? 0 : dd);
     console.info('[ld-ai] ' + unitId + ' source ' + meta.length + '/' + meta.budget + 'ch trimmed=' + meta.totalTrimmed);
     if (meta.totalTrimmed > 0 && onStatus === undefined) toast.show('warn', unitId + ': older history trimmed to fit the AI budget (' + meta.totalTrimmed + ' older lines left out)', 4000);
     // The AI lane can be busy/slow (Claude credential stall + contention with
