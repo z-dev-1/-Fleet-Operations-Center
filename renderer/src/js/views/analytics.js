@@ -30,7 +30,7 @@ import * as longDwellSp from './longdwell-sp.js';
 // SINGLE SOURCE OF TRUTH for the AI-fill prompt + SEV rules. The computed Long
 // Dwell table uses the SAME prompt builder (and FAS knowledge base) as the
 // imported-CSV table and the Slack assistant — no duplicated/drifting rubric.
-import { _buildAIFillPrompt, _stripCosts, _sourceContextForRow, loadKnowledge as _loadLdKnowledge } from '../longdwell-ai.js';
+import { _stripCosts, _sourceContextForRow, loadKnowledge as _loadLdKnowledge, buildAIFillPromptWithMeta, refreshAiFillSettings, withRelayCacheBackfill } from '../longdwell-ai.js';
 import { normalizeLongDwellSummary } from '../longdwell-summary-format.js';
 
 let _el = null;
@@ -684,9 +684,13 @@ async function _aiFillRow(unitId, tr, onStatus,
     if (btn && onStatus === undefined) btn.textContent = '\u2728 Refreshing...';
     const fresh = await _ensureUnitFresh(unitId, onStatus);
     if (fresh.row) row = fresh.row;
+    await refreshAiFillSettings();
+    try { row = withRelayCacheBackfill(row, await relayBridge.getUnitCache(unitId)); } catch (_) {}
     if (btn && onStatus === undefined) btn.textContent = '\u2728 Filling...';
     const dd = _downDays(row);
-    const prompt = _buildAIFillPrompt(row, dd == null ? 0 : dd);
+    const { prompt, meta } = buildAIFillPromptWithMeta(row, dd == null ? 0 : dd);
+    console.info('[ld-ai] ' + unitId + ' source ' + meta.length + '/' + meta.budget + 'ch trimmed=' + meta.totalTrimmed);
+    if (meta.totalTrimmed > 0 && onStatus === undefined) toast.show('warn', unitId + ': older history trimmed to fit the AI budget (' + meta.totalTrimmed + ' older lines left out)', 4000);
     // The AI lane can be busy/slow (Claude credential stall + contention with
     // background jobs), which surfaces as an abort/timeout. Retry ONCE after a
     // short pause — the second attempt usually lands on the warm Orcha lane.

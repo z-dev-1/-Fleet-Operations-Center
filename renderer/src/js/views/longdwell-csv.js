@@ -17,7 +17,7 @@ import { fillFingerprint, fillSummaryText, filledBadgeHtml, fillStatusText, runD
 import { extractJsonObject } from '../util/ai-json.js';
 import state from '../state.js';
 import toast from '../components/toast.js';
-import { _buildAIFillPrompt, _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS } from '../longdwell-ai.js';
+import { _stripCosts, loadKnowledge, DELAY_REASONS as AI_DELAY_REASONS, ESCALATION_LEVELS as AI_ESCALATION_LEVELS, buildAIFillPromptWithMeta, buildCsvPromptRow, refreshAiFillSettings, withRelayCacheBackfill } from '../longdwell-ai.js';
 import { normalizeLongDwellSummary } from '../longdwell-summary-format.js';
 
 // Match the computed Long Dwell fill's data-freshness window: refresh + deep
@@ -460,33 +460,17 @@ function _promptRowFor(rowKey, fleetRow) {
   const csv = r.csv || {};
   const assetId = String(r.assetId || csv['Asset ID'] || '').trim();
 
-  // Start from the imported CSV columns (always present).
-  const base = {
-    equipmentId:     assetId,
-    vendor:          csv['RG Vendor Assigned'] || '',
-    domicileSite:    csv['Site'] || '',
-    operator:        csv['SCAC'] || '',
-    lifecycleReason: csv['Lifecycle State Reason'] || '',
-    issueDetails:    [csv['Level 1'], csv['Level 2']].filter(Boolean).join(' / '),
-    issueSummary:    csv['Vendor Delay Reason'] || '',
-  };
-
   // Enrich from the (freshened) live fleet row for timeline / notes /
   // conversation / canonical state — the fields that make the summary rich.
+  let live = null;
   try {
-    const live = fleetRow || (state.slice('fleet').rows || [])
-      .find((x) => String(x.equipmentId || '').trim() === assetId);
-    if (live) {
-      for (const k of ['repairTimeline', 'savedNotes', 'notes', 'fullConversation',
-                       'lastConversation', 'conversation', 'issueDetails', 'issueSummary',
-                       'canonicalStatus', 'canonicalStale', 'canonicalWaitingOn',
-                       'canonicalSituation', 'canonicalNextStep', 'vendor',
-                       'domicileSite', 'operator', 'lifecycleReason']) {
-        if (live[k] != null && String(live[k]).trim() !== '') base[k] = live[k];
-      }
-    }
+    live = fleetRow || (state.slice('fleet').rows || [])
+      .find((x) => String(x.equipmentId || '').trim() === assetId) || null;
   } catch (_) { /* no live fleet data — fall back to CSV-only context */ }
 
+  // CSV columns + live keys (shared builder in ../longdwell-ai.js).
+  const base = buildCsvPromptRow(csv, live);
+  base.equipmentId = assetId;
   return base;
 }
 
@@ -561,7 +545,12 @@ async function _aiFillRow(rowKey, btn, onStatus,
     const fresh = await _ensureUnitFresh(assetId, onStatus);
     const promptRow = _promptRowFor(rowKey, fresh);
     const dd = _downDaysForRow(r.csv || {});
-    const prompt = _buildAIFillPrompt(promptRow, dd);
+    await refreshAiFillSettings();
+    let pr = promptRow;
+    try { pr = withRelayCacheBackfill(promptRow, await relayBridge.getUnitCache(assetId)); } catch (_) {}
+    const { prompt, meta } = buildAIFillPromptWithMeta(pr, dd);
+    console.info('[ld-ai] ' + assetId + ' source ' + meta.length + '/' + meta.budget + 'ch trimmed=' + meta.totalTrimmed);
+    if (meta.totalTrimmed > 0 && !onStatus) toast.show('warn', assetId + ': older history trimmed to fit the AI budget (' + meta.totalTrimmed + ' older lines left out)', 4000);
     const result = await aiBridge.ask(prompt, { priority: onStatus ? 'low' : 'normal' }); // batch fill-all = low (AI gateway)
     if (!result || result.ok === false) throw new Error((result && result.error) || 'AI call failed');
     const textOut = result.text || '';

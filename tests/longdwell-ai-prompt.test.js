@@ -1,6 +1,7 @@
 // tests/longdwell-ai-prompt.test.js — the 7-bullet summary contract sits in the
-// head of the Long Dwell AI Fill prompt, ahead of the ~27k-char FAS KB, so it
-// survives the Aki lane's ~32k head-keep truncation on Windows.
+// head of the Long Dwell AI Fill prompt, ahead of the ~27k-char FAS KB, so the
+// model reads it first. (The Aki lane now gets the whole prompt via stdin and
+// the prompt is capped at 62k — see tests/ld-source-context.test.js.)
 import { describe, it, expect } from 'vitest';
 import { _buildAIFillPrompt } from '../renderer/src/js/longdwell-ai.js';
 import { LD_SUMMARY_LABELS } from '../renderer/src/js/longdwell-summary-format.js';

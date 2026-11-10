@@ -51,34 +51,407 @@ export function _stripCosts(text) {
     .trim();
 }
 
-// Compact context block for the AI prompt -- same source fields deep-scan.js
-// already reads off a merged row (repairTimeline / issueSummary / savedNotes
-// / fullConversation), truncated so a single unit's prompt stays reasonable.
-export function _sourceContextForRow(row) {
-  const parts = [];
-  // CANONICAL STATE (the single reconciled truth, mirrored onto the row). When
-  // present, lead with it so the AI anchors on the reconciled status / next
-  // step / who-we're-waiting-on rather than re-deriving from raw notes. The raw
-  // fields below remain as supporting detail / fallback.
-  if (row.canonicalStatus) {
+// Source-feed tidy: collapses runs of spaces/tabs, trims each line and caps
+// blank-line runs, but KEEPS the line structure (unlike _stripCosts, which
+// flattens newlines and so would make line-boundary trimming impossible).
+export function _tidySource(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/[ \t]{2,}/g, ' ')
+    .split('\n').map((l) => l.trim()).join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// ── Budgets ─────────────────────────────────────────────────────────────────
+// ai:ask (src/ipc/ai.js) rejects prompts over 64,000 chars, so the whole Long
+// Dwell prompt is kept <= 62,000. The SOURCE DATA block gets whatever is left
+// after the fixed text (KB + instructions), clamped to [6,000, 24,000].
+export const LD_PROMPT_MAX = 62000;
+export const LD_SOURCE_MAX = 24000;
+export const LD_SOURCE_MIN = 6000;
+
+// settings.ai.fullContext (default ON). false -> legacy source sizes (still
+// newest-first). Refreshed before each fill via refreshAiFillSettings().
+let _fullContext = true;
+export async function refreshAiFillSettings() {
+  try {
+    const { settings } = await import('./bridge.js');
+    const all = settings && settings.getAll ? await settings.getAll() : null;
+    _fullContext = !(all && all.ai && all.ai.fullContext === false);
+  } catch (_) { /* best-effort — keep the last known value */ }
+  return _fullContext;
+}
+
+// ── Newest-first trimming (ESM twin of src/orcha/source-budget.js) ──────────
+// The renderer bundle cannot require main-process CJS, so the same algorithm,
+// regexes and marker text live here too. tests/ld-source-context.test.js pins
+// both copies to identical output — change them together.
+const NUM_LINE_DATE_RE = /^\s*(?:\[|- )?\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?!\d)/;
+const MON_DATE_RE = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),\s+(\d{4})\b/i;
+const _MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function _lineDate(line) {
+  const s = String(line || '');
+  let m = s.match(NUM_LINE_DATE_RE);
+  if (m) {
+    const mo = parseInt(m[1], 10), d = parseInt(m[2], 10);
+    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      let y = m[3] ? parseInt(m[3], 10) : null;
+      if (y != null && y < 100) y += 2000;
+      return { y, m: mo, d };
+    }
+  }
+  m = s.match(MON_DATE_RE);
+  if (m) return { y: parseInt(m[3], 10), m: _MONTHS[m[1].slice(0, 3).toLowerCase()], d: parseInt(m[2], 10) };
+  return null;
+}
+
+// 'desc' when the last parseable date is older than the first, else 'asc'.
+export function detectOrder(lines) {
+  const arr = Array.isArray(lines) ? lines : String(lines || '').split('\n');
+  let first = null, last = null;
+  for (const l of arr) { const dt = _lineDate(l); if (dt) { if (!first) first = dt; last = dt; } }
+  if (!first || first === last) return 'asc';
+  if (first.y != null && last.y != null) {
+    const a = first.y * 10000 + first.m * 100 + first.d;
+    const b = last.y * 10000 + last.m * 100 + last.d;
+    return b < a ? 'desc' : 'asc';
+  }
+  // Month/day only: a gap over ~6 months is read as a year wrap (12/20 -> 01/05).
+  const diff = (last.m * 31 + last.d) - (first.m * 31 + first.d);
+  const wrap = Math.abs(diff) > 6 * 31;
+  const lastIsOlder = wrap ? diff > 0 : diff < 0;
+  return lastIsOlder ? 'desc' : 'asc';
+}
+
+export const TRIM_MARKER_RE = /^\[… \d+ older lines trimmed to fit the AI budget …\]$/m;
+const _marker = (n) => `[… ${n} older lines trimmed to fit the AI budget …]`;
+
+// Cut a string to at most n UTF-16 units without splitting a surrogate pair.
+function _safeCut(s, n) {
+  if (n <= 0) return '';
+  if (s.length <= n) return s;
+  let k = n;
+  const c = s.charCodeAt(k - 1);
+  if (c >= 0xd800 && c <= 0xdbff) k--;
+  return s.slice(0, k);
+}
+
+// keepNewest(text, budget, { anchor }) -> { text, dropped, droppedLines }
+// Keeps whole lines: the newest lines that fit, plus up to `anchor` chars of
+// the oldest lines, with a marker line at the gap. droppedLines are newest-first.
+export function keepNewest(text, budget, { anchor = 0 } = {}) {
+  const src = String(text == null ? '' : text);
+  const max = Math.max(0, Math.floor(Number(budget) || 0));
+  if (src.length <= max) return { text: src, dropped: 0, droppedLines: [] };
+  const lines = src.split('\n');
+  const order = detectOrder(lines);
+  const anchorMax = Math.max(0, Math.min(Math.floor(Number(anchor) || 0), Math.floor(max / 2)));
+  const markerLen = _marker(lines.length).length + 1; // worst-case digits + '\n'
+
+  // Oldest side = head for asc, tail for desc. Newest side is the opposite.
+  const oldestIdx = (i) => (order === 'asc' ? i : lines.length - 1 - i);
+  const newestIdx = (i) => (order === 'asc' ? lines.length - 1 - i : i);
+
+  let anchorCount = 0, anchorUsed = 0;
+  while (anchorCount < lines.length) {
+    const len = lines[oldestIdx(anchorCount)].length + 1;
+    if (anchorUsed + len > anchorMax) break;
+    anchorUsed += len; anchorCount++;
+  }
+  const room = max - anchorUsed - markerLen;
+  let newestCount = 0, used = 0;
+  while (newestCount + anchorCount < lines.length) {
+    const len = lines[newestIdx(newestCount)].length + 1;
+    if (used + len > room + 1) break; // the final line carries no trailing '\n'
+    used += len; newestCount++;
+  }
+  let cutLine = null;
+  if (newestCount === 0 && anchorCount < lines.length) {
+    // The single newest line alone exceeds the room: keep its leading part.
+    cutLine = _safeCut(lines[newestIdx(0)], Math.max(0, room));
+    newestCount = 1;
+  }
+
+  const anchorLines = [], newestLines = [], droppedLines = [];
+  for (let i = 0; i < anchorCount; i++) anchorLines.push(lines[oldestIdx(i)]);
+  for (let i = 0; i < newestCount; i++) newestLines.push(i === 0 && cutLine != null ? cutLine : lines[newestIdx(i)]);
+  for (let i = newestCount; i < lines.length - anchorCount; i++) droppedLines.push(lines[newestIdx(i)]);
+  const dropped = droppedLines.length;
+
+  let out;
+  if (order === 'asc') {
+    out = anchorLines.concat(dropped ? [_marker(dropped)] : [], newestLines.slice().reverse());
+  } else {
+    out = newestLines.concat(dropped ? [_marker(dropped)] : [], anchorLines.slice().reverse());
+  }
+  return { text: out.join('\n'), dropped, droppedLines };
+}
+
+// ── Prompt-row helpers ──────────────────────────────────────────────────────
+// Fill empty row fields from the flat relay cache (relay.getUnitCache). Never
+// overwrites a non-empty row value. Returns a shallow copy.
+const _CACHE_BACKFILL_KEYS = ['fullConversation', 'asistNotes', 'needBy', 'created', 'serviceState', 'subState', 'vendorWorkOrderId'];
+export function withRelayCacheBackfill(row, cache) {
+  if (!cache) return row;
+  const out = Object.assign({}, row);
+  for (const k of _CACHE_BACKFILL_KEYS) {
+    const cur = out[k];
+    const empty = cur == null || String(cur).trim() === '';
+    if (empty && typeof cache[k] === 'string' && cache[k].trim() !== '') out[k] = cache[k];
+  }
+  return out;
+}
+
+// Row object the shared prompt expects for an imported-CSV Long Dwell row:
+// the CSV columns, enriched from the (freshened) live fleet row. Moved here
+// from views/longdwell-csv.js _promptRowFor so it can be unit-tested.
+const _CSV_LIVE_KEYS = ['repairTimeline', 'savedNotes', 'notes', 'fullConversation',
+  'lastConversation', 'conversation', 'issueDetails', 'issueSummary',
+  'canonicalStatus', 'canonicalStale', 'canonicalWaitingOn',
+  'canonicalSituation', 'canonicalNextStep', 'vendor',
+  'domicileSite', 'operator', 'lifecycleReason',
+  // Extra facts for the UNIT FACTS / CANONICAL / feed sections.
+  'asistNotes', 'needBy', 'created', 'serviceState', 'subState', 'vendorWorkOrderId',
+  'pmB', 'pmX', 'dot', 'canonicalPhase', 'canonicalLocation',
+  'canonicalStatusChangeReason', 'canonicalUpdatedAt', '_secondaryWRs', '_plannedWRData'];
+export function buildCsvPromptRow(csv, live) {
+  const c = csv || {};
+  const assetId = String(c['Asset ID'] || '').trim();
+  // Start from the imported CSV columns (always present).
+  const base = {
+    equipmentId:     assetId,
+    vendor:          c['RG Vendor Assigned'] || '',
+    domicileSite:    c['Site'] || '',
+    operator:        c['SCAC'] || '',
+    lifecycleReason: c['Lifecycle State Reason'] || '',
+    issueDetails:    [c['Level 1'], c['Level 2']].filter(Boolean).join(' / '),
+    issueSummary:    c['Vendor Delay Reason'] || '',
+    // CSV-only facts, kept even when the live row overwrites issueSummary.
+    csvDaysDown:          c['Days Down'] || '',
+    csvExpectedEtc:       c['Expected ETC'] || '',
+    csvVendorDelayReason: c['Vendor Delay Reason'] || '',
+  };
+  // Enrich from the live fleet row for timeline / notes / conversation /
+  // canonical state — the fields that make the summary rich.
+  if (live) {
+    for (const k of _CSV_LIVE_KEYS) {
+      const v = live[k];
+      if (v == null) continue;
+      if (typeof v === 'object') {
+        if (Array.isArray(v) ? v.length : true) base[k] = v; // by reference
+      } else if (String(v).trim() !== '') {
+        base[k] = v;
+      }
+    }
+  }
+  return base;
+}
+
+// ── SOURCE DATA assembly ────────────────────────────────────────────────────
+const _CANON_HEADER = 'CANONICAL STATE (reconciled summary — if a NEWER dated line below conflicts with it, the newer line wins):';
+const _KEY_HEADER = 'KEY LINES FROM TRIMMED HISTORY (newest first):';
+const _KEY_LINE_RE = /\$\s?\d|estimate|\bETC\b|\bETA\b|\bparts?\b|back ?order|\bSIM\b|diag|root cause|\bcause\b|approv|reject/i;
+const _FEED_SHARES = { conversation: 0.45, timeline: 0.30, offsite: 0.15, secondary: 0.10 };
+const _FEED_ORDER = ['conversation', 'timeline', 'offsite', 'secondary'];
+
+function _factVal(v) {
+  const s = v == null ? '' : String(v).replace(/\s+/g, ' ').trim();
+  return s && s !== '--' ? s : '';
+}
+function _fromConversation(text) {
+  let c = String(text || '');
+  const i = c.indexOf('Conversation');
+  if (i > 0) c = c.substring(i);
+  return c;
+}
+// All lines of a feed, newest first (used when a feed gets no room at all).
+function _linesNewestFirst(body) {
+  const lines = String(body || '').split('\n');
+  return detectOrder(lines) === 'asc' ? lines.reverse() : lines;
+}
+
+// Render one plain feed into at most `alloc` chars (header + '\n' + body + the
+// '\n\n' separator). Returns { text, dropped, droppedLines }.
+function _renderFeed(f, alloc) {
+  const room = alloc - f.header.length - 3;
+  if (room < 1) {
+    const all = _linesNewestFirst(f.body);
+    return { text: '', dropped: all.length, droppedLines: all };
+  }
+  const k = keepNewest(f.body, room, { anchor: f.anchor });
+  return { text: f.header + '\n' + k.text, dropped: k.dropped, droppedLines: k.droppedLines };
+}
+
+// Render the "Other work orders" feed: each WO gets an equal share of what is
+// left, so a short WO's unused room flows to the next one.
+function _renderSecondary(f, alloc) {
+  let remaining = alloc - f.header.length - 3;
+  const out = [], droppedLines = [];
+  let dropped = 0;
+  f.items.forEach((it, i) => {
+    const sep = out.length ? 2 : 0;
+    const share = Math.floor(remaining / (f.items.length - i));
+    const room = share - it.label.length - 1 - sep;
+    if (room < 1) {
+      const all = _linesNewestFirst(it.body);
+      dropped += all.length; droppedLines.push(...all);
+      return;
+    }
+    const k = keepNewest(it.body, room);
+    const t = it.label + '\n' + k.text;
+    out.push(t);
+    remaining -= t.length + sep;
+    dropped += k.dropped; droppedLines.push(...k.droppedLines);
+  });
+  return { text: out.length ? f.header + '\n' + out.join('\n\n') : '', dropped, droppedLines };
+}
+
+// sourceContextWithMeta(row, { budget, fullContext }) -> { text, meta }
+// Builds the SOURCE DATA block. Fixed fact sections come first; then the long
+// feeds (conversation / timeline / offsite notes / other WOs), whole when they
+// fit, otherwise trimmed newest-first at line boundaries with a visible marker
+// and a KEY LINES extract of estimate/ETC/parts lines from the trimmed part.
+// Every emitted line is a header/label or text copied from a row field.
+export function sourceContextWithMeta(row, opts = {}) {
+  const r = row || {};
+  const budget = opts.budget != null ? opts.budget : LD_SOURCE_MAX;
+  const full = opts.fullContext != null ? !!opts.fullContext : _fullContext;
+  const lim = full ? 600 : 300;
+  const trimmed = { conversation: 0, timeline: 0, offsite: 0, secondary: 0 };
+  const fixed = [];
+
+  // (1) UNIT FACTS — short factual fields (CSV + WO + PM/DOT).
+  const facts = [
+    ['Days Down', r.csvDaysDown], ['Expected ETC', r.csvExpectedEtc],
+    ['Vendor delay reason', r.csvVendorDelayReason], ['WO created', r.created],
+    ['Need by', r.needBy], ['Service state', r.serviceState], ['Sub-state', r.subState],
+    ['Vendor WO #', r.vendorWorkOrderId], ['PM-B', r.pmB], ['PM-X', r.pmX], ['DOT', r.dot],
+  ].map(([k, v]) => { const s = _factVal(v); return s ? k + ': ' + s : ''; }).filter(Boolean);
+  if (facts.length) fixed.push(_safeCut('UNIT FACTS: ' + facts.join(' | '), 800));
+
+  // (2) CANONICAL STATE (the reconciled summary, mirrored onto the row). It can
+  // be stale or empty, so newer dated source lines win over it.
+  if (r.canonicalStatus) {
     const cs = [];
-    cs.push('Canonical status: ' + String(row.canonicalStatus).replace(/_/g, ' ') + (row.canonicalStale ? ' (STALE — no recent update)' : ''));
-    if (row.canonicalWaitingOn) cs.push('waiting on: ' + row.canonicalWaitingOn);
-    if (row.canonicalSituation) cs.push('situation: ' + _stripCosts(String(row.canonicalSituation)).slice(0, 300));
-    if (row.canonicalNextStep)  cs.push('reconciled next step: ' + _stripCosts(String(row.canonicalNextStep)).slice(0, 300));
-    parts.push('CANONICAL STATE (reconciled truth — trust over raw notes):\n' + cs.join('\n'));
+    cs.push('Canonical status: ' + String(r.canonicalStatus).replace(/_/g, ' ') + (r.canonicalStale ? ' (STALE — no recent update)' : ''));
+    if (r.canonicalWaitingOn) cs.push('waiting on: ' + r.canonicalWaitingOn);
+    if (r.canonicalSituation) cs.push('situation: ' + _stripCosts(String(r.canonicalSituation)).slice(0, lim));
+    if (r.canonicalNextStep)  cs.push('reconciled next step: ' + _stripCosts(String(r.canonicalNextStep)).slice(0, lim));
+    if (full) {
+      if (r.canonicalStatusChangeReason) cs.push('status change reason: ' + _stripCosts(String(r.canonicalStatusChangeReason)).slice(0, 400));
+      if (r.canonicalPhase)     cs.push('phase: ' + _stripCosts(String(r.canonicalPhase)).slice(0, 100));
+      if (r.canonicalLocation)  cs.push('location: ' + _stripCosts(String(r.canonicalLocation)).slice(0, 200));
+      if (r.canonicalUpdatedAt) cs.push('updated: ' + _stripCosts(String(r.canonicalUpdatedAt)).slice(0, 60));
+    }
+    fixed.push(_CANON_HEADER + '\n' + cs.join('\n'));
   }
-  if (row.issueDetails)   parts.push('Issue: ' + _stripCosts(String(row.issueDetails)).slice(0, 300));
-  if (row.issueSummary)   parts.push('Summary so far: ' + _stripCosts(String(row.issueSummary)).slice(0, 300));
-  if (row.repairTimeline) parts.push('Repair timeline:\n' + _stripCosts(String(row.repairTimeline)).slice(0, 1200));
-  else if (row.savedNotes) parts.push('Notes: ' + _stripCosts(String(row.savedNotes)).slice(0, 500));
-  let conv = row.fullConversation || row.lastConversation || row.conversation || '';
-  if (conv) {
-    const cs = conv.indexOf('Conversation');
-    if (cs > 0) conv = conv.substring(cs);
-    parts.push('Vendor/WO conversation:\n' + _stripCosts(String(conv)).slice(0, 1500));
+
+  // (3) Issue / summary so far.
+  if (r.issueDetails) fixed.push('Issue: ' + _stripCosts(String(r.issueDetails)).slice(0, lim));
+  if (r.issueSummary) fixed.push('Summary so far: ' + _stripCosts(String(r.issueSummary)).slice(0, lim));
+
+  // (4) Saved notes: always with full context; legacy = only without a timeline.
+  if (r.savedNotes) {
+    if (full) fixed.push('Notes: ' + _stripCosts(String(r.savedNotes)).slice(0, 1000));
+    else if (!r.repairTimeline) fixed.push('Notes: ' + _stripCosts(String(r.savedNotes)).slice(0, 500));
   }
-  return parts.length ? parts.join('\n\n') : '(no repair notes or conversation on file)';
+
+  // (5) Feeds.
+  const conv = _tidySource(_fromConversation(r.fullConversation || r.lastConversation || r.conversation || ''));
+  const timeline = _tidySource(r.repairTimeline);
+  const feedTexts = [];
+  let keyText = '';
+
+  if (!full) {
+    // Legacy sizes, newest-first.
+    if (conv) {
+      const k = keepNewest(conv, 1500, { anchor: 300 });
+      feedTexts.push('Vendor/WO conversation:\n' + k.text); trimmed.conversation = k.dropped;
+    }
+    if (timeline) {
+      const k = keepNewest(timeline, 1200);
+      feedTexts.push('Repair timeline:\n' + k.text); trimmed.timeline = k.dropped;
+    }
+  } else {
+    const feeds = [];
+    if (conv) feeds.push({ key: 'conversation', header: 'Vendor/WO conversation:', body: conv, anchor: 600 });
+    if (timeline) feeds.push({ key: 'timeline', header: 'Repair timeline:', body: timeline, anchor: 0 });
+    const offsite = _tidySource(r.asistNotes);
+    if (offsite) feeds.push({ key: 'offsite', header: 'Offsite/dealer notes:', body: offsite, anchor: 0 });
+    const wos = [];
+    if (r._plannedWRData && typeof r._plannedWRData === 'object') wos.push(r._plannedWRData);
+    if (Array.isArray(r._secondaryWRs)) wos.push(...r._secondaryWRs);
+    const items = [];
+    for (const w of wos) {
+      if (items.length >= 3) break;
+      const body = w && _tidySource(_fromConversation(w.fullConversation));
+      if (!body) continue;
+      items.push({ label: '[WO #' + (items.length + 1) + ' ' + (_factVal(w.vendor) || 'vendor unknown') + ']', body });
+    }
+    if (items.length) {
+      const f = { key: 'secondary', header: 'Other work orders:', items, body: '' };
+      f.need = f.header.length + 1 + items.reduce((n, it) => n + it.label.length + 1 + it.body.length, 0) + 2 * (items.length - 1) + 2;
+      feeds.push(f);
+    }
+    for (const f of feeds) if (f.need == null) f.need = f.header.length + 1 + f.body.length + 2;
+
+    const fixedLen = fixed.length ? fixed.join('\n\n').length + 2 : 0;
+    const R = Math.max(0, budget - fixedLen);
+    const totalNeed = feeds.reduce((n, f) => n + f.need, 0);
+    let keyBudget = 0;
+    const alloc = {};
+    if (totalNeed <= R) {
+      for (const f of feeds) alloc[f.key] = f.need;
+    } else {
+      keyBudget = Math.min(2500, Math.floor(0.12 * R));
+      const R2 = R - keyBudget;
+      let left = R2;
+      for (const f of feeds) { alloc[f.key] = Math.min(f.need, Math.floor(_FEED_SHARES[f.key] * R2)); left -= alloc[f.key]; }
+      for (const key of _FEED_ORDER) {
+        const f = feeds.find((x) => x.key === key);
+        if (!f || left <= 0) continue;
+        const add = Math.min(f.need - alloc[key], left);
+        alloc[key] += add; left -= add;
+      }
+    }
+
+    const dropped = [];
+    for (const key of _FEED_ORDER) {
+      const f = feeds.find((x) => x.key === key);
+      if (!f) continue;
+      const out = key === 'secondary' ? _renderSecondary(f, alloc[key]) : _renderFeed(f, alloc[key]);
+      if (out.text) feedTexts.push(out.text);
+      trimmed[key] = out.dropped;
+      dropped.push(...out.droppedLines);
+    }
+
+    // KEY LINES: estimate / $ / ETC / parts / SIM / diag / cause lines from the
+    // trimmed part, so a dropped estimate or ETC still reaches the model.
+    if (keyBudget > 0 && dropped.length) {
+      let room = keyBudget - _KEY_HEADER.length - 3;
+      const seen = new Set(), keep = [];
+      for (const raw of dropped) {
+        const line = String(raw || '').trim();
+        if (!line || seen.has(line) || !_KEY_LINE_RE.test(line)) continue;
+        const l = _safeCut(line, 400);
+        if (l.length + 1 > room) continue;
+        seen.add(line); keep.push(l); room -= l.length + 1;
+      }
+      if (keep.length) keyText = _KEY_HEADER + '\n' + keep.join('\n');
+    }
+  }
+
+  const parts = fixed.concat(keyText ? [keyText] : [], feedTexts);
+  const text = parts.length ? parts.join('\n\n') : '(no repair notes or conversation on file)';
+  const totalTrimmed = trimmed.conversation + trimmed.timeline + trimmed.offsite + trimmed.secondary;
+  return { text, meta: { budget, length: text.length, trimmed, totalTrimmed } };
+}
+
+// SOURCE DATA block as a string (fillFingerprint calls this with one arg).
+export function _sourceContextForRow(row, opts = {}) {
+  return sourceContextWithMeta(row, opts).text;
 }
 
 // Builds the AI-fill prompt for one Long Dwell row. Requests strict JSON so
@@ -86,7 +459,20 @@ export function _sourceContextForRow(row) {
 // daily-call.js's _runAI already uses for its own AI calls) rather than the
 // looser REPAIR_STATUS:/ISSUE: line-regex format deep-scan.js uses -- JSON
 // is a better fit here since there are three independent fields to fill.
-export function _buildAIFillPrompt(row, dd) {
+//
+// buildAIFillPromptWithMeta(row, dd, { knowledge, fullContext }) -> { prompt, meta }
+// The SOURCE DATA budget is sized to the real ceiling: the prompt is capped at
+// LD_PROMPT_MAX (62,000; ai:ask rejects > 64,000), and the source gets
+// 62,000 - fixedLen clamped to [6,000, 24,000] (~22.3k with the ~27k KB).
+// NOTE: if the KB grows past ~43k, the 6k floor can push the prompt over 62k;
+// ai:ask then rejects it visibly (never silently truncated).
+export function _buildAIFillPrompt(row, dd, opts = {}) {
+  return buildAIFillPromptWithMeta(row, dd, opts).prompt;
+}
+
+export function buildAIFillPromptWithMeta(row, dd, opts = {}) {
+  row = row || {};
+  const kb     = opts.knowledge != null ? opts.knowledge : _kbCache;
   const id     = row.equipmentId || '';
   const vendor = row.vendor || 'unassigned';
   const dom    = row.domicileSite || row.domicile || 'unknown';
@@ -97,28 +483,29 @@ export function _buildAIFillPrompt(row, dd) {
   const _now   = new Date();
   const _dow   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][_now.getDay()];
   const todayStr = _dow + ' ' + (_now.getMonth() + 1) + '/' + _now.getDate() + '/' + _now.getFullYear();
-  return (
+  const head = (
     // FAS KNOWLEDGE BASE (single source of truth for SEV/escalation/ownership).
     // Fetched from main via loadKnowledge(); empty string until loaded (the
     // prompt still works, the SEV section just won't be present that one time).
-    // Output contract stated up front too: the Aki lane trims an over-long
-    // prompt from the END, which can drop the tail contract below.
-    // The 7-bullet summary contract is up front for the same reason: on
-    // Windows Aki head-keeps only ~32k chars, and the full field spec + gold
-    // examples below sit past that point (after the ~27k-char KB).
+    // The output contract + 7-bullet summary contract stay up front so they
+    // lead the prompt ahead of the ~27k-char KB. (The Aki lane now receives
+    // the whole prompt via stdin; it no longer head-keeps ~32k chars.)
     'OUTPUT CONTRACT: return ONLY one raw JSON object {"delayReason": "...", "escalationLevel": "...", "summary": "..."} -- no markdown, no code fences, no commentary before or after it.\n' +
     'The summary value MUST be EXACTLY 7 lines separated by \\n. Each line starts with "\\u2022 " (bullet + space) ' +
     'followed by one of these exact labels, in this exact order: Initial Issue Reported:, Primary Vendor Rejection:, ' +
     'Primary Barrier:, Actions Taken:, Repair Status:, ETC:, Follow-up date:. No preamble, no paragraph, no headings, ' +
     'no blank or extra lines. If a field has no information still emit its line: "N/A" for Primary Vendor Rejection, ' +
     'otherwise "not documented \\u2014 verify". The full field spec and gold examples follow below.\n\n' +
-    (_kbCache ? (_kbCache + '\n\n') : '') +
+    (kb ? (kb + '\n\n') : '') +
     'You are Orcha, the AI brain for Fleet Operations. This unit is a LONG DWELL unit -- ' +
     'down and unavailable for an extended period -- and needs a leadership-facing status ' +
     'entry filled in for the Long Dwell Units report.\n\n' +
     'TODAY IS: ' + todayStr + '. Use this to compute a concrete follow-up date.\n\n' +
     'UNIT: ' + id + ' | Vendor: ' + vendor + ' | Domicile: ' + dom + ' | Operator: ' + op + ' | Down ' + dd + ' days | Lifecycle reason: ' + reason + '\n\n' +
-    'SOURCE DATA:\n' + _sourceContextForRow(row) + '\n\n' +
+    'SOURCE DATA:\n'
+  );
+  const tail = (
+    '\n\n' +
     'MY ROLE (FAS) -- OWNERSHIP RULES (critical: attribute actions to the correct team):\n' +
     '   - I am a FAS. I do NOT approve or reject estimates -- ESTIMATE APPROVAL IS OWNED BY MCS\n' +
     '     (MCS L3 for power-unit estimates up to $30K; MCS L4H / HVE leadership for $30K+ power units\n' +
@@ -241,4 +628,8 @@ export function _buildAIFillPrompt(row, dd) {
     '(the summary value is a single JSON string containing the 7 bulleted lines separated by \\n):\n' +
     '{"delayReason": "...", "escalationLevel": "...", "summary": "..."}'
   );
+  const fixedLen = head.length + tail.length;
+  const budget = Math.max(LD_SOURCE_MIN, Math.min(LD_SOURCE_MAX, LD_PROMPT_MAX - fixedLen));
+  const s = sourceContextWithMeta(row, { budget, fullContext: opts.fullContext });
+  return { prompt: head + s.text + tail, meta: s.meta };
 }
