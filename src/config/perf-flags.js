@@ -546,6 +546,37 @@ function loadDbrLookup(deps = {}) {
   }
 }
 
+// ── Fleet DBR (Daily Call, default ON) ──────────────────────────────────────
+//   settings.dbr.fleetData    (!== false) / FLEET_DBR_FLEET_DATA    '0'|'1'
+//   settings.dbr.fleetDataAi  (!== false) / FLEET_DBR_FLEET_DATA_AI '0'|'1'
+// aiDraft = enabled && fleetDataAi. Read per IPC call / per DBR pull (not memoized).
+const FLEET_DBR_ENV = { enabled: 'FLEET_DBR_FLEET_DATA', ai: 'FLEET_DBR_FLEET_DATA_AI' };
+
+function resolveFleetDbrFlags(settings, env) {
+  const d = _obj(_obj(settings).dbr);
+  let enabled = d.fleetData !== false;
+  let ai = d.fleetDataAi !== false;
+  const e = _envBool(env, FLEET_DBR_ENV.enabled);
+  if (e !== null) enabled = e;
+  const a = _envBool(env, FLEET_DBR_ENV.ai);
+  if (a !== null) ai = a;
+  return { enabled, aiDraft: enabled && ai };
+}
+
+function loadFleetDbr(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveFleetDbrFlags(settings, env);
+  } catch (_) {
+    return resolveFleetDbrFlags({}, {});
+  }
+}
+
 // ── Aki AI lane (enabled default ON) ─────────────────────────────────────────
 //   settings.ai.aki.enabled         (!== false)            / FLEET_AI_AKI '0'|'1' (env wins)
 //   settings.ai.aki.allowUntrusted  (=== true, default OFF)
@@ -824,6 +855,7 @@ module.exports = {
   resolveWorkerIsolationFlags, loadWorkerIsolation, ISOLATION_GROUPS, ISOLATION_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
+  resolveFleetDbrFlags, loadFleetDbr, FLEET_DBR_ENV,
   resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,
