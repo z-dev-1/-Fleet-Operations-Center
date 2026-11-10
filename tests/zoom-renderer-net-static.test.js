@@ -44,7 +44,8 @@ describe('renderer zoom networking (static)', () => {
     expect(src.slice(open, ctor)).toMatch(/!FEED_URL_RE\.test\(url\)\) return;/);
     // connect() rejects a bad URL before anything is opened.
     const c = src.indexOf('export function connect(');
-    const body = src.slice(c, src.indexOf('\n}\n', c));
+    const end = /\r?\n\}\r?\n/.exec(src.slice(c));
+    const body = src.slice(c, c + (end ? end.index : src.length));
     expect(body.indexOf('FEED_URL_RE.test(feedUrl)')).toBeGreaterThan(-1);
     expect(body.indexOf('FEED_URL_RE.test(feedUrl)')).toBeLessThan(body.indexOf('_open()'));
   });
