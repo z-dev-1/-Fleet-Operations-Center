@@ -512,6 +512,17 @@ expose('wbr', {
   comparison: (rows) => ipcRenderer.invoke('wbr:comparison', { rows }),
 });
 
+// ── Fleet DBR (Daily Call 24-column DBR, built from fleet data) ──────────────
+expose('fleetDbr', {
+  status:     ()  => ipcRenderer.invoke('fleet-dbr:status'),
+  get:        ()  => ipcRenderer.invoke('fleet-dbr:get'),
+  build:      ()  => ipcRenderer.invoke('fleet-dbr:build'),
+  draft:      (p) => ipcRenderer.invoke('fleet-dbr:draft', p),
+  saveEdit:   (p) => ipcRenderer.invoke('fleet-dbr:save-edit', p),
+  resetRow:   (p) => ipcRenderer.invoke('fleet-dbr:reset-row', p),
+  setFasName: (p) => ipcRenderer.invoke('fleet-dbr:set-fas-name', p),
+});
+
 // ── Geofence ──────────────────────────────────────────────────────────────────
 expose('geofence', {
   scrape:   () => ipcRenderer.invoke('geofence:scrape'),

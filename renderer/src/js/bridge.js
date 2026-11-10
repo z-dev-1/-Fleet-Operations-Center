@@ -521,6 +521,23 @@ export const wbr = {
   comparison: (rows) => window.wbr.comparison(rows),
 };
 
+// ── Fleet DBR (Daily Call 24-column DBR, built from fleet data) ─────────────
+// Guarded like _ldSp: a missing preload API or method resolves
+// { ok:false, code:'unavailable' } instead of throwing.
+const _fdbr = (name) => (payload) => {
+  const api = typeof window !== 'undefined' ? window.fleetDbr : null;
+  return api && typeof api[name] === 'function' ? api[name](payload) : Promise.resolve({ ok: false, code: 'unavailable' });
+};
+export const fleetDbr = {
+  status:     _fdbr('status'),
+  get:        _fdbr('get'),
+  build:      _fdbr('build'),
+  draft:      _fdbr('draft'),
+  saveEdit:   _fdbr('saveEdit'),
+  resetRow:   _fdbr('resetRow'),
+  setFasName: _fdbr('setFasName'),
+};
+
 // ── Slack ──────────────────────────────────────────────────────────────────
 export const slack = {
   send:         (data) => window.slack.send(data),
