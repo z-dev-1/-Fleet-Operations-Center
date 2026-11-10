@@ -10,7 +10,11 @@
  * src/zoom/ required. With no area effective (the flag-OFF parity state, even with zoom.enabled:true)
  * every channel is a fixed-literal stub that requires nothing.
  *
- * Later phases add ONE line per channel to REAL, inside their own block (// A2, // B1, // B2).
+ * OBS area (CHANNELS.obs, 7 channels): registered for real only when effective.obs (= studio && obs,
+ * flag zoom.studio.obs, default OFF); otherwise DISABLED stubs, so no OBS module is ever required.
+ * Event 'zoomStudio:obs-state' carries the obs.js status snapshot.
+ *
+ * Later phases add ONE line per channel to REAL, inside their own block (// A2, // B1, // B2; the OBS block is B3).
  */
 const log = require('../utils/logger')('zoom:hub');
 
@@ -52,10 +56,20 @@ const CHANNELS = Object.freeze({
     'zoomStudio:launcher-pick',
     'zoomStudio:launcher-run',
   ]),
+  // zoom.studio.obs (effective = studio && obs): Studio drives OBS over obs-websocket v5.
+  obs: Object.freeze([
+    'zoomStudio:obs-status',
+    'zoomStudio:obs-config-set',
+    'zoomStudio:obs-connect',
+    'zoomStudio:obs-disconnect',
+    'zoomStudio:obs-start',
+    'zoomStudio:obs-stop',
+    'zoomStudio:obs-launch',
+  ]),
 });
 
 // Main -> renderer events (sent through ctx.sendToWindow).
-const EVENTS = Object.freeze(['zoomData:auth-changed', 'zoomData:summary-progress']);
+const EVENTS = Object.freeze(['zoomData:auth-changed', 'zoomData:summary-progress', 'zoomStudio:obs-state']);
 
 // channel -> () => implementation(input, {event, ctx}). The getter runs inside the handler, so the
 // module is required only when the user acts. Validators live in src/zoom/validate.js (validators[channel]).
@@ -96,6 +110,14 @@ const REAL = {
   'zoomStudio:launcher-get': () => require('../zoom/studio/launcher').get,
   'zoomStudio:launcher-pick': () => require('../zoom/studio/launcher').pick,
   'zoomStudio:launcher-run': () => require('../zoom/studio/launcher').run,
+  // B3 (OBS)
+  'zoomStudio:obs-status': () => require('../zoom/studio/obs').status,
+  'zoomStudio:obs-config-set': () => require('../zoom/studio/obs').configSet,
+  'zoomStudio:obs-connect': () => require('../zoom/studio/obs').connect,
+  'zoomStudio:obs-disconnect': () => require('../zoom/studio/obs').disconnect,
+  'zoomStudio:obs-start': () => require('../zoom/studio/obs').start,
+  'zoomStudio:obs-stop': () => require('../zoom/studio/obs').stop,
+  'zoomStudio:obs-launch': () => require('../zoom/studio/obs').launch,
 };
 
 const DISABLED = Object.freeze({ ok: false, code: 'DISABLED' });
@@ -142,6 +164,7 @@ function registerZoomHubIPC(ctx, deps = {}) {
   const effData = eff.data === true;
   const effStudio = eff.studio === true;
   const effWrite = eff.write === true;
+  const effObs = eff.obs === true;
   const anyArea = effData || effStudio;
 
   if (anyArea) {
@@ -160,6 +183,7 @@ function registerZoomHubIPC(ctx, deps = {}) {
     data: effData,
     studio: effStudio,
     write: effWrite,
+    obs: effObs,
   });
 
   function stub(channel, result) {
@@ -203,6 +227,7 @@ function registerZoomHubIPC(ctx, deps = {}) {
   }
   registerArea(CHANNELS.data, effData);
   registerArea(CHANNELS.studio, effStudio);
+  registerArea(CHANNELS.obs, effObs);
 
   return { flags: flagsResult, anyArea };
 }

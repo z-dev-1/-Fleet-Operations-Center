@@ -3,6 +3,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createFakeElectron, installFakeElectron, installFakeLogger, freshZoom } from './fixtures/zoom/fake-electron.js';
 import { createExtDom, ExtElement } from './fixtures/zoom/fake-dom-ext.js';
 
@@ -31,12 +33,12 @@ describe('main: registerZoomHubIPC with no area effective', () => {
       const fakeCtx = { mainWindow: { isDestroyed: () => false, webContents: wc }, sendToWindow: () => { throw new Error('no events when OFF'); } };
       const hub = require('../src/ipc/zoom-hub');
       hub.registerZoomHubIPC(fakeCtx, { flags, handle: (ch, fn) => handlers.set(ch, fn) });
-      const all = [].concat(hub.CHANNELS.hub, hub.CHANNELS.data, hub.CHANNELS.studio);
+      const all = [].concat(hub.CHANNELS.hub, hub.CHANNELS.data, hub.CHANNELS.studio, hub.CHANNELS.obs);
       expect([...handlers.keys()].sort()).toEqual(all.slice().sort());
       const event = { sender: wc, senderFrame: { processId: 2, routingId: 1, url: 'file:///C:/Fleet/renderer/src/index.html' } };
       for (const ch of all) {
         const r = await handlers.get(ch)(event, { key: 'abc', kind: 'upcoming' });
-        if (ch === 'zoomHub:flags') expect(r).toEqual({ ok: true, enabled, data: false, studio: false, write: false });
+        if (ch === 'zoomHub:flags') expect(r).toEqual({ ok: true, enabled, data: false, studio: false, write: false, obs: false });
         else expect([ch, r]).toEqual([ch, { ok: false, code: 'DISABLED' }]);
       }
       expect(zoomInCache()).toEqual([]);
@@ -70,6 +72,61 @@ describe('main: registerZoomHubIPC with no area effective', () => {
     expect(Object.keys(require.cache).some((k) => k.replace(/\\/g, '/').includes('/src/zoom/studio/'))).toBe(false);
   });
 
+  it('OBS flag OFF with studio ON: obs channels are DISABLED and obs-auth, obs-client, obs-feed-server, obs-launch and obs are never required', async () => {
+    const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'zoom-obs-off-'));
+    require('../src/config/paths').setDataDir(TMP);
+    try {
+      freshZoom(require);
+      logger = installFakeLogger(require);
+      const fx = createFakeElectron();
+      restoreE = installFakeElectron(require, fx.electron);
+      const handlers = new Map();
+      const wc = { id: 1, mainFrame: { processId: 2, routingId: 1 } };
+      const fakeCtx = { mainWindow: { isDestroyed: () => false, webContents: wc }, sendToWindow: () => {} };
+      const hub = require('../src/ipc/zoom-hub');
+      const flags = pf.resolveZoomFlags({ zoom: { enabled: true, studio: true } }, {});
+      const reg = hub.registerZoomHubIPC(fakeCtx, { flags, handle: (ch, fn) => handlers.set(ch, fn) });
+      expect(reg.flags).toEqual({ ok: true, enabled: true, data: false, studio: true, write: false, obs: false });
+      const event = { sender: wc, senderFrame: { processId: 2, routingId: 1, url: 'file:///C:/Fleet/renderer/src/index.html' } };
+      const P = 'p_000000000000';
+      const L = 'l_000000000000';
+      const studioPayloads = {
+        'zoomStudio:media-status': undefined,
+        'zoomStudio:open-privacy': { which: 'camera' },
+        'zoomStudio:presets-list': undefined,
+        'zoomStudio:preset-save': { preset: {} },
+        'zoomStudio:preset-rename': { id: P, name: 'x' },
+        'zoomStudio:preset-delete': { id: P },
+        'zoomStudio:preset-select': { id: null },
+        'zoomStudio:library-list': undefined,
+        'zoomStudio:library-import': { kind: 'background' },
+        'zoomStudio:library-read': { id: L },
+        'zoomStudio:library-rename': { id: L, name: 'x' },
+        'zoomStudio:library-delete': { id: L },
+        'zoomStudio:launcher-get': undefined,
+        'zoomStudio:launcher-pick': undefined,
+        'zoomStudio:launcher-run': undefined,
+      };
+      expect(Object.keys(studioPayloads).sort()).toEqual(hub.CHANNELS.studio.slice().sort());
+      for (const ch of hub.CHANNELS.studio) {
+        const r = await handlers.get(ch)(event, studioPayloads[ch]);
+        expect([ch, r && r.code]).not.toEqual([ch, 'DISABLED']);
+      }
+      const obsPayloads = { 'zoomStudio:obs-config-set': { host: '127.0.0.1', port: 4455, exePath: null, password: 'x' } };
+      for (const ch of hub.CHANNELS.obs) {
+        expect([ch, await handlers.get(ch)(event, obsPayloads[ch])]).toEqual([ch, { ok: false, code: 'DISABLED' }]);
+      }
+      const OBS_FILES = ['obs-auth', 'obs-client', 'obs-feed-server', 'obs-launch', 'obs'].map((n) => '/src/zoom/studio/' + n + '.js');
+      const loaded = Object.keys(require.cache).map((k) => k.replace(/\\/g, '/'));
+      for (const f of OBS_FILES) expect([f, loaded.some((k) => k.endsWith(f))]).toEqual([f, false]);
+      // Sanity: the studio area really ran (its modules are in the cache).
+      expect(loaded.some((k) => k.endsWith('/src/zoom/studio/presets.js'))).toBe(true);
+      expect(loaded.some((k) => k.endsWith('/src/zoom/validate.js'))).toBe(true);
+    } finally {
+      try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {}
+    }
+  });
+
   it('src/ipc/index.js has exactly one registerZoomHubIPC(ctx) line', () => {
     const src = fs.readFileSync(require.resolve('../src/ipc/index.js'), 'utf8');
     const hits = src.split(/\r?\n/).filter((l) => l.includes("require('./zoom-hub').registerZoomHubIPC(ctx)"));
@@ -93,7 +150,8 @@ describe('renderer: zoom-hub-boot with no area effective', () => {
         const { boot } = await import('../renderer/src/js/views/zoom-hub-boot.js');
         const load = vi.fn(async () => { throw new Error('zoom-hub.js must not be imported'); });
         const eff = flags.effective;
-        const zoomHub = { flags: vi.fn(async () => ({ ok: true, enabled: eff.enabled, data: eff.data, studio: eff.studio, write: eff.write })) };
+        const zoomHub = { flags: vi.fn(async () => ({ ok: true, enabled: eff.enabled, data: eff.data, studio: eff.studio, write: eff.write, obs: eff.obs })) };
+        expect(eff.obs).toBe(false);
         const mount = new ExtElement('views-mount', 'div', dom);
         const r = await boot(mount, { zoomHub, load });
         expect(r).toBe(false);
@@ -152,8 +210,8 @@ describe('renderer: zoom-hub-boot with no area effective', () => {
     const init = vi.fn();
     const load = vi.fn(async () => ({ init }));
     const mount = {};
-    const r = await boot(mount, { zoomHub: { flags: async () => ({ ok: true, enabled: true, data: true, studio: false, write: false }) }, load });
+    const r = await boot(mount, { zoomHub: { flags: async () => ({ ok: true, enabled: true, data: true, studio: false, write: false, obs: false }) }, load });
     expect(r).toBe(true);
-    expect(init).toHaveBeenCalledWith(mount, { enabled: true, data: true, studio: false, write: false });
+    expect(init).toHaveBeenCalledWith(mount, { enabled: true, data: true, studio: false, write: false, obs: false });
   });
 });

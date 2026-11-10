@@ -86,7 +86,7 @@ describe('sender guard (review F-13)', () => {
 describe('area stubs', () => {
   it('zoomHub:flags returns effective values', async () => {
     setup({ enabled: true, data: true, write: true });
-    expect(await call('zoomHub:flags')).toEqual({ ok: true, enabled: true, data: true, studio: false, write: true });
+    expect(await call('zoomHub:flags')).toEqual({ ok: true, enabled: true, data: true, studio: false, write: true, obs: false });
   });
 
   it('data OFF -> every zoomData:* is DISABLED; studio ON -> every zoomStudio:* is REAL (B1 + B2 landed, no NOT_IMPLEMENTED left)', async () => {
@@ -134,8 +134,8 @@ describe('validators (AC-24, review F-2)', () => {
   it('there is exactly one validator per channel', () => {
     setup({ enabled: true, data: true });
     const V = require('../src/zoom/validate').validators;
-    const all = [].concat(hub.CHANNELS.hub, hub.CHANNELS.data, hub.CHANNELS.studio);
-    expect(all.length).toBe(33);
+    const all = [].concat(hub.CHANNELS.hub, hub.CHANNELS.data, hub.CHANNELS.studio, hub.CHANNELS.obs);
+    expect(all.length).toBe(40);
     expect(Object.keys(V).sort()).toEqual(all.slice().sort());
   });
 

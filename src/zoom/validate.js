@@ -150,7 +150,47 @@ const V = {
   'zoomStudio:launcher-get': none,
   'zoomStudio:launcher-pick': none,
   'zoomStudio:launcher-run': none,
+
+  // OBS (zoom.studio.obs)
+  'zoomStudio:obs-status': none,
+  'zoomStudio:obs-config-set': (p) => {
+    // F6: require obs-auth lazily, inside this validator body only (no top-level import), so requiring
+    // validate.js (eager whenever studio is on) never loads an OBS module.
+    const { exeSyntaxOk } = require('./studio/obs-auth');
+    return obsConfigInput(p, exeSyntaxOk);
+  },
+  'zoomStudio:obs-connect': none,
+  'zoomStudio:obs-disconnect': none,
+  'zoomStudio:obs-start': none,
+  'zoomStudio:obs-stop': none,
+  'zoomStudio:obs-launch': none,
 };
+
+const OBS_HOSTS = ['127.0.0.1', 'localhost'];
+const OBS_PASSWORD_MAX = 256;
+
+/** obs-config-set: {host?, port?, exePath?, password?}; only the keys present are returned. */
+function obsConfigInput(p, exeSyntaxOk) {
+  const o = obj(p, ['host', 'port', 'exePath', 'password'], { optional: true });
+  const out = {};
+  if (o.host !== undefined) out.host = oneOf(o.host, OBS_HOSTS, 'host');
+  if (o.port !== undefined) {
+    if (!Number.isInteger(o.port) || o.port < 1024 || o.port > 65535) throw bad('port');
+    out.port = o.port;
+  }
+  if (o.exePath !== undefined) {
+    if (o.exePath !== null && !exeSyntaxOk(o.exePath)) throw bad('exePath');
+    out.exePath = o.exePath;
+  }
+  if (o.password !== undefined) {
+    if (o.password !== null &&
+      (typeof o.password !== 'string' || o.password.length > OBS_PASSWORD_MAX || o.password.includes('\0'))) {
+      throw bad('password');
+    }
+    out.password = o.password;
+  }
+  return out;
+}
 
 function linkInput(p) {
   const o = obj(p, ['key', 'kind', 'id']);

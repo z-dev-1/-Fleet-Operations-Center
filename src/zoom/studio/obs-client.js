@@ -19,6 +19,7 @@
  */
 const { EventEmitter } = require('events');
 const { ZoomError } = require('../errors');
+const { safeJson } = require('../safe-json');
 const { authString, closeCodeToError, isRefused } = require('./obs-auth');
 
 const SUBPROTOCOL = 'obswebsocket.json';
@@ -50,8 +51,8 @@ function createObsClient(opts = {}) {
   function _parse(data, isBinary) {
     const len = data && typeof data.length === 'number' ? data.length : 0;
     if (isBinary) { _log('debug', { op: 'malformed', len }); return null; }
-    let msg;
-    try { msg = JSON.parse(String(data)); } catch (_) { msg = null; }
+    const parsed = safeJson(String(data));
+    const msg = parsed.ok ? parsed.value : null;
     if (!msg || typeof msg !== 'object' || typeof msg.op !== 'number' || !msg.d || typeof msg.d !== 'object') {
       _log('debug', { op: 'malformed', len });
       return null;

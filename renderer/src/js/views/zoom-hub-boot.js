@@ -21,7 +21,7 @@ export async function boot(mount, deps = {}) {
     if (!f.enabled || !(f.data || f.studio)) return false;
     const load = typeof deps.load === 'function' ? deps.load : () => import('./zoom-hub.js');
     const mod = await load();
-    mod.init(mount, { enabled: !!f.enabled, data: !!f.data, studio: !!f.studio, write: !!f.write });
+    mod.init(mount, { enabled: !!f.enabled, data: !!f.data, studio: !!f.studio, write: !!f.write, obs: !!f.obs });
     return true;
   } catch (e) {
     try { console.warn('[zoom-hub] boot failed', e && e.name); } catch (_) {}

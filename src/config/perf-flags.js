@@ -722,15 +722,55 @@ function loadEmailIntel(deps = {}) {
   }
 }
 
-// Zoom AI studio (all default OFF): settings.zoom.{enabled,data,studio,write} === true, or
-// FLEET_ZOOM / FLEET_ZOOM_DATA / FLEET_ZOOM_STUDIO / FLEET_ZOOM_WRITE '0'|'1' (env wins over settings;
-// FLEET_ZOOM_ENABLED is an alias for FLEET_ZOOM, used only when the primary is unset). Effective chain:
+// ── Zoom Meetings tab (default OFF) ─────────────────────────────────────────
+//   settings.zoom.enabled  boolean (=== true) / FLEET_ZOOM_ENABLED '0'|'1' (env wins, junk ignored)
+// Non-flag options (validated, never hardcoded meeting data):
+//   settings.zoom.portalHost   tenant portal host, default 'amazon.zoom.us' (must be *.zoom.us)
+//   settings.zoom.webAppHost   Zoom web app host,  default 'app.zoom.us'    (must be *.zoom.us)
+//   settings.zoom.miniPlayer   'corner' | 'floating', default 'corner'
+// Read once at startup (restart to change). No new store key: 'settings' is already in the REGISTRY.
+const ZOOM_MEET_ENV = 'FLEET_ZOOM_ENABLED';
+const ZOOM_HOST_RE = /^([a-z0-9-]+\.)*zoom\.us$/i;
+function _zoomHost(v, dflt) {
+  return (typeof v === 'string' && ZOOM_HOST_RE.test(v.trim())) ? v.trim().toLowerCase() : dflt;
+}
+function resolveZoomMeetFlags(settings, env) {
+  const z = _obj(_obj(settings).zoom);
+  let enabled = z.enabled === true;
+  const e = _envBool(env, ZOOM_MEET_ENV);
+  if (e !== null) enabled = e;
+  return {
+    enabled,
+    portalHost: _zoomHost(z.portalHost, 'amazon.zoom.us'),
+    webAppHost: _zoomHost(z.webAppHost, 'app.zoom.us'),
+    miniPlayer: z.miniPlayer === 'floating' ? 'floating' : 'corner',
+  };
+}
+function loadZoomMeet(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveZoomMeetFlags(settings, env);
+  } catch (_) {
+    return resolveZoomMeetFlags({}, {});
+  }
+}
+
+// Zoom AI studio (all default OFF): settings.zoom.{enabled,data,studio,write,obs} === true, or
+// FLEET_ZOOM / FLEET_ZOOM_DATA / FLEET_ZOOM_STUDIO / FLEET_ZOOM_WRITE / FLEET_ZOOM_OBS '0'|'1' (env wins
+// over settings; FLEET_ZOOM_ENABLED is an alias for FLEET_ZOOM, used only when the primary is unset).
+// Effective chain:
 //   enabled = raw.enabled
 //   data    = enabled && raw.data
 //   studio  = enabled && raw.studio
 //   write   = data(eff) && raw.write
+//   obs     = studio(eff) && raw.obs   (zoom.studio.obs: Studio drives OBS over obs-websocket v5)
 // No area effective (data and studio both off) is the flag-OFF parity state, even with enabled:true.
-const ZOOM_ENV = { enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE' };
+const ZOOM_ENV = { enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE', obs: 'FLEET_ZOOM_OBS' };
 const ZOOM_ENV_ALIASES = { enabled: ['FLEET_ZOOM_ENABLED'] };
 
 function resolveZoomFlags(settings, env) {
@@ -750,8 +790,10 @@ function resolveZoomFlags(settings, env) {
   effective.data = raw.enabled && raw.data;
   effective.studio = raw.enabled && raw.studio;
   effective.write = effective.data && raw.write;
+  effective.obs = effective.studio && raw.obs;
   const warnings = [];
   if (raw.write && !effective.data) warnings.push('write-needs-data');
+  if (raw.obs && !effective.studio) warnings.push('obs-needs-studio');
   if (raw.enabled && !raw.data && !raw.studio) warnings.push('enabled-without-area');
   return Object.assign({}, raw, { effective, warnings });
 }

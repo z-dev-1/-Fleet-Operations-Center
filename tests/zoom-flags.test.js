@@ -1,4 +1,5 @@
 // FEAT-A1 / AC-2: Zoom flag resolver matrix, alias, env precedence, effective chain, warnings, loadZoom fallback.
+// OBS FEAT-003: zoom.studio.obs (settings.zoom.obs / FLEET_ZOOM_OBS) = studio(eff) && raw.obs, default OFF.
 import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'node:module';
 
@@ -7,17 +8,18 @@ const pf = require('../src/config/perf-flags');
 const zflags = require('../src/zoom/flags');
 
 const S = (zoom) => ({ zoom });
+const ALL_OFF = { enabled: false, data: false, studio: false, write: false, obs: false };
 
 describe('resolveZoomFlags', () => {
   it('defaults every flag OFF with no settings and no env', () => {
     const f = pf.resolveZoomFlags({}, {});
-    expect(f).toMatchObject({ enabled: false, data: false, studio: false, write: false });
-    expect(f.effective).toEqual({ enabled: false, data: false, studio: false, write: false });
+    expect(f).toMatchObject({ enabled: false, data: false, studio: false, write: false, obs: false });
+    expect(f.effective).toEqual(ALL_OFF);
     expect(f.warnings).toEqual([]);
   });
 
   it('exports ZOOM_ENV names', () => {
-    expect(pf.ZOOM_ENV).toEqual({ enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE' });
+    expect(pf.ZOOM_ENV).toEqual({ enabled: 'FLEET_ZOOM', data: 'FLEET_ZOOM_DATA', studio: 'FLEET_ZOOM_STUDIO', write: 'FLEET_ZOOM_WRITE', obs: 'FLEET_ZOOM_OBS' });
     expect(typeof pf.loadZoom).toBe('function');
   });
 
@@ -32,13 +34,15 @@ describe('resolveZoomFlags', () => {
 
   const matrix = [
     // [settings.zoom, effective]
-    [{ enabled: true }, { enabled: true, data: false, studio: false, write: false }],
-    [{ enabled: true, data: true }, { enabled: true, data: true, studio: false, write: false }],
-    [{ enabled: true, studio: true }, { enabled: true, data: false, studio: true, write: false }],
-    [{ enabled: true, data: true, write: true }, { enabled: true, data: true, studio: false, write: true }],
-    [{ enabled: true, studio: true, write: true }, { enabled: true, data: false, studio: true, write: false }],
-    [{ data: true, studio: true, write: true }, { enabled: false, data: false, studio: false, write: false }],
-    [{ enabled: true, data: true, studio: true, write: true }, { enabled: true, data: true, studio: true, write: true }],
+    [{ enabled: true }, { enabled: true, data: false, studio: false, write: false, obs: false }],
+    [{ enabled: true, data: true }, { enabled: true, data: true, studio: false, write: false, obs: false }],
+    [{ enabled: true, studio: true }, { enabled: true, data: false, studio: true, write: false, obs: false }],
+    [{ enabled: true, data: true, write: true }, { enabled: true, data: true, studio: false, write: true, obs: false }],
+    [{ enabled: true, studio: true, write: true }, { enabled: true, data: false, studio: true, write: false, obs: false }],
+    [{ data: true, studio: true, write: true }, { enabled: false, data: false, studio: false, write: false, obs: false }],
+    [{ enabled: true, data: true, studio: true, write: true }, { enabled: true, data: true, studio: true, write: true, obs: false }],
+    [{ enabled: true, studio: true, obs: true }, { enabled: true, data: false, studio: true, write: false, obs: true }],
+    [{ enabled: true, obs: true }, { enabled: true, data: false, studio: false, write: false, obs: false }],
   ];
   for (const [z, eff] of matrix) {
     it('effective chain for ' + JSON.stringify(z), () => {
@@ -46,11 +50,24 @@ describe('resolveZoomFlags', () => {
     });
   }
 
+  it('effective chain: obs = studio && raw.obs', () => {
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true, obs: true }), {}).effective.obs).toBe(true);
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true }), {}).effective.obs).toBe(false);
+    expect(pf.resolveZoomFlags(S({ enabled: true, data: true, obs: true }), {}).effective.obs).toBe(false);
+    expect(pf.resolveZoomFlags(S({ studio: true, obs: true }), {}).effective.obs).toBe(false);
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true, obs: 'true' }), {}).effective.obs).toBe(false);
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true }), { FLEET_ZOOM_OBS: '1' }).effective.obs).toBe(true);
+    const off = pf.resolveZoomFlags(S({ enabled: true, studio: true, obs: true }), { FLEET_ZOOM_OBS: '0' });
+    expect(off.obs).toBe(false);
+    expect(off.effective.obs).toBe(false);
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true, obs: true }), { FLEET_ZOOM_STUDIO: '0' }).effective.obs).toBe(false);
+  });
+
   it('env wins over settings in both directions', () => {
     const on = pf.resolveZoomFlags({}, { FLEET_ZOOM: '1', FLEET_ZOOM_DATA: '1', FLEET_ZOOM_STUDIO: '1', FLEET_ZOOM_WRITE: '1' });
-    expect(on.effective).toEqual({ enabled: true, data: true, studio: true, write: true });
+    expect(on.effective).toEqual({ enabled: true, data: true, studio: true, write: true, obs: false });
     const off = pf.resolveZoomFlags(S({ enabled: true, data: true, studio: true, write: true }), { FLEET_ZOOM: '0' });
-    expect(off.effective).toEqual({ enabled: false, data: false, studio: false, write: false });
+    expect(off.effective).toEqual(ALL_OFF);
     expect(off.data).toBe(true);
   });
 
@@ -71,6 +88,13 @@ describe('resolveZoomFlags', () => {
     expect(pf.resolveZoomFlags(S({ enabled: true, studio: true }), {}).warnings).toEqual([]);
     expect(pf.resolveZoomFlags(S({ write: true }), {}).warnings).toEqual(['write-needs-data']);
   });
+
+  it('warnings: obs-needs-studio', () => {
+    expect(pf.resolveZoomFlags(S({ enabled: true, data: true, obs: true }), {}).warnings).toEqual(['obs-needs-studio']);
+    expect(pf.resolveZoomFlags(S({ obs: true }), {}).warnings).toEqual(['obs-needs-studio']);
+    expect(pf.resolveZoomFlags(S({ enabled: true, obs: true }), {}).warnings).toEqual(['obs-needs-studio', 'enabled-without-area']);
+    expect(pf.resolveZoomFlags(S({ enabled: true, studio: true, obs: true }), {}).warnings).toEqual([]);
+  });
 });
 
 describe('loadZoom', () => {
@@ -80,7 +104,7 @@ describe('loadZoom', () => {
   });
   it('falls back to all-OFF when the store throws', () => {
     const f = pf.loadZoom({ load: () => { throw new Error('boom'); }, env: {} });
-    expect(f.effective).toEqual({ enabled: false, data: false, studio: false, write: false });
+    expect(f.effective).toEqual(ALL_OFF);
   });
   it('falls back to all-OFF when env access throws', () => {
     const env = new Proxy({}, { get() { throw new Error('env'); } });
@@ -88,7 +112,7 @@ describe('loadZoom', () => {
     expect(f.effective.data).toBe(false);
   });
   it('the test setup forces the FLEET_ZOOM* env OFF', () => {
-    for (const k of ['FLEET_ZOOM', 'FLEET_ZOOM_ENABLED', 'FLEET_ZOOM_DATA', 'FLEET_ZOOM_STUDIO', 'FLEET_ZOOM_WRITE']) expect(process.env[k]).toBe('0');
+    for (const k of ['FLEET_ZOOM', 'FLEET_ZOOM_ENABLED', 'FLEET_ZOOM_DATA', 'FLEET_ZOOM_STUDIO', 'FLEET_ZOOM_WRITE', 'FLEET_ZOOM_OBS']) expect(process.env[k]).toBe('0');
   });
 });
 
