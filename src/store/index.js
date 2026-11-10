@@ -362,6 +362,8 @@ const REGISTRY = {
   zoomStudioLibrary:       () => path.join(P.dataDir, 'zoom_studio_library.json'),
   // Shape: { version:1, launcherPath:null|string, launcherConfirmed:{ [sha256(path)]: ISO }, lastPresetId:null|string }
   zoomStudioConfig:        () => path.join(P.dataDir, 'zoom_studio_config.json'),
+  // Shape: { version:1, host, port, exePath:null|string, hintShown, owned:{ sceneUuid, inputUuid, createdByFleet }, recovery:null|{ prevScene, vcamByFleet, at } } (never a password)
+  zoomStudioObs:           () => path.join(P.dataDir, 'zoom_studio_obs.json'),
 };
 
 function _resolvePath(name) {
