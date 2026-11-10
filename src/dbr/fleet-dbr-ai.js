@@ -7,7 +7,8 @@
 // Anti-fabrication gate (validateDraft), line-level: a line is dropped when it cites an
 // ID-like token that is neither one of the pair's down units nor present (token-bounded) in
 // the evidence, cites a fleet unit outside the pair, cites a ticket ref absent from the
-// evidence, or states an ETC date that is not one of the pair's parsed ETC dates.
+// evidence, states an ETC date that is not one of the pair's parsed ETC dates, or states a
+// $ amount or fact-like date (drop-off/tow/arrival/delivery/pickup/repaired) absent from the evidence.
 'use strict';
 
 const { extractJsonObject } = require('../utils/ai-json');
@@ -29,7 +30,14 @@ const ID_TOKEN_RE = /\b[A-Z]{1,4}\d{4,}[A-Z0-9]*\b|\b\d{5,}\b/g;
 // amz-…, FNA-style refs. Only tokens containing a digit count as ticket refs, so ordinary
 // hyphenated words ("re-escalated", "pre-approval") are not mistaken for invented tickets.
 const TICKET_RE = /\b[a-z]{2,5}-[a-z0-9]{8,}\b/gi;
-const ETC_DATE_RE = /\b(ETC|ETR|estimated completion|completion date)\b[^\n\d]{0,25}(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/gi;
+// Same ETC phrase list as the builder's parseEtc (fleet-dbr.js), so "repair ETA 11/14" is gated too.
+const ETC_DATE_RE = /\b(ETC|ETR|est(?:\.|imated)?\s+(?:time\s+of\s+)?completion|expected\s+completion|completion\s+(?:date|eta)|repair\s+eta|eta\s+(?:for|on)\s+(?:completion|repair))\b[^\n\d]{0,25}(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/gi;
+// Fact-like dates (drop-off, tow, arrival, delivery, pickup, repaired) must appear in the
+// evidence; follow-up / due dates stay allowed because the draft proposes them.
+const FACT_DATE_RE = /\b(drop[\s-]?off|dropped\s+off|tow(?:ed)?|arriv(?:ed|al)|deliver(?:ed|y)|picked\s+up|pick[\s-]?up|repaired)\b[^\n\d]{0,25}(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/gi;
+// Dollar amounts must appear in the evidence ($4,200 / $4200 / $4,200.00 compare equal).
+const AMOUNT_RE = /\$\s?(\d[\d,]*(?:\.\d+)?)/g;
+const EVIDENCE_DATE_RE = /\b(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\b|\b\d{4}-(\d{2})-(\d{2})\b/g;
 
 const BARRIER_LABELS = [
   ['vendor1p', '1P Vendor Barrier'], ['oem', 'OEM Barrier'], ['estimate', 'Estimate Barrier'],
@@ -225,7 +233,39 @@ function _lineProblem(line, ctx) {
   while ((m = ETC_DATE_RE.exec(line))) {
     if (!ctx.etcDates.has(_mdOf(m[2]))) return 'unknown-etc-date';
   }
+  FACT_DATE_RE.lastIndex = 0;
+  while ((m = FACT_DATE_RE.exec(line))) {
+    if (!ctx.evidenceDates.has(_mdOf(m[2]))) return 'unknown-date';
+  }
+  AMOUNT_RE.lastIndex = 0;
+  while ((m = AMOUNT_RE.exec(line))) {
+    if (!ctx.evidenceAmounts.has(_amountOf(m[1]))) return 'unknown-amount';
+  }
   return null;
+}
+
+function _amountOf(s) {
+  const n = Number(String(s).replace(/,/g, ''));
+  return Number.isFinite(n) ? String(n) : '';
+}
+
+function _evidenceDates(evidence) {
+  const out = new Set();
+  EVIDENCE_DATE_RE.lastIndex = 0;
+  let m;
+  while ((m = EVIDENCE_DATE_RE.exec(evidence))) {
+    out.add(m[1] ? (+m[1]) + '/' + (+m[2]) : (+m[3]) + '/' + (+m[4]));
+  }
+  return out;
+}
+
+function _evidenceAmounts(evidence) {
+  const out = new Set();
+  AMOUNT_RE.lastIndex = 0;
+  let m;
+  while ((m = AMOUNT_RE.exec(evidence))) out.add(_amountOf(m[1]));
+  out.delete('');
+  return out;
 }
 
 function _field(raw, max, ctx, counter) {
@@ -256,6 +296,8 @@ function validateDraft(text, opts = {}) {
     evidence: typeof opts.evidenceText === 'string' ? opts.evidenceText : '',
     etcDates: new Set((opts.etcDates || []).map((d) => (/^\d{4}-/.test(d) ? _md(d) : _mdOf(d))).filter(Boolean)),
   };
+  ctx.evidenceDates = _evidenceDates(ctx.evidence);
+  ctx.evidenceAmounts = _evidenceAmounts(ctx.evidence);
   const counter = { dropped: 0 };
   const fasActions = _field(obj.fasActions, MAX_LINES.fasActions, ctx, counter);
   const support = _field(obj.support, MAX_LINES.support, ctx, counter);

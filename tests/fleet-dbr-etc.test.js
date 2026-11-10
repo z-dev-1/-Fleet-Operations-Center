@@ -33,6 +33,12 @@ describe('parseEtc classification', () => {
     expect(etc({ canonicalNextStep: 'no ETC until parts arrive 11/12' })).toMatchObject({ state: 'none', date: null });
     expect(etc({ savedNotes: 'ETC: TBD 11/12' }).state).toBe('none');
   });
+  it('negated ETC phrases are not dated ETCs (no "estimated completion" + a parts ETA)', () => {
+    expect(etc({ savedNotes: 'No estimated completion yet; parts ETA 11/12' })).toMatchObject({ state: 'none', date: null });
+    expect(etc({ savedNotes: 'pending estimated completion date 11/12' })).toMatchObject({ state: 'none', date: null });
+    expect(etc({ savedNotes: 'repair ETA: TBD, parts 11/12' })).toMatchObject({ state: 'none', date: null });
+    expect(etc({ savedNotes: 'estimated completion 11/12' })).toMatchObject({ state: 'future', date: '2026-11-12' });
+  });
   it('a higher-priority source decides even when a lower one has a date', () => {
     expect(etc({ canonicalNextStep: 'ETC 11/05', savedNotes: 'ETC 11/10' })).toMatchObject({ state: 'missed', source: 'canonicalNextStep' });
   });

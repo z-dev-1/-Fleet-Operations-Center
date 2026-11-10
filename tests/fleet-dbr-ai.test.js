@@ -107,6 +107,29 @@ describe('validateDraft', () => {
     expect(Object.keys(r).sort()).toEqual(['dropped', 'fasActions', 'ok', 'support']);
   });
 
+  it('drops ETA-phrased repair dates, invented $ amounts and invented fact dates; keeps follow-up dates', () => {
+    const c2 = Object.assign({}, ctx, { evidenceText: ctx.evidenceText + '\n12/20 - estimate $4,200 submitted, drop-off 12/21' });
+    const fas = [
+      '• ' + a + ': repair ETA 12/24 per shop',               // invented ETA-phrased ETC
+      '• ' + a + ': ETA for completion 12/24',                // invented ETA-phrased ETC
+      '• ' + a + ': repair ETA 11/12 per shop',               // parsed ETC date
+      '• ' + a + ': estimate $9,999 approved',                // invented amount
+      '• ' + a + ': estimate $4200.00 submitted',             // evidence amount
+      '• ' + a + ': body-shop drop-off 12/24',                // invented fact date
+      '• ' + a + ': drop-off 12/21 confirmed',                // evidence date
+      '• ' + a + ': follow up 12/24 with carrier',            // proposed follow-up date stays
+    ].join('\n');
+    const r = AI.validateDraft(J({ fasActions: fas, support: 'None' }), c2);
+    expect(r.ok).toBe(true);
+    expect(r.dropped).toBe(4);
+    expect(r.fasActions.split('\n')).toEqual([
+      '• ' + a + ': repair ETA 11/12 per shop',
+      '• ' + a + ': estimate $4200.00 submitted',
+      '• ' + a + ': drop-off 12/21 confirmed',
+      '• ' + a + ': follow up 12/24 with carrier',
+    ]);
+  });
+
   it('caps lines, line length and total chars; strips fences and control chars', () => {
     const many = Array.from({ length: 12 }, (_, i) => '• ' + a + ': action ' + i).join('\n');
     const r = AI.validateDraft('```json\n' + J({ fasActions: many, support: Array.from({ length: 7 }, (_, i) => '• MCS: ask ' + i).join('\n') }) + '\n```', ctx);

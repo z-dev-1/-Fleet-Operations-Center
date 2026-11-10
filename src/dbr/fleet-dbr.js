@@ -178,29 +178,34 @@ const ETC_SOURCES = Object.freeze(['canonicalNextStep', 'canonicalSituation', 's
 const _DATE_TAIL = '[^\\n\\d]{0,25}?(\\d{1,2})\\/(\\d{1,2})(?:\\/(\\d{2,4}))?';
 // ETC / ETR are case-sensitive uppercase so "etc." (et cetera) never matches; bare ETA never counts.
 const ETC_TOKEN_POS_RE = new RegExp('\\b(?:ETC|ETR)\\b' + _DATE_TAIL, 'g');
-const ETC_PHRASE_POS_RE = new RegExp('\\b(?:est(?:\\.|imated)?\\s+(?:time\\s+of\\s+)?completion|expected\\s+completion|completion\\s+(?:date|eta)|repair\\s+eta|eta\\s+(?:for|on)\\s+(?:completion|repair))\\b' + _DATE_TAIL, 'gi');
+const _ETC_PHRASE = '\\b(?:est(?:\\.|imated)?\\s+(?:time\\s+of\\s+)?completion|expected\\s+completion|completion\\s+(?:date|eta)|repair\\s+eta|eta\\s+(?:for|on)\\s+(?:completion|repair))\\b';
+const ETC_PHRASE_POS_RE = new RegExp(_ETC_PHRASE + _DATE_TAIL, 'gi');
 const ETC_TOKEN_RE = /\b(?:ETC|ETR)\b/g;
+const ETC_PHRASE_RE = new RegExp(_ETC_PHRASE, 'gi');
 const NEG_BEFORE_RE = /\b(?:no|without|pending|tbd|unknown|n\/a)\s+(?:an?\s+)?$/i;
 const NEG_AFTER_RE = /^\s*[:-]?\s*(?:tbd|pending|unknown|n\/a|none|not (?:yet )?(?:provided|given|available))\b/i;
 
 // All ETC mentions in one text: [{ start, end, negated, date }]. Invalid dates are ignored
-// (not negated). A positive match whose ETC/ETR token lies inside a negated span is discarded.
+// (not negated). A positive match whose ETC/ETR token or ETC phrase ("estimated completion",
+// "repair ETA", ...) lies inside a negated span is discarded.
 function _etcMentions(text, today) {
   const t = _str(text);
   const neg = [];
-  ETC_TOKEN_RE.lastIndex = 0;
   let m;
-  while ((m = ETC_TOKEN_RE.exec(t))) {
-    const tokS = m.index;
-    const tokE = m.index + m[0].length;
-    const before = NEG_BEFORE_RE.exec(t.slice(Math.max(0, tokS - 40), tokS));
-    const after = NEG_AFTER_RE.exec(t.slice(tokE));
-    if (before || after) {
-      neg.push({
-        start: before ? tokS - before[0].length : tokS,
-        end: after ? tokE + after[0].length : tokE,
-        negated: true, date: null,
-      });
+  for (const re of [ETC_TOKEN_RE, ETC_PHRASE_RE]) {
+    re.lastIndex = 0;
+    while ((m = re.exec(t))) {
+      const tokS = m.index;
+      const tokE = m.index + m[0].length;
+      const before = NEG_BEFORE_RE.exec(t.slice(Math.max(0, tokS - 40), tokS));
+      const after = NEG_AFTER_RE.exec(t.slice(tokE));
+      if (before || after) {
+        neg.push({
+          start: before ? tokS - before[0].length : tokS,
+          end: after ? tokE + after[0].length : tokE,
+          negated: true, date: null,
+        });
+      }
     }
   }
   const inNeg = (i) => neg.some((n) => i >= n.start && i < n.end);
@@ -208,7 +213,7 @@ function _etcMentions(text, today) {
   for (const re of [ETC_TOKEN_POS_RE, ETC_PHRASE_POS_RE]) {
     re.lastIndex = 0;
     while ((m = re.exec(t))) {
-      if (re === ETC_TOKEN_POS_RE && inNeg(m.index)) continue;
+      if (inNeg(m.index)) continue;
       const date = inferDate(m[1], m[2], m[3], today);
       if (!date) continue;
       pos.push({ start: m.index, end: m.index + m[0].length, negated: false, date });
