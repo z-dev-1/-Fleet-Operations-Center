@@ -1,16 +1,22 @@
 'use strict';
 /**
- * orcha/aki-lane.js — Aki CLI as an AI lane (one-shot `aki --cli ... <prompt>`).
+ * orcha/aki-lane.js — Aki CLI as an AI lane (one-shot `aki --cli ...`, prompt on stdin).
  *
  * Every call spawns the Aki binary directly (never a .cmd/.bat shim, never a
- * shell), with the prompt as ONE argv element, stdin ignored, no --thread
- * (each call is a throwaway Aki thread), cwd in a private temp sandbox and a
- * scrubbed environment (AWS/Midway creds kept, Fleet/Slack/token keys dropped).
+ * shell), no --thread (each call is a throwaway Aki thread), cwd in a private
+ * temp sandbox and a scrubbed environment (AWS/Midway creds kept, Fleet/Slack/
+ * token keys dropped). The FULL prompt is written to stdin (pipe mode) and
+ * stdin is closed, so prompts are not bound by the ~32k Windows command line.
+ * Fallback: if stdin delivery fails, the call is re-spawned once with the
+ * prompt as ONE argv element, but only when the whole prompt fits the command
+ * line; otherwise it rejects AKI_PROMPT_TOO_LONG. The lane never truncates.
+ * Emergency override: FLEET_AKI_PROMPT_VIA=argv forces argv mode (over-limit
+ * prompts reject AKI_PROMPT_TOO_LONG, never truncated).
  * Output is `--output-format stream-json` JSONL, parsed incrementally:
  * text_delta content is the answer, tool_use events are counted by name.
  *
  * Never logs prompt, response or stderr content: one line per call with exit
- * code, latency, text length and tool counts only.
+ * code, latency, text length, tool counts, delivery mode and prompt length only.
  *
  * All side effects go through injectable deps so unit tests never run aki:
  *   createAkiLane({ spawn, killTree, resolveBin, mkdirSync, tmpdir, platform,
@@ -26,6 +32,7 @@ const AKI_CMDLINE_MAX_WIN32 = 32000;
 const AKI_CMDLINE_MAX_OTHER = 120000;
 const AKI_CMDLINE_MAX = process.platform === 'win32' ? AKI_CMDLINE_MAX_WIN32 : AKI_CMDLINE_MAX_OTHER;
 const AKI_SANDBOX_DIRNAME = 'fleet-aki-lane';
+// Kept for fitPrompt's pure 'truncate' mode (back-compat); the lane itself never uses it.
 const AKI_TRUNC_MARKER = '\n\n[…truncated by Fleet: prompt exceeded the Windows command-line limit for Aki]';
 const AKI_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,99}$/;
 const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,40}$/;
@@ -91,6 +98,15 @@ function buildArgs(prompt, opts = {}) {
   if (opts.model) args.push('--model', String(opts.model));
   args.push('--output-format', 'stream-json');
   args.push(p.startsWith('-') ? ' ' + p : p);
+  return args;
+}
+
+/** argv for stdin (pipe) mode: same flags as buildArgs, no prompt element. */
+function buildStdinArgs(opts = {}) {
+  const args = ['--cli'];
+  if (opts.profile) args.push('--profile', String(opts.profile));
+  if (opts.model) args.push('--model', String(opts.model));
+  args.push('--output-format', 'stream-json');
   return args;
 }
 
@@ -184,6 +200,12 @@ function _envGet(env, name) {
   return k ? env[k] : undefined;
 }
 
+/** Prompt delivery mode: 'argv' only when FLEET_AKI_PROMPT_VIA=argv (emergency override), else 'stdin'. */
+function promptVia(env) {
+  const v = _envGet(env, 'FLEET_AKI_PROMPT_VIA');
+  return String(v == null ? '' : v).trim().toLowerCase() === 'argv' ? 'argv' : 'stdin';
+}
+
 /**
  * Locate the Aki binary. win32: %LOCALAPPDATA%\Aki\Aki.exe, then PATH dirs + Aki.exe
  * (never a .cmd/.bat: Node refuses those with shell:false). Else ~/.aki/bin/aki, then PATH aki.
@@ -267,6 +289,7 @@ function createAkiLane(deps = {}) {
     counters = {
       calls: 0, ok: 0, failed: 0, timeouts: 0, aborted: 0, tooLong: 0, toolsUsed: 0,
       lastTools: {}, lastLatencyMs: null, lastErrorCode: null,
+      stdinFallbacks: 0, stdinFailed: 0, lastVia: null,
     };
   }
   reset();
@@ -311,6 +334,7 @@ function createAkiLane(deps = {}) {
       calls: counters.calls, ok: counters.ok, failed: counters.failed, timeouts: counters.timeouts,
       aborted: counters.aborted, tooLong: counters.tooLong, toolsUsed: counters.toolsUsed,
       lastTools: { ...counters.lastTools }, lastLatencyMs: counters.lastLatencyMs, lastErrorCode: counters.lastErrorCode,
+      stdinFallbacks: counters.stdinFallbacks, stdinFailed: counters.stdinFailed, lastVia: counters.lastVia,
     };
   }
 
@@ -326,6 +350,13 @@ function createAkiLane(deps = {}) {
         reject(_abortErr());
         return;
       }
+      const text = String(prompt == null ? '' : prompt);
+      if (text.trim() === '') {
+        counters.failed++;
+        counters.lastErrorCode = 'AKI_EMPTY_PROMPT';
+        reject(_err('AKI_EMPTY_PROMPT', 'empty prompt not sent to aki'));
+        return;
+      }
       const bin = _bin();
       if (!bin) {
         counters.failed++;
@@ -333,19 +364,27 @@ function createAkiLane(deps = {}) {
         reject(_err('AKI_NOT_FOUND', 'aki not found'));
         return;
       }
-      let fitted;
-      try {
-        const argOpts = { profile: cfg.profile, model: cfg.model };
-        fitted = fitPrompt(bin, (p) => buildArgs(p, argOpts), prompt, opts.onTooLong === 'truncate' ? 'truncate' : 'reject',
-          { max: cmdLineMax(d.platform) });
-      } catch (e) {
-        counters.tooLong++;
-        counters.lastErrorCode = e.code || 'AKI_PROMPT_TOO_LONG';
-        reject(e);
-        return;
+      const argOpts = { profile: cfg.profile, model: cfg.model };
+      const max = cmdLineMax(d.platform);
+      const via = promptVia(d.env);
+      let args;
+      let argvFits = false;
+      if (via === 'stdin') {
+        args = buildStdinArgs(argOpts);
+        argvFits = cmdLineLength(bin, buildArgs(text, argOpts)) <= max;
+      } else {
+        // argv override: the whole prompt must fit; opts.onTooLong === 'truncate' is ignored (never truncates).
+        try {
+          args = fitPrompt(bin, (p) => buildArgs(p, argOpts), text, 'reject', { max }).args;
+        } catch (e) {
+          counters.tooLong++;
+          counters.lastErrorCode = e.code || 'AKI_PROMPT_TOO_LONG';
+          reject(e);
+          return;
+        }
       }
       const job = {
-        id: ++seq, bin, args: fitted.args, truncated: fitted.truncated,
+        id: ++seq, bin, args, via, prompt: text, promptLen: text.length, argOpts, argvFits, retried: false, stdinFailCode: null,
         requestId: opts.requestId || `aki-${seq}`, isolated: opts.isolated === true,
         rank: (opts.rank != null && Number.isFinite(Number(opts.rank))) ? Number(opts.rank) : null,
         signal, resolve, reject, started: false, settle: null, onAbort: null,
@@ -414,23 +453,44 @@ function createAkiLane(deps = {}) {
     };
     const onError = (e) => finish('error', e);
     const onClose = (code) => { exitCode = code; finish('close'); };
+    let stdinDone = false;
+    const onStdinError = (e) => {
+      if (settled || stdinDone) return;
+      finish('stdin', { code: (e && e.code) || 'STDIN_ERROR' });
+    };
 
     function finish(kind, e) {
       if (settled) return;
       settled = true;
       job.settle = null;
       if (timer) { d.clearTimeout(timer); timer = null; }
-      if (job.signal && job.onAbort) job.signal.removeEventListener('abort', job.onAbort);
       if (proc) {
         try { proc.stdout && proc.stdout.removeListener('data', onStdout); } catch (_) {}
         try { proc.stderr && proc.stderr.removeListener('data', onStderr); } catch (_) {}
         try { proc.removeListener('close', onClose); } catch (_) {}
-        // keep an error listener so a late 'error' after settle never becomes an uncaught exception
+        // keep error listeners so a late 'error' / EPIPE after settle never becomes an uncaught exception
         try { proc.removeListener('error', onError); proc.on('error', () => {}); } catch (_) {}
+        try { if (proc.stdin) { proc.stdin.removeListener('error', onStdinError); proc.stdin.on('error', () => {}); } } catch (_) {}
       }
-      if ((kind === 'timeout' || kind === 'abort' || kind === 'cap') && proc) {
+      if ((kind === 'timeout' || kind === 'abort' || kind === 'cap' || kind === 'stdin') && proc) {
         try { d.killTree(proc); } catch (_) {}
       }
+      if (kind === 'stdin') {
+        job.stdinFailCode = (e && e.code) || 'STDIN_ERROR';
+        if (job.argvFits && !job.retried) {
+          // One argv re-spawn: the whole prompt fits the command line. `active` stays held by this job.
+          job.retried = true;
+          job.via = 'argv-fallback';
+          job.args = buildArgs(job.prompt, job.argOpts);
+          counters.stdinFallbacks++;
+          _info(`[aki] ${job.requestId} stdin failed (${job.stdinFailCode}) -> argv fallback in=${job.promptLen}ch`);
+          _run(job);
+          return;
+        }
+        counters.stdinFailed++;
+        counters.tooLong++;
+      }
+      if (job.signal && job.onAbort) job.signal.removeEventListener('abort', job.onAbort);
       if (kind === 'close') parser.push(decoder.end());
       const st2 = parser.end();
       const text = st2.text;
@@ -453,6 +513,9 @@ function createAkiLane(deps = {}) {
         err = _abortErr();
       } else if (kind === 'cap') {
         err = _err('AKI_STDOUT_CAP', `aki output exceeded ${cfg.maxStdoutBytes} bytes`);
+      } else if (kind === 'stdin') {
+        err = _err('AKI_PROMPT_TOO_LONG', `aki stdin delivery failed (${job.stdinFailCode}); prompt ${job.promptLen} chars `
+          + `exceeds the ${cmdLineMax(d.platform)}-char command line, not sent truncated`);
       } else {
         const code = e && e.code;
         if (code === 'ENOENT') {
@@ -465,6 +528,7 @@ function createAkiLane(deps = {}) {
       }
 
       counters.lastLatencyMs = ms;
+      counters.lastVia = job.via;
       counters.toolsUsed += st2.toolCount;
       counters.lastTools = { ...st2.tools };
       if (err) {
@@ -485,9 +549,10 @@ function createAkiLane(deps = {}) {
       _info(`[aki] ${job.requestId} exit=${exitStr} ${ms}ms text=${text.length}ch tools=${st2.toolCount}`
         + (toolList ? ` (${toolList})` : '')
         + (err ? ` err=${err.code}` : '')
-        + (job.truncated ? ' [truncated]' : '')
         + (job.isolated ? ' [isolated]' : '')
-        + ` stderr=${stderrBytes}b`);
+        + ` stderr=${stderrBytes}b`
+        + ` via=${job.via} in=${job.promptLen}ch`
+        + (job.stdinFailCode ? ` [stdin-failed:${job.stdinFailCode}]` : ''));
 
       active--;
       if (err) job.reject(err); else job.resolve(value);
@@ -502,7 +567,7 @@ function createAkiLane(deps = {}) {
       proc = d.spawn(job.bin, job.args, {
         cwd,
         env: akiChildEnv(d.env),
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: job.via === 'stdin' ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
         shell: false,
         windowsHide: true,
       });
@@ -517,6 +582,15 @@ function createAkiLane(deps = {}) {
     proc.on('error', onError);
     proc.on('close', onClose);
     timer = d.setTimeout(() => finish('timeout'), cfg.timeoutMs);
+    if (job.via === 'stdin') {
+      if (!proc.stdin) { finish('stdin', { code: 'NO_STDIN' }); return; }
+      proc.stdin.on('error', onStdinError);
+      try {
+        proc.stdin.end(job.prompt, 'utf8', () => { stdinDone = true; });
+      } catch (e) {
+        onStdinError(e);
+      }
+    }
   }
 
   return { ask, configure, available, load, stats, markState, reset };
@@ -527,6 +601,8 @@ module.exports = {
   createStreamParser,
   parseStreamJson,
   buildArgs,
+  buildStdinArgs,
+  promptVia,
   winQuotedLength,
   cmdLineLength,
   cmdLineMax,

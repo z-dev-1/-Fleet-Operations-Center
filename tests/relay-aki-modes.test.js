@@ -14,7 +14,7 @@ fs.mkdirSync(tmpDir, { recursive: true });
 require('../src/config/paths').setDataDir(tmpDir);
 const relay = require('../src/orcha/relay');
 const fleetBrain = require('../src/orcha/fleet-brain');
-const { flush, makeFakeProc, baseRelaySetup, installFakeFleetBrain, GW_OFF } = require('./helpers/ai-gateway-fakes.cjs');
+const { flush, makeFakeProc, attachFakeStdin, baseRelaySetup, installFakeFleetBrain, GW_OFF } = require('./helpers/ai-gateway-fakes.cjs');
 const { AKI_TRUNC_MARKER } = require('../src/orcha/aki-lane');
 const T = relay.__test__;
 const SENTINEL = 'SENTINEL-AKI-9c1e';
@@ -23,10 +23,11 @@ const SLOW = 15000; // tests that exhaust the Orcha lane wait its real 2 s retry
 
 let cc, aki, fbCalls;
 
-function makeAkiProc() {
+function makeAkiProc(opts = {}) {
   const p = new EventEmitter();
   p.stdout = new EventEmitter();
   p.stderr = new EventEmitter();
+  if (opts.noStdin) p.stdin = null; else attachFakeStdin(p);
   p.pid = 4242;
   p.kill = vi.fn();
   p.reply = (text, tools = []) => {
@@ -42,7 +43,7 @@ function makeAkiProc() {
 function installAki(opts = {}) {
   const st = { procs: [], spawns: [], kill: vi.fn(), logs: [], bin: opts.bin !== false };
   T.setAkiLaneDeps({
-    spawn: (bin, args, options) => { const p = makeAkiProc(); st.procs.push(p); st.spawns.push({ bin, args, options }); return p; },
+    spawn: (bin, args, options) => { const p = makeAkiProc({ noStdin: !!opts.noStdin }); st.procs.push(p); st.spawns.push({ bin, args, options }); return p; },
     killTree: st.kill,
     resolveBin: () => (st.bin ? AKI_BIN : null),
     mkdirSync: () => {},
@@ -117,7 +118,8 @@ describe("mode 'aki' (strict)", () => {
     await flush();
     expect(started()).toEqual({ aki: 1, claude: 0, fb: 0 });
     expect(aki.spawns[0].bin).toBe(AKI_BIN);
-    expect(aki.spawns[0].args[aki.spawns[0].args.length - 1]).toBe('classify this repair');
+    expect(aki.procs[0].stdinData).toBe('classify this repair');
+    expect(aki.spawns[0].args).not.toContain('classify this repair');
     expect(T.laneState().akiBusy).toBe(1);
     aki.procs[0].reply('ENGINE', ['Bash', 'Read']);
     expect(await r.p).toBe('ENGINE');
@@ -150,14 +152,16 @@ describe("mode 'aki' (strict)", () => {
     expect(relay.getStatus().backends.aki).toBe(false);
     expect(relay.queueStats().akiLane.state).toBe('not-found');
   });
-  it('long prompt is truncated with the marker (Aki is the only lane), spawned once', async () => {
+  it('long prompt is delivered whole via stdin (Aki is the only lane), spawned once', async () => {
     relay.setPreference('aki');
     const r = ask('x'.repeat(40000) + 'TAIL');
     await flush();
     expect(aki.spawns).toHaveLength(1);
-    const arg = aki.spawns[0].args[aki.spawns[0].args.length - 1];
-    expect(arg.endsWith(AKI_TRUNC_MARKER)).toBe(true);
-    expect(arg).not.toContain('TAIL');
+    const sent = aki.procs[0].stdinData;
+    expect(sent).toHaveLength(40004);
+    expect(sent.endsWith('TAIL')).toBe(true);
+    expect(sent).not.toContain(AKI_TRUNC_MARKER);
+    expect(aki.spawns[0].args.some((a) => a.includes(AKI_TRUNC_MARKER) || a.includes('TAIL'))).toBe(false);
     aki.procs[0].reply('ok');
     expect(await r.p).toBe('ok');
   });
@@ -344,16 +348,29 @@ describe("mode 'aki-claude'", () => {
     await expect(r.p).rejects.toThrow('All AI lanes failed (preference=aki-claude)');
     expect(cc).toHaveLength(1);
   }, SLOW);
-  it('too-long prompt -> falls through to claude without marking Aki down', async () => {
+  it('long prompt with working stdin -> delivered whole to Aki, no Claude call', async () => {
     relay.setPreference('aki-claude');
     const r = ask('y'.repeat(40000));
     await flush();
-    expect(aki.spawns).toHaveLength(0);
+    expect(aki.spawns).toHaveLength(1);
+    expect(aki.procs[0].stdinData).toHaveLength(40000);
+    aki.procs[0].reply('aki');
+    expect(await r.p).toBe('aki');
+    expect(cc).toHaveLength(0);
+    expect(relay.queueStats().akiLane.tooLong).toBe(0);
+  });
+  it('stdin unavailable + over-limit prompt -> AKI_PROMPT_TOO_LONG, claude answers, Aki not marked down', async () => {
+    aki = installAki({ noStdin: true });
+    relay.setPreference('aki-claude');
+    const r = ask('y'.repeat(40000));
+    await flush();
+    expect(aki.spawns).toHaveLength(1);
+    expect(aki.kill).toHaveBeenCalledWith(aki.procs[0]);
     expect(cc).toHaveLength(1);
     cc[0].result('cc');
     expect(await r.p).toBe('cc');
     expect(T.laneState().downUntil.aki).toBe(0);
-    expect(relay.queueStats().akiLane.tooLong).toBe(1);
+    expect(relay.queueStats().akiLane).toMatchObject({ tooLong: 1, stdinFailed: 1, lastErrorCode: 'AKI_PROMPT_TOO_LONG' });
   });
   it('binary missing -> skipped, claude used, Aki not marked down', async () => {
     aki = installAki({ bin: false });

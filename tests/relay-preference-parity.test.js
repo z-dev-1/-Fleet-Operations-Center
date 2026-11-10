@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const tmpDir = path.join(os.tmpdir(), 'relay-parity-' + Date.now());
@@ -31,6 +32,7 @@ function setup() {
     spawn: (bin, args) => {
       akiSpawns.push(args);
       const p = new EventEmitter(); p.stdout = new EventEmitter(); p.stderr = new EventEmitter(); p.pid = 1; p.kill = () => {};
+      p.stdin = new PassThrough(); p.stdin.resume();
       return p;
     },
     killTree: () => {}, resolveBin: () => 'C:\\fake\\Aki\\Aki.exe', mkdirSync: () => {}, tmpdir: () => os.tmpdir(),

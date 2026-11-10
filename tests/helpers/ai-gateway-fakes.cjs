@@ -47,6 +47,27 @@ function makeFakeProc(vi) {
   return proc;
 }
 
+// Fake Aki stdin: a flowing PassThrough whose write()/end() record what the lane
+// sent synchronously (proc.stdinData utf8, proc.stdinEnded, proc.stdinEndCalls).
+function attachFakeStdin(proc) {
+  const { PassThrough } = require('stream');
+  const stdin = new PassThrough();
+  proc.stdinData = '';
+  proc.stdinEnded = false;
+  proc.stdinEndCalls = 0;
+  const rec = (chunk, enc) => {
+    if (chunk == null || typeof chunk === 'function') return;
+    proc.stdinData += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : Buffer.from(String(chunk), typeof enc === 'string' ? enc : 'utf8').toString('utf8');
+  };
+  const origWrite = stdin.write.bind(stdin);
+  const origEnd = stdin.end.bind(stdin);
+  stdin.write = (chunk, enc, cb) => { rec(chunk, enc); return origWrite(chunk, enc, cb); };
+  stdin.end = (chunk, enc, cb) => { proc.stdinEndCalls++; proc.stdinEnded = true; rec(chunk, enc); return origEnd(chunk, enc, cb); };
+  stdin.resume(); // drain so 'finish' (the end callback) fires
+  proc.stdin = stdin;
+  return stdin;
+}
+
 function baseRelaySetup(relay) {
   relay.setPreference('auto');
   relay.__test__.setTryWS(() => Promise.reject(new Error('no ws (test)')));
@@ -58,4 +79,4 @@ function baseRelaySetup(relay) {
 
 const GW_OFF = { priorities: false, abortOnTimeout: false, dedupe: false, routerDecides: false, reserveSlots: 2 };
 
-module.exports = { deferred, flush, installFakeFleetBrain, makeFakeProc, baseRelaySetup, GW_OFF };
+module.exports = { deferred, flush, installFakeFleetBrain, makeFakeProc, attachFakeStdin, baseRelaySetup, GW_OFF };

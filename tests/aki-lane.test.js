@@ -11,7 +11,7 @@ const {
   createAkiLane, parseStreamJson, buildArgs, winQuotedLength, cmdLineLength, fitPrompt,
   akiChildEnv, resolveAkiBin, AKI_CMDLINE_MAX, AKI_SANDBOX_DIRNAME, AKI_TRUNC_MARKER,
 } = require('../src/orcha/aki-lane');
-const { flush } = require('./helpers/ai-gateway-fakes.cjs');
+const { flush, attachFakeStdin } = require('./helpers/ai-gateway-fakes.cjs');
 
 const BIN = 'C:\\Users\\u\\AppData\\Local\\Aki\\Aki.exe';
 const SENTINEL = 'SENTINEL_7f3a_DO_NOT_LOG';
@@ -21,6 +21,7 @@ function makeProc() {
   const proc = new EventEmitter();
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
+  attachFakeStdin(proc);
   proc.pid = ++_pid;
   proc.kill = vi.fn();
   proc.ev = (o) => proc.stdout.emit('data', Buffer.from(JSON.stringify(o) + '\n'));
@@ -152,10 +153,12 @@ describe('aki-lane ask()', () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     const [bin, args, opts] = spawn.mock.calls[0];
     expect(bin).toBe(BIN);
-    expect(args).toEqual(['--cli', '--profile', 'fleet-specialist', '--model', 'opus', '--output-format', 'stream-json', prompt]);
+    expect(args).toEqual(['--cli', '--profile', 'fleet-specialist', '--model', 'opus', '--output-format', 'stream-json']);
     expect(opts.shell).toBe(false);
     expect(opts.windowsHide).toBe(true);
-    expect(opts.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+    expect(opts.stdio).toEqual(['pipe', 'pipe', 'pipe']);
+    expect(procs[0].stdinData).toBe(prompt);
+    expect(procs[0].stdinEndCalls).toBe(1);
     expect(opts.cwd).toBe(path.join(os.tmpdir(), AKI_SANDBOX_DIRNAME));
     expect(mkdirSync).toHaveBeenCalledWith(opts.cwd, { recursive: true });
     procs[0].ev({ type: 'text_delta', content: '  Cooling ' });
@@ -165,16 +168,29 @@ describe('aki-lane ask()', () => {
     expect(lane.stats()).toMatchObject({ state: 'up', calls: 1, ok: 1, failed: 0, active: 0 });
   });
 
-  it('leading "-" prompt gets a space; env passed is stripped', async () => {
+  it('leading "-" prompt: stdin verbatim, no prompt arg; argv override gets a space; env passed is stripped', async () => {
     const { lane, spawn, procs } = setup({ env: { PATH: 'p', FLEET_X: '1', SLACK_TOKEN: 'x', AWS_SESSION_TOKEN: 't' } });
     const p = lane.ask('-rf all');
     await flush();
     const [, args, opts] = spawn.mock.calls[0];
-    expect(args[args.length - 1]).toBe(' -rf all');
+    expect(procs[0].stdinData).toBe('-rf all');
+    expect(args).toEqual(['--cli', '--output-format', 'stream-json']);
     expect(opts.env).toEqual({ PATH: 'p', AWS_SESSION_TOKEN: 't' });
     procs[0].ev({ type: 'text_delta', content: 'ok' });
     procs[0].close(0);
     await p;
+
+    const b = setup({ env: { PATH: 'p', FLEET_AKI_PROMPT_VIA: 'ARGV' } });
+    const p2 = b.lane.ask('-rf all');
+    await flush();
+    const [, args2, opts2] = b.spawn.mock.calls[0];
+    expect(args2[args2.length - 1]).toBe(' -rf all');
+    expect(opts2.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+    expect(b.procs[0].stdinEndCalls).toBe(0);
+    b.procs[0].ev({ type: 'text_delta', content: 'ok' });
+    b.procs[0].close(0);
+    await p2;
+    expect(b.lane.stats().lastVia).toBe('argv');
   });
 
   it('incremental parse across chunk boundaries (partial lines, split UTF-8, bad lines)', async () => {
@@ -290,7 +306,7 @@ describe('aki-lane ask()', () => {
     await flush();
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(lane.stats()).toMatchObject({ active: 2, queued: 4, max: 2 });
-    const order = () => spawn.mock.calls.map((c) => c[1][c[1].length - 1]);
+    const order = () => procs.map((p) => p.stdinData);
     const finish = async (i) => { procs[i].ev({ type: 'text_delta', content: 'ok' }); procs[i].close(0); await flush(); };
     await finish(0);
     expect(spawn).toHaveBeenCalledTimes(3);
@@ -299,21 +315,25 @@ describe('aki-lane ask()', () => {
     expect(order()).toEqual(['a', 'b', 'f', 'd', 'e', 'c']);
   });
 
-  it('long prompt: reject -> AKI_PROMPT_TOO_LONG without spawning; truncate -> spawns with marker within budget', async () => {
+  it('long prompt: stdin mode delivers it whole (spawned once, no marker); argv override rejects, never truncates', async () => {
     const { lane, spawn, procs } = setup();
     const long = 'word '.repeat(10000);
-    await expect(lane.ask(long)).rejects.toMatchObject({ code: 'AKI_PROMPT_TOO_LONG' });
-    expect(spawn).not.toHaveBeenCalled();
-    expect(lane.stats().tooLong).toBe(1);
-    const p = lane.ask(long, { onTooLong: 'truncate' });
+    const p = lane.ask(long);
     await flush();
     expect(spawn).toHaveBeenCalledTimes(1);
-    const [bin, args] = spawn.mock.calls[0];
-    expect(args[args.length - 1].endsWith(AKI_TRUNC_MARKER)).toBe(true);
-    expect(cmdLineLength(bin, args)).toBeLessThanOrEqual(32000);
+    expect(procs[0].stdinData).toBe(long);
+    expect(procs[0].stdinData).not.toContain(AKI_TRUNC_MARKER);
+    expect(spawn.mock.calls[0][1].some((a) => a.includes('word'))).toBe(false);
     procs[0].ev({ type: 'text_delta', content: 'ok' });
     procs[0].close(0);
-    await p;
+    await expect(p).resolves.toBe('ok');
+    expect(lane.stats()).toMatchObject({ tooLong: 0, lastVia: 'stdin' });
+
+    const b = setup({ env: { FLEET_AKI_PROMPT_VIA: 'argv' } });
+    await expect(b.lane.ask(long)).rejects.toMatchObject({ code: 'AKI_PROMPT_TOO_LONG' });
+    await expect(b.lane.ask(long, { onTooLong: 'truncate' })).rejects.toMatchObject({ code: 'AKI_PROMPT_TOO_LONG' });
+    expect(b.spawn).not.toHaveBeenCalled();
+    expect(b.lane.stats().tooLong).toBe(2);
   });
 
   it('stdout cap -> killTree + AKI_STDOUT_CAP', async () => {
@@ -356,6 +376,7 @@ describe('aki-lane ask()', () => {
     expect(lane.stats()).toEqual({
       state: 'idle', active: 0, queued: 0, max: 2, calls: 0, ok: 0, failed: 0, timeouts: 0, aborted: 0,
       tooLong: 0, toolsUsed: 0, lastTools: {}, lastLatencyMs: null, lastErrorCode: null,
+      stdinFallbacks: 0, stdinFailed: 0, lastVia: null,
     });
     lane.markState('down');
     expect(lane.stats().state).toBe('down');
