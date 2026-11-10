@@ -52,6 +52,18 @@ const CODE_MESSAGES = {
   UNAVAILABLE: 'Zoom is unavailable in this window. Restart Fleet.',
   NOT_IMPLEMENTED: 'Not available yet.',
   INTERNAL: 'Something went wrong.',
+  // OBS (design §4.7; only reachable when zoom.studio.obs is on)
+  OBS_UNREACHABLE: "Can't reach OBS.",
+  OBS_NOT_RUNNING: "OBS isn't running.",
+  OBS_SERVER_DISABLED: 'The WebSocket server is off in OBS.',
+  OBS_PASSWORD_REQUIRED: 'OBS needs its WebSocket password.',
+  OBS_AUTH_FAILED: 'OBS rejected the password.',
+  OBS_NOT_INSTALLED: "OBS wasn't found at that path.",
+  OBS_NAME_CONFLICT: "An OBS scene or source named 'Fleet Camera' / 'Fleet Camera Feed' already exists and isn't Fleet's. Rename it in OBS.",
+  OBS_REQUEST_FAILED: 'OBS refused a request.',
+  OBS_CLOSED: 'OBS closed the connection.',
+  OBS_UNSUPPORTED: "This OBS WebSocket version isn't supported.",
+  OBS_FEED_FAILED: "Fleet couldn't start the OBS feed.",
 };
 
 // code + reason specific sentences (review F-3, F-4).
