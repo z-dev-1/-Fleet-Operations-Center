@@ -43,6 +43,15 @@ function memStore(init = {}) {
   };
 }
 
+// Mocked AI answers in the design §3 contract shape.
+const NB = { yn: 'N', details: [] };
+const answer = (fasActions) => JSON.stringify({
+  barriers: { vendor1p: NB, oem: NB, estimate: NB, partner: NB, parts: NB, common: NB },
+  etc: [], fasActions, support: 'None',
+});
+const OK_ANSWER = answer([{ unit: ROC[0], text: 'No FAS action logged; AI_SECRET call carrier; next: call carrier' }]);
+const ROC0_LINE = '• ' + ROC[0] + ': No FAS action logged; AI_SECRET call carrier; next: call carrier';
+
 let store, flags, fleet, ask, fasFor;
 function freshFleet() {
   return { rows: makeFleetRows({ [ROC[0]]: { savedNotes: SECRET + ' tow order 00176990', vendor: 'CEI' } }), syncedAt: '2026-11-10T10:00:00Z' };
@@ -51,7 +60,7 @@ function reset(over = {}) {
   store = memStore(over.storeInit || {});
   flags = over.flags || { enabled: true, aiDraft: true };
   fleet = over.fleet || freshFleet();
-  ask = over.ask || vi.fn(async () => JSON.stringify({ fasActions: '• ' + ROC[0] + ': AI_SECRET call carrier', support: 'None' }));
+  ask = over.ask || vi.fn(async () => OK_ANSWER);
   fasFor = vi.fn((scac, dom) => (scac === 'TUZR' && dom === 'ABE40' ? ROSTER : ''));
   logCalls.length = 0;
   ipc._resetForTests({ store, loadFlags: () => flags, ask: (...a) => ask(...a), now: () => NOW, getFleet: () => fleet, fasFor });
@@ -252,7 +261,7 @@ describe('draft', () => {
     const r = await call('draft', { key: ROC_KEY });
     expect(r.ok).toBe(true);
     expect(r.key).toBe(ROC_KEY);
-    expect(r.fasActions).toBe('• ' + ROC[0] + ': AI_SECRET call carrier');
+    expect(r.fasActions.split('\n')).toContain(ROC0_LINE);
     expect(r.support).toBe('None');
     expect(r.saved).toBe(true);
     expect(typeof r.draftedAt).toBe('string');
@@ -272,13 +281,14 @@ describe('draft', () => {
 
   it('a third concurrent draft returns busy', async () => {
     const pending = [];
-    reset({ ask: vi.fn(() => new Promise((res) => pending.push(res))) });
+    // The first call of each draft stays pending; the self-review call answers at once.
+    reset({ ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))) });
     await call('build');
     const p1 = call('draft', { key: ROC_KEY });
     const p2 = call('draft', { key: SAPB_KEY });
     expect(await call('draft', { key: TUZR_KEY })).toEqual({ ok: false, code: 'busy' });
     await vi.waitFor(() => expect(pending).toHaveLength(2));
-    for (const res of pending) res(JSON.stringify({ fasActions: '', support: 'None' }));
+    for (const res of pending) res(answer([]));
     expect((await p1).ok).toBe(true);
     expect((await p2).ok).toBe(true);
     pending.length = 0;
