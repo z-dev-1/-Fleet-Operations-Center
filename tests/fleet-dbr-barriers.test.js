@@ -19,6 +19,22 @@ describe('1P Vendor', () => {
     expect(hit({ vendor: 'COX', savedRepairStatus: 'Waiting for vendor' }, 'vendor1p').why).toBe('status Waiting for vendor');
     expect(hit({ vendor: 'TA', delayReasonCodes: 'Tech _ shortage' }, 'vendor1p').why).toBe('delay code Tech shortage');
   });
+  it('AC14: AAP status "Cannot Complete — Parts Ordered" on a COX unit is not a 1P rejection (any dash / spacing / case)', () => {
+    for (const s of ['Cannot Complete \u2014 Parts Ordered', 'Cannot Complete - Parts Ordered', 'cannot complete\u2013parts ordered', 'CANNOT COMPLETE \u2014  PARTS ORDERED']) {
+      const b = F.classifyBarriers(makeUnit({
+        vendor: 'COX', savedRepairStatus: 'Cannot Complete \u2014 Parts Ordered', repairTimeline: '11/09 - Status: ' + s, savedNotes: s,
+      }), { today: TODAY });
+      expect(b.vendor1p, s).toBeNull();
+      expect(b.parts.why).toMatch(/status Cannot Complete \u2014 Parts Ordered/);
+    }
+    const row = buildOne([makeUnit({ equipmentId: 'X1', vendor: 'COX', savedRepairStatus: 'Cannot Complete \u2014 Parts Ordered', repairTimeline: '11/09 - Cannot Complete \u2014 Parts Ordered' })]);
+    expect(row.cells.vendor1pYN).toBe('N');
+    expect(row.cells.partsYN).toBe('Y');
+  });
+  it('AC14: "unable to complete, sending to dealer" on a COX unit still hits', () => {
+    const h = hit({ vendor: 'COX', repairTimeline: '11/09 - COX unable to complete, sending to dealer' }, 'vendor1p');
+    expect(h.why).toMatch(/^vendor can't complete: '.*unable to complete, sending to dealer/);
+  });
   it('onsite vendor with no signal -> N', () => {
     expect(hit({ vendor: 'Amerit', savedNotes: 'repair in progress' }, 'vendor1p')).toBeNull();
   });

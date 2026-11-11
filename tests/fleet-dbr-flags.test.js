@@ -55,6 +55,18 @@ describe('loadFleetDbr', () => {
   });
 });
 
+describe('perf-flags loadability (NFR5: the module itself is not modified)', () => {
+  it('loads and exposes the Zoom Meet, Zoom (OBS) and Fleet DBR resolvers', () => {
+    const fresh = require('../src/config/perf-flags');
+    for (const k of ['resolveZoomMeetFlags', 'loadZoomMeet', 'resolveZoomFlags', 'loadZoom', 'resolveFleetDbrFlags', 'loadFleetDbr']) {
+      expect(typeof fresh[k], k).toBe('function');
+    }
+  });
+  it('dbr.fleetDataAi:false -> aiDraft false', () => {
+    expect(resolveFleetDbrFlags({ dbr: { fleetDataAi: false } }, {}).aiDraft).toBe(false);
+  });
+});
+
 describe('perf-flags Zoom Meet restore', () => {
   it('module loads and resolveZoomMeetFlags / loadZoomMeet are functions', () => {
     expect(typeof flags.resolveZoomMeetFlags).toBe('function');

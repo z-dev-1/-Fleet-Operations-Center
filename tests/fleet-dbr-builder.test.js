@@ -37,6 +37,20 @@ describe('COLUMNS', () => {
       'commonDetails', 'etcToday', 'noEtc', 'missedEtc', 'fasActions', 'support',
     ]);
   });
+  it('HARD_CELL_IDS are the 7 code-only cells; AI_CELL_IDS are the other 17 in column order', () => {
+    expect(F.HARD_CELL_IDS).toEqual(['fasName', 'domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown']);
+    expect(F.AI_CELL_IDS).toHaveLength(17);
+    expect(F.AI_CELL_IDS).toEqual(F.COLUMNS.map((c) => c.id).slice(7));
+    for (const b of ['vendor1p', 'oem', 'estimate', 'partner', 'parts', 'common']) {
+      expect(F.AI_CELL_IDS).toContain(b + 'YN');
+      expect(F.AI_CELL_IDS).toContain(b + 'Details');
+    }
+    for (const id of F.HARD_CELL_IDS) expect(F.AI_CELL_IDS).not.toContain(id);
+    expect(Object.isFrozen(F.AI_CELL_IDS) && Object.isFrozen(F.HARD_CELL_IDS)).toBe(true);
+  });
+  it('exports EMAIL_RE for evidence redaction', () => {
+    expect('mail a.b@c.com now'.replace(F.EMAIL_RE, '[redacted]')).toBe('mail [redacted] now');
+  });
 });
 
 describe('buildFleetDbr on the fixture', () => {
@@ -89,7 +103,8 @@ describe('buildFleetDbr on the fixture', () => {
   it('lists every down unit of a pair with no ETC under NO ETC', () => {
     const r = rowOf(built, 'HBD1|AKJJI');
     const ids = downIdsOf(rows, 'HBD1', 'AKJJI');
-    expect(r.cells.noEtc).toBe('3 \u2014 ' + ids.join(', '));
+    expect(r.cells.noEtc).toBe('3');
+    expect(r.units.filter((u) => u.etc.state === 'none').map((u) => u.id).sort()).toEqual(ids.slice().sort());
     expect(r.cells.etcToday).toBe('0');
     expect(r.cells.missedEtc).toBe('0');
     expect(r.units.map((u) => u.id).sort()).toEqual(ids.slice().sort());
@@ -166,6 +181,14 @@ describe('unitsHash', () => {
   });
   it('changes when a hashed field changes', () => {
     expect(F.unitsHash([a, b])).not.toBe(F.unitsHash([a, Object.assign({}, b, { savedRepairStatus: 'Parts ordered' })]));
+  });
+  it('built rows carry both unitsHash and evidenceHash', () => {
+    const r = F.buildFleetDbr([a, b], { today: TODAY }).rows[0];
+    expect(r.unitsHash).toBe(F.unitsHash([a, b]));
+    expect(r.evidenceHash).toBe(F.evidenceHash([a, b]));
+    const changed = F.buildFleetDbr([Object.assign({}, a, { repairTimeline: '11/10 - parts arrived' }), b], { today: TODAY }).rows[0];
+    expect(changed.unitsHash).toBe(r.unitsHash);
+    expect(changed.evidenceHash).not.toBe(r.evidenceHash);
   });
 });
 

@@ -44,6 +44,10 @@ const COLUMNS = Object.freeze([
 ]);
 
 const EDITABLE_IDS = Object.freeze(COLUMNS.filter((c) => c.editable).map((c) => c.id));
+// Hard cells are code-computed facts the AI can never write; every other column (6 Y/N,
+// 6 Details, the 3 ETC cells, FAS Actions, Support = 17) is an AI judgment cell.
+const HARD_CELL_IDS = Object.freeze(['fasName', 'domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown']);
+const AI_CELL_IDS = Object.freeze(COLUMNS.map((c) => c.id).filter((id) => !HARD_CELL_IDS.includes(id)));
 
 // Common Repairs fires when this many of the pair's down units share a category
 // (the user's recorded site-trend rule, review-engine TREND_MIN_UNITS = 3).
@@ -184,10 +188,19 @@ const ETC_TOKEN_RE = /\b(?:ETC|ETR)\b/g;
 const ETC_PHRASE_RE = new RegExp(_ETC_PHRASE, 'gi');
 const NEG_BEFORE_RE = /\b(?:no|without|pending|tbd|unknown|n\/a)\s+(?:an?\s+)?$/i;
 const NEG_AFTER_RE = /^\s*[:-]?\s*(?:tbd|pending|unknown|n\/a|none|not (?:yet )?(?:provided|given|available))\b/i;
+// Expectation phrasing ("dealer says ready 11/12", "should be ready by 11/12", "promised ready
+// 11/12") is an ETC. Past-tense events ("diagnosis completed 11/05", "PM done 11/03") never are,
+// and neither is a parts / tow / delivery date ("parts delivered and ready 11/12").
+const _EXPECT_READY = '\\b(?:expected|expects?|expecting|should\\s+be|will\\s+be|to\\s+be|target(?:ed)?|promised|says|said|est(?:imated)?)\\s+(?:to\\s+be\\s+)?(?:ready|complete|completion|finished)\\b(?:\\s+(?:by|on|for))?';
+const EXPECT_READY_RE = new RegExp(_EXPECT_READY, 'gi');
+const EXPECT_READY_POS_RE = new RegExp(_EXPECT_READY + _DATE_TAIL, 'gi');
+const NOT_ETC_CONTEXT_RE = /\b(?:parts?|tow|ship(?:ped|ping)?|deliver(?:y|ed)?|arriv(?:e|al))\b/i;
+const NOT_ETC_WINDOW = 30;
 
 // All ETC mentions in one text: [{ start, end, negated, date }]. Invalid dates are ignored
 // (not negated). A positive match whose ETC/ETR token or ETC phrase ("estimated completion",
-// "repair ETA", ...) lies inside a negated span is discarded.
+// "repair ETA", ...) lies inside a negated span is discarded. Expectation phrasing counts only
+// when no parts / tow / delivery word sits in the 30 chars before it.
 function _etcMentions(text, today) {
   const t = _str(text);
   const neg = [];
@@ -219,7 +232,27 @@ function _etcMentions(text, today) {
       pos.push({ start: m.index, end: m.index + m[0].length, negated: false, date });
     }
   }
+  EXPECT_READY_POS_RE.lastIndex = 0;
+  while ((m = EXPECT_READY_POS_RE.exec(t))) {
+    if (inNeg(m.index)) continue;
+    if (NOT_ETC_CONTEXT_RE.test(t.slice(Math.max(0, m.index - NOT_ETC_WINDOW), m.index))) continue;
+    const date = inferDate(m[1], m[2], m[3], today);
+    if (!date) continue;
+    pos.push({ start: m.index, end: m.index + m[0].length, negated: false, date });
+  }
   return neg.concat(pos).sort((a, b) => a.start - b.start);
+}
+
+// Every positive (non-negated, valid) ETC date in a text, as unpadded 'M/D', de-duplicated in
+// text order. Used by the AI gate's per-unit etcDates (not only the parseEtc winner).
+function etcMentionDates(text, today) {
+  const out = [];
+  for (const m of _etcMentions(text, today)) {
+    if (m.negated || !m.date) continue;
+    const md = _md(m.date);
+    if (md && !out.includes(md)) out.push(md);
+  }
+  return out;
 }
 
 function _classifyEtc(date, today) {
@@ -262,7 +295,11 @@ function parseEtc(row, today) {
 const OEM_VENDOR_RE = /volvo|asist|freightliner|daimler|peterbilt|paccar|kenworth|\bkwne\b|pete_store|\binternational\b|navistar|\bmack\b|dealer/i;
 const ONSITE_VENDOR_RE = /amerit|\bta\b|travel\s*centers|\bcox\b|velociti|fleetnet|\bmobile\b|onsite|road\s*ready|goodyear/i;
 const VENDOR_REJECT_RE = /\b(reject(ed)?|declin(ed|ing)|unable to (complete|repair|diagnose)|can(no|')t (complete|repair|fix)|not equipped|beyond (scope|capabilit)|refer(red)? (out|to (a )?(dealer|oem|shop))|send(ing)? (it )?to (the )?(dealer|oem))\b/gi;
-const REJECT_CONTEXT_EXCLUDE_RE = /estimate|quote|approval|\bPO\b/i;
+// The AAP repair status "Cannot Complete — Parts Ordered" is a parts wait, not a vendor
+// rejection: the parts words in the +-25-char context skip the match (the unit still gets
+// its Parts Delay hit from the status / code rules).
+const AAP_PARTS_STATUS_RE = /\bparts?\s+(ordered|on\s+order|back[\s-]?order(ed)?)\b/i;
+const REJECT_CONTEXT_EXCLUDE_RE = new RegExp(/estimate|quote|approval|\bPO\b/.source + '|' + AAP_PARTS_STATUS_RE.source, 'i');
 const ESTIMATE_TEXT_RE = /\b(awaiting|pending|waiting (on|for))\s+(an?\s+)?(estimate|approval)\b/i;
 const PARTNER_TEXT_RE = /\b(carrier|dsp)[- ](managed|owned|handling|to (handle|repair))|insurance|adjuster|claim (filed|open|pending)\b/i;
 const PARTS_CODE_RE = /parts|sourcing|back ?order/;
@@ -435,6 +472,21 @@ function unitsHash(downRows) {
   return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
 }
 
+// sha1 over the evidence the AI draft reads per down unit (order-independent): the free text
+// (repairTimeline, savedNotes, fullConversation, asistNotes) and the status fields. A change
+// here with an unchanged unitsHash marks a draft stale by evidence.
+const EVIDENCE_HASH_FIELDS = Object.freeze([
+  'repairTimeline', 'savedNotes', 'fullConversation', 'asistNotes',
+  'lifecycleReason', 'vendor', 'savedRepairStatus', 'serviceState', 'subState',
+  'delayReasonCodes', 'offsiteStage', 'offsiteStageDetail', 'escalations', 'estimatePendingCost',
+]);
+function evidenceHash(downRows) {
+  const parts = (downRows || []).map((r) => JSON.stringify(
+    [_idOf(r)].concat(EVIDENCE_HASH_FIELDS.map((f) => _str(r && r[f]).trim())),
+  )).sort();
+  return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
+}
+
 // ── Builder ─────────────────────────────────────────────────────────────────
 function _stats(total, down) { return { total, down, uptime: uptimePct(total, down) }; }
 function _byDaysThenId(a, b) {
@@ -447,7 +499,12 @@ function _detailLine(u, why) {
   const v = u.vendor || 'no vendor';
   return u.id + ' (' + v + (u.daysDown == null ? '' : ', ' + u.daysDown + 'd') + '): ' + why;
 }
-function _countCell(ids) { return ids.length ? ids.length + ' \u2014 ' + ids.join(', ') : '0'; }
+// Missed ETC: the count, then one "why" line per missed unit (IDs of every bucket stay in
+// units[].etc for the drill-down).
+function _missedCell(missed) {
+  return [String(missed.length)].concat(missed.map((u) => '\u2022 ' + u.id + ' (ETC ' + _md(u.etc.date) + '): '
+    + (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)'))).join('\n');
+}
 
 function buildFleetDbr(rows, opts = {}) {
   const today = opts.today;
@@ -499,7 +556,7 @@ function buildFleetDbr(rows, opts = {}) {
         if (hit) { hits[rule.id] = true; details[rule.id].push(_detailLine(u, hit.why)); }
       }
       if (u.etc.state === 'today') etcBuckets.today.push(u.id);
-      else if (u.etc.state === 'missed') etcBuckets.missed.push(u.id + ' (ETC ' + _md(u.etc.date) + ')');
+      else if (u.etc.state === 'missed') etcBuckets.missed.push(u);
       else if (u.etc.state === 'none') etcBuckets.none.push(u.id);
       delete u._why;
     }
@@ -514,9 +571,9 @@ function buildFleetDbr(rows, opts = {}) {
       scacDown: String(scacStats.down),
       commonYN: common.yn,
       commonDetails: common.details,
-      etcToday: _countCell(etcBuckets.today),
-      noEtc: _countCell(etcBuckets.none),
-      missedEtc: _countCell(etcBuckets.missed),
+      etcToday: String(etcBuckets.today.length),
+      noEtc: String(etcBuckets.none.length),
+      missedEtc: _missedCell(etcBuckets.missed),
       fasActions: '',
       support: '',
     };
@@ -527,7 +584,7 @@ function buildFleetDbr(rows, opts = {}) {
     out.push({
       key: p.key, domicile: p.domicile, scac: p.scac,
       pair: { total: p.total, down: p.down }, domicileStats, scacStats,
-      cells, units, unitsHash: unitsHash(p.downRows),
+      cells, units, unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
     });
   }
 
@@ -593,8 +650,8 @@ function applyOverlays(built, overlays = {}) {
 function _plain(v) { return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; }
 
 module.exports = {
-  COLUMNS, EDITABLE_IDS, BARRIER_RULES, COMMON_REPAIR_MIN, RECENT_TIMELINE_LINES,
-  OEM_VENDOR_RE, ONSITE_VENDOR_RE,
-  isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc,
-  classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash,
+  COLUMNS, EDITABLE_IDS, AI_CELL_IDS, HARD_CELL_IDS, BARRIER_RULES, COMMON_REPAIR_MIN, RECENT_TIMELINE_LINES,
+  OEM_VENDOR_RE, ONSITE_VENDOR_RE, EMAIL_RE, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
+  isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates,
+  classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,
 };

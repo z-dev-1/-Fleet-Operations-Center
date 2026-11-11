@@ -91,16 +91,67 @@ describe('ETC cells', () => {
     makeUnit({ equipmentId: 'E6', savedNotes: 'ETC 11/05', lifecycleState: 'Active' }),
   ], { today: TODAY }).rows[0];
 
-  it('formats today / NO ETC / Missed; future goes to no column; non-down units never listed', () => {
-    expect(row.cells.etcToday).toBe('1 \u2014 E1');
-    expect(row.cells.missedEtc).toBe('2 \u2014 E3 (ETC 11/1), E2 (ETC 11/5)');
-    expect(row.cells.noEtc).toBe('1 \u2014 E5');
-    expect(JSON.stringify(row.cells)).not.toMatch(/E4|E6/);
+  it('Today / NO ETC are whole numbers; Missed is the count plus one why line per missed unit', () => {
+    expect(row.cells.etcToday).toBe('1');
+    expect(row.cells.noEtc).toBe('1');
+    expect(row.cells.missedEtc).toBe("2\n\u2022 E3 (ETC 11/1): 'ETR 11/1'\n\u2022 E2 (ETC 11/5): 'ETC 11/05'");
+    expect(row.cells.missedEtc.split('\n').filter((l) => l.startsWith('\u2022 '))).toHaveLength(2);
+    expect(JSON.stringify(row.cells)).not.toMatch(/E1|E4|E5|E6/);
+    // IDs stay in units[].etc for the drill-down.
+    expect(row.units.find((u) => u.id === 'E1').etc.state).toBe('today');
+    expect(row.units.find((u) => u.id === 'E5').etc.state).toBe('none');
     expect(row.units.find((u) => u.id === 'E4').etc).toMatchObject({ state: 'future', date: '2026-11-25' });
     expect(row.units.find((u) => u.id === 'E5').etc.date).toBeNull();
   });
   it('empty buckets are "0"', () => {
     const r = F.buildFleetDbr([makeUnit({ equipmentId: 'Z1', lifecycleState: 'Active' })], { today: TODAY }).rows[0];
     expect([r.cells.etcToday, r.cells.noEtc, r.cells.missedEtc]).toEqual(['0', '0', '0']);
+  });
+});
+
+describe('etcMentionDates (AC21 ETC source)', () => {
+  const T = '2026-11-12';
+  it('accepts expectation phrasing', () => {
+    for (const s of ['dealer says ready 11/12', 'expected to be complete 11/12', 'should be ready by 11/12', 'promised ready 11/12']) {
+      expect(F.etcMentionDates(s, T), s).toEqual(['11/12']);
+    }
+  });
+  it('excludes bare parts ETAs, past-tense events and delivery wording', () => {
+    for (const s of ['Parts ETA 11/08 turbo', 'diagnosis completed 11/05', 'PM done 11/03', 'estimate completed 11/04', 'parts delivered and ready 11/12']) {
+      expect(F.etcMentionDates(s, T), s).toEqual([]);
+    }
+  });
+  it('returns every positive ETC date (not only the winner), unpadded and de-duplicated; negated ones are skipped', () => {
+    expect(F.etcMentionDates('ETC 11/08; later new ETC 11/14 and ETR 11/14', T)).toEqual(['11/8', '11/14']);
+    expect(F.etcMentionDates('no ETC yet; parts should be ready by 11/20', T)).toEqual([]);
+    expect(F.etcMentionDates('brakes, filters etc. 11/12', T)).toEqual([]);
+  });
+  it('parseEtc reads expectation phrasing too, and still ignores the excluded lines', () => {
+    expect(etc({ savedNotes: 'dealer says ready 11/12' })).toMatchObject({ state: 'future', date: '2026-11-12' });
+    expect(etc({ savedNotes: 'diagnosis completed 11/05' }).state).toBe('none');
+    expect(etc({ savedNotes: 'parts delivered and ready 11/12' }).state).toBe('none');
+  });
+});
+
+describe('evidenceHash', () => {
+  const a = makeUnit({ equipmentId: 'H1', vendor: 'TA', repairTimeline: '11/09 - towed' });
+  const b = makeUnit({ equipmentId: 'H2', savedNotes: 'called TA' });
+  it('is stable, order-independent and set on every built row next to unitsHash', () => {
+    expect(F.evidenceHash([a, b])).toBe(F.evidenceHash([b, a]));
+    expect(F.evidenceHash([a, b])).toMatch(/^[0-9a-f]{40}$/);
+    const built = F.buildFleetDbr([a, b], { today: TODAY });
+    for (const r of built.rows) expect(r.evidenceHash).toMatch(/^[0-9a-f]{40}$/);
+    expect(built.rows[0].evidenceHash).toBe(F.evidenceHash([a, b]));
+  });
+  it('changes when only repairTimeline changes (unitsHash does not)', () => {
+    const a2 = Object.assign({}, a, { repairTimeline: '11/09 - towed\n11/10 - at dealer' });
+    expect(F.evidenceHash([a2, b])).not.toBe(F.evidenceHash([a, b]));
+    expect(F.unitsHash([a2, b])).toBe(F.unitsHash([a, b]));
+  });
+  it('changes on notes, conversation, ASIST notes and status fields', () => {
+    const base = F.evidenceHash([a, b]);
+    for (const patch of [{ savedNotes: 'x' }, { fullConversation: 'Conversation\n11/10 - X Y: hi' }, { asistNotes: 'case 1' }, { savedRepairStatus: 'Parts ordered' }]) {
+      expect(F.evidenceHash([Object.assign({}, a, patch), b])).not.toBe(base);
+    }
   });
 });
