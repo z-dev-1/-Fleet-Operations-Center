@@ -293,6 +293,82 @@ describe('E3\' prose tokens (AC4, AC24, AC39, AC44, AC45, scope)', () => {
   it('AC21: "etc." in prose is not an ETC phrase', () => {
     expect(res('filters, belts, etc. 11/12 at TA', undefined, ['B61001'])).toBe('kept');
   });
+  it('amounts written USD / dollars are checked like $', () => {
+    expect(res('TA quoted 4800 dollars for the turbo', undefined, ['B61003'])).toBe('unknown-ref');
+    expect(res('TA quoted USD 4,800 for the turbo', undefined, ['B61003'])).toBe('unknown-ref');
+    expect(res('Estimate pending 1,250 USD at Bruckners', undefined, ['B61003'])).toBe('kept');
+    expect(res('Estimate pending USD 1250 at Bruckners', undefined, ['B61003'])).toBe('kept');
+  });
+});
+
+describe('non-M/D date forms go through every date rule (review finding 1)', () => {
+  const forms = ['Nov 21', 'November 21', 'Nov. 21st', '21 Nov', '21st of November', '11-21', '11.21'];
+  it('mdDates reads every form as M/D; ranges, measures and ordinals of things are not dates', () => {
+    for (const f of forms) expect(G.mdDates('parts ETA ' + f + ' per dealer', TODAY).map((d) => d.md), f).toEqual(['11/21']);
+    expect(G.mdDates('due by the 21st', TODAY)).toMatchObject([{ md: '11/21', alts: ['10/21'] }]);
+    expect(G.mdDates('2026-11-21 and 11/21/2026', TODAY).map((d) => d.md)).toEqual(['11/21', '11/21']);
+    for (const t of ['waiting 2-3 days', 'labor 1.25 hours', 'RO-4488 open', 'I-81 tow', '2nd shift tech', 'we may 2x the order', '$11.21 fee', '3rd party vendor'])
+      expect(G.mdDates(t, TODAY), t).toEqual([]);
+  });
+  it('Details: an invented date in any form is dropped; the evidence date in any form is kept', () => {
+    for (const f of forms) {
+      expect(res('Turbo back-ordered, parts ETA ' + f + ' per Bruckners', undefined, ['B61003']), f).toBe('unknown-date');
+      expect(res('Turbo back-ordered, parts ETA ' + f.replace('21', '14'), undefined, ['B61003']), f).toBe('kept');
+    }
+    expect(res('Turbo back-ordered, due by the 21st', undefined, ['B61003'])).toBe('unknown-date');
+  });
+  it('ETC-phrase dates in any form must be ETC dates of the unit', () => {
+    expect(res('Turbo back-ordered, ETC Nov 25', undefined, ['B61003'])).toBe('unknown-date');
+    expect(res('Parts ETA 11/14; ETC Nov 14', undefined, ['B61003'])).toBe('unknown-etc-date');
+    expect(res('Dealer gave a new ETC Nov 14', undefined, ['B61004'])).toBe('kept');
+    expect(res('Dealer gave a new ETC 11-14', undefined, ['B61004'])).toBe('kept');
+  });
+  it('evidence written "ETC Nov 19" counts as an evidence and ETC date', () => {
+    const c = makeCtx({ units: { B70002: { vendor: 'dealer', repairTimeline: '11/10 - dealer: ETC Nov 19 per email' } }, today: TODAY }).ctx;
+    expect(c.dates.B70002.has('11/19')).toBe(true);
+    expect(c.etcDates.B70002.has('11/19')).toBe(true);
+    for (const t of ['Dealer ETC 11/19', 'Dealer ETC Nov 19', 'Dealer ETC 19 November']) {
+      expect(G.gateEntry(t, undefined, ['B70002'], c, { field: 'details' }).ok, t).toBe(true);
+    }
+  });
+  it('FAS Actions and ETC why: invented non-numeric dates are dropped, next: proposals still keep future ones', () => {
+    const ok = env({ fas: [F('11/10', 'called TA re tech callout')] });
+    expect(res('11/10 called TA re tech callout, bay confirmed for Nov 21', ok, ['B61001'], 'fasActions')).toBe('unknown-date');
+    expect(res('Nov 10 called TA re tech callout', ok, ['B61001'], 'fasActions')).toBe('kept');
+    expect(res('11/10 called TA re tech callout; next: confirm tech on site Nov 21', ok, ['B61001'], 'fasActions')).toBe('kept');
+    expect(res('11/10 called TA re tech callout; next: follow up on the Nov 2 quote', ok, ['B61001'], 'fasActions')).toBe('unknown-date');
+    expect(res('Dealer moved the ETC to Nov 25', undefined, ['B61004'], 'etcWhy')).toBe('unknown-date');
+    expect(res('Dealer moved the ETC to Nov 14', undefined, ['B61004'], 'etcWhy')).toBe('kept');
+  });
+  it('E6b binds month-name dates too', () => {
+    expect(gate('Turbo back-ordered, parts ETA Nov 14', undefined, ['B61003']).unbound).toEqual([]);
+    expect(gate('Turbo back-ordered, bay Nov 14', undefined, ['B61003']).unbound).toEqual([{ date: '11/14', kw: 'bay' }]);
+  });
+  it('the review probe: "ETC Nov 25" never reaches partsDetails', () => {
+    const d = G.validateRowDraft(answer({ barriers: Object.assign(N6(), { parts: { yn: 'Y', details: [
+      { units: ['B61003'], text: 'Turbo back-ordered at Bruckners, ETC Nov 25' },
+      { units: ['B61002'], text: 'Volvo parts ETA 11/14 for the brakes' },
+    ] } }) }), ctx);
+    const r = G.renderCells(d, ctx);
+    expect(r.cells.partsDetails).not.toContain('Nov 25');
+    expect(r.cells.partsDetails).toContain('B61002');
+    expect(d.meta.removals).toContainEqual({ unit: 'B61003', field: 'partsDetails', code: 'unknown-date' });
+  });
+});
+
+describe('E4 checks the claimed action, next: only as the last clause (review findings 2, 3)', () => {
+  const ok = env({ fas: [F('11/10', 'called TA re tech callout')] });
+  it('a second action on a real src.fas date needs its own quote', () => {
+    expect(res('11/10 called TA re tech callout; also escalated to TA regional 11/10', ok, ['B61001'], 'fasActions')).toBe('unfounded-fas-action');
+    expect(res('11/10 escalated to TA regional', ok, ['B61001'], 'fasActions')).toBe('unfounded-fas-action');
+    expect(res('11/10 called TA re tech callout; TA update 11/10: bay booked', ok, ['B61001'], 'fasActions')).toBe('kept');
+  });
+  it('a next: clause mid-entry is ordinary text', () => {
+    expect(res('11/10 called TA re tech callout; next: call TA Thursday', ok, ['B61001'], 'fasActions')).toBe('kept');
+    expect(res('11/10 called TA re tech callout; next: call TA Thursday; TA has no tech', ok, ['B61001'], 'fasActions')).toBe('unknown-rel-date');
+    expect(res('11/10 called TA re tech callout; next: dealer promised bay 11/25; TA has no tech', ok, ['B61001'], 'fasActions')).toBe('unknown-date');
+    expect(G.nextClause('next: call TA Thursday', 'fasActions', TODAY, false)).toEqual({ isNext: false, body: 'call TA Thursday' });
+  });
 });
 
 describe('planted tokens (AC4) dropped from Details while siblings survive', () => {

@@ -81,9 +81,16 @@ describe('ROC5|AUVTE-shaped pair (AC8)', () => {
     expect(r.cells.missedEtc.split('\n')[0]).toBe('3');
     expect(r.cells.missedEtc).toContain('\u2022 B90105 (ETC 11/9): (no verified reason)');
 
-    // the 7 hard cells equal the builder's (AI keys like domicileDown are ignored)
-    const merged = Object.assign({}, row.cells, r.cells);
-    for (const h of Fd.HARD_CELL_IDS) expect(merged[h]).toBe(row.cells[h]);
+    // the 7 hard cells equal the builder's through the real overlay, even when the stored draft
+    // carries hard-cell keys (domicileDown / scacUptime / fasName are ignored by the whitelist)
+    const d = {
+      version: 2, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X', flags: r.flags,
+      cells: Object.assign({}, r.cells, { domicileDown: '999', scacUptime: '1%', fasName: 'Evil' }),
+    };
+    const ov = Fd.applyOverlays(args.built, { drafts: { [R.KEY]: d }, flags: { aiDraft: true } }).rows.find((x) => x.key === R.KEY);
+    for (const h of Fd.HARD_CELL_IDS) expect(ov.cells[h], h).toBe(h === 'fasName' ? '' : row.cells[h]);
+    for (const id of Fd.AI_CELL_IDS) expect(ov.cells[id], id).toBe(r.cells[id]);
+    expect(ov.draft.state).toBe('ok');
     // AC14 basis: the COX "Cannot Complete — Parts Ordered" unit has no 1P vendor rule hit
     expect(row.units.find((u) => u.id === 'B90103').barriers).not.toContain('vendor1p');
   });

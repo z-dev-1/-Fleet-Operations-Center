@@ -48,7 +48,10 @@ const NEXT_PREFIX_RE = /^\s*next\s*:\s*/i;
 const CLAUSE_SPLIT_RE = /;\s*|\.\s+(?=[A-Z])|\n+/;
 // "I" only as a standalone word (I-Shift / I-81 are not a FAS subject). Case-sensitive "I".
 const FAS_SUBJECT_RE = /\bFAS\b|(?<![\w-])I(?![\w-])|\b(?:[Ww]e|me|my|[Oo]ur)\b/;
-const FAS_LEADVERB_RE = new RegExp('^\\s*(?:\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?\\s*[-:,]?\\s*)?(?:' + FAS_ACT_SRC + ')\\b', 'i');
+// A clause led by an action verb, optionally after its date and a connector ("also escalated …").
+const LEAD_DATE_SRC = '(?:\\d{1,2}[\\/.-]\\d{1,2}(?:[\\/.-]\\d{2,4})?|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?\\s*\\d{1,2}(?:st|nd|rd|th)?)';
+const FAS_LEADVERB_RE = new RegExp('^\\s*(?:' + LEAD_DATE_SRC + '\\s*[-:,]?\\s*)?(?:(?:also|and|then|later|again|plus)\\s+)?(?:' + FAS_ACT_SRC + ')\\b', 'i');
+const FAS_VERB_RE = new RegExp('\\b(' + FAS_ACT_SRC + ')\\b', 'i');
 // Support voice: only FAS / I / we followed within 20 chars by an action verb is a claim.
 const FAS_SUBJ_ACT_RE = new RegExp('(?:\\bFAS\\b|(?<![\\w-])I(?![\\w-])|\\b[Ww]e\\b)[^.;\\n]{0,20}?\\b(?:' + FAS_ACT_SRC + ')\\b');
 // "today" is deliberately absent: the sheet uses "ETC for today".
@@ -61,14 +64,30 @@ const REF_RE = /\b(?:RO|WO|WR|PO|SR|SIM|ASIST|case|ticket|claim|ref)\s*(?:#|-|no
 const ID_TOKEN_RE = /\b[A-Z]{1,4}\d{4,}[A-Z0-9]*\b|\b\d{5,}\b/g;
 const TICKET_RE = /\b[a-z]{2,5}-[a-z0-9]{8,}\b/gi;
 const URL_RE = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
-const AMOUNT_RE = /\$\s?(\d[\d,]*(?:\.\d+)?)/g;
+// "$4,800", "USD 4,800", "4800 dollars", "4,800 USD". The amount is group 1 or group 2.
+const AMOUNT_RE = /(?:\$|\bUSD\b)\s?(\d[\d,]*(?:\.\d+)?)|\b(\d[\d,]*(?:\.\d+)?)\s?(?:dollars|bucks|USD)\b/gi;
+// ETC keywords; the date that follows (any form mdDates reads) is found by _etcPhraseDates.
 // ETC/ETR uppercase-only (prose "etc." is not an ETC); the long phrases are case-insensitive.
-const GATE_ETC_ABBR_RE = /\b(?:ETC|ETR)\b[^\n\d]{0,25}(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/g;
-const GATE_ETC_PHRASE_RE = /\b(?:est(?:\.|imated)?\s+(?:time\s+of\s+)?completion|expected\s+completion|completion\s+(?:date|eta)|repair\s+eta|eta\s+(?:for|on)\s+(?:completion|repair))\b[^\n\d]{0,25}(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/gi;
-const EVIDENCE_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?(?![\d/])|\b\d{4}-(\d{2})-(\d{2})\b/g;
+const GATE_ETC_ABBR_RE = /\b(?:ETC|ETR)\b/g;
+const GATE_ETC_PHRASE_RE = /\b(?:est(?:\.|imated)?\s+(?:time\s+of\s+)?completion|expected\s+completion|completion\s+(?:date|eta)|repair\s+eta|eta\s+(?:for|on)\s+(?:completion|repair))\b/gi;
+const ETC_DATE_WINDOW = 25;
 const PROSE_MD_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
 const PROSE_ISO_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+// Non-numeric date forms (review finding 1): month names either side of the day, dash and dot
+// M-D / M.D, and a bare ordinal day after a date preposition ("by the 21st" -> today's month,
+// previous month as an alternative). Every one of them goes through the same date rules as M/D.
+const MONTH_SRC = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+const MONTH_NUM = Object.freeze({ jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 });
+const ORD_SRC = '(?:st|nd|rd|th)';
+const PROSE_MONTH_DAY_RE = new RegExp('\\b(' + MONTH_SRC + ')\\.?\\s{0,2}(\\d{1,2})' + ORD_SRC + '?\\b(?:,?\\s+(\\d{4})\\b)?', 'gi');
+const PROSE_DAY_MONTH_RE = new RegExp('\\b(\\d{1,2})' + ORD_SRC + '?\\s+(?:of\\s+)?(' + MONTH_SRC + ')\\b\\.?(?:,?\\s+(\\d{4})\\b)?', 'gi');
+const PROSE_DASH_RE = /(?<![\w/.$#-])(\d{1,2})-(\d{1,2})(?:-(\d{2,4}))?(?![\w/-]|\.\d)/g;
+const PROSE_DOT_RE = /(?<![\w/.$#,-])(\d{1,2})\.(\d{2})(?![\w/.%-])/g;
+const PROSE_ORD_RE = new RegExp('\\b(?:on|by|until|till|before|after|since|from|the)\\s+(?:the\\s+)?(\\d{1,2})' + ORD_SRC + '\\b'
+  + '(?!\\s+(?:of\\b|' + MONTH_SRC + '|party|shift|time|attempt|opinion|call|visit|try|tier|gen|generation|axle|floor|level|quarter|week|day|unit|truck|tow|reminder|follow|request|email|escalation|notice|round|stop|load|trip|bay|tech|vendor|place|option|line|step|one|set|part|pass|leg|row|wheel|position|cylinder|gear)\\b)', 'gi');
 const FRACTION_UNIT_RE = /^\s{0,3}(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt)\b/i;
+// Ranges / measures written M-D or M.D ("2-3 days", "1.25 hours") are not dates.
+const RANGE_UNIT_RE = /^\s{0,3}(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt|days?|d|hours?|hrs?|h|weeks?|wks?|months?|mins?|minutes?|miles?|mi|km|k|trucks?|techs?|bays?|times?|x|percent|am|pm)\b|^\s{0,3}%/i;
 const ENV_DATE_RE = /^\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*$/;
 const EMAIL_MARKER_ALL_RE = /\s*\[em:[0-9a-f]{8}\]/gi;
 const NAME_TOKEN_RE = /(?<![\w-])[A-Z][A-Za-z]{3,}\b/g;
@@ -124,55 +143,108 @@ function _bounded(tok, text, flags) {
 }
 function _splitClauses(text) { return text.split(CLAUSE_SPLIT_RE).filter((c) => c && c.trim()); }
 
-// Prose dates: M/D[/Y] (fraction skip: "3/4 ton", "2/3 units", "10/12 ft-lb"; invalid month/day
-// skipped) and ISO dates. -> [{ md: 'M/D', ymd, index }]
-function mdDates(text, today) {
+function _ymdShift(ymd, months) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || '');
+  if (!m) return '';
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1 + months, 1));
+  return d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-01';
+}
+// Every date the gate reads, in any written form: M/D[/Y] (fraction skip: "3/4 ton", "2/3 units",
+// "10/12 ft-lb"), ISO, "Nov 21" / "Nov. 21st" / "November 21, 2026", "21 Nov" / "21st of November",
+// "11-21" / "11.21" (range / measure skip: "2-3 days", "1.25 hours") and a bare ordinal after a
+// date preposition ("by the 21st": today's month, `alts` = the previous month). Invalid month/day
+// skipped. opts.loose (evidence side): no unit skips, lowercase "may" counts.
+// -> [{ md: 'M/D', ymd, index, len, alts? }]
+function mdDates(text, today, opts = {}) {
   const t = _s(text);
+  const loose = !!opts.loose;
   const out = [];
+  const taken = [];
+  const free = (i, len) => !taken.some(([a, b]) => i < b && a < i + len);
+  const push = (mo, da, y, index, len, extra) => {
+    if (!free(index, len)) return;
+    const ymd = inferDate(mo, da, y, today);
+    if (!ymd) return;
+    taken.push([index, index + len]);
+    out.push(Object.assign({ md: (+mo) + '/' + (+da), ymd, index, len }, extra || {}));
+  };
+  const unitAfter = (re, m) => !loose && re.test(t.slice(m.index + m[0].length));
   let m;
+  PROSE_ISO_RE.lastIndex = 0;
+  while ((m = PROSE_ISO_RE.exec(t))) push(m[2], m[3], m[1], m.index, m[0].length);
   PROSE_MD_RE.lastIndex = 0;
   while ((m = PROSE_MD_RE.exec(t))) {
-    if (FRACTION_UNIT_RE.test(t.slice(m.index + m[0].length))) continue;
-    const ymd = inferDate(m[1], m[2], m[3], today);
-    if (!ymd) continue;
-    out.push({ md: (+m[1]) + '/' + (+m[2]), ymd, index: m.index });
+    if (unitAfter(FRACTION_UNIT_RE, m)) continue;
+    push(m[1], m[2], m[3], m.index, m[0].length);
   }
-  PROSE_ISO_RE.lastIndex = 0;
-  while ((m = PROSE_ISO_RE.exec(t))) {
-    const ymd = inferDate(m[2], m[3], m[1], today);
-    if (ymd) out.push({ md: (+m[2]) + '/' + (+m[3]), ymd, index: m.index });
+  for (const [re, moAt, daAt] of [[PROSE_MONTH_DAY_RE, 1, 2], [PROSE_DAY_MONTH_RE, 2, 1]]) {
+    re.lastIndex = 0;
+    while ((m = re.exec(t))) {
+      const name = m[moAt];
+      if (!loose && name === 'may') continue;            // the verb "may", not the month
+      push(MONTH_NUM[name.slice(0, 3).toLowerCase()], m[daAt], m[3], m.index, m[0].length);
+    }
+  }
+  PROSE_DASH_RE.lastIndex = 0;
+  while ((m = PROSE_DASH_RE.exec(t))) {
+    if (unitAfter(RANGE_UNIT_RE, m)) continue;
+    push(m[1], m[2], m[3], m.index, m[0].length);
+  }
+  PROSE_DOT_RE.lastIndex = 0;
+  while ((m = PROSE_DOT_RE.exec(t))) {
+    if (unitAfter(RANGE_UNIT_RE, m)) continue;
+    push(m[1], m[2], undefined, m.index, m[0].length);
+  }
+  const tm = /^\d{4}-(\d{2})-\d{2}$/.exec(today || '');
+  if (tm) {
+    PROSE_ORD_RE.lastIndex = 0;
+    while ((m = PROSE_ORD_RE.exec(t))) {
+      const at = m.index + m[0].lastIndexOf(m[1]);
+      const prev = _ymdShift(today, -1);
+      const prevMo = prev ? +prev.slice(5, 7) : 0;
+      push(+tm[1], m[1], undefined, at, m[0].length - (at - m.index), prevMo ? { alts: [prevMo + '/' + (+m[1])] } : null);
+    }
   }
   return out.sort((a, b) => a.index - b.index);
 }
-function _evidenceDates(text) {
+// Every evidence date as 'M/D' (any form mdDates reads, loose).
+function _evidenceDates(text, today) {
   const out = new Set();
-  EVIDENCE_DATE_RE.lastIndex = 0;
-  let m;
-  while ((m = EVIDENCE_DATE_RE.exec(text))) {
-    const mo = m[1] ? +m[1] : +m[3];
-    const d = m[1] ? +m[2] : +m[4];
-    if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31) out.add(mo + '/' + d);
-  }
+  for (const d of mdDates(text, today, { loose: true })) out.add(d.md);
   return out;
 }
+function _dateAllowed(d, allowed) {
+  return allowed.has(d.md) || (Array.isArray(d.alts) && d.alts.some((a) => allowed.has(a)));
+}
 // Dates within `window` chars after each match of `re`, skipping matches with `by` in the
-// `notPrecededWithin` chars before them. -> 'M/D'[]
-function datesAfter(text, re, window, opts = {}) {
+// `notPrecededWithin` chars before them; nothing but non-digit, non-newline text may sit between
+// the keyword and the date. -> [{ md, ymd, at }] (at = index of the date in text)
+function _datesAfterAt(text, re, window, today, opts = {}) {
   const t = _s(text);
   const out = [];
   const rx = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
   let m;
   while ((m = rx.exec(t))) {
-    if (opts.by && opts.notPrecededWithin && opts.by.test(t.slice(Math.max(0, m.index - opts.notPrecededWithin), m.index))) continue;
-    const tail = t.slice(m.index + m[0].length, m.index + m[0].length + window + 10);
-    const d = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?(?![\d/])/.exec(tail);
-    if (!d || d.index > window) continue;
-    const mo = +d[1];
-    const da = +d[2];
-    if (mo >= 1 && mo <= 12 && da >= 1 && da <= 31 && !out.includes(mo + '/' + da)) out.push(mo + '/' + da);
     if (m[0].length === 0) rx.lastIndex += 1;
+    if (opts.by && opts.notPrecededWithin && opts.by.test(t.slice(Math.max(0, m.index - opts.notPrecededWithin), m.index))) continue;
+    const end = m.index + m[0].length;
+    const d = mdDates(t.slice(end, end + window + 30), today, { loose: !!opts.loose })[0];
+    if (!d || d.index > window || /[\n\d]/.test(t.slice(end, end + d.index))) continue;
+    out.push({ md: d.md, ymd: d.ymd, at: end + d.index, alts: d.alts });
   }
   return out;
+}
+function datesAfter(text, re, window, opts = {}) {
+  const out = [];
+  for (const d of _datesAfterAt(text, re, window, opts.today, Object.assign({ loose: true }, opts))) {
+    if (!out.includes(d.md)) out.push(d.md);
+  }
+  return out;
+}
+// Dates written after an ETC keyword (ETC / ETR / "estimated completion" …), any date form.
+function _etcPhraseDates(text, today, opts = {}) {
+  return [GATE_ETC_ABBR_RE, GATE_ETC_PHRASE_RE]
+    .flatMap((re) => _datesAfterAt(text, re, ETC_DATE_WINDOW, today, opts));
 }
 function _refSet(text) {
   const out = new Set();
@@ -188,7 +260,7 @@ function _amounts(text) {
   const out = new Set();
   AMOUNT_RE.lastIndex = 0;
   let m;
-  while ((m = AMOUNT_RE.exec(text))) out.add(_amountOf(m[1]));
+  while ((m = AMOUNT_RE.exec(text))) out.add(_amountOf(m[1] || m[2]));
   out.delete('');
   return out;
 }
@@ -247,13 +319,16 @@ function gateContext({ row, evidences, fleetIds, today, unitRows } = {}) {
     const ev = Array.isArray(evidences) ? evidences[i] : (_plainObj(evidences) ? evidences[id] : null);
     const text = ev && typeof ev.text === 'function' ? ev.text() : '';
     ctx.unitEvidence[id] = text;
-    ctx.lines[id] = ev && Array.isArray(ev.lines) ? ev.lines : [];
+    // Line dates also read "Nov 14" / "11-14" wording (copies; the evidence objects are shared).
+    ctx.lines[id] = (ev && Array.isArray(ev.lines) ? ev.lines : [])
+      .map((l) => Object.assign({}, l, { mds: new Set([...(l.mds || []), ..._evidenceDates(_s(l.norm), today)]) }));
     ctx.fasLines[id] = ev && Array.isArray(ev.fasLines) ? ev.fasLines : [];
     ctx.fasDates[id] = ev && ev.fasDates instanceof Set ? ev.fasDates : new Set();
-    ctx.dates[id] = _evidenceDates(text);
+    ctx.dates[id] = _evidenceDates(text, today);
     ctx.etcDates[id] = new Set([
       ...etcMentionDates(text, today),
-      ...datesAfter(text, EXPECT_READY_RE, 25, { notPrecededWithin: 30, by: NOT_ETC_CONTEXT_RE }),
+      ..._etcPhraseDates(text, today, { loose: true }).map((d) => d.md),
+      ...datesAfter(text, EXPECT_READY_RE, 25, { today, notPrecededWithin: 30, by: NOT_ETC_CONTEXT_RE }),
     ]);
     ctx.amounts[id] = _amounts(text);
     ctx.urls[id] = _urls(text);
@@ -414,22 +489,26 @@ function checkFas(env, scope, ctx) {
 }
 
 // R-M2: the ONE `next:` rule. A `next:` clause exists only in FAS Actions; it is a proposal only
-// while it carries no past date. isNext relaxes the date rules only, never E4.
-function nextClause(c, field, today) {           // -> { isNext, body }
+// while it carries no past date. isNext relaxes the date rules only, never E4. Only the LAST
+// clause of an entry can be the proposal (the contract's "Last 'next: <next step>'"): a `next:`
+// mid-entry is ordinary text with its prefix removed. `last` defaults to true for a lone clause.
+function nextClause(c, field, today, last = true) {   // -> { isNext, body }
   if (field !== 'fasActions' || !NEXT_PREFIX_RE.test(c)) return { isNext: false, body: c };
   const body = c.replace(NEXT_PREFIX_RE, '');
+  if (!last) return { isNext: false, body };
   const past = mdDates(body, today).some((d) => d.ymd < today);
   return past ? { isNext: false, body } : { isNext: true, body };
 }
 
-// E3'(a): every prose M/D is a scope evidence date / validated src.fas date (/ a why's reconciled
-// ETC date), except a date >= today inside a FAS `next:` clause or in a Support ask.
+// E3'(a): every prose date (any written form) is a scope evidence date / validated src.fas date
+// (/ a why's reconciled ETC date), except a date >= today inside a FAS `next:` clause or in a
+// Support ask.
 function freeDateProblem(text, allowed, field, today) {
   const parts = field === 'fasActions' ? _splitClauses(text) : [text];
-  for (const p of parts) {
-    const { isNext, body } = nextClause(p, field, today);
+  for (let i = 0; i < parts.length; i++) {
+    const { isNext, body } = nextClause(parts[i], field, today, i === parts.length - 1);
     for (const d of mdDates(body, today)) {
-      if (allowed.has(d.md)) continue;
+      if (_dateAllowed(d, allowed)) continue;
       if ((isNext || field === 'support') && d.ymd >= today) continue;
       return 'unknown-date';
     }
@@ -487,14 +566,14 @@ function proseTokens(text, scope, ctx, opts = {}) {
   const amounts = _scopeUnion(scope, ctx.amounts);
   AMOUNT_RE.lastIndex = 0;
   while ((m = AMOUNT_RE.exec(text))) {
-    if (!amounts.has(_amountOf(m[1]))) return 'unknown-ref';
+    if (!amounts.has(_amountOf(m[1] || m[2]))) return 'unknown-ref';
   }
   // (c) relative dates outside FAS `next:` clauses and Support asks
   if (field !== 'support') {
     const own = new Set([...mdDates(text, today).map((d) => d.md), ...fasMds]);
     const parts = field === 'fasActions' ? _splitClauses(text) : [text];
-    for (const p of parts) {
-      const { isNext, body } = nextClause(p, field, today);
+    for (let i = 0; i < parts.length; i++) {
+      const { isNext, body } = nextClause(parts[i], field, today, i === parts.length - 1);
       if (isNext) continue;
       REL_DATE_RE.lastIndex = 0;
       while ((m = REL_DATE_RE.exec(body))) {
@@ -506,14 +585,10 @@ function proseTokens(text, scope, ctx, opts = {}) {
       }
     }
   }
-  // (d) ETC-phrase dates must be ETC dates of the scope (next: clauses included)
+  // (d) ETC-phrase dates (any date form) must be ETC dates of the scope (next: clauses included)
   const etc = new Set([..._scopeUnion(scope, ctx.etcDates), ...extra]);
-  for (const re of [GATE_ETC_ABBR_RE, GATE_ETC_PHRASE_RE]) {
-    re.lastIndex = 0;
-    while ((m = re.exec(text))) {
-      const d = /^(\d{1,2})\/(\d{1,2})/.exec(m[1]);
-      if (d && !etc.has((+d[1]) + '/' + (+d[2]))) return 'unknown-etc-date';
-    }
+  for (const d of _etcPhraseDates(text, today)) {
+    if (!_dateAllowed(d, etc)) return 'unknown-etc-date';
   }
   return null;
 }
@@ -524,8 +599,19 @@ function isFasClaim(c, field) {
     : (FAS_SUBJECT_RE.test(c) || FAS_LEADVERB_RE.test(c));
 }
 
-// E4: every FAS-claim clause, in every field, carries a validated src.fas date. Never skipped for
-// `next:` (R-M2): inside an isNext clause only the narrow subject+verb / lead-verb test applies.
+// The claimed FAS action verb of a claim clause ("called", "escalated", "followed" …, hyphens
+// removed): the lead verb, else the verb right after a FAS / I / we subject. '' when the clause is
+// a claim by subject alone ("FAS update 11/10: …").
+function _claimVerb(body) {
+  const m = FAS_LEADVERB_RE.exec(body) || FAS_SUBJ_ACT_RE.exec(body);
+  const v = m ? FAS_VERB_RE.exec(m[0]) : null;
+  return v ? v[1].split(/\s+/)[0].toLowerCase().replace(/-/g, '') : '';
+}
+
+// E4: every FAS-claim clause, in every field, carries a validated src.fas item on one of the
+// clause's dates whose quote holds the clause's action verb (so "also escalated … 11/10" is not
+// carried by a "called TA" quote). Never skipped for `next:` (R-M2): inside an isNext clause only
+// the narrow subject+verb / lead-verb test applies.
 function fasClaimProblem(text, env, field, today) {
   const fasMd = new Set(env.fas.map((f) => f.md));
   if (field === 'fasActions') {
@@ -533,12 +619,17 @@ function fasClaimProblem(text, env, field, today) {
     if (noFas && fasMd.size) return 'bad-envelope';
     if (!noFas && !fasMd.size) return 'unfounded-fas-action';
   }
-  for (const c of _splitClauses(text)) {
+  const clauses = _splitClauses(text);
+  for (let i = 0; i < clauses.length; i++) {
+    const c = clauses[i];
     if (NO_FAS_RE.test(c)) continue;
-    const { isNext, body } = nextClause(c, field, today);
+    const { isNext, body } = nextClause(c, field, today, i === clauses.length - 1);
     const claim = isNext ? (FAS_SUBJ_ACT_RE.test(body) || FAS_LEADVERB_RE.test(body)) : isFasClaim(body, field);
     if (!claim) continue;
-    if (!mdDates(body, today).some((d) => fasMd.has(d.md))) return 'unfounded-fas-action';
+    const mds = new Set(mdDates(body, today).map((d) => d.md));
+    const verb = _claimVerb(body);
+    const backed = env.fas.some((f) => mds.has(f.md) && (!verb || _bounded(verb, _s(f.norm).replace(/-/g, ''), 'i')));
+    if (!backed) return 'unfounded-fas-action';
   }
   return null;
 }
@@ -569,15 +660,10 @@ function dateBindingFlags(text, scope, ctx, field) {
   const today = ctx.today;
   const out = [];
   const parts = field === 'fasActions' ? _splitClauses(text) : [text];
-  for (const p of parts) {
-    const { isNext, body } = nextClause(p, field, today);
+  for (let i = 0; i < parts.length; i++) {
+    const { isNext, body } = nextClause(parts[i], field, today, i === parts.length - 1);
     if (isNext) continue;
-    const etcIdx = new Set();
-    for (const re of [GATE_ETC_ABBR_RE, GATE_ETC_PHRASE_RE]) {
-      re.lastIndex = 0;
-      let e;
-      while ((e = re.exec(body))) etcIdx.add(e.index + e[0].length - e[1].length);
-    }
+    const etcIdx = new Set(_etcPhraseDates(body, today).map((e) => e.at));
     BIND_KW_RE.lastIndex = 0;
     let m;
     while ((m = BIND_KW_RE.exec(body))) {
@@ -587,7 +673,7 @@ function dateBindingFlags(text, scope, ctx, field) {
       const kw = m[0].toLowerCase();
       const cls = /eta$/.test(kw) ? 'eta' : (kw === 'bay' ? 'bay' : (kw === 'ready' ? 'ready'
         : (/^ship/.test(kw) ? 'ship' : (/^deliver/.test(kw) ? 'deliver' : 'arriv'))));
-      const bound = scope.some((u) => (ctx.lines[u] || []).some((l) => l.mds && l.mds.has(d.md) && BIND_CLASS_RE[cls].test(_s(l.norm))));
+      const bound = scope.some((u) => (ctx.lines[u] || []).some((l) => l.mds && _dateAllowed(d, l.mds) && BIND_CLASS_RE[cls].test(_s(l.norm))));
       if (!bound) out.push({ date: _mmdd(d.ymd), kw: cls });
     }
   }

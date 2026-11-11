@@ -175,7 +175,7 @@ const REVIEW_CHECKLIST = [
   '7. What would a skeptical fleet manager challenge? Fix or drop each FACT-CHECK REMOVED item.',
 ].join('\n');
 const REVIEW_END_SINGLE = 'Return the corrected, COMPLETE FINAL JSON in the same contract (not a diff). For each entry you keep or rewrite that reports a FAS action, re-declare its src.fas from a [FAS] line.';
-const REVIEW_END_MR = 'Return the corrected FINAL JSON {barriers, support, fasActions}, where fasActions covers ONLY the units listed under UNITS MISSING A FAS ACTIONS LINE (with evidence shown). For each entry you keep or rewrite that reports a FAS action, re-declare its src.fas from a [FAS] line or an f: item.';
+const REVIEW_END_MR = 'Return the corrected FINAL JSON {barriers, support, fasActions}, fasActions for the missing units only. For each entry you keep or rewrite that reports a FAS action, re-declare its src.fas from a [FAS] line or an f: item.';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -240,7 +240,7 @@ function _role(kind, ctx, o) {
     map: 'MAP BATCH ' + (o.batchNo || 1) + ' of ' + (o.batchCount || 1) + ' of one FAS Daily Business Review row (' + pair + '). Extract each unit\'s facts, ETC and FAS Actions line for THIS batch; a later step writes the row.',
     reduce: 'Write the barrier Y/N, Details and Support cells of one FAS Daily Business Review row (' + pair + ') from every down unit\'s fact-checked facts.',
     review: 'Review and correct your own draft of one FAS Daily Business Review row (' + pair + ') with the same evidence and rules.',
-    'review-mr': 'Review and correct your own draft (barriers, Support, FAS lines of the units listed as missing) of one FAS Daily Business Review row (' + pair + ').',
+    'review-mr': 'Review and correct your own draft (barriers, Support, missing FAS lines) of one FAS Daily Business Review row (' + pair + ').',
   }[kind];
   return 'ROLE / RULES (output goes to a live management meeting)\n' + what + '\n' + RULES;
 }
@@ -282,7 +282,7 @@ function contractText(kind, ctx, o = {}) {
   else if (kind === 'review') base = OUTPUT_CONTRACT.slice(0, OUTPUT_CONTRACT.indexOf(EXAMPLE_LABEL)).trimEnd();
   else {
     base = REDUCE_CONTRACT.slice(0, REDUCE_CONTRACT.indexOf(EXAMPLE_LABEL)).trimEnd().replace('Do not return etc or fasActions.', 'Do not return etc.')
-      + '\n- fasActions: [{"unit":"<ID>","text":"…","src":{"fas":[…]}}] for ONLY the units listed as missing a FAS Actions line with evidence shown.\n' + FAS_RULE;
+      + '\n- fasActions: [{"unit":"<ID>","text":"…","src":{"fas":[…]}}] ONLY for the units under "UNITS MISSING A FAS ACTIONS LINE:".\n' + FAS_RULE;
   }
   return _limitsText(kind, b) + '\n' + base;
 }

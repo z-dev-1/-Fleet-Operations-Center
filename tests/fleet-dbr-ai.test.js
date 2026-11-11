@@ -125,16 +125,17 @@ describe('constants and contracts', () => {
     for (const s of ['fasAction ≤ 150', 'fact ≤ 40', 'facts total ≤ 2,056', 'the total wins', 'why ≤ 120', 'whys total ≤ 1,800', 'at most 4 support asks per batch']) expect(m).toContain(s);
   });
 
-  it('R-M1: overhead(kind, n) <= OVERHEAD_MAX on the real strings (single/map/reduce/review/review-mr x n)', () => {
-    for (const n of [1, 14, 16, 24, 96]) {
-      const p = pair(n, { idOf: (i) => 'B6' + String(1000000000 + i) });
+  it('R-M1: overhead(kind, n) <= OVERHEAD_MAX on the real strings (single/map/reduce/review/review-mr x n x idLen 12 / 15)', () => {
+    for (const [n, idLen] of [1, 14, 16, 24, 96].flatMap((x) => [[x, 12], [x, 15]])) {
+      const p = pair(n, { idOf: (i) => 'B6' + String(1000000000 + i).padStart(idLen - 2, '0') });
+      expect(p.ctx.gate.limits.idLen).toBe(idLen);
       for (const u of p.ctx.row.units) u.barriers = G.BARRIER_IDS.slice();
       for (const b of G.BARRIERS) p.ctx.row.cells[b.ynCol] = 'Y';
       const kinds = n <= 16 ? ['single', 'review', 'map', 'reduce', 'review-mr'] : ['map', 'reduce', 'review-mr'];
       for (const kind of kinds) {
         const o = kind === 'map' ? { ids: p.ids.slice(0, Math.min(n, 24)) } : (kind === 'review-mr' ? { g: Math.min(16, n), hits: 6 * n } : (kind === 'reduce' ? { hits: 6 * n } : {}));
         const s = AI.overhead(kind, p.ctx, o);
-        expect(s.length, kind + ' n=' + n).toBeLessThanOrEqual(AI.OVERHEAD_MAX);
+        expect(s.length, kind + ' n=' + n + ' idLen=' + idLen).toBeLessThanOrEqual(AI.OVERHEAD_MAX);
         expect(s).toContain('COLUMN GUIDANCE');
         expect(s).toContain('VERIFIED COUNTS (exact — do not recount)');
         expect(s).toContain('RULE HINTS');
@@ -290,12 +291,58 @@ describe('single mode', () => {
     expect(rp.prompt.length).toBeLessThanOrEqual(56000);
     expect(rp.embed.D).toBeGreaterThanOrEqual(60);
     expect(rp.embed.chars).toBeLessThanOrEqual(AI.DRAFT_EMBED_MAX);
-    // and through draftRow the review runs
-    const r = await AI.draftRow(Object.assign({ ask: smartAsk() }, p.args));
+    // and through draftRow the review runs, on a draft at the production Details cap (16 entries)
+    const full = rowAnswer(p.ids, { barriers: Object.assign(rowAnswer(p.ids).barriers, {
+      vendor1p: { yn: 'Y', details: p.ids.slice(0, 8).map((u, k) => ent(u, k)) },
+      parts: { yn: 'Y', details: p.ids.slice(8, 16).map((u, k) => ent(u, k + 8)) },
+    }) });
+    expect(G.outBudget('single', 16).detMax).toBe(16);
+    const ask = smartAsk({ single: () => full, review: () => full });
+    const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
     expect(r.reviewSkipped).toBeUndefined();
     expect(r.calls).toBe(2);
+    expect(r.cells.vendor1pDetails.split('\n').length + r.cells.partsDetails.split('\n').length).toBe(16);
     for (const e of r.log) expect(e.promptChars).toBeLessThanOrEqual(56000);
+    expect(r.log[1].embedD).toBeGreaterThanOrEqual(60);
+    for (const id of p.ids) expect(ask.seen.prompts[1]).toContain(id);
+  });
+
+  it('assertFits overflow: the draft batch is re-allocated, the review reuses the re-allocated blocks', async () => {
+    const p = pair(16, { tlChars: 2100 });
+    const evOf = (s) => s.slice(s.indexOf(AI.EVIDENCE_OPEN), s.indexOf('=== END EVIDENCE ==='));
+    const before = evOf(AI.buildDraftPrompt(p.ctx)).length;
+    const orig = AI.buildDraftPrompt;
+    let builds = 0;
+    AI.buildDraftPrompt = (ctx) => {
+      const real = orig(ctx);
+      builds += 1;
+      return builds === 1 ? real + 'x'.repeat(AI.CALL_PROMPT_MAX - real.length + 3000) : real;
+    };
+    try {
+      const ask = smartAsk();
+      const r = await AI.draftRow(Object.assign({ ask }, p.args));
+      expect(r.ok).toBe(true);
+      expect(builds).toBe(2);
+      expect(ask.seen.kinds).toEqual(['single', 'review']);
+      const draftEv = evOf(ask.seen.prompts[0]);
+      expect(draftEv.length).toBeLessThan(before - 2500);
+      expect(evOf(ask.seen.prompts[1])).toBe(draftEv);
+      for (const pr of ask.seen.prompts) expect(pr.length).toBeLessThanOrEqual(AI.CALL_PROMPT_MAX);
+      for (const id of p.ids) expect(draftEv).toContain('[' + id + ']');
+    } finally { AI.buildDraftPrompt = orig; }
+  });
+
+  it('assertFits overflow that the re-allocation cannot fix -> ai-too-large, 0 calls', async () => {
+    const p = pair(3);
+    const orig = AI.buildDraftPrompt;
+    AI.buildDraftPrompt = () => 'x'.repeat(AI.CALL_PROMPT_MAX + 1);
+    try {
+      const ask = smartAsk();
+      const r = await AI.draftRow(Object.assign({ ask }, p.args));
+      expect(r).toMatchObject({ ok: false, code: 'ai-too-large', calls: 0 });
+      expect(ask).not.toHaveBeenCalled();
+    } finally { AI.buildDraftPrompt = orig; }
   });
 
   it('review that cannot fit -> reviewSkipped too-large, ok, no extra call', async () => {
