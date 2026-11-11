@@ -306,3 +306,138 @@ describe('panelHtml', () => {
     expect(h).toContain('T0001');
   });
 });
+
+describe('SCAC filter', () => {
+  const SCACS = ['AGNLI', 'AKJJI', 'AUVTE', 'AZNG', 'EOFE', 'MIMY', 'SAPB', 'SHIL', 'TUZR', 'UNNE', 'YTSC'];
+  const m = model();
+  const keysOf = (rows) => rows.map((r) => r.key);
+
+  it('scacOptions: distinct, sorted SCACs; [] for no model', () => {
+    expect(L.scacOptions(m)).toEqual(SCACS);
+    expect(L.scacOptions(null)).toEqual([]);
+    expect(L.scacOptions({ rows: [{ scac: 'B' }, { scac: 'A' }, { scac: 'B' }, { scac: '' }, {}] })).toEqual(['A', 'B']);
+  });
+
+  it('normalizeScacs drops absent SCACs, dedupes and sorts; accepts a Set', () => {
+    expect(L.normalizeScacs(['TUZR', 'ZZZZ', 'SAPB', 'TUZR'], m)).toEqual(['SAPB', 'TUZR']);
+    expect(L.normalizeScacs(new Set(['TUZR']), m)).toEqual(['TUZR']);
+    expect(L.normalizeScacs(['ZZZZ'], m)).toEqual([]);
+    expect(L.normalizeScacs(undefined, m)).toEqual([]);
+    expect(L.normalizeScacs('TUZR', m)).toEqual([]);
+  });
+
+  it('visibleRows narrows to the selected SCACs; empty = all; honours hideZero; absent SCACs ignored', () => {
+    const tuzr = L.visibleRows(m, false, ['TUZR']);
+    expect(tuzr.length).toBe(3);
+    expect(tuzr.every((r) => r.scac === 'TUZR')).toBe(true);
+    expect(L.visibleRows(m, false, ['TUZR', 'SAPB']).length).toBe(5);
+    expect(L.visibleRows(m, false, new Set(['TUZR', 'SAPB'])).length).toBe(5);
+    expect(L.visibleRows(m, false, []).length).toBe(21);
+    expect(L.visibleRows(m, false, undefined).length).toBe(21);
+    const hz = L.visibleRows(m, true, ['TUZR']);
+    expect(hz.length).toBe(2);
+    expect(hz.every((r) => r.pair.down > 0 && r.scac === 'TUZR')).toBe(true);
+    expect(keysOf(L.visibleRows(m, false, ['TUZR', 'ZZZZ']))).toEqual(keysOf(tuzr));
+    expect(L.visibleRows(m, false, ['ZZZZ']).length).toBe(21);
+  });
+
+  it('eligibleForAutoDraft only returns visible rows; other rules unchanged', () => {
+    const tuzrDown = m.rows.filter((r) => r.scac === 'TUZR' && r.pair.down > 0).map((r) => r.key);
+    expect(L.eligibleForAutoDraft(m, { scacs: ['TUZR'] })).toEqual(tuzrDown);
+    expect(tuzrDown.length).toBe(2);
+    expect(L.eligibleForAutoDraft(m).length).toBe(m.rows.filter((r) => r.pair.down > 0).length);
+    expect(L.eligibleForAutoDraft(m, { scacs: ['TUZR'], hideZero: true })).toEqual(tuzrDown);
+    // an ok-drafted TUZR row is not re-drafted
+    const okKey = tuzrDown[0];
+    const okHash = m.rows.find((r) => r.key === okKey).unitsHash;
+    const withOk = model({ drafts: { [okKey]: { fasActions: 'a', support: 'b', unitsHash: okHash } } });
+    expect(L.eligibleForAutoDraft(withOk, { scacs: ['TUZR'] })).toEqual([tuzrDown[1]]);
+    // evidence-stale still honours includeEvidenceStale under a SCAC filter (KEY = ROC5|AUVTE)
+    const ev = v2Model({ evidenceHash: 'old' }).m;
+    expect(L.eligibleForAutoDraft(ev, { scacs: ['AUVTE'] })).toEqual([]);
+    expect(L.eligibleForAutoDraft(ev, { scacs: ['AUVTE'], includeEvidenceStale: true })).toEqual([KEY]);
+    expect(L.eligibleForAutoDraft(ev, { scacs: ['TUZR'], includeEvidenceStale: true })).not.toContain(KEY);
+  });
+
+  it('aiProgress counts only visible keys', () => {
+    expect(L.aiProgress({ sessionKeys: ['a', 'b', 'c'], doneKeys: ['a', 'c'], visibleKeys: ['a', 'b'] })).toEqual({ done: 1, total: 2 });
+    expect(L.aiProgress({ sessionKeys: new Set(['a']), doneKeys: new Set(), visibleKeys: new Set() })).toEqual({ done: 0, total: 0 });
+    expect(L.aiProgress()).toEqual({ done: 0, total: 0 });
+  });
+
+  it('statusLine reflects the filtered rows; unchanged with no filter', () => {
+    const s = L.statusLine(m, { scacs: ['TUZR'], ai: { done: 1, total: 2 } });
+    expect(s).toContain('3 of 21 rows');
+    expect(s).toContain('7 down');
+    expect(s).toContain('SCAC: TUZR');
+    expect(s).toContain('AI 1/2');
+    expect(L.statusLine(m, { scacs: ['SAPB', 'TUZR'] })).toContain('SCAC: SAPB, TUZR');
+    expect(L.statusLine(m, {})).toBe(L.statusLine(m));
+    expect(L.statusLine(m, { scacs: ['ZZZZ'] })).toBe(L.statusLine(m));
+    expect(L.statusLine(m, {})).toContain('21 rows');
+  });
+
+  it('panelHtml renders the checkbox group (escaped), checked state and All SCACs button', () => {
+    const h = L.panelHtml({ status: 'ready', scacOptions: ['SAPB', 'TUZR'], scacs: ['TUZR'] });
+    expect((h.match(/data-fdbr-field="scac"/g) || []).length).toBe(2);
+    expect(h).toContain('<legend>SCAC</legend>');
+    expect(h).toContain('data-scac="TUZR" value="TUZR" checked>');
+    expect(h).toContain('data-scac="SAPB" value="SAPB">');
+    expect(h).toContain('data-fdbr-action="scac-all"');
+    expect(L.panelHtml({ status: 'ready', scacOptions: ['SAPB'], scacs: [] })).not.toContain('scac-all');
+    expect(L.panelHtml({ status: 'ready' })).not.toContain('fdbr-scac"');
+    const x = L.panelHtml({ status: 'ready', scacOptions: ['"><b>'], scacs: [] });
+    expect(x).not.toContain('"><b>');
+    expect(x).toContain('&quot;&gt;&lt;b&gt;');
+    expect(L.PANEL_CSS).toContain('.fdbr-scac {');
+  });
+
+  it('tableHtml renders only the filtered rows, keeps 25 <th>, and explains an empty filtered view', () => {
+    const h = L.tableHtml(m, { scacs: ['TUZR'] });
+    expect((h.match(/<tr data-key=/g) || []).length).toBe(3);
+    expect((h.match(/<th scope="col">/g) || []).length).toBe(25);
+    const onlyZero = { ...m, rows: m.rows.map((r) => (r.scac === 'UNNE' ? r : { ...r })) };
+    expect(L.tableHtml(onlyZero, { scacs: ['UNNE'], hideZero: true })).toContain('No rows with down units for the selected SCACs');
+    expect(L.tableHtml({ ...m, rows: m.rows.map((r) => ({ ...r, pair: { ...r.pair, down: 0 } })) }, { hideZero: true })).toContain('Every row has 0 down');
+  });
+});
+
+describe('Copy fill columns', () => {
+  const FILL = [
+    '1P Vendor Barrier Y/N?', '1P Vendor Barrier \u2014 Details', 'OEM Barrier Y/N?', 'OEM Barrier \u2014 Details',
+    'Estimate Barrier Y/N?', 'Estimate Barrier \u2014 Details', 'Partner Barrier Y/N?', 'Partner Barrier \u2014 Details',
+    'Parts Delay Y/N?', 'Parts Delay \u2014 Details', 'Common Repairs Y/N?', 'Common Repairs \u2014 Details',
+    'Expected units with ETC for Today', 'NO ETC', 'Missed ETC', 'FAS Actions', 'Where Do You Need Support?',
+  ];
+  const IDENTITY = ['fasName', 'domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown'];
+
+  it('fillColumns = the 17 AI fill columns in sheet order, identity/count columns excluded', () => {
+    const m = model();
+    const cols = L.fillColumns(m);
+    expect(cols.map((c) => c.header)).toEqual(FILL);
+    expect(FILL).toEqual(HEADERS.slice(7));
+    for (const id of IDENTITY) expect(cols.map((c) => c.id)).not.toContain(id);
+    expect(L.fillColumns(null)).toEqual([]);
+  });
+
+  it('fillColumnsTsv: 17 cells per row, one line per row, tabs / newlines flattened, live values used', () => {
+    const { m, row } = v2Model();
+    const rows = [row, m.rows.find((r) => r.key !== KEY)];
+    const live = (r, c) => (r.key === KEY && c === 'support' ? 'a\tb\r\n  c\n\nd' : r.cells[c]);
+    const tsv = L.fillColumnsTsv(m, rows, live);
+    const lines = tsv.split('\n');
+    expect(lines.length).toBe(2);
+    for (const line of lines) expect(line.split('\t').length).toBe(17);
+    const first = lines[0].split('\t');
+    expect(first[16]).toBe('a b c d');
+    expect(first[2]).toBe('Y'); // oemYN from the AI draft
+    expect(first[15]).toBe(L.fillCell(row.cells.fasActions));
+    expect(lines[1].split('\t')).toEqual(L.fillColumns(m).map((c) => L.fillCell(rows[1].cells[c.id])));
+    expect(L.fillCell(null)).toBe('');
+    expect(L.fillCell('\u2022 x\n\u2022 y')).toBe('\u2022 x \u2022 y');
+  });
+
+  it('panelHtml has the Copy fill columns button next to the other copy actions', () => {
+    expect(L.panelHtml({ status: 'ready' })).toContain('data-fdbr-action="copy-fill">\ud83d\udccb Copy fill columns</button>');
+  });
+});

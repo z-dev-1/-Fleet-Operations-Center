@@ -24,6 +24,17 @@ const BUSY_RETRY_MS = 2000;
 const BUSY_RETRIES = 3;
 const STATUS_TICK_MS = 30000;
 const HIDE_ZERO_KEY = 'fleetDbr__hideZero';
+const SCAC_KEY = 'fleetDbr__scacs';
+
+// Persisted SCAC selection: JSON array of strings; anything else -> [] (show all).
+function _readScacs(storage) {
+  try {
+    const raw = storage && storage.getItem(SCAC_KEY);
+    if (!raw) return [];
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((s) => typeof s === 'string') : [];
+  } catch (_) { return []; }
+}
 
 let _active = null;
 
@@ -77,11 +88,16 @@ function createController(deps) {
     hideZero: false, stale: false, closed: false, building: false,
     drafting: false, stopped: false, queue: [], inFlight: new Set(), retrying: new Set(),
     done: 0, total: 0, rowStatus: {}, draftStartedAt: 0,
+    scacs: [],              // persisted SCAC selection (raw; effective = L.normalizeScacs(st.scacs, st.model))
+    sessionKeys: new Set(), // keys queued this drafting session
+    doneKeys: new Set(),    // keys finished this session (ok or final error)
     identityRequeued: new Set(), // R-N3: keys re-queued once because the FAS alias became known
     live: {},     // key -> { col -> unsaved/just-typed value }
     pending: {},  // 'key\u0000col' -> debounce timer
   };
   try { st.hideZero = storage && storage.getItem(HIDE_ZERO_KEY) === '1'; } catch (_) { st.hideZero = false; }
+  st.scacs = _readScacs(storage);
+  const visibleKeys = () => new Set(L.visibleRows(st.model, st.hideZero, st.scacs).map((r) => r.key));
 
   let overlay = null; let frame = null; let bannerEl = null; let statusEl = null; let tableEl = null;
   let unsub = null; let lastFrame = '';
@@ -113,15 +129,21 @@ function createController(deps) {
     doc.body.appendChild(overlay);
   }
 
-  function renderFrame() {
+  function renderFrame(focusScac) {
     const m = st.model;
     const html = L.panelHtml({
       status: st.status, aiDraft: st.aiDraft, drafting: st.drafting, hideZero: st.hideZero,
       fasName: m ? m.fasName : '', conflicts: m ? m.conflicts : [], message: st.note,
+      scacOptions: L.scacOptions(m), scacs: L.normalizeScacs(st.scacs, m),
     });
     if (html === lastFrame) return; // keep focus/caret in the FAS Name input
     lastFrame = html;
     frame.innerHTML = html;
+    // The frame was re-rendered: keep keyboard focus on the SCAC checkbox the user toggled.
+    if (focusScac && typeof frame.querySelector === 'function') {
+      const cb = frame.querySelector('input[data-fdbr-field="scac"][data-scac="' + _attr(focusScac) + '"]');
+      if (cb && typeof cb.focus === 'function') cb.focus();
+    }
   }
 
   function liveValue(row, col) {
@@ -139,7 +161,7 @@ function createController(deps) {
   function renderTable() {
     if (!tableEl) return;
     tableEl.innerHTML = st.model && st.status === 'ready'
-      ? L.tableHtml(st.model, { aiDraft: st.aiDraft, rowStatus: st.rowStatus, hideZero: st.hideZero, getValue: liveValue })
+      ? L.tableHtml(st.model, { aiDraft: st.aiDraft, rowStatus: st.rowStatus, hideZero: st.hideZero, scacs: st.scacs, getValue: liveValue })
       : '';
     if (typeof tableEl.querySelectorAll === 'function') tableEl.querySelectorAll('textarea.fdbr-cell').forEach(autoGrow);
   }
@@ -171,10 +193,12 @@ function createController(deps) {
 
   function renderStatus() {
     if (!statusEl) return;
+    // AI done/total and ETA over the rows visible under the SCAC filter + hide-zero.
+    const ai = L.aiProgress({ sessionKeys: st.sessionKeys, doneKeys: st.doneKeys, visibleKeys: visibleKeys() });
     const etaMin = st.drafting
-      ? L.etaMinutes({ done: st.done, total: st.total, startedAt: st.draftStartedAt, now: now(), slots: MAX_DRAFTS_IN_FLIGHT })
+      ? L.etaMinutes({ done: ai.done, total: ai.total, startedAt: st.draftStartedAt, now: now(), slots: MAX_DRAFTS_IN_FLIGHT })
       : null;
-    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: st.done, total: st.total, etaMin } }) : '';
+    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: ai.done, total: ai.total, etaMin }, scacs: st.scacs }) : '';
     statusEl.textContent = [line, st.note].filter(Boolean).join(' \u00b7 ');
   }
   function note(text) { st.note = text || ''; renderStatus(); }
@@ -252,17 +276,27 @@ function createController(deps) {
   // ── AI drafting (2 at a time, busy re-queue x3, Stop) ─────────────────────
   function startDrafts(keys) {
     if (!st.aiDraft || !st.model || st.closed) return;
-    const list = keys || L.eligibleForAutoDraft(st.model);
+    const list = keys || L.eligibleForAutoDraft(st.model, { hideZero: st.hideZero, scacs: st.scacs });
     const queued = new Set(st.queue.map((q) => q.key));
-    let added = 0;
+    const vis = visibleKeys(); // AI time is only spent on rows the user can see
+    const add = [];
     for (const key of list) {
-      if (queued.has(key) || st.inFlight.has(key) || st.retrying.has(key)) continue;
+      if (!vis.has(key) || queued.has(key) || st.inFlight.has(key) || st.retrying.has(key)) continue;
+      queued.add(key);
+      add.push(key);
+    }
+    if (!add.length) return;
+    if (!st.drafting) {
+      st.done = 0; st.total = 0; st.draftStartedAt = now();
+      st.sessionKeys = new Set(); st.doneKeys = new Set();
+    }
+    for (const key of add) {
       st.queue.push({ key, tries: 0 });
       st.rowStatus[key] = { state: 'queued' };
-      added++;
+      st.sessionKeys.add(key);
+      st.doneKeys.delete(key);
     }
-    if (!added) return;
-    if (!st.drafting) { st.done = 0; st.total = 0; st.draftStartedAt = now(); }
+    const added = add.length;
     st.total += added;
     const wasDrafting = st.drafting;
     st.drafting = true;
@@ -310,6 +344,7 @@ function createController(deps) {
       else _patchDraft(key, res);
       delete st.rowStatus[key];
       st.done++;
+      st.doneKeys.add(key);
       // R-N3: drafted before the FAS alias was known (either branch) -> redraft once per panel.
       const row = _row(key);
       if (row && row.draft && row.draft.staleReason === 'identity' && !st.identityRequeued.has(key)) {
@@ -324,12 +359,15 @@ function createController(deps) {
         st.retrying.delete(key);
         if (st.closed) return;
         if (st.stopped) { delete st.rowStatus[key]; pump(); refreshRow(key); return; }
+        // Row hidden by the SCAC filter meanwhile: drop the retry (no AI time on hidden rows).
+        if (!visibleKeys().has(key)) { delete st.rowStatus[key]; renderStatus(); pump(); return; }
         st.queue.unshift(item); pump(); // retry goes first when a slot frees
       }, BUSY_RETRY_MS);
     } else {
       if (res.code === 'stale-build') { st.stale = true; renderBanner(); }
       st.rowStatus[key] = { state: 'error', code: res.code || 'ai-failed' };
       st.done++;
+      st.doneKeys.add(key);
     }
     refreshRow(key); renderStatus();
     if (requeue && !st.stopped) startDrafts([key]);
@@ -378,6 +416,24 @@ function createController(deps) {
     st.drafting = false;
     stopTick();
     renderFrame(); renderTable(); renderStatus();
+  }
+
+  // ── SCAC filter ───────────────────────────────────────────────────────────
+  // In-flight drafts are never aborted (their results land normally). Queued rows that
+  // became hidden are dropped; newly visible eligible rows are queued unless the user
+  // pressed ■ Stop. Already-drafted (ok) rows are not eligible, so nothing is re-drafted.
+  function applyScacs(next, focusScac) {
+    st.scacs = L.normalizeScacs(next, st.model);
+    if (storage) storage.setItem(SCAC_KEY, JSON.stringify(st.scacs));
+    const vis = visibleKeys();
+    st.queue = st.queue.filter((q) => {
+      if (vis.has(q.key)) return true;
+      delete st.rowStatus[q.key];
+      return false;
+    });
+    renderFrame(focusScac); renderTable(); renderStatus();
+    if (!st.stopped) startDrafts(null);
+    pump();
   }
 
   // ── edits ─────────────────────────────────────────────────────────────────
@@ -460,10 +516,11 @@ function createController(deps) {
   }
 
   // ── copy ──────────────────────────────────────────────────────────────────
-  async function copy(rows, header, btnEl) {
+  // fillOnly: only the fill columns (L.fillColumns), no identity/count columns, no header.
+  async function copy(rows, header, btnEl, fillOnly) {
     const m = st.model;
     if (!m) { note('Nothing to copy yet \u2014 \u21ba Build first.'); return; }
-    const tsv = L.rowsToTsv(m.columns, rows, liveValue, { header });
+    const tsv = fillOnly ? L.fillColumnsTsv(m, rows, liveValue) : L.rowsToTsv(m.columns, rows, liveValue, { header });
     let ok = false;
     try { ok = (await clipboard.writeText(tsv)) !== false; } catch (_) { ok = false; }
     if (st.closed) return;
@@ -490,12 +547,14 @@ function createController(deps) {
     switch (el.dataset.fdbrAction) {
       case 'close': close(); return;
       case 'build': return build().then((ok) => { if (ok) startDrafts(null); });
-      case 'draft-all': startDrafts(st.model ? L.eligibleForAutoDraft(st.model, { includeEvidenceStale: true }) : null); return;
+      case 'draft-all': startDrafts(st.model ? L.eligibleForAutoDraft(st.model, { includeEvidenceStale: true, hideZero: st.hideZero, scacs: st.scacs }) : null); return;
+      case 'scac-all': applyScacs([]); return;
       case 'stop': stopDrafts(); return;
       case 'redraft': if (key) startDrafts([key]); return;
       case 'reset-row': if (key) return resetRow(key); return;
-      case 'copy': return copy(L.visibleRows(st.model, st.hideZero), false, el);
-      case 'copy-header': return copy(L.visibleRows(st.model, st.hideZero), true, el);
+      case 'copy': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), false, el);
+      case 'copy-header': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), true, el);
+      case 'copy-fill': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), false, el, true);
       case 'copy-row': { const row = key ? _row(key) : null; if (row) return copy([row], false, el); return; }
       default:
     }
@@ -518,6 +577,14 @@ function createController(deps) {
       st.hideZero = !!t.checked;
       if (storage) storage.setItem(HIDE_ZERO_KEY, st.hideZero ? '1' : '0');
       renderFrame(); renderTable();
+      return;
+    }
+    if (field === 'scac') {
+      const scac = String((t.dataset && t.dataset.scac) || '');
+      if (!scac) return;
+      const sel = new Set(L.normalizeScacs(st.scacs, st.model));
+      if (t.checked) sel.add(scac); else sel.delete(scac);
+      applyScacs(sel, scac);
     }
   }
 
@@ -548,4 +615,4 @@ function createController(deps) {
   };
 }
 
-export const __test__ = { createController, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY };
+export const __test__ = { createController, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY, SCAC_KEY };

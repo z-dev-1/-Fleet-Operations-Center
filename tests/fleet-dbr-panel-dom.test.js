@@ -91,7 +91,7 @@ function setup(opts = {}) {
   api = makeApi(opts);
   const doc = makeDoc();
   const clipboard = { writeText: vi.fn(async () => true) };
-  const store = {};
+  const store = { ...(opts.store || {}) };
   const storage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = v; } };
   const unsub = vi.fn();
   const busHandlers = {};
@@ -439,6 +439,127 @@ describe('AI v2 cells (FEAT-004)', () => {
     expect(api.draft).not.toHaveBeenCalled();
     await overlayOf(t).emit('click', act('draft-all')); await flush();
     expect(api.draft.mock.calls.map((c) => c[0].key)).toEqual([k]);
+  });
+});
+
+describe('SCAC filter', () => {
+  const scacEv = (scac, checked) => ({ target: { dataset: { fdbrField: 'scac', scac }, checked } });
+  const rowCount = (t) => (part(t, 'fdbr-table').innerHTML.match(/<tr data-key=/g) || []).length;
+  const scacOf = (k) => BUILT.rows.find((r) => r.key === k).scac;
+  const downOf = (scac) => DOWN_KEYS.filter((k) => scacOf(k) === scac);
+  const draftedKeys = () => api.draft.mock.calls.map((c) => c[0].key);
+
+  it('renders the distinct SCACs (none checked) and all 21 rows by default', async () => {
+    const t = setup({ aiDraft: false });
+    await t.ctl.open(); await flush();
+    const frame = part(t, 'fdbr-frame').innerHTML;
+    expect((frame.match(/data-fdbr-field="scac"/g) || []).length).toBe(11);
+    expect(frame).not.toMatch(/data-fdbr-field="scac"[^>]* checked/);
+    expect(frame).not.toContain('scac-all');
+    expect(rowCount(t)).toBe(21);
+  });
+
+  it('selecting a SCAC narrows rows, persists, updates the status line and Copy; All SCACs resets', async () => {
+    const t = setup({ aiDraft: false });
+    await t.ctl.open(); await flush();
+    await overlayOf(t).emit('change', scacEv('TUZR', true));
+    expect(rowCount(t)).toBe(3);
+    expect(t.store[P.__test__.SCAC_KEY]).toBe('["TUZR"]');
+    expect(part(t, 'fdbr-status').textContent).toContain('3 of 21 rows');
+    expect(part(t, 'fdbr-frame').innerHTML).toContain('data-scac="TUZR" value="TUZR" checked>');
+    await overlayOf(t).emit('click', act('copy')); await flush();
+    expect(t.clipboard.writeText.mock.calls[0][0].split('\n').length).toBe(3);
+    await overlayOf(t).emit('change', scacEv('SAPB', true));
+    expect(rowCount(t)).toBe(5);
+    expect(t.store.fleetDbr__scacs).toBe('["SAPB","TUZR"]');
+    await overlayOf(t).emit('change', scacEv('TUZR', false));
+    expect(rowCount(t)).toBe(2);
+    await overlayOf(t).emit('click', act('scac-all')); await flush();
+    expect(rowCount(t)).toBe(21);
+    expect(t.store.fleetDbr__scacs).toBe('[]');
+    expect(part(t, 'fdbr-status').textContent).toContain('21 rows');
+  });
+
+  it('restores the persisted selection, ignoring SCACs no longer in the model; malformed -> all rows', async () => {
+    const t = setup({ aiDraft: false, store: { fleetDbr__scacs: '["TUZR","ZZZZ"]' } });
+    await t.ctl.open(); await flush();
+    const frame = part(t, 'fdbr-frame').innerHTML;
+    expect((frame.match(/ checked>/g) || []).length).toBe(1);
+    expect(frame).toContain('data-scac="TUZR" value="TUZR" checked>');
+    expect(rowCount(t)).toBe(3);
+    const bad = setup({ aiDraft: false, store: { fleetDbr__scacs: '{not json' } });
+    await bad.ctl.open(); await flush();
+    expect(rowCount(bad)).toBe(21);
+  });
+
+  it('auto-draft only queues visible rows; widening the filter drafts the new rows once, never re-drafts', async () => {
+    const t = setup({ store: { fleetDbr__scacs: '["TUZR"]' } });
+    await t.ctl.open(); await flush();
+    expect(new Set(draftedKeys())).toEqual(new Set(downOf('TUZR')));
+    expect(draftedKeys().length).toBe(2);
+    expect(part(t, 'fdbr-status').textContent).toContain('AI 2/2');
+    await overlayOf(t).emit('change', scacEv('SAPB', true)); await flush();
+    expect(new Set(draftedKeys())).toEqual(new Set([...downOf('TUZR'), ...downOf('SAPB')]));
+    expect(draftedKeys().length).toBe(4);
+    expect(t.ctl.state.drafting).toBe(false);
+  });
+
+  it('narrowing while drafting: in-flight drafts land, hidden queued rows are dropped, progress counts visible rows', async () => {
+    const t = setup({ manualDraft: true, store: { fleetDbr__scacs: '["SAPB","TUZR"]' } });
+    await t.ctl.open(); await flush();
+    expect(pendingDrafts.length).toBe(2);
+    const inFlightKeys = pendingDrafts.map((d) => d.key);
+    const hidden = scacOf(t.ctl.state.queue[0].key);
+    const kept = hidden === 'TUZR' ? 'SAPB' : 'TUZR';
+    const dropped = t.ctl.state.queue.map((q) => q.key).filter((k) => scacOf(k) === hidden);
+    expect(dropped.length).toBeGreaterThan(0);
+    await overlayOf(t).emit('change', scacEv(hidden, false)); await flush();
+    expect(t.ctl.state.queue.some((q) => dropped.includes(q.key))).toBe(false);
+    for (const k of dropped) expect(t.ctl.state.rowStatus[k]).toBeUndefined();
+    expect(pendingDrafts.length).toBe(2); // nothing aborted
+    for (let i = 0; i < 10 && pendingDrafts.length; i++) {
+      const d = pendingDrafts.shift();
+      drafts[d.key] = { fasActions: 'landed ' + d.key, support: 'None', unitsHash: hashOf(d.key) };
+      d.resolve({ ok: true, key: d.key, fasActions: drafts[d.key].fasActions, support: 'None', model: modelWith(drafts) });
+      await flush();
+    }
+    for (const k of dropped) expect(draftedKeys()).not.toContain(k);
+    for (const k of inFlightKeys) expect(t.ctl.state.model.rows.find((r) => r.key === k).draft.state).toBe('ok');
+    expect(new Set(draftedKeys())).toEqual(new Set([...inFlightKeys, ...downOf(kept)]));
+    expect(t.ctl.state.drafting).toBe(false);
+    const status = part(t, 'fdbr-status').textContent;
+    expect(status).toContain('AI 2/2');
+    expect(status).toContain('SCAC: ' + kept);
+  });
+
+  it('after ■ Stop, changing the filter starts no new drafts', async () => {
+    const t = setup({ manualDraft: true });
+    await t.ctl.open(); await flush();
+    await overlayOf(t).emit('click', act('stop'));
+    await overlayOf(t).emit('change', scacEv('TUZR', true)); await flush();
+    await overlayOf(t).emit('change', scacEv('SAPB', true)); await flush();
+    expect(api.draft).toHaveBeenCalledTimes(2);
+  });
+
+  it('Copy fill columns copies only the 17 fill columns of the visible (filtered) rows', async () => {
+    const t = setup({ aiDraft: false, store: { fleetDbr__scacs: '["TUZR"]' } });
+    await t.ctl.open(); await flush();
+    expect(part(t, 'fdbr-frame').innerHTML).toContain('data-fdbr-action="copy-fill"');
+    const key = downOf('TUZR')[0];
+    await overlayOf(t).emit('input', typing(key, 'support', 'two\nlines'));
+    const a = act('copy-fill');
+    await overlayOf(t).emit('click', a); await flush();
+    expect(t.clipboard.writeText).toHaveBeenCalledTimes(1);
+    const tsv = t.clipboard.writeText.mock.calls[0][0];
+    const m = modelWith();
+    const live = (r, c) => (r.key === key && c === 'support' ? 'two\nlines' : r.cells[c]);
+    expect(tsv).toBe(L.fillColumnsTsv(m, L.visibleRows(m, false, ['TUZR']), live));
+    const lines = tsv.split('\n');
+    expect(lines.length).toBe(3);
+    for (const line of lines) expect(line.split('\t').length).toBe(17);
+    expect(tsv).toContain('two lines');
+    expect(tsv).not.toContain('TUZR'); // SCAC / domicile identity columns are omitted
+    expect(a.el.textContent).toBe('\u2713 Copied');
   });
 });
 

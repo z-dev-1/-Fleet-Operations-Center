@@ -38,11 +38,79 @@ export function rowsToTsv(columns, rows, getValue, opts = {}) {
   return lines.join('\n');
 }
 
+// ── Copy fill columns ───────────────────────────────────────────────────────
+// The fill columns = model.columns that are AI judgment cells (model.aiCellIds: every column
+// except the 7 leading identity/count cells), in model.columns order (17 today).
+export function fillColumns(model) {
+  const cols = model && Array.isArray(model.columns) ? model.columns : [];
+  const ids = new Set(aiCellIds(model));
+  return cols.filter((c) => c && ids.has(c.id));
+}
+
+// One paste-safe fill cell: tabs and line breaks become single spaces, so every cell stays
+// in one tab slot and every row on one line (Excel / Sheets paste).
+export function fillCell(v) {
+  return String(v == null ? '' : v).replace(/\t/g, ' ').replace(/[ \t]*[\r\n]+[ \t]*/g, ' ').trim();
+}
+
+// TSV of only the fill columns for `rows` (no header); getValue reads live textarea values.
+export function fillColumnsTsv(model, rows, getValue) {
+  const cols = fillColumns(model);
+  const get = typeof getValue === 'function' ? getValue : _cellOf;
+  return (rows || []).map((r) => cols.map((c) => fillCell(get(r, c.id))).join('\t')).join('\n');
+}
+
 const _down = (row) => (row && row.pair && Number(row.pair.down)) || 0;
 
-export function visibleRows(model, hideZero) {
+// ── SCAC filter ─────────────────────────────────────────────────────────────
+const _sortStr = (a, b) => a.localeCompare(b);
+
+// Distinct non-empty SCACs of the model, sorted.
+export function scacOptions(model) {
   const rows = model && Array.isArray(model.rows) ? model.rows : [];
+  const set = new Set();
+  for (const r of rows) {
+    const s = r && r.scac != null ? String(r.scac) : '';
+    if (s) set.add(s);
+  }
+  return [...set].sort(_sortStr);
+}
+
+// The selected SCACs (array or Set) that still exist in the model, deduped and sorted.
+// SCACs no longer in the model are ignored; [] means "no SCAC filter" (show all).
+export function normalizeScacs(selected, model) {
+  if (!selected || typeof selected[Symbol.iterator] !== 'function' || typeof selected === 'string') return [];
+  const opts = new Set(scacOptions(model));
+  const out = new Set();
+  for (const s of selected) if (typeof s === 'string' && opts.has(s)) out.add(s);
+  return [...out].sort(_sortStr);
+}
+
+const _scacFiltered = (model, scacs) => {
+  const rows = model && Array.isArray(model.rows) ? model.rows : [];
+  const sel = normalizeScacs(scacs, model);
+  if (!sel.length) return rows;
+  const set = new Set(sel);
+  return rows.filter((r) => r && set.has(String(r.scac)));
+};
+
+// Rows shown in the table: SCAC filter (empty = all), then hide-zero.
+export function visibleRows(model, hideZero, scacs) {
+  const rows = _scacFiltered(model, scacs);
   return hideZero ? rows.filter((r) => _down(r) > 0) : rows;
+}
+
+// AI progress counted over the visible keys only: { done, total }.
+export function aiProgress({ sessionKeys, doneKeys, visibleKeys } = {}) {
+  const vis = visibleKeys instanceof Set ? visibleKeys : new Set(visibleKeys || []);
+  const fin = doneKeys instanceof Set ? doneKeys : new Set(doneKeys || []);
+  let done = 0; let total = 0;
+  for (const k of sessionKeys || []) {
+    if (!vis.has(k)) continue;
+    total++;
+    if (fin.has(k)) done++;
+  }
+  return { done, total };
 }
 
 // The AI judgment cells of the model (main: AI_CELL_IDS); older models only had the two.
@@ -53,8 +121,9 @@ export function aiCellIds(model) {
 // Auto-draft eligibility: has down units, the user hasn't edited EVERY editable AI cell, and
 // the draft is missing (none) or stale by 'units' / 'identity'. A draft stale only by
 // 'evidence' is queued by "Draft all" / ↻ (includeEvidenceStale), not on panel open.
-export function eligibleForAutoDraft(model, { includeEvidenceStale = false } = {}) {
-  const rows = model && Array.isArray(model.rows) ? model.rows : [];
+// Only rows visible under { hideZero, scacs } are considered (no opts = every row).
+export function eligibleForAutoDraft(model, { includeEvidenceStale = false, hideZero = false, scacs } = {}) {
+  const rows = visibleRows(model, hideZero, scacs);
   const cols = model && Array.isArray(model.columns) ? model.columns : [];
   const ids = aiCellIds(model);
   const editable = cols.length ? ids.filter((id) => cols.some((c) => c.id === id && c.editable)) : ids;
@@ -117,9 +186,12 @@ function _hhmm(iso) {
 }
 
 // "Built 10:31 from fleet sync 10:30 · 21 rows · 53 down · AI 7/15 · 2 rows use your name (no roster match)"
+// With a SCAC filter: "… · 3 of 21 rows · 7 down · SCAC: TUZR · …" (counts over the filtered rows).
 export function statusLine(model, opts = {}) {
   if (!model) return '';
-  const rows = Array.isArray(model.rows) ? model.rows : [];
+  const all = Array.isArray(model.rows) ? model.rows : [];
+  const sel = normalizeScacs(opts && opts.scacs, model);
+  const rows = sel.length ? visibleRows(model, false, sel) : all;
   const parts = [];
   const built = _hhmm(model.builtAt);
   if (built) {
@@ -127,8 +199,14 @@ export function statusLine(model, opts = {}) {
     parts.push('Built ' + built + (synced ? ' from fleet sync ' + synced : ''));
   }
   if (model.day) parts.push(model.day);
-  parts.push(rows.length + (rows.length === 1 ? ' row' : ' rows'));
-  parts.push((Number(model.downCount) || 0) + ' down');
+  if (sel.length) {
+    parts.push(rows.length + ' of ' + all.length + (all.length === 1 ? ' row' : ' rows'));
+    parts.push(rows.reduce((n, r) => n + _down(r), 0) + ' down');
+    parts.push('SCAC: ' + sel.join(', '));
+  } else {
+    parts.push(rows.length + (rows.length === 1 ? ' row' : ' rows'));
+    parts.push((Number(model.downCount) || 0) + ' down');
+  }
   const ai = opts && opts.ai;
   if (ai && ai.total > 0) {
     const eta = ai.done < ai.total && Number.isFinite(ai.etaMin) && ai.etaMin > 0 ? ' \u00b7 ~' + ai.etaMin + ' min left' : '';
@@ -250,10 +328,13 @@ export function tableHtml(model, opts = {}) {
   const aiDraft = !!opts.aiDraft;
   const rowStatus = opts.rowStatus || {};
   const get = typeof opts.getValue === 'function' ? opts.getValue : _cellOf;
-  const rows = visibleRows(model, !!opts.hideZero);
+  const rows = visibleRows(model, !!opts.hideZero, opts.scacs);
   if (!rows.length) {
+    const scacOn = normalizeScacs(opts.scacs, model).length > 0;
     return '<div class="dc-empty">' + (model && model.rows && model.rows.length
-      ? 'Every row has 0 down \u2014 untick "Hide rows with 0 down" to see them.'
+      ? (scacOn
+        ? 'No rows with down units for the selected SCACs \u2014 untick "Hide rows with 0 down" or pick other SCACs.'
+        : 'Every row has 0 down \u2014 untick "Hide rows with 0 down" to see them.')
       : 'No rows yet \u2014 click \u21ba Build from fleet data.') + '</div>';
   }
   const head = '<thead><tr>' + cols.map((c) => '<th scope="col">' + esc(c.header) + '</th>').join('')
@@ -324,10 +405,25 @@ export const PANEL_CSS = `
     #dbr-overlay .fdbr-badge--ok { color: #3fb950; }
     #dbr-overlay .fdbr-banner { margin: 0 18px 6px; padding: 6px 10px; font-size: 11px; border: 1px solid #f0a800; border-radius: 4px; }
     #dbr-overlay .fdbr-status { font-size: 11px; color: var(--mut, #888); padding: 0 18px 6px; min-height: 14px; }
+    #dbr-overlay .fdbr-scac { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; border: 1px solid var(--border, #444); border-radius: 4px; padding: 2px 8px; margin: 0; font-size: 11px; }
+    #dbr-overlay .fdbr-scac legend { padding: 0 4px; font-size: 10px; color: var(--mut, #888); }
+    #dbr-overlay .fdbr-scac label { display: flex; align-items: center; gap: 3px; }
 `;
 
+// Multi-select SCAC filter: one checkbox per SCAC (no selection = all rows).
+function _scacHtml(options, selected) {
+  const opts = Array.isArray(options) ? options : [];
+  if (!opts.length) return '';
+  const sel = new Set(Array.isArray(selected) ? selected : []);
+  return '<fieldset class="fdbr-scac"><legend>SCAC</legend>'
+    + opts.map((s) => '<label><input type="checkbox" data-fdbr-field="scac" data-scac="' + esc(s) + '" value="' + esc(s) + '"'
+      + (sel.has(s) ? ' checked' : '') + '> ' + esc(s) + '</label>').join('')
+    + (sel.size ? '<button type="button" class="detail-panel__btn detail-panel__btn--secondary fdbr-mini" data-fdbr-action="scac-all">All SCACs</button>' : '')
+    + '</fieldset>';
+}
+
 // state: { status:'ready'|'loading'|'off'|'unavailable'|'error', aiDraft, drafting,
-//          fasName, hideZero, message, conflicts:[{id}] }
+//          fasName, hideZero, message, conflicts:[{id}], scacOptions:[], scacs:[] }
 export function panelHtml(state = {}) {
   const s = state || {};
   const header = '<style>' + PANEL_CSS + '</style>'
@@ -351,8 +447,10 @@ export function panelHtml(state = {}) {
     + ai
     + btn('copy', '\ud83d\udccb Copy rows', ' detail-panel__btn--secondary')
     + btn('copy-header', '\ud83d\udccb Copy with header', ' detail-panel__btn--secondary')
+    + btn('copy-fill', '\ud83d\udccb Copy fill columns', ' detail-panel__btn--secondary')
     + '<label style="font-size:11px;display:flex;align-items:center;gap:4px;">'
     + '<input type="checkbox" data-fdbr-field="hideZero"' + (s.hideZero ? ' checked' : '') + '> Hide rows with 0 down</label>'
+    + _scacHtml(s.scacOptions, s.scacs)
     + '</div>';
   const hint = fas ? '' : '<div class="fdbr-muted" style="margin-bottom:6px;">No FAS name set \u2014 rows without a roster match stay blank until you enter one (or type it per row).</div>';
   const conflicts = Array.isArray(s.conflicts) ? s.conflicts : [];
