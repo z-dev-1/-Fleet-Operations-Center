@@ -46,8 +46,13 @@ describe('tableHtml', () => {
     const tas = [...html.matchAll(/<textarea[^>]*data-key="([^"]+)" data-col="([^"]+)" aria-label="([^"]+)"/g)];
     expect(tas.length).toBe(m.rows.length * F.EDITABLE_IDS.length);
     expect(new Set(tas.map((t) => t[2]))).toEqual(new Set(F.EDITABLE_IDS));
-    for (const ro of ['domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown', 'vendor1pYN', 'oemYN', 'estimateYN', 'partnerYN', 'partsYN', 'commonYN']) {
+    for (const ro of ['domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown']) {
       expect(html).not.toContain('data-col="' + ro + '"');
+    }
+    // The 6 Y/N AI cells are read-only <td data-key data-col> (patchable), never textareas.
+    for (const yn of ['vendor1pYN', 'oemYN', 'estimateYN', 'partnerYN', 'partsYN', 'commonYN']) {
+      expect(html).not.toMatch(new RegExp('<textarea[^>]*data-col="' + yn + '"'));
+      expect(html).toContain('<td data-key="ROC5|AUVTE" data-col="' + yn + '">');
     }
     expect(html).toContain('aria-label="FAS Actions \u2014 ROC5/AUVTE"');
     expect(html).toMatch(/<textarea class="dc-input fdbr-cell"/);
@@ -132,7 +137,8 @@ describe('visibleRows / eligibleForAutoDraft', () => {
         [okKey]: { fasActions: 'a', support: 'b', unitsHash: okHash },
         [staleKey]: { fasActions: 'a', support: 'b', unitsHash: 'old' },
       },
-      edits: { [bothKey]: { fasActions: 'x', support: 'y' }, [oneKey]: { fasActions: 'x' } },
+      // "both edited" = every editable AI cell edited (Details, ETC, FAS Actions, Support).
+      edits: { [bothKey]: Object.fromEntries(F.AI_CELL_IDS.filter((id) => F.EDITABLE_IDS.includes(id)).map((id) => [id, 'x'])), [oneKey]: { fasActions: 'x', support: 'y' } },
     });
     const keys = L.eligibleForAutoDraft(m);
     expect(keys).not.toContain(okKey);
@@ -141,6 +147,110 @@ describe('visibleRows / eligibleForAutoDraft', () => {
     expect(keys).toContain(oneKey);
     expect(keys).not.toContain(zeroKey);
     expect(keys.length).toBe(downKeys.length - 2);
+  });
+});
+
+// A v2 draft over the real builder row (FEAT-004).
+const KEY = 'ROC5|AUVTE';
+function v2Model(draftOver = {}, overlays = {}) {
+  const built = F.buildFleetDbr(makeFleetRows(), { today: TODAY });
+  const row = built.rows.find((r) => r.key === KEY);
+  const u0 = row.units[0].id;
+  const d = Object.assign({
+    version: 2, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X',
+    cells: { oemYN: 'Y', oemDetails: '\u2022 ' + u0 + ': at dealer', partsYN: 'N', partsDetails: '', fasActions: '\u2022 ' + u0 + ': <b>called</b> TA' },
+    sources: { oemYN: 'ai', oemDetails: 'ai', partsYN: 'ai', partsDetails: 'ai', fasActions: 'ai' },
+    flags: { partsYN: 'review', fasActions: 'review' },
+    disagreements: ['parts'],
+    etcUnits: [{ unit: u0, state: 'none', date: '', origin: 'ai', why: "ETC 11/08 cancelled <i>x</i>" }],
+    etcDisagreements: [{ unit: u0, ai: '11/08', code: '11/14' }],
+    etcOverrides: [{ unit: u0, code: '11/08' }],
+    provenance: { fasActions: { [u0]: [{ date: '11/10', quote: 'called TA re <tech>' }] }, oemDetails: { [u0]: [{ date: '11/10', quote: 'called TA re <tech>' }] } },
+    unverifiedNames: [{ name: 'Vanguard<script>', units: [u0], cell: 'partsDetails' }],
+    unboundDates: [{ unit: u0, cell: 'partsDetails', date: '11/09', kw: 'eta' }],
+    identity: { alias: true, names: 1, fasTagged: 1 },
+  }, draftOver);
+  const m = F.applyOverlays(built, Object.assign({ today: TODAY, flags: { aiDraft: true }, drafts: { [KEY]: d } }, overlays));
+  return { m, row: m.rows.find((r) => r.key === KEY), u0 };
+}
+
+describe('AI markers, drill-down and flags (FEAT-004)', () => {
+  it('24 <th> with AI on and off; AI off shows no AI / ⚠ markers even with a stored v2 draft (AC12)', () => {
+    const on = v2Model().m;
+    const off = v2Model({}, { flags: { aiDraft: false } }).m;
+    for (const [mm, ai] of [[on, true], [off, false]]) {
+      const h = L.tableHtml(mm, { aiDraft: ai });
+      const ths = [...h.matchAll(/<th scope="col">([\s\S]*?)<\/th>/g)].map((x) => unescape(x[1]));
+      expect(ths.slice(0, 24)).toEqual(HEADERS);
+      expect(ths.length).toBe(25);
+    }
+    const hOff = L.tableHtml(off, { aiDraft: false });
+    expect(hOff).not.toContain('<span class="fdbr-mark">AI</span>');
+    expect(hOff).not.toContain('\u26a0 check');
+  });
+
+  it('AI marker on AI Y/N cells, ⚠ check on flagged cells (text, not colour only), escaped values', () => {
+    const { m, row } = v2Model();
+    const h = L.tableHtml(m, { aiDraft: true });
+    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="oemYN">Y<span class="fdbr-mark">AI</span></td>');
+    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="partsYN">N<span class="fdbr-mark">AI</span><span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span></td>');
+    expect(h).not.toContain('<b>called</b>');
+    expect(h).toContain('&lt;b&gt;called&lt;/b&gt;');
+    expect(L.cellInnerHtml(row, 'fasActions')).toContain('\u26a0 check');
+    // An edited cell shows "edited" and no ⚠.
+    const e = v2Model({}, { edits: { [KEY]: { fasActions: 'mine' } } }).row;
+    expect(L.markHtml(e, 'fasActions')).toBe('<span class="fdbr-mark">edited</span>');
+    expect(L.PANEL_CSS).toContain('.fdbr-mark--warn');
+  });
+
+  it('drill-down: AI ETC, ETC disagreement / override, sources, unverified names, unbound dates, AI vs rules (all escaped)', () => {
+    const { row } = v2Model();
+    const d = L.unitsDrillHtml(row);
+    expect(d).toContain('AI ETC: none (ai)');
+    expect(d).toContain('ETC: AI 11/08 vs rules 11/14');
+    expect(d).toContain('ETC: AI none (rules 11/08) \u2014 &#39;ETC 11/08 cancelled &lt;i&gt;x&lt;/i&gt;&#39;');
+    expect((d.match(/sources: 11\/10 \[FAS\] &#39;called TA re &lt;tech&gt;&#39;/g) || []).length).toBe(1); // de-duplicated
+    expect(d).toContain('unverified name: Vanguard&lt;script&gt; (partsDetails)');
+    expect(d).toContain('unbound date: eta 11/09 (partsDetails)');
+    expect(d).toContain('AI vs rules: Parts Delay AI=N rules=Y');
+    expect(d).not.toContain('<script>');
+    expect(d).not.toContain('<tech>');
+  });
+
+  it('AC37: rules Y vs AI N -> partsYN N kept, flagged, counted by flaggedCount', () => {
+    const { row } = v2Model();
+    expect(row.cells.partsYN).toBe('N');
+    expect(row.flags.partsYN).toBe('review');
+    expect(L.flaggedCount([row])).toBe(2);
+    expect(L.flaggedCount([row], (r, id) => id === 'fasActions')).toBe(1);
+    const e = v2Model({}, { edits: { [KEY]: { fasActions: 'mine' } } }).row;
+    expect(L.flaggedCount([e])).toBe(1);
+  });
+
+  it('AC32: evidence-stale is not auto-queued, but is with includeEvidenceStale; units / identity are', () => {
+    const ev = v2Model({ evidenceHash: 'old' }).m;
+    expect(ev.rows.find((r) => r.key === KEY).draft.staleReason).toBe('evidence');
+    expect(L.eligibleForAutoDraft(ev)).not.toContain(KEY);
+    expect(L.eligibleForAutoDraft(ev, { includeEvidenceStale: true })).toContain(KEY);
+    const units = v2Model({ unitsHash: 'old' }).m;
+    expect(L.eligibleForAutoDraft(units)).toContain(KEY);
+    const id = v2Model({ identity: { alias: false, names: 0, fasTagged: 0 } }, { fasAliasKnown: true }).m;
+    expect(id.rows.find((r) => r.key === KEY).draft.staleReason).toBe('identity');
+    expect(L.eligibleForAutoDraft(id)).toContain(KEY);
+    expect(L.eligibleForAutoDraft(v2Model().m)).not.toContain(KEY);
+  });
+
+  it('AC40: ETA in the status line', () => {
+    expect(L.etaMinutes({ done: 2, total: 20, startedAt: 1000, now: 1000 + 4 * 60000, slots: 2 })).toBe(36);
+    expect(L.etaMinutes({ done: 0, total: 20, startedAt: 1000, now: 5000, slots: 2 })).toBe(40);
+    expect(L.statusLine(model(), { ai: { done: 2, total: 20, etaMin: 36 } })).toContain('AI 2/20 \u00b7 ~36 min left');
+    expect(L.statusLine(model(), { ai: { done: 20, total: 20, etaMin: 0 } })).not.toContain('min left');
+  });
+
+  it('notes describe the AI cells and the whole-number ETC counts', () => {
+    expect(L.AI_NOTE).toContain('AI decides each barrier Y/N');
+    expect(L.ETC_NOTE).toContain('whole-number');
+    expect(L.ETC_NOTE).toContain('drill-down');
   });
 });
 

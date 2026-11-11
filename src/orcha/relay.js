@@ -617,7 +617,9 @@ async function _runCascade(prompt, ctx) {
     // would retain the content), no WS, no Bedrock, no lane-health changes.
     // Aki joins the isolated lane only with an Aki mode AND ai.aki.enabled AND
     // ai.aki.allowUntrusted === true (_runIsolatedSet); otherwise unchanged.
-    if (opts.isolated === true && _akiIsolatedAllowed()) return await _runIsolatedSet(prompt, ctx, _aiPreference);
+    // opts.preferAki (Fleet DBR): Aki first in any mode, still gated on
+    // ai.aki.enabled + allowUntrusted consent (_akiPreferAllowed).
+    if (opts.isolated === true && (_akiIsolatedAllowed() || (opts.preferAki === true && _akiPreferAllowed()))) return await _runIsolatedSet(prompt, ctx, opts.preferAki === true ? 'aki' : _aiPreference);
     if (opts.isolated === true) {
       const t = await _tryClaudeCode(prompt, { ..._ccOpts(ctx), isolated: true });
       rec.via = 'claude-code/isolated';
@@ -916,6 +918,12 @@ async function _runLaneSet(prompt, ctx, mode) {
 // ── ISOLATED LANE SET (untrusted content: emails, attachments, links) ────────
 function _akiIsolatedAllowed() {
   if (!AKI_MODES.has(_aiPreference)) return false;
+  const f = _aki();
+  return !!f.enabled && f.allowUntrusted === true;
+}
+
+// opts.preferAki callers: same consent gate, independent of _aiPreference.
+function _akiPreferAllowed() {
   const f = _aki();
   return !!f.enabled && f.allowUntrusted === true;
 }

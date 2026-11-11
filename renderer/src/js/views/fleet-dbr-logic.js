@@ -45,28 +45,65 @@ export function visibleRows(model, hideZero) {
   return hideZero ? rows.filter((r) => _down(r) > 0) : rows;
 }
 
-// Auto-draft eligibility: has down units, the user hasn't edited BOTH AI cells,
-// and there is no current draft (none) or the draft is out of date (stale).
-export function eligibleForAutoDraft(model) {
+// The AI judgment cells of the model (main: AI_CELL_IDS); older models only had the two.
+export function aiCellIds(model) {
+  return model && Array.isArray(model.aiCellIds) && model.aiCellIds.length ? model.aiCellIds : ['fasActions', 'support'];
+}
+
+// Auto-draft eligibility: has down units, the user hasn't edited EVERY editable AI cell, and
+// the draft is missing (none) or stale by 'units' / 'identity'. A draft stale only by
+// 'evidence' is queued by "Draft all" / ↻ (includeEvidenceStale), not on panel open.
+export function eligibleForAutoDraft(model, { includeEvidenceStale = false } = {}) {
   const rows = model && Array.isArray(model.rows) ? model.rows : [];
+  const cols = model && Array.isArray(model.columns) ? model.columns : [];
+  const ids = aiCellIds(model);
+  const editable = cols.length ? ids.filter((id) => cols.some((c) => c.id === id && c.editable)) : ids;
   const out = [];
   for (const r of rows) {
     if (_down(r) <= 0) continue;
     const src = r.source || {};
-    if (src.fasActions === 'edit' && src.support === 'edit') continue;
-    const state = (r.draft && r.draft.state) || 'none';
-    if (state !== 'none' && state !== 'stale') continue;
+    if (editable.length && editable.every((id) => src[id] === 'edit')) continue;
+    const d = r.draft || {};
+    const state = d.state || 'none';
+    if (state === 'stale') {
+      const why = d.staleReason || 'units';
+      if (why === 'evidence' && !includeEvidenceStale) continue;
+    } else if (state !== 'none') continue;
     out.push(r.key);
   }
   return out;
 }
 
+// Cells flagged ⚠ for review across rows, excluding cells the user edited (saved or live).
+export function flaggedCount(rows, isEdited) {
+  let n = 0;
+  for (const r of rows || []) {
+    const flags = (r && r.flags) || {};
+    const src = (r && r.source) || {};
+    for (const [id, v] of Object.entries(flags)) {
+      if (v !== 'review' || src[id] === 'edit') continue;
+      if (typeof isEdited === 'function' && isEdited(r, id)) continue;
+      n++;
+    }
+  }
+  return n;
+}
+
+// Minutes left for the AI queue (§7): measured per-row rate once a row is done, else
+// 240 s per row spread over the in-flight slots.
+export function etaMinutes({ done = 0, total = 0, startedAt = 0, now = 0, slots = 2 } = {}) {
+  const remaining = Math.max(0, total - done);
+  if (!remaining) return 0;
+  const perRowMs = done > 0 && startedAt ? Math.max(0, now - startedAt) / done : 240000 / Math.max(1, slots);
+  return Math.ceil((remaining * perRowMs) / 60000);
+}
+
 // ── Notes ───────────────────────────────────────────────────────────────────
-export const ETC_NOTE = "ETC is best-effort: parsed from notes/timeline text (ETC / ETR / estimated completion + a date). Bare 'ETA' (parts, tow) is ignored. Units with no parsed ETC are listed under NO ETC. Nothing is guessed.";
+export const ETC_NOTE = "ETC is best-effort: parsed from notes/timeline text (ETC / ETR / estimated completion / expected ready + a date). The ETC cells are whole-number counts; the unit IDs are in each row's drill-down. 'Expected today' counts every down unit with an ETC today (not only 1P/OEM). A bare parts/tow 'ETA' is not an ETC. Nothing is guessed.";
 export const OEM_NOTE = 'OEM = at OEM/dealer and stalled (waiting/diagnosis/no dealer status/\u226514d).';
 export const ROW_NOTE = 'One row per Domicile \u00d7 SCAC in your fleet data; Domicile and SCAC uptime are whole-domicile / whole-SCAC figures.';
 export const DOWN_NOTE = 'Down = lifecycle state Unavailable; Ordered units count in totals, not as down.';
-export const AI_NOTE = 'AI fills FAS Actions and Support as suggestions only. Review before pasting.';
+export const AI_NOTE = "AI decides each barrier Y/N and writes Details, ETC, FAS Actions and Support from every down unit's full record. Specifics are fact-checked against the evidence. \u26a0 marks cells to review. Review before pasting.";
 export const OFF_NOTICE = 'Fleet DBR is turned off (settings.dbr.fleetData = false).';
 export const UNAVAILABLE_NOTICE = 'Fleet DBR unavailable in this build.';
 export const TITLE = '\ud83d\udcca DBR \u2014 Fleet Health (from fleet data)';
@@ -93,7 +130,10 @@ export function statusLine(model, opts = {}) {
   parts.push(rows.length + (rows.length === 1 ? ' row' : ' rows'));
   parts.push((Number(model.downCount) || 0) + ' down');
   const ai = opts && opts.ai;
-  if (ai && ai.total > 0) parts.push('AI ' + ai.done + '/' + ai.total);
+  if (ai && ai.total > 0) {
+    const eta = ai.done < ai.total && Number.isFinite(ai.etaMin) && ai.etaMin > 0 ? ' \u00b7 ~' + ai.etaMin + ' min left' : '';
+    parts.push('AI ' + ai.done + '/' + ai.total + eta);
+  }
   const you = rows.filter((r) => r && r.fasSource === 'you').length;
   if (you) parts.push(you + (you === 1 ? ' row uses' : ' rows use') + ' your name (no roster match)');
   return parts.join(' \u00b7 ');
@@ -101,6 +141,40 @@ export function statusLine(model, opts = {}) {
 
 // ── Per-row drill-down ──────────────────────────────────────────────────────
 const ETC_LABEL = { today: 'ETC today', missed: 'Missed ETC', future: 'ETC future', none: 'NO ETC' };
+
+const BARRIER_LABEL = {
+  vendor1p: '1P Vendor', oem: 'OEM', estimate: 'Estimate', partner: 'Partner', parts: 'Parts Delay', common: 'Common Repairs',
+};
+const _arr = (v) => (Array.isArray(v) ? v : []);
+const _line = (text) => '<br><span class="fdbr-muted">' + esc(text) + '</span>';
+
+// Per-unit AI lines of the drill-down (AI ETC, ETC disagreements / overrides, FAS sources,
+// unverified names, unbound dates). Every value is escaped.
+function _aiUnitLines(r, id, units) {
+  const out = [];
+  const etcU = _arr(r.etcUnits).find((e) => e && e.unit === id);
+  if (etcU) out.push('AI ETC: ' + [etcU.state || 'none', etcU.date || '', '(' + (etcU.origin || 'ai') + ')'].filter(Boolean).join(' '));
+  for (const d of _arr(r.etcDisagreements)) if (d && d.unit === id) out.push('ETC: AI ' + (d.ai || '') + ' vs rules ' + (d.code || ''));
+  for (const o of _arr(r.etcOverrides)) {
+    if (!o || o.unit !== id) continue;
+    out.push('ETC: AI none (rules ' + (o.code || '') + ')' + (etcU && etcU.why ? " \u2014 '" + etcU.why + "'" : ''));
+  }
+  const seen = new Set();
+  for (const byUnit of Object.values(r.provenance && typeof r.provenance === 'object' ? r.provenance : {})) {
+    for (const it of _arr(byUnit && byUnit[id])) {
+      if (!it) continue;
+      const s = 'sources: ' + (it.date || '') + " [FAS] '" + (it.quote || '') + "'";
+      if (!seen.has(s)) { seen.add(s); out.push(s); }
+    }
+  }
+  for (const n of _arr(r.unverifiedNames)) {
+    if (!n) continue;
+    const on = Array.isArray(n.units) ? n.units.includes(id) : (n.unit === id || (!n.unit && units === 1));
+    if (on) out.push('unverified name: ' + (n.name || '') + ' (' + (n.cell || '') + ')');
+  }
+  for (const b of _arr(r.unboundDates)) if (b && b.unit === id) out.push('unbound date: ' + (b.kw || '') + ' ' + (b.date || '') + ' (' + (b.cell || '') + ')');
+  return out.map(_line).join('');
+}
 
 export function unitsDrillHtml(row) {
   const r = row || {};
@@ -121,10 +195,19 @@ export function unitsDrillHtml(row) {
     return '<li><strong>' + esc(u.id) + '</strong> ' + bits
       + '<br><span class="fdbr-muted">' + esc(etcBits) + (etc.snippet ? ': ' + esc(etc.snippet) : '') + '</span>'
       + (tags.length ? '<br><span class="fdbr-muted">tags: ' + esc(tags.join(', ')) + '</span>' : '')
+      + _aiUnitLines(r, u.id, units.length)
       + '</li>';
   }).join('');
+  const rowLines = [];
+  const dis = _arr(r.disagreements).map((b) => {
+    const ai = String((r.cells && r.cells[b + 'YN']) || '').trim().toUpperCase().startsWith('Y') ? 'Y' : 'N';
+    return (BARRIER_LABEL[b] || b) + ' AI=' + ai + ' rules=' + (ai === 'Y' ? 'N' : 'Y');
+  });
+  if (dis.length) rowLines.push('AI vs rules: ' + dis.join('; '));
+  if (r.reviewSkipped) rowLines.push('AI self-review skipped: ' + r.reviewSkipped);
   return '<details class="fdbr-drill"><summary>' + esc((pair.down || 0) + ' down / ' + (pair.total || 0)) + '</summary>'
     + '<div class="fdbr-muted">FAS source: ' + esc(fasSrc) + (r.rosterFas ? ' (roster: ' + esc(r.rosterFas) + ')' : '') + '</div>'
+    + rowLines.map((t) => '<div class="fdbr-muted">' + esc(t) + '</div>').join('')
     + (items ? '<ul class="fdbr-units">' + items + '</ul>' : '<div class="fdbr-muted">No down units.</div>')
     + '</details>';
 }
@@ -142,10 +225,28 @@ export function badgeHtml(row, status) {
 }
 
 // ── Table ───────────────────────────────────────────────────────────────────
+// Text markers (never color-only): "edited", "AI" on AI-written cells, "⚠ check" on
+// cells the fact-check flagged for review (not shown once the user edited the cell).
+export function markHtml(row, col) {
+  const src = (row && row.source) || {};
+  const flags = (row && row.flags) || {};
+  if (src[col] === 'edit') return '<span class="fdbr-mark">edited</span>';
+  let out = src[col] === 'ai' ? '<span class="fdbr-mark">AI</span>' : '';
+  if (flags[col] === 'review') out += '<span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span>';
+  return out;
+}
+// Inner HTML of a non-editable AI cell (value + markers, escaped); refreshRow patches it.
+export function cellInnerHtml(row, col, value) {
+  const v = value !== undefined ? value : _cellOf(row, col);
+  return esc(v) + markHtml(row, col);
+}
+
 // 24 <th scope="col"> in model.columns order, plus one UI-only last column
-// (drill-down + row buttons) that is never copied.
+// (drill-down + row buttons) that is never copied. Non-editable AI cells (the 6 Y/N) carry
+// data-key/data-col so the panel can patch them; hard cells are plain <td>.
 export function tableHtml(model, opts = {}) {
   const cols = model && Array.isArray(model.columns) ? model.columns : [];
+  const aiIds = new Set(aiCellIds(model));
   const aiDraft = !!opts.aiDraft;
   const rowStatus = opts.rowStatus || {};
   const get = typeof opts.getValue === 'function' ? opts.getValue : _cellOf;
@@ -159,15 +260,16 @@ export function tableHtml(model, opts = {}) {
     + '<th scope="col">Units / Row</th></tr></thead>';
   const body = rows.map((r) => {
     const label = (r.domicile || '') + '/' + (r.scac || '');
-    const src = r.source || {};
     const tds = cols.map((c) => {
       const v = get(r, c.id);
-      if (!c.editable) return '<td>' + esc(v) + '</td>';
-      const mark = src[c.id] === 'edit' ? '<span class="fdbr-mark">edited</span>'
-        : (src[c.id] === 'ai' ? '<span class="fdbr-mark">AI draft</span>' : '');
+      if (!c.editable) {
+        if (!aiIds.has(c.id)) return '<td>' + esc(v) + '</td>';
+        return '<td data-key="' + esc(r.key) + '" data-col="' + esc(c.id) + '">' + cellInnerHtml(r, c.id, v) + '</td>';
+      }
       return '<td class="fdbr-td">'
         + '<textarea class="dc-input fdbr-cell" rows="2" data-key="' + esc(r.key) + '" data-col="' + esc(c.id) + '"'
-        + ' aria-label="' + esc(c.header + ' \u2014 ' + label) + '">' + esc(v) + '</textarea>' + mark + '</td>';
+        + ' aria-label="' + esc(c.header + ' \u2014 ' + label) + '">' + esc(v) + '</textarea>'
+        + '<span class="fdbr-marks" data-mark-key="' + esc(r.key) + '" data-mark-col="' + esc(c.id) + '">' + markHtml(r, c.id) + '</span></td>';
     }).join('');
     const btn = (action, text, aria) => '<button type="button" class="detail-panel__btn detail-panel__btn--secondary fdbr-mini"'
       + ' data-fdbr-action="' + action + '" data-key="' + esc(r.key) + '" aria-label="' + esc(aria + ' ' + label) + '">' + text + '</button>';
@@ -213,6 +315,7 @@ export const PANEL_CSS = `
     #dbr-overlay .fdbr-notes { font-size: 10px; color: var(--mut, #888); margin: 0 0 4px; padding-left: 16px; }
     #dbr-overlay .fdbr-muted { font-size: 10px; color: var(--mut, #888); }
     #dbr-overlay .fdbr-mark { display: block; font-size: 9px; color: var(--mut, #888); }
+    #dbr-overlay .fdbr-mark--warn { color: #f0a800; font-weight: 600; }
     #dbr-overlay .fdbr-mini { font-size: 10px; margin: 2px 2px 0 0; }
     #dbr-overlay .fdbr-ui { min-width: 190px; }
     #dbr-overlay .fdbr-units { margin: 4px 0; padding-left: 14px; }

@@ -6,7 +6,10 @@
  *   fleet-dbr:status        ()                    -> { ok, enabled, aiDraft }
  *   fleet-dbr:get           ()                    -> { ok, model | null }   (null = no snapshot today)
  *   fleet-dbr:build         ()                    -> { ok, model, saved } | { ok:false, code:'no-fleet-data' }
- *   fleet-dbr:draft         ({ key })             -> { ok, key, fasActions, support, dropped, draftedAt, model?, saved } | { ok:false, code }
+ *   fleet-dbr:draft         ({ key })             -> { ok, key, cells, sources, flags, disagreements, etcUnits, etcDisagreements,
+ *                                                      etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
+ *                                                      dropped, rounds, reviewSkipped, mode, draftedAt, saved, model?,
+ *                                                      fasActions, support } | { ok:false, code }
  *   fleet-dbr:save-edit     ({ key, col, value }) -> { ok } | { ok:false, code }
  *   fleet-dbr:reset-row     ({ key })             -> { ok } | { ok:false, code }
  *   fleet-dbr:set-fas-name  ({ name })            -> { ok, fasName } | { ok:false, code }
@@ -30,7 +33,7 @@ const log = require('../utils/logger')('fleet-dbr');
 const dbr = require('../dbr/fleet-dbr');
 
 const MAX_KEY = 80;
-const MAX_VALUE = 4000;
+const MAX_VALUE = 16000;
 const MAX_NAME = 120;
 const MAX_EDIT_ROWS = 300;
 const MAX_IN_FLIGHT = 2;
@@ -52,9 +55,140 @@ function _today() {
   const d = _now();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
+// Isolated lane, Aki first when ai.aki.allowUntrusted consent is on (relay preferAki). The
+// per-call timeoutMs (and signal) come from draftRow; the lane options cannot be overridden.
 function _ask() {
   if (_o.ask) return _o.ask;
-  return (p, o) => require('../orcha/relay').askWithTimeout(p, { source: 'fleet_dbr', priority: 'normal', timeoutMs: 90000, ...o });
+  return (p, o) => require('../orcha/relay').askWithTimeout(p, {
+    ...o, source: 'fleet_dbr', priority: 'normal', isolated: true, preferAki: true,
+  });
+}
+
+// ── FAS alias (AAP user alias) ──────────────────────────────────────────────
+// Memoized per process. _primeAlias() starts the fetch without awaiting (status / get / draft);
+// _aapAlias() never awaits; _awaitAlias() is the draft handler's bounded wait (polling, never
+// a promise race). Injectable for tests: _o.userAlias (fn -> alias | Promise), _o.aliasNow
+// (clock fn, ms) and _o.aliasSleep (ms -> Promise).
+const ALIAS_RE = /^[A-Za-z0-9._-]{2,64}$/;
+const ALIAS_WAIT_MS = 15000;
+const ALIAS_POLL_MS = 250;
+const ALIAS_RETRY_MS = 30 * 60 * 1000;
+let _aliasCache = '';
+let _aliasPending = false;
+let _aliasTriedAt = 0;
+
+function _aliasNow() { return (_o.aliasNow || Date.now)(); }
+function _aapAlias() { return _aliasCache; }
+function _primeAlias() {
+  if (_aliasCache || _aliasPending) return;
+  if (_aliasTriedAt && _aliasNow() - _aliasTriedAt < ALIAS_RETRY_MS) return;
+  _aliasPending = true;
+  const fetch = _o.userAlias || (() => {
+    const api = require('../scrapers/aap_api');
+    return Promise.resolve(api.getUserDetails()).then((u) => api._userAlias(u));
+  });
+  Promise.resolve()
+    .then(() => fetch())
+    .then((a) => { if (typeof a === 'string' && ALIAS_RE.test(a)) _aliasCache = a; })
+    .catch(() => { log.debug('[fleet-dbr] alias', { code: 'alias-unavailable' }); })
+    .finally(() => { _aliasPending = false; _aliasTriedAt = _aliasNow(); });
+}
+async function _awaitAlias() {
+  const sleep = _o.aliasSleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const t0 = _aliasNow();
+  while (_aliasPending && _aliasNow() - t0 < ALIAS_WAIT_MS) await sleep(ALIAS_POLL_MS);
+}
+
+// ── Enrich (canonicalState / notesStore / emailEvidence) ───────────────────
+// Each source loads in its own try; a load or shape failure makes that source empty for every
+// unit (warn, code only) and the draft continues. -> { [downId]: { canonical, manualEntries, email } }
+const MAX_MANUAL = 50;
+const MAX_MANUAL_CHARS = 400;
+const MAX_EMAIL = 15;
+function _isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+function _enrichSource(key, name, pick) {
+  try {
+    const doc = _store().load(name, {});
+    const v = pick(doc == null ? {} : doc);
+    if (v === null) throw new Error('shape');
+    return v;
+  } catch (_) {
+    log.warn('[fleet-dbr] enrich', { key, source: name, code: 'enrich-unavailable' });
+    return {};
+  }
+}
+function _enrich(key, ids) {
+  const canon = _enrichSource(key, 'canonicalState', (d) => {
+    if (!_isObj(d)) return null;
+    if (d.units === undefined) return {};
+    return _isObj(d.units) ? d.units : null;
+  });
+  const notes = _enrichSource(key, 'notesStore', (d) => (_isObj(d) ? d : null));
+  const mail = _enrichSource(key, 'emailEvidence', (d) => (_isObj(d) ? d : null));
+  const out = {};
+  for (const id of ids) {
+    const rec = {};
+    if (_isObj(canon[id])) rec.canonical = canon[id];
+    const ns = notes[id];
+    if (_isObj(ns) && Array.isArray(ns.manualEntries)) {
+      rec.manualEntries = ns.manualEntries.filter((x) => typeof x === 'string').slice(-MAX_MANUAL).map((x) => x.slice(0, MAX_MANUAL_CHARS));
+    }
+    if (Array.isArray(mail[id])) {
+      const t = (x) => { const v = Date.parse(x && x.observedAt); return Number.isFinite(v) ? v : 0; };
+      rec.email = mail[id].filter(_isObj).slice().sort((a, b) => t(b) - t(a)).slice(0, MAX_EMAIL);
+    }
+    if (Object.keys(rec).length) out[id] = rec;
+  }
+  return out;
+}
+// FAS identity names: roster, panel override, email-intel name (unique, trimmed, 1..120).
+function _fasNames(snapRow) {
+  const out = [];
+  let list = [];
+  try { list = [_fasFor(snapRow.scac, snapRow.domicile), _editsDoc().fasName, _emailFasName()]; } catch (_) { list = []; }
+  for (const n of list) {
+    const s = typeof n === 'string' ? n.trim() : '';
+    if (s && s.length <= MAX_NAME && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+// Draft info log: counts, codes, the row key and ms only (never prompt, evidence or AI text).
+function _draftLog(key, res, view, calls, extra) {
+  const num = (v) => (Number.isFinite(v) ? v : 0);
+  const fieldOver = {};
+  let maxPromptChars = 0;
+  let maxOutChars = 0;
+  let envOver = 0;
+  let envMissing = 0;
+  for (const c of calls) {
+    if (!c) continue;
+    maxPromptChars = Math.max(maxPromptChars, num(c.promptChars));
+    maxOutChars = Math.max(maxOutChars, num(c.outChars));
+    envOver += num(c.envOver);
+    envMissing += num(c.envMissing);
+    for (const [k, v] of Object.entries(_plain(c.fieldOver))) fieldOver[k] = Math.max(fieldOver[k] || 0, num(v));
+  }
+  const dropReasons = {};
+  for (const [k, v] of Object.entries(_plain(res.dropReasons))) dropReasons[k] = num(v);
+  const er = _plain(res.etcReconciled);
+  const provenanceItems = Object.values(view.provenance)
+    .reduce((s, byUnit) => s + Object.values(_plain(byUnit)).reduce((t, list) => t + (Array.isArray(list) ? list.length : 0), 0), 0);
+  return {
+    key, outcome: 'ok', units: (res.etcUnits || []).length, mode: res.mode, demand: num(res.demand),
+    calls: num(res.calls), mapRetries: num(res.mapRetries), rounds: num(res.rounds), reviewSkipped: res.reviewSkipped || null,
+    dropped: num(res.dropped), dropReasons, unverifiedNames: view.unverifiedNames.length, unboundDates: view.unboundDates.length,
+    etcOverrides: view.etcOverrides.length, envOver, envMissing, fieldOver, provenanceItems,
+    coverageFilled: view.coverageFilled.length, fasTagged: extra.fasTagged, alias: extra.alias,
+    etcFilled: num(er.filled), etcReclassified: num(er.reclassified), etcDateUnknown: num(er.dateUnknown),
+    etcDisagreements: view.etcDisagreements.length, disagreements: view.disagreements.length,
+    maxPromptChars, maxOutChars, ms: extra.ms,
+  };
+}
+function _pick(obj, ids) {
+  const src = _plain(obj);
+  const out = {};
+  for (const id of ids) if (typeof src[id] === 'string') out[id] = src[id];
+  return out;
 }
 function _getFleet() {
   if (_o.getFleet) return _o.getFleet();
@@ -133,6 +267,7 @@ function _model(snap, today, flags) {
   return dbr.applyOverlays(built, {
     edits: rowsEdits, drafts: _plain(snap.drafts), fasNameOverride: edits.fasName,
     emailFasName: _emailFasName(), rosterFas, today, flags: { aiDraft: !!flags.aiDraft },
+    fasAliasKnown: !!_aapAlias(),
   });
 }
 
@@ -148,12 +283,14 @@ const handlers = {
   status: guarded('status', () => {
     const f = _flags();
     const enabled = f.enabled === true;
+    if (enabled) _primeAlias();
     return { ok: true, enabled, aiDraft: enabled && f.aiDraft === true };
   }),
 
   get: guarded('get', () => {
     const f = _flags();
     if (f.enabled !== true) return OFF;
+    _primeAlias();
     const today = _today();
     const snap = _snapshot(today);
     return { ok: true, model: snap ? _model(snap, today, f) : null };
@@ -192,6 +329,10 @@ const handlers = {
     if (f.aiDraft !== true) return { ok: false, code: 'ai-off' };
     _obj(payload, 'payload');
     const key = _key(payload);
+    _primeAlias();
+    // FIRST await. Everything from the busy check to `_inFlight += 1` below is synchronous, so
+    // MAX_IN_FLIGHT holds however many calls waited here, and the snapshot is read after the wait.
+    await _awaitAlias();
     if (_inFlight >= MAX_IN_FLIGHT) return { ok: false, code: 'busy' };
     const today = _today();
     const snap = _snapshot(today);
@@ -215,33 +356,72 @@ const handlers = {
       else if (r.equipmentId) fleetIds.push(String(r.equipmentId).trim());
     }
 
+    const downIds = (freshRow.units || []).map((u) => u && u.id).filter((id) => typeof id === 'string' && id && id !== '(no id)');
+    const enrich = _enrich(key, downIds);
+    const fasNames = _fasNames(snapRow);
+    const fasAlias = _aapAlias();
+
     const t0 = Date.now();
     _inFlight += 1;
     let res;
     try {
       const { draftRow } = require('../dbr/fleet-dbr-ai');
-      res = await draftRow({ row: freshRow, unitRows, built: fresh, ask: _ask(), fleetIds, today });
+      res = await draftRow({ row: freshRow, unitRows, built: fresh, ask: _ask(), enrich, fasNames, fasAlias, fleetIds, today });
     } finally {
       _inFlight -= 1;
     }
     const ms = Date.now() - t0;
+    const calls = Array.isArray(res && res.log) ? res.log : [];
+    for (const c of calls) {
+      if (c && c.kind !== 'map-retry') log.debug('[fleet-dbr] call', { key, kind: c.kind, promptChars: c.promptChars, outChars: c.outChars, ms: c.ms });
+    }
     if (!res || !res.ok) {
       const code = (res && res.code) || 'ai-failed';
-      if (code === 'ai-timeout' || code === 'ai-failed') log.warn('[fleet-dbr] draft', { key, code, ms });
-      else log.info('[fleet-dbr] draft', { key, code, dropped: (res && res.dropped) || 0, ms });
+      const meta = { key, code, mode: res && res.mode, demand: res && res.demand, calls: (res && res.calls) || 0, ms };
+      if (res && res.reason) meta.reason = res.reason;
+      if (code === 'ai-timeout' || code === 'ai-failed') log.warn('[fleet-dbr] draft', meta);
+      else log.info('[fleet-dbr] draft', meta);
       return { ok: false, code };
     }
 
     const draftedAt = _now().toISOString();
-    const out = { ok: true, key, fasActions: res.fasActions, support: res.support, dropped: res.dropped, draftedAt, saved: false };
+    const fasTagged = calls.reduce((m, c) => Math.max(m, (c && c.fasTagged) || 0), 0);
+    const arr = (v) => (Array.isArray(v) ? v : []);
+    const view = {
+      cells: _pick(res.cells, dbr.AI_CELL_IDS), sources: _plain(res.sources), flags: _plain(res.flags),
+      disagreements: arr(res.disagreements), etcUnits: arr(res.etcUnits), etcDisagreements: arr(res.etcDisagreements),
+      etcOverrides: arr(res.etcOverrides), provenance: _plain(res.provenance), unverifiedNames: arr(res.unverifiedNames),
+      unboundDates: arr(res.unboundDates), coverageFilled: arr(res.coverageFilled),
+    };
+    const out = Object.assign({ ok: true, key }, view, {
+      dropped: res.dropped || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null, mode: res.mode,
+      draftedAt, saved: false, fasActions: view.cells.fasActions, support: view.cells.support,
+    });
     const cur = _snapshot(today);
-    if (cur && cur.rows.some((r) => r && r.key === key)) {
+    const i = cur ? cur.rows.findIndex((r) => r && r.key === key) : -1;
+    if (i >= 0 && cur.rows[i].unitsHash !== freshRow.unitsHash) {
+      // A rebuild with a different down set landed while drafting: do not store a mismatched draft.
+      log.info('[fleet-dbr] draft', { key, outcome: 'stale-build', ms });
+      return { ok: false, code: 'stale-build' };
+    }
+    if (i >= 0) {
+      // The drill-down units and computed fallback cells follow the drafted evidence; hard cells stay.
+      cur.rows[i] = Object.assign({}, cur.rows[i], {
+        units: freshRow.units,
+        evidenceHash: freshRow.evidenceHash,
+        cells: Object.assign({}, cur.rows[i].cells, _pick(freshRow.cells, dbr.AI_CELL_IDS)),
+      });
       cur.drafts = _plain(cur.drafts);
-      cur.drafts[key] = { fasActions: res.fasActions, support: res.support, draftedAt, unitsHash: snapRow.unitsHash, dropped: res.dropped };
+      cur.drafts[key] = Object.assign({ version: 2 }, view, {
+        dropped: res.dropped || 0, dropReasons: _plain(res.dropReasons), mode: res.mode, calls: res.calls || 0,
+        mapRetries: res.mapRetries || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null,
+        identity: { alias: !!fasAlias, names: fasNames.length, fasTagged },
+        draftedAt, unitsHash: freshRow.unitsHash, evidenceHash: freshRow.evidenceHash,
+      });
       out.saved = _save(SNAP, cur);
       out.model = _model(cur, today, f);
     }
-    log.info('[fleet-dbr] draft', { key, outcome: 'ok', dropped: res.dropped, ms });
+    log.info('[fleet-dbr] draft', _draftLog(key, res, view, calls, { fasTagged, alias: !!fasAlias, ms }));
     return out;
   }),
 
@@ -317,6 +497,9 @@ function _resetForTests(overrides) {
   _o = overrides || {};
   _ctx = (overrides && overrides.ctx) || null;
   _inFlight = 0;
+  _aliasCache = '';
+  _aliasPending = false;
+  _aliasTriedAt = 0;
 }
 
 module.exports = { registerFleetDbrIPC, guarded, _resetForTests, CHANNELS, __test__: { handlers } };

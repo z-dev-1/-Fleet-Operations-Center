@@ -4,8 +4,9 @@
  * retired dashboard-scrape AFP/DSP overlay.
  *
  * - ↺ Build from fleet data, editable cells (debounced save), per-row Reset/Copy.
- * - ✨ Draft with AI / ■ Stop: AI drafts land ONLY in the FAS Actions / Support
- *   cells (validated main-side), stay editable, and are never sent anywhere.
+ * - ✨ Draft with AI / ■ Stop: AI drafts fill the 17 judgment cells (model.aiCellIds;
+ *   fact-checked main-side, hard cells never change), carry "AI" / "⚠ check" text
+ *   markers, editable cells stay editable, and nothing is sent anywhere.
  *   The only thing that leaves the panel is the clipboard on an explicit Copy.
  * - Accessible dialog: Escape / × / backdrop close, focus returns to the opener.
  *
@@ -21,6 +22,7 @@ const SAVE_DEBOUNCE_MS = 600;
 const MAX_DRAFTS_IN_FLIGHT = 2;
 const BUSY_RETRY_MS = 2000;
 const BUSY_RETRIES = 3;
+const STATUS_TICK_MS = 30000;
 const HIDE_ZERO_KEY = 'fleetDbr__hideZero';
 
 let _active = null;
@@ -68,12 +70,14 @@ function createController(deps) {
   const evBus = deps.bus || null;
   const setT = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
   const clrT = deps.clearTimeout || ((id) => clearTimeout(id));
+  const now = deps.now || (() => Date.now());
 
   const st = {
     status: 'loading', aiDraft: false, model: null, note: '',
     hideZero: false, stale: false, closed: false, building: false,
     drafting: false, stopped: false, queue: [], inFlight: new Set(), retrying: new Set(),
-    done: 0, total: 0, rowStatus: {},
+    done: 0, total: 0, rowStatus: {}, draftStartedAt: 0,
+    identityRequeued: new Set(), // R-N3: keys re-queued once because the FAS alias became known
     live: {},     // key -> { col -> unsaved/just-typed value }
     pending: {},  // 'key\u0000col' -> debounce timer
   };
@@ -148,9 +152,18 @@ function createController(deps) {
     if (!typing || !key || typeof tableEl.querySelector !== 'function') { renderTable(); return; }
     const row = _row(key);
     if (!row) { renderTable(); return; }
-    for (const col of ['fasActions', 'support']) {
-      const ta = tableEl.querySelector('textarea[data-key="' + _attr(key) + '"][data-col="' + col + '"]');
-      if (ta && ta !== active) { ta.value = liveValue(row, col); autoGrow(ta); }
+    const k = _attr(key);
+    for (const col of L.aiCellIds(st.model)) {
+      const c = _attr(col);
+      const ta = tableEl.querySelector('textarea[data-key="' + k + '"][data-col="' + c + '"]');
+      if (ta) {
+        if (ta !== active) { ta.value = liveValue(row, col); autoGrow(ta); }
+        const marks = tableEl.querySelector('[data-mark-key="' + k + '"][data-mark-col="' + c + '"]');
+        if (marks) marks.innerHTML = L.markHtml(row, col);
+        continue;
+      }
+      const td = tableEl.querySelector('td[data-key="' + k + '"][data-col="' + c + '"]');
+      if (td) td.innerHTML = L.cellInnerHtml(row, col, liveValue(row, col));
     }
     const badge = tableEl.querySelector('[data-fdbr-badge="' + _attr(key) + '"]');
     if (badge) badge.innerHTML = L.badgeHtml(row, st.rowStatus[key]);
@@ -158,7 +171,10 @@ function createController(deps) {
 
   function renderStatus() {
     if (!statusEl) return;
-    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: st.done, total: st.total } }) : '';
+    const etaMin = st.drafting
+      ? L.etaMinutes({ done: st.done, total: st.total, startedAt: st.draftStartedAt, now: now(), slots: MAX_DRAFTS_IN_FLIGHT })
+      : null;
+    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: st.done, total: st.total, etaMin } }) : '';
     statusEl.textContent = [line, st.note].filter(Boolean).join(' \u00b7 ');
   }
   function note(text) { st.note = text || ''; renderStatus(); }
@@ -246,18 +262,36 @@ function createController(deps) {
       added++;
     }
     if (!added) return;
-    if (!st.drafting) { st.done = 0; st.total = 0; }
+    if (!st.drafting) { st.done = 0; st.total = 0; st.draftStartedAt = now(); }
     st.total += added;
+    const wasDrafting = st.drafting;
     st.drafting = true;
     st.stopped = false;
+    if (!wasDrafting) statusTick();
     renderFrame(); renderTable(); renderStatus();
     pump();
+  }
+
+  // Re-render the status line (ETA) every 30 s while drafting; stops on drain / Stop / close.
+  let tickId = null;
+  function statusTick() {
+    if (tickId != null) { clrT(tickId); timers.delete(tickId); }
+    tickId = later(() => {
+      tickId = null;
+      if (st.closed || !st.drafting) return;
+      renderStatus();
+      statusTick();
+    }, STATUS_TICK_MS);
+  }
+  function stopTick() {
+    if (tickId != null) { clrT(tickId); timers.delete(tickId); tickId = null; }
   }
 
   function pump() {
     while (!st.stopped && !st.closed && st.inFlight.size < MAX_DRAFTS_IN_FLIGHT && st.queue.length) runDraft(st.queue.shift());
     if (!st.inFlight.size && !st.queue.length && !st.retrying.size && st.drafting) {
       st.drafting = false;
+      stopTick();
       renderFrame(); renderStatus();
     }
   }
@@ -270,11 +304,18 @@ function createController(deps) {
     const res = await _call('draft', { key });
     st.inFlight.delete(key);
     if (st.closed) return;
+    let requeue = false;
     if (res.ok) {
       if (res.model) setModel(res.model);
       else _patchDraft(key, res);
       delete st.rowStatus[key];
       st.done++;
+      // R-N3: drafted before the FAS alias was known (either branch) -> redraft once per panel.
+      const row = _row(key);
+      if (row && row.draft && row.draft.staleReason === 'identity' && !st.identityRequeued.has(key)) {
+        st.identityRequeued.add(key);
+        requeue = true;
+      }
     } else if (res.code === 'busy' && item.tries < BUSY_RETRIES && !st.stopped) {
       item.tries++;
       st.retrying.add(key);
@@ -291,19 +332,41 @@ function createController(deps) {
       st.done++;
     }
     refreshRow(key); renderStatus();
+    if (requeue && !st.stopped) startDrafts([key]);
     pump();
   }
 
-  // Draft committed but no model came back (snapshot save path): patch locally.
+  // Draft committed but no model came back (snapshot save path): patch locally. Reads
+  // res.cells / sources / flags (v2) or res.fasActions / support (v1); never throws on a
+  // missing field, so runDraft always reaches refreshRow + pump.
   function _patchDraft(key, res) {
     const row = _row(key);
     if (!row) return;
+    const cells = res.cells && typeof res.cells === 'object' ? res.cells : null;
+    const srcs = res.sources && typeof res.sources === 'object' ? res.sources : {};
+    const flags = res.flags && typeof res.flags === 'object' ? res.flags : {};
     row.cells = Object.assign({}, row.cells); row.source = Object.assign({}, row.source);
-    for (const col of ['fasActions', 'support']) {
-      if (typeof res[col] !== 'string' || !res[col]) continue;
-      row.base = Object.assign({}, row.base, { [col]: res[col] });
-      if (row.source[col] !== 'edit') { row.cells[col] = res[col]; row.source[col] = 'ai'; }
+    row.base = Object.assign({}, row.base);
+    const put = (col, v, src) => {
+      if (typeof v !== 'string') return;
+      row.base[col] = v;
+      if (row.source[col] !== 'edit') { row.cells[col] = v; row.source[col] = src; }
+    };
+    if (cells) {
+      for (const col of L.aiCellIds(st.model)) put(col, cells[col], srcs[col] === 'computed' ? 'computed' : 'ai');
+    } else {
+      for (const col of ['fasActions', 'support']) if (res[col]) put(col, res[col], 'ai');
     }
+    const arr = (v) => (Array.isArray(v) ? v : []);
+    row.flags = cells ? Object.assign({}, flags) : (row.flags || {});
+    row.disagreements = arr(res.disagreements);
+    row.etcUnits = arr(res.etcUnits);
+    row.etcDisagreements = arr(res.etcDisagreements);
+    row.etcOverrides = arr(res.etcOverrides);
+    row.provenance = res.provenance && typeof res.provenance === 'object' ? res.provenance : {};
+    row.unverifiedNames = arr(res.unverifiedNames);
+    row.unboundDates = arr(res.unboundDates);
+    row.reviewSkipped = typeof res.reviewSkipped === 'string' ? res.reviewSkipped : null;
     row.draft = { state: 'ok', draftedAt: res.draftedAt || null };
   }
 
@@ -313,6 +376,7 @@ function createController(deps) {
     st.queue = [];
     for (const k of st.retrying) delete st.rowStatus[k];
     st.drafting = false;
+    stopTick();
     renderFrame(); renderTable(); renderStatus();
   }
 
@@ -404,6 +468,11 @@ function createController(deps) {
     try { ok = (await clipboard.writeText(tsv)) !== false; } catch (_) { ok = false; }
     if (st.closed) return;
     if (!ok) { note('\u26a0 Copy failed \u2014 select the table and Ctrl+C'); return; }
+    // The pasted text is unchanged; the note tells the user what still needs a look.
+    const isLive = (r, col) => !!(st.live[r.key] && Object.prototype.hasOwnProperty.call(st.live[r.key], col));
+    const flagged = L.flaggedCount(rows, isLive);
+    note(flagged ? 'Copied ' + rows.length + (rows.length === 1 ? ' row' : ' rows') + ' \u2014 '
+      + flagged + (flagged === 1 ? ' cell' : ' cells') + ' flagged \u26a0 \u2014 review before pasting' : '');
     if (btnEl && typeof btnEl.textContent === 'string') {
       const orig = btnEl.textContent;
       btnEl.textContent = '\u2713 Copied';
@@ -421,7 +490,7 @@ function createController(deps) {
     switch (el.dataset.fdbrAction) {
       case 'close': close(); return;
       case 'build': return build().then((ok) => { if (ok) startDrafts(null); });
-      case 'draft-all': startDrafts(null); return;
+      case 'draft-all': startDrafts(st.model ? L.eligibleForAutoDraft(st.model, { includeEvidenceStale: true }) : null); return;
       case 'stop': stopDrafts(); return;
       case 'redraft': if (key) startDrafts([key]); return;
       case 'reset-row': if (key) return resetRow(key); return;

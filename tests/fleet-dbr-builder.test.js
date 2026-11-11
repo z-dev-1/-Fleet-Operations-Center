@@ -219,10 +219,48 @@ describe('applyOverlays', () => {
   });
 
   it('tags a draft with a different unitsHash as stale (still shown)', () => {
-    const m = F.applyOverlays(built, { drafts: { [key]: { fasActions: 'a', support: 'b', unitsHash: 'old' } } });
+    const m = F.applyOverlays(built, { drafts: { [key]: { fasActions: 'a', support: 'b', unitsHash: 'old' } }, flags: { aiDraft: true } });
     const r = m.rows.find((x) => x.key === key);
-    expect(r.draft.state).toBe('stale');
+    expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'units' });
     expect(r.cells.fasActions).toBe('a');
+    // AI flag off: no overlay, state none, even with the stored draft.
+    const off = F.applyOverlays(built, { drafts: { [key]: { fasActions: 'a', support: 'b', unitsHash: hash } } });
+    const o = off.rows.find((x) => x.key === key);
+    expect(o.draft).toEqual({ state: 'none', draftedAt: null });
+    expect(o.source.fasActions).toBe('computed');
+  });
+
+  it('v2 overlay: AI_CELL_IDS whitelist only, sources/flags, staleReason units > identity > evidence', () => {
+    const row = rowOf(built, key);
+    const d = {
+      version: 2, unitsHash: hash, evidenceHash: row.evidenceHash, draftedAt: 'X',
+      cells: { oemYN: 'Y', oemDetails: '• AI', partsYN: 'N', domicileDown: '999', scacUptime: '1%', fasName: 'Evil' },
+      sources: { oemYN: 'ai', oemDetails: 'ai', partsYN: 'computed' }, flags: { oemDetails: 'review', domicileDown: 'review' },
+      etcUnits: [{ unit: 'T0001', state: 'none' }], provenance: { fasActions: { T0001: [{ date: '11/10', quote: 'called TA' }] } },
+      identity: { alias: false, names: 0, fasTagged: 0 },
+    };
+    const ov = (extra) => F.applyOverlays(built, Object.assign({ drafts: { [key]: d }, flags: { aiDraft: true } }, extra)).rows.find((x) => x.key === key);
+    let r = ov({});
+    expect(r.cells.oemYN).toBe('Y');
+    expect(r.source.oemYN).toBe('ai');
+    expect(r.source.partsYN).toBe('computed');
+    for (const id of F.HARD_CELL_IDS) expect(r.cells[id]).toBe(id === 'fasName' ? '' : row.cells[id]);
+    expect(r.flags).toEqual({ oemDetails: 'review' });
+    expect(r.etcUnits).toEqual(d.etcUnits);
+    expect(r.provenance).toEqual(d.provenance);
+    expect(r.draft).toEqual({ state: 'ok', draftedAt: 'X' });
+    r = ov({ fasAliasKnown: true });
+    expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'identity' });
+    d.evidenceHash = 'other';
+    r = ov({});
+    expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'evidence' });
+    r = ov({ fasAliasKnown: true });
+    expect(r.draft.staleReason).toBe('identity');
+    d.unitsHash = 'old';
+    expect(ov({ fasAliasKnown: true }).draft.staleReason).toBe('units');
+    const m = F.applyOverlays(built, { flags: { aiDraft: true }, fasAliasKnown: true });
+    expect(m.aiCellIds).toEqual(F.AI_CELL_IDS);
+    expect(m.fasAliasKnown).toBe(true);
   });
 
   it('FAS name: roster wins, then the user name, then empty; per-row edit overrides', () => {

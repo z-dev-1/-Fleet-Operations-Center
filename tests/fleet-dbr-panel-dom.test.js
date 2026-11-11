@@ -274,7 +274,8 @@ describe('AI drafting', () => {
   });
   it('rows already drafted (ok) or with both AI cells edited are skipped; Redraft forces one row', async () => {
     const [okKey, bothKey] = DOWN_KEYS;
-    const m = modelWith({ [okKey]: { fasActions: 'a', support: 'b', unitsHash: hashOf(okKey) } }, { edits: { [bothKey]: { fasActions: 'x', support: 'y' } } });
+    const allEdited = Object.fromEntries(F.AI_CELL_IDS.filter((id) => F.EDITABLE_IDS.includes(id)).map((id) => [id, 'x']));
+    const m = modelWith({ [okKey]: { fasActions: 'a', support: 'b', unitsHash: hashOf(okKey) } }, { edits: { [bothKey]: allEdited } });
     const t = setup({ getModel: m });
     await t.ctl.open(); await flush();
     const drafted = api.draft.mock.calls.map((c) => c[0].key);
@@ -338,6 +339,106 @@ describe('AI drafting', () => {
     t.busHandlers['fleet:data']({ rows: [], syncedAt: '2026-11-10T16:00:00Z' });
     expect(part(t, 'fdbr-banner').innerHTML).toContain('Fleet data updated');
     expect(api.build).toHaveBeenCalledTimes(1);
+  });
+});
+
+// v2 stored draft for one row (FEAT-004).
+const rowOfBuilt = (k) => BUILT.rows.find((r) => r.key === k);
+function v2(k, over = {}) {
+  const r = rowOfBuilt(k);
+  return Object.assign({
+    version: 2, unitsHash: r.unitsHash, evidenceHash: r.evidenceHash, draftedAt: 'X',
+    cells: { oemYN: 'Y', oemDetails: '\u2022 AI oem', fasActions: '\u2022 AI fas', support: 'None' },
+    sources: { oemYN: 'ai', oemDetails: 'ai', fasActions: 'ai', support: 'ai' },
+    flags: { oemYN: 'review', fasActions: 'review' }, identity: { alias: true, names: 0, fasTagged: 0 },
+  }, over);
+}
+
+describe('AI v2 cells (FEAT-004)', () => {
+  it('24 columns with AI on; AI / ⚠ check markers render on the drafted row', async () => {
+    const k = DOWN_KEYS[0];
+    const okAll = Object.fromEntries(DOWN_KEYS.map((x) => [x, v2(x)]));
+    const t = setup({ getModel: modelWith(okAll) });
+    await t.ctl.open(); await flush();
+    expect(api.draft).not.toHaveBeenCalled(); // every row has an ok draft
+    const table = part(t, 'fdbr-table').innerHTML;
+    expect((table.match(/<th scope="col">/g) || []).length).toBe(25);
+    expect(table).toContain('<td data-key="' + L.esc(k) + '" data-col="oemYN">Y<span class="fdbr-mark">AI</span><span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span></td>');
+  });
+
+  it('AC26 / AC37: Copy notes the flagged cells; the pasted text is unchanged', async () => {
+    const k = DOWN_KEYS[0];
+    const m = modelWith({ [k]: v2(k, { cells: { partsYN: 'N', fasActions: '\u2022 AI fas' }, sources: { partsYN: 'ai', fasActions: 'ai' }, flags: { partsYN: 'review', fasActions: 'review' } }) });
+    const t = setup({ aiDraft: false, getModel: m });
+    await t.ctl.open(); await flush();
+    await overlayOf(t).emit('click', act('copy-row', { key: k })); await flush();
+    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.rowsToTsv(m.columns, [m.rows.find((r) => r.key === k)], null));
+    expect(part(t, 'fdbr-status').textContent).toContain('2 cells flagged \u26a0 \u2014 review before pasting');
+    // An unsaved edit of a flagged cell is not counted.
+    await overlayOf(t).emit('input', typing(k, 'fasActions', 'mine'));
+    await overlayOf(t).emit('click', act('copy-row', { key: k })); await flush();
+    expect(part(t, 'fdbr-status').textContent).toContain('1 cell flagged \u26a0');
+    // No flagged cell -> no note.
+    await overlayOf(t).emit('click', act('copy-row', { key: DOWN_KEYS[1] })); await flush();
+    expect(part(t, 'fdbr-status').textContent).not.toContain('flagged');
+  });
+
+  it('AC30: ok with cells and no model (no sources) patches every AI cell and the next queued row starts', async () => {
+    const t = setup({ manualDraft: true, getModel: modelWith() });
+    await t.ctl.open(); await flush();
+    expect(pendingDrafts.length).toBe(2);
+    const first = pendingDrafts.shift();
+    const cells = Object.fromEntries(F.AI_CELL_IDS.map((id) => [id, id.endsWith('YN') ? 'Y' : 'AI ' + id]));
+    first.resolve({ ok: true, key: first.key, cells, flags: { oemYN: 'review' }, draftedAt: 'T' });
+    await flush();
+    expect(api.draft).toHaveBeenCalledTimes(3); // the next queued row started (no stall)
+    const row = t.ctl.state.model.rows.find((r) => r.key === first.key);
+    for (const id of F.AI_CELL_IDS) { expect(row.cells[id]).toBe(cells[id]); expect(row.source[id]).toBe('ai'); }
+    expect(row.flags).toEqual({ oemYN: 'review' });
+    expect(row.draft.state).toBe('ok');
+    expect(row.etcUnits).toEqual([]);
+    const table = part(t, 'fdbr-table').innerHTML;
+    expect(table).toContain('data-col="oemDetails" aria-label="OEM Barrier \u2014 Details \u2014 ' + first.key.replace('|', '/') + '">AI oemDetails</textarea>');
+    expect(table).toContain('data-col="partsYN">Y<span class="fdbr-mark">AI</span></td>');
+    // v1-shaped response (no cells) still patches fasActions/support only.
+    const second = pendingDrafts.shift();
+    second.resolve({ ok: true, key: second.key, fasActions: '\u2022 v1', support: 'None' });
+    await flush();
+    const r2 = t.ctl.state.model.rows.find((r) => r.key === second.key);
+    expect(r2.cells.fasActions).toBe('\u2022 v1');
+    expect(r2.source.oemYN).toBe('computed');
+    expect(api.draft).toHaveBeenCalledTimes(4);
+  });
+
+  it('R-N3: an identity-stale result with res.model present is re-queued once per panel', async () => {
+    const t = setup({ manualDraft: true, getModel: modelWith() });
+    await t.ctl.open(); await flush();
+    const k = pendingDrafts[0].key;
+    const staleModel = () => modelWith({ [k]: v2(k, { identity: { alias: false, names: 0, fasTagged: 0 } }) }, { fasAliasKnown: true });
+    expect(staleModel().rows.find((r) => r.key === k).draft.staleReason).toBe('identity');
+    pendingDrafts.shift().resolve({ ok: true, key: k, cells: {}, model: staleModel() });
+    await flush();
+    const count = () => api.draft.mock.calls.filter((c) => c[0].key === k).length;
+    // drain: answer every pending draft with the identity-stale model again
+    for (let i = 0; i < 40 && pendingDrafts.length; i++) {
+      const d = pendingDrafts.shift();
+      d.resolve({ ok: true, key: d.key, cells: {}, model: staleModel() });
+      await flush();
+    }
+    expect(count()).toBe(2);
+    expect(t.ctl.state.identityRequeued.has(k)).toBe(true);
+    expect(t.ctl.state.drafting).toBe(false);
+  });
+
+  it('Draft all also queues evidence-stale rows; panel open does not', async () => {
+    const k = DOWN_KEYS[0];
+    const okAll = Object.fromEntries(DOWN_KEYS.map((x) => [x, v2(x)]));
+    okAll[k] = v2(k, { evidenceHash: 'old' });
+    const t = setup({ getModel: modelWith(okAll) });
+    await t.ctl.open(); await flush();
+    expect(api.draft).not.toHaveBeenCalled();
+    await overlayOf(t).emit('click', act('draft-all')); await flush();
+    expect(api.draft.mock.calls.map((c) => c[0].key)).toEqual([k]);
   });
 });
 

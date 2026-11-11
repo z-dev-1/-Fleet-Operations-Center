@@ -597,7 +597,12 @@ function buildFleetDbr(rows, opts = {}) {
 }
 
 // ── Overlays -> view model ──────────────────────────────────────────────────
-// Precedence per cell: user edit > AI draft (fasActions/support only) > computed.
+// Precedence per cell: user edit (editable only) > AI draft > computed.
+// The draft overlays ONLY the AI_CELL_IDS whitelist (v2: all 17; v1: fasActions/support), so
+// HARD_CELL_IDS can never come from a stored draft. Drafts are overlaid only when
+// overlays.flags.aiDraft is on: flag off -> computed cells, draft state 'none' (drafts stay on disk).
+// Stale: unitsHash differs ('units', checked first), the draft predates a now-known FAS alias
+// ('identity'), or evidenceHash differs ('evidence'). A stale draft still overlays.
 // FAS Name default per row: rosterFas[key] -> resolved user name -> ''.
 // The caller passes edits already filtered to today.
 function applyOverlays(built, overlays = {}) {
@@ -609,6 +614,9 @@ function applyOverlays(built, overlays = {}) {
   const email = _str(overlays.emailFasName).trim();
   const fasName = override || email || '';
   const fasNameSource = override ? 'panel' : (email ? 'email-intel' : 'none');
+  const aiOn = !!(overlays.flags && overlays.flags.aiDraft);
+  const fasAliasKnown = overlays.fasAliasKnown === true;
+  const arr = (v) => (Array.isArray(v) ? v : []);
 
   const rows = (b.rows || []).map((row) => {
     const rosterName = _str(roster[row.key]).trim();
@@ -617,8 +625,25 @@ function applyOverlays(built, overlays = {}) {
     const source = {};
     for (const c of COLUMNS) source[c.id] = 'computed';
     const d = _plain(drafts[row.key]);
-    const hasDraft = Object.keys(d).length > 0;
-    if (hasDraft) {
+    const useDraft = aiOn && Object.keys(d).length > 0;
+    const extra = {
+      flags: {}, disagreements: [], etcUnits: [], etcDisagreements: [], etcOverrides: [],
+      provenance: {}, unverifiedNames: [], unboundDates: [], reviewSkipped: null,
+    };
+    if (useDraft && d.version === 2) {
+      const dc = _plain(d.cells);
+      const ds = _plain(d.sources);
+      const df = _plain(d.flags);
+      for (const id of AI_CELL_IDS) {
+        if (typeof dc[id] === 'string') { base[id] = dc[id]; source[id] = ds[id] === 'computed' ? 'computed' : 'ai'; }
+        if (df[id] === 'review') extra.flags[id] = 'review';
+      }
+      Object.assign(extra, {
+        disagreements: arr(d.disagreements), etcUnits: arr(d.etcUnits), etcDisagreements: arr(d.etcDisagreements),
+        etcOverrides: arr(d.etcOverrides), provenance: _plain(d.provenance), unverifiedNames: arr(d.unverifiedNames),
+        unboundDates: arr(d.unboundDates), reviewSkipped: typeof d.reviewSkipped === 'string' ? d.reviewSkipped : null,
+      });
+    } else if (useDraft) {
       for (const id of ['fasActions', 'support']) {
         if (typeof d[id] === 'string' && d[id]) { base[id] = d[id]; source[id] = 'ai'; }
       }
@@ -628,10 +653,17 @@ function applyOverlays(built, overlays = {}) {
     for (const id of EDITABLE_IDS) {
       if (typeof e[id] === 'string') { cells[id] = e[id]; source[id] = 'edit'; }
     }
-    const draft = hasDraft
-      ? { state: d.unitsHash === row.unitsHash ? 'ok' : 'stale', draftedAt: d.draftedAt || null }
-      : { state: 'none', draftedAt: null };
-    return Object.assign({}, row, { cells, base, source, draft, fasSource, rosterFas: rosterName });
+    let draft = { state: 'none', draftedAt: null };
+    if (useDraft) {
+      const units = d.unitsHash !== row.unitsHash;
+      const identity = !!(d.identity && typeof d.identity === 'object' && d.identity.alias === false && fasAliasKnown);
+      const evidence = !!(d.evidenceHash && d.evidenceHash !== row.evidenceHash);
+      const staleReason = units ? 'units' : (identity ? 'identity' : (evidence ? 'evidence' : null));
+      draft = staleReason
+        ? { state: 'stale', draftedAt: d.draftedAt || null, staleReason }
+        : { state: 'ok', draftedAt: d.draftedAt || null };
+    }
+    return Object.assign({}, row, extra, { cells, base, source, draft, fasSource, rosterFas: rosterName });
   });
 
   return {
@@ -643,7 +675,9 @@ function applyOverlays(built, overlays = {}) {
     fleetSyncedAt: b.fleetSyncedAt || null,
     columns: COLUMNS,
     fasName, fasNameSource,
-    flags: { aiDraft: !!(overlays.flags && overlays.flags.aiDraft) },
+    flags: { aiDraft: aiOn },
+    aiCellIds: AI_CELL_IDS,
+    fasAliasKnown,
     rows,
   };
 }

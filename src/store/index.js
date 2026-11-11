@@ -126,7 +126,11 @@ const REGISTRY = {
   quicksightDbrDsp:     () => path.join(P.dataDir, 'quicksight_dbr_dsp.json'),
   // Fleet DBR (Daily Call, 2026-11-10) — 24-column DBR built from fleetData. See src/dbr/fleet-dbr.js + src/ipc/fleet-dbr.js.
   // Shape: { version:1, day:'YYYY-MM-DD', builtAt, fleetSyncedAt, rows:[builder row], conflicts:[..],
-  //          drafts:{ [key]: { fasActions, support, draftedAt, unitsHash, dropped } } }.  Day-scoped.
+  //          drafts:{ [key]: v2 { version:2, cells:{<17 AI cell ids>:string}, sources, flags, disagreements,
+  //            etcUnits, etcDisagreements, etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
+  //            dropped, dropReasons, mode, calls, mapRetries, rounds, reviewSkipped, identity:{alias,names,fasTagged},
+  //            draftedAt, unitsHash, evidenceHash }
+  //            | v1 (read only) { fasActions, support, draftedAt, unitsHash, dropped } } }.  Day-scoped.
   fleetDbrSnapshot:     () => path.join(P.dataDir, 'fleet_dbr_snapshot.json'),
   // Shape: { version:1, fasName:'' (persists across days), day:'YYYY-MM-DD', rows:{ [key]: { [colId]: string } } }.
   fleetDbrEdits:        () => path.join(P.dataDir, 'fleet_dbr_edits.json'),

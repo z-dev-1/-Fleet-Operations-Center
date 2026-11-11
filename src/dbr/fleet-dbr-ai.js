@@ -765,6 +765,7 @@ async function _draftRow(opts) {
     etcUnits: view.etcUnits, etcDisagreements: view.etcDisagreements, etcOverrides: view.etcOverrides,
     provenance: view.provenance, unverifiedNames: view.unverifiedNames, unboundDates: view.unboundDates,
     coverageFilled: view.coverageFilled, dropReasons: view.dropReasons,
+    disagreements: view.disagreements, etcReconciled: view.etcReconciled,
     calls: st.calls, planned, rounds: roundsDone, mapRetries: st.mapRetries, mode: ctx.mode, demand: ctx.demand, log: st.log,
     // Back-compat for the unchanged (pre-FEAT-004) IPC: the v1 draft fields.
     fasActions: view.cells.fasActions, support: view.cells.support, dropped: view.removals.length,

@@ -540,6 +540,51 @@ describe('isolated requests + ai.aki.allowUntrusted', () => {
     T.setClaudeBinExists(() => true);
     expect(relay.isolatedLaneAvailable()).toBe(true);
   });
+  describe('preferAki (Fleet DBR, AC13)', () => {
+    const pref = (prompt) => ask(prompt, { isolated: true, preferAki: true, source: 'fleet_dbr' });
+    it('balanced + enabled + allowUntrusted -> Aki first, Aki rejects -> claude-iso; never fleet-brain', async () => {
+      T.setAkiFlags({ enabled: true, allowUntrusted: true });
+      relay.setPreference('balanced');
+      let r = pref('dbr');
+      await flush();
+      expect(started()).toEqual({ aki: 1, claude: 0, fb: 0 });
+      expect(aki.procs[0].stdinData).toBe('dbr');
+      aki.procs[0].reply('akiiso');
+      expect(await r.p).toBe('akiiso');
+      expect(r.rec.via).toBe('aki/isolated');
+      r = pref('dbr2');
+      await flush();
+      aki.procs[1].fail(1);
+      await flush();
+      expect(cc).toHaveLength(1);
+      expect(cc[0].args).toEqual(T.isolatedArgs(''));
+      cc[0].result('cciso');
+      expect(await r.p).toBe('cciso');
+      expect(r.rec.via).toBe('claude-code/isolated');
+      expect(fbCalls).toHaveLength(0);
+    });
+    it('balanced + allowUntrusted:false -> claude-iso only', async () => {
+      T.setAkiFlags({ enabled: true, allowUntrusted: false });
+      relay.setPreference('balanced');
+      const r = pref('dbr');
+      await flush();
+      expect(started()).toEqual({ aki: 0, claude: 1, fb: 0 });
+      expect(cc[0].args).toEqual(T.isolatedArgs(''));
+      cc[0].result('cciso');
+      expect(await r.p).toBe('cciso');
+      expect(r.rec.via).toBe('claude-code/isolated');
+    });
+    it('no preferAki -> unchanged (balanced isolated = claude-iso only, even with consent)', async () => {
+      T.setAkiFlags({ enabled: true, allowUntrusted: true });
+      relay.setPreference('balanced');
+      const r = iso('dbr');
+      await flush();
+      expect(started()).toEqual({ aki: 0, claude: 1, fb: 0 });
+      cc[0].result('cciso');
+      expect(await r.p).toBe('cciso');
+      expect(r.rec.via).toBe('claude-code/isolated');
+    });
+  });
   it('isolated Aki errors and logs never contain the prompt / stderr sentinel', async () => {
     T.setAkiFlags({ enabled: true, allowUntrusted: true });
     T.setClaudeBinExists(() => false);
