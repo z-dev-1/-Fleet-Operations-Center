@@ -302,7 +302,13 @@ describe('E3\' prose tokens (AC4, AC24, AC39, AC44, AC45, scope)', () => {
 });
 
 describe('non-M/D date forms go through every date rule (review finding 1)', () => {
-  const forms = ['Nov 21', 'November 21', 'Nov. 21st', '21 Nov', '21st of November', '11-21', '11.21'];
+  const forms = ['Nov 21', 'November 21', 'Nov. 21st', '21 Nov', '21st of November', '11-21', '11.21', 'Nov-21', '21-Nov', '11 / 21'];
+  it('a bare ordinal after ETA / ETC / due is a date; dash ranges with a unit or after a bay are not', () => {
+    expect(G.mdDates('parts ETA 21st', TODAY)).toMatchObject([{ md: '11/21', alts: ['10/21'] }]);
+    expect(res('Turbo back-ordered, parts ETA 21st', undefined, ['B61003'])).toBe('unknown-date');
+    for (const t of ['lead time 5-7 business days', 'needs 3-4 more days', 'bay 3-4 open', '2-3 working days'])
+      expect(G.mdDates(t, TODAY), t).toEqual([]);
+  });
   it('mdDates reads every form as M/D; ranges, measures and ordinals of things are not dates', () => {
     for (const f of forms) expect(G.mdDates('parts ETA ' + f + ' per dealer', TODAY).map((d) => d.md), f).toEqual(['11/21']);
     expect(G.mdDates('due by the 21st', TODAY)).toMatchObject([{ md: '11/21', alts: ['10/21'] }]);
@@ -330,6 +336,23 @@ describe('non-M/D date forms go through every date rule (review finding 1)', () 
     for (const t of ['Dealer ETC 11/19', 'Dealer ETC Nov 19', 'Dealer ETC 19 November']) {
       expect(G.gateEntry(t, undefined, ['B70002'], c, { field: 'details' }).ok, t).toBe(true);
     }
+  });
+  it('negated ETC mentions never widen etcDates: the unit stays in NO ETC (pass-2 MEDIUM)', () => {
+    const c = makeCtx({ units: {
+      B70003: { vendor: 'dealer', repairTimeline: '11/10 - dealer: ETC unknown, parts ETA 11/14' },
+      B70004: { vendor: 'dealer', repairTimeline: '11/10 - no ETC yet; tech visit 11/13' },
+      B70005: { vendor: 'dealer', repairTimeline: '11/10 - dealer: ETC Nov 19 per email' },
+    }, today: TODAY }).ctx;
+    expect([...c.etcDates.B70003]).toEqual([]);
+    expect([...c.etcDates.B70004]).toEqual([]);
+    const rec = G.reconcileEtc([
+      { unit: 'B70003', state: 'future', date: '11/14' },
+      { unit: 'B70004', state: 'future', date: '11/13' },
+      { unit: 'B70005', state: 'future', date: '11/19' },
+    ], c);
+    expect(rec.entries.B70003).toMatchObject({ state: 'none', date: null, origin: 'code' });
+    expect(rec.entries.B70004).toMatchObject({ state: 'none', date: null, origin: 'code' });
+    expect(rec.entries.B70005).toMatchObject({ state: 'future', date: '2026-11-19', origin: 'ai' });
   });
   it('FAS Actions and ETC why: invented non-numeric dates are dropped, next: proposals still keep future ones', () => {
     const ok = env({ fas: [F('11/10', 'called TA re tech callout')] });
@@ -362,6 +385,16 @@ describe('E4 checks the claimed action, next: only as the last clause (review fi
     expect(res('11/10 called TA re tech callout; also escalated to TA regional 11/10', ok, ['B61001'], 'fasActions')).toBe('unfounded-fas-action');
     expect(res('11/10 escalated to TA regional', ok, ['B61001'], 'fasActions')).toBe('unfounded-fas-action');
     expect(res('11/10 called TA re tech callout; TA update 11/10: bay booked', ok, ['B61001'], 'fasActions')).toBe('kept');
+  });
+  it('a second action joined by a comma, "and" or a dash needs its own quote too', () => {
+    for (const t of [
+      '11/10 called TA re tech callout, also escalated to TA regional',
+      '11/10 called TA re tech callout and escalated to TA regional',
+      '11/10 called TA re tech callout - escalated to TA regional',
+    ]) expect(res(t, ok, ['B61001'], 'fasActions'), t).toBe('unfounded-fas-action');
+    expect(res('11/10 called TA, bay confirmed for 11/12', ok, ['B61001'], 'fasActions')).toBe('kept');
+    const both = { fas: [{ md: '11/10', norm: 'called ta re tech callout' }, { md: '11/10', norm: 'escalated to ta regional' }] };
+    expect(G.fasClaimProblem('11/10 called TA re tech callout, also escalated to TA regional', both, 'fasActions', TODAY)).toBe(null);
   });
   it('a next: clause mid-entry is ordinary text', () => {
     expect(res('11/10 called TA re tech callout; next: call TA Thursday', ok, ['B61001'], 'fasActions')).toBe('kept');

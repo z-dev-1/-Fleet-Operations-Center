@@ -12,7 +12,7 @@
 'use strict';
 
 const { extractJsonObject } = require('../utils/ai-json');
-const { inferDate, etcMentionDates, parseTimelineLines, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE } = require('./fleet-dbr');
+const { inferDate, etcMentionDates, etcKeywordNegated, parseTimelineLines, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE } = require('./fleet-dbr');
 const { FAS_ACT_SRC, normQuote, redactEvidence } = require('./fleet-dbr-evidence');
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -71,7 +71,8 @@ const AMOUNT_RE = /(?:\$|\bUSD\b)\s?(\d[\d,]*(?:\.\d+)?)|\b(\d[\d,]*(?:\.\d+)?)\
 const GATE_ETC_ABBR_RE = /\b(?:ETC|ETR)\b/g;
 const GATE_ETC_PHRASE_RE = /\b(?:est(?:\.|imated)?\s+(?:time\s+of\s+)?completion|expected\s+completion|completion\s+(?:date|eta)|repair\s+eta|eta\s+(?:for|on)\s+(?:completion|repair))\b/gi;
 const ETC_DATE_WINDOW = 25;
-const PROSE_MD_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
+// "11/21" and "11 / 21" (one optional space either side of the slash).
+const PROSE_MD_RE = /(?<![\d/])(\d{1,2}) ?\/ ?(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
 const PROSE_ISO_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
 // Non-numeric date forms (review finding 1): month names either side of the day, dash and dot
 // M-D / M.D, and a bare ordinal day after a date preposition ("by the 21st" -> today's month,
@@ -79,15 +80,20 @@ const PROSE_ISO_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
 const MONTH_SRC = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
 const MONTH_NUM = Object.freeze({ jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 });
 const ORD_SRC = '(?:st|nd|rd|th)';
-const PROSE_MONTH_DAY_RE = new RegExp('\\b(' + MONTH_SRC + ')\\.?\\s{0,2}(\\d{1,2})' + ORD_SRC + '?\\b(?:,?\\s+(\\d{4})\\b)?', 'gi');
-const PROSE_DAY_MONTH_RE = new RegExp('\\b(\\d{1,2})' + ORD_SRC + '?\\s+(?:of\\s+)?(' + MONTH_SRC + ')\\b\\.?(?:,?\\s+(\\d{4})\\b)?', 'gi');
+// "Nov 21" / "Nov-21" and "21 Nov" / "21-Nov" (Excel's d-mmm display).
+const PROSE_MONTH_DAY_RE = new RegExp('\\b(' + MONTH_SRC + ')\\.?(?:\\s{0,2}|-)(\\d{1,2})' + ORD_SRC + '?\\b(?:,?\\s+(\\d{4})\\b)?', 'gi');
+const PROSE_DAY_MONTH_RE = new RegExp('\\b(\\d{1,2})' + ORD_SRC + '?(?:\\s+(?:of\\s+)?|-)(' + MONTH_SRC + ')\\b\\.?(?:,?\\s+(\\d{4})\\b)?', 'gi');
 const PROSE_DASH_RE = /(?<![\w/.$#-])(\d{1,2})-(\d{1,2})(?:-(\d{2,4}))?(?![\w/-]|\.\d)/g;
 const PROSE_DOT_RE = /(?<![\w/.$#,-])(\d{1,2})\.(\d{2})(?![\w/.%-])/g;
-const PROSE_ORD_RE = new RegExp('\\b(?:on|by|until|till|before|after|since|from|the)\\s+(?:the\\s+)?(\\d{1,2})' + ORD_SRC + '\\b'
+// A bare ordinal after a date preposition or an ETA / ETC / ETR / due keyword ("ETA 21st").
+const PROSE_ORD_RE = new RegExp('\\b(?:on|by|until|till|before|after|since|from|the|eta|etc|etr|due)\\s+(?:the\\s+)?(\\d{1,2})' + ORD_SRC + '\\b'
   + '(?!\\s+(?:of\\b|' + MONTH_SRC + '|party|shift|time|attempt|opinion|call|visit|try|tier|gen|generation|axle|floor|level|quarter|week|day|unit|truck|tow|reminder|follow|request|email|escalation|notice|round|stop|load|trip|bay|tech|vendor|place|option|line|step|one|set|part|pass|leg|row|wheel|position|cylinder|gear)\\b)', 'gi');
 const FRACTION_UNIT_RE = /^\s{0,3}(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt)\b/i;
 // Ranges / measures written M-D or M.D ("2-3 days", "1.25 hours") are not dates.
-const RANGE_UNIT_RE = /^\s{0,3}(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt|days?|d|hours?|hrs?|h|weeks?|wks?|months?|mins?|minutes?|miles?|mi|km|k|trucks?|techs?|bays?|times?|x|percent|am|pm)\b|^\s{0,3}%/i;
+// "5-7 business days" / "3-4 more days" / "2-3 working days" too.
+const RANGE_UNIT_RE = /^\s{0,3}(?:(?:business|working|calendar|more|additional|extra)\s+)?(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt|days?|d|hours?|hrs?|h|weeks?|wks?|months?|mins?|minutes?|miles?|mi|km|k|trucks?|techs?|bays?|times?|x|percent|am|pm)\b|^\s{0,3}%/i;
+// A dash/dot number pair right after a location noun is a range, not a date ("bay 3-4 open").
+const RANGE_NOUN_BEFORE_RE = /\b(?:bays?|lanes?|doors?|stalls?|docks?|spots?|slots?|units?|trucks?|techs?|rows?|levels?)\s*$/i;
 const ENV_DATE_RE = /^\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*$/;
 const EMAIL_MARKER_ALL_RE = /\s*\[em:[0-9a-f]{8}\]/gi;
 const NAME_TOKEN_RE = /(?<![\w-])[A-Z][A-Za-z]{3,}\b/g;
@@ -188,6 +194,7 @@ function mdDates(text, today, opts = {}) {
   PROSE_DASH_RE.lastIndex = 0;
   while ((m = PROSE_DASH_RE.exec(t))) {
     if (unitAfter(RANGE_UNIT_RE, m)) continue;
+    if (!loose && RANGE_NOUN_BEFORE_RE.test(t.slice(Math.max(0, m.index - 12), m.index))) continue;
     push(m[1], m[2], m[3], m.index, m[0].length);
   }
   PROSE_DOT_RE.lastIndex = 0;
@@ -228,6 +235,7 @@ function _datesAfterAt(text, re, window, today, opts = {}) {
     if (m[0].length === 0) rx.lastIndex += 1;
     if (opts.by && opts.notPrecededWithin && opts.by.test(t.slice(Math.max(0, m.index - opts.notPrecededWithin), m.index))) continue;
     const end = m.index + m[0].length;
+    if (opts.skipKeyword && opts.skipKeyword(t, m.index, end)) continue;
     const d = mdDates(t.slice(end, end + window + 30), today, { loose: !!opts.loose })[0];
     if (!d || d.index > window || /[\n\d]/.test(t.slice(end, end + d.index))) continue;
     out.push({ md: d.md, ymd: d.ymd, at: end + d.index, alts: d.alts });
@@ -242,7 +250,10 @@ function datesAfter(text, re, window, opts = {}) {
   return out;
 }
 // Dates written after an ETC keyword (ETC / ETR / "estimated completion" …), any date form.
+// opts.positive: skip keywords the builder treats as negated ("ETC unknown, parts ETA 11/14",
+// "no ETC yet; tech visit 11/13"), so the evidence ETC whitelist is never wider than etcMentionDates.
 function _etcPhraseDates(text, today, opts = {}) {
+  if (opts.positive) opts = Object.assign({}, opts, { skipKeyword: etcKeywordNegated });
   return [GATE_ETC_ABBR_RE, GATE_ETC_PHRASE_RE]
     .flatMap((re) => _datesAfterAt(text, re, ETC_DATE_WINDOW, today, opts));
 }
@@ -327,7 +338,7 @@ function gateContext({ row, evidences, fleetIds, today, unitRows } = {}) {
     ctx.dates[id] = _evidenceDates(text, today);
     ctx.etcDates[id] = new Set([
       ...etcMentionDates(text, today),
-      ..._etcPhraseDates(text, today, { loose: true }).map((d) => d.md),
+      ..._etcPhraseDates(text, today, { loose: true, positive: true }).map((d) => d.md),
       ...datesAfter(text, EXPECT_READY_RE, 25, { today, notPrecededWithin: 30, by: NOT_ETC_CONTEXT_RE }),
     ]);
     ctx.amounts[id] = _amounts(text);
@@ -602,10 +613,27 @@ function isFasClaim(c, field) {
 // The claimed FAS action verb of a claim clause ("called", "escalated", "followed" …, hyphens
 // removed): the lead verb, else the verb right after a FAS / I / we subject. '' when the clause is
 // a claim by subject alone ("FAS update 11/10: …").
+const _verbKey = (v) => v.split(/\s+/)[0].toLowerCase().replace(/-/g, '');
 function _claimVerb(body) {
   const m = FAS_LEADVERB_RE.exec(body) || FAS_SUBJ_ACT_RE.exec(body);
   const v = m ? FAS_VERB_RE.exec(m[0]) : null;
-  return v ? v[1].split(/\s+/)[0].toLowerCase().replace(/-/g, '') : '';
+  return v ? _verbKey(v[1]) : '';
+}
+// A further action joined to the clause: ", also escalated", "and escalated", "and then emailed",
+// " - escalated". A non-FAS verb after a comma ("bay confirmed for 11/12") is not one.
+const JOINED_ACT_RE = new RegExp('(?:(?:,\\s*|\\s+)(?:also|and(?:\\s+then)?|then|plus|later|again)\\s+|\\s[-\\u2013]\\s*)(' + FAS_ACT_SRC + ')\\b', 'gi');
+// Every claimed FAS action verb of a claim clause: the lead / subject verb plus each joined action.
+function _claimVerbs(body) {
+  const out = [];
+  const lead = _claimVerb(body);
+  if (lead) out.push(lead);
+  JOINED_ACT_RE.lastIndex = 0;
+  let m;
+  while ((m = JOINED_ACT_RE.exec(body))) {
+    const v = _verbKey(m[1]);
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
 }
 
 // E4: every FAS-claim clause, in every field, carries a validated src.fas item on one of the
@@ -627,8 +655,11 @@ function fasClaimProblem(text, env, field, today) {
     const claim = isNext ? (FAS_SUBJ_ACT_RE.test(body) || FAS_LEADVERB_RE.test(body)) : isFasClaim(body, field);
     if (!claim) continue;
     const mds = new Set(mdDates(body, today).map((d) => d.md));
-    const verb = _claimVerb(body);
-    const backed = env.fas.some((f) => mds.has(f.md) && (!verb || _bounded(verb, _s(f.norm).replace(/-/g, ''), 'i')));
+    // Each claimed verb (lead and joined) needs its own src.fas quote on a clause date.
+    const onDate = env.fas.filter((f) => mds.has(f.md));
+    const verbs = _claimVerbs(body);
+    const backed = onDate.length > 0
+      && verbs.every((v) => onDate.some((f) => _bounded(v, _s(f.norm).replace(/-/g, ''), 'i')));
     if (!backed) return 'unfounded-fas-action';
   }
   return null;

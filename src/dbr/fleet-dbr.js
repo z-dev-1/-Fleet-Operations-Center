@@ -243,6 +243,13 @@ function _etcMentions(text, today) {
   return neg.concat(pos).sort((a, b) => a.start - b.start);
 }
 
+// True when the ETC keyword at [start, end) is negated by the same rule _etcMentions uses
+// ("no ETC", "ETC unknown", "ETR not provided" …). The gate applies it to its own ETC-keyword reads.
+function etcKeywordNegated(text, start, end) {
+  const t = _str(text);
+  return NEG_BEFORE_RE.test(t.slice(Math.max(0, start - 40), start)) || NEG_AFTER_RE.test(t.slice(end));
+}
+
 // Every positive (non-negated, valid) ETC date in a text, as unpadded 'M/D', de-duplicated in
 // text order. Used by the AI gate's per-unit etcDates (not only the parseEtc winner).
 function etcMentionDates(text, today) {
@@ -686,6 +693,6 @@ function _plain(v) { return v && typeof v === 'object' && !Array.isArray(v) ? v 
 module.exports = {
   COLUMNS, EDITABLE_IDS, AI_CELL_IDS, HARD_CELL_IDS, BARRIER_RULES, COMMON_REPAIR_MIN, RECENT_TIMELINE_LINES,
   OEM_VENDOR_RE, ONSITE_VENDOR_RE, EMAIL_RE, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
-  isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates,
+  isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates, etcKeywordNegated,
   classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,
 };
