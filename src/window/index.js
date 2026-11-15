@@ -276,8 +276,9 @@ function initWindows(ctx) {
   let _lastDeepScanAt   = 0;         // hoisted: throttles the AI timeline build to once / 20 min
   let _autoSyncStarted  = false;     // hoisted: ensures the auto-sync timer starts exactly once
   let _reauthInFlight   = false;     // hoisted: guards the AEA/mwinit recovery ladder (one at a time)
-  let _apiLoadInFlight  = false;     // hoisted: single-flight guard for _loadFleetViaApiStartup (no concurrent builds)
-  let _apiLoadPendingReason = null;  // hoisted: a load requested while one was in flight → one trailing refresh
+  // hoisted: single-flight guard for _loadFleetViaApiStartup (no concurrent
+  // builds; one coalesced trailing refresh; a build stuck >10 min is superseded)
+  const _apiLoadGuard = require('./api-load-guard').createApiLoadGuard();
   let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
@@ -1043,7 +1044,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
     // coalesce path (a build already in flight) bypasses tracking so a no-op
     // skip doesn't pollute the durations. Pure pass-through either way.
     function _loadFleetViaApiStartup(reason) {
-      if (_apiLoadInFlight) return _loadFleetViaApiStartupImpl(reason);
+      if (_apiLoadGuard.isBusy()) return _loadFleetViaApiStartupImpl(reason);
       return telemetry.track('fleet.apiLoad', () => _loadFleetViaApiStartupImpl(reason));
     }
     async function _loadFleetViaApiStartupImpl(reason) {
@@ -1056,12 +1057,20 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       // repaints. If a build is already in flight, remember that another was
       // requested and run exactly ONE follow-up when the current one finishes
       // (coalescing the whole burst into a single trailing refresh).
-      if (_apiLoadInFlight) {
-        _apiLoadPendingReason = reason || 'coalesced';
+      // WATCHDOG: a build in flight for longer than the guard's max age (10 min)
+      // is treated as stuck. The new request supersedes it: dispose the AAP
+      // window and run. The stuck build's token is no longer current, so its
+      // late result is dropped and its finally cannot release this build.
+      const _start = _apiLoadGuard.tryStart(reason || 'coalesced');
+      if (!_start.started) {
         logger.info('[data-source] API load (' + (reason || 'startup') + ') skipped — a build is already in flight (coalescing)');
         return;
       }
-      _apiLoadInFlight = true;
+      const _loadToken = _start.token;
+      if (_start.superseded) {
+        logger.warn('[data-source] API load (' + (reason || 'startup') + ') superseding a build stuck for ' + Math.round(_start.ageMs / 1000) + 's');
+        try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+      }
       try {
         // Stage 11: cluster live-pull gate. This is the single chokepoint every
         // recurring live AAP read converges on (the 5-min API timer, the rescan
@@ -1089,6 +1098,10 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         const { mergeUptakeIntoRows } = require('../scrapers/uptake');
         const { mergeRelayIntoRows } = require('../scrapers/relay');
         const ds  = await api.buildFleetDataset({ withComments: false });
+        if (!_apiLoadGuard.isCurrent(_loadToken)) {
+          logger.warn('[data-source] API load (' + (reason || 'startup') + ') finished after being superseded — result dropped');
+          return;
+        }
         let rows  = ds.rows || [];
 
         // Enrich from the CACHED Uptake units immediately (never block the table
@@ -1198,6 +1211,10 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             .catch((e) => logger.warn('[stage-refresh] error (non-fatal): ' + e.message));
         } catch (e) { logger.warn('[stage-refresh] hook error (non-fatal): ' + e.message); }
       } catch (e) {
+        if (!_apiLoadGuard.isCurrent(_loadToken)) {
+          logger.warn('[data-source] superseded API load (' + (reason || 'startup') + ') failed late: ' + (e && e.message));
+          return;
+        }
         // A server-REJECTED AAP session (bounced to the SSO login wall) is the
         // one failure the timestamp-based checkMwinit() can't see — the cookie
         // file reads "valid" by expiry while AAP rejects it (almost always a
@@ -1268,10 +1285,10 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         // Release the single-flight guard. If other callers asked for a load
         // while this one was running, run exactly ONE trailing refresh now so
         // the latest data lands — without stacking the whole burst.
-        _apiLoadInFlight = false;
-        if (_apiLoadPendingReason) {
-          const nextReason = _apiLoadPendingReason;
-          _apiLoadPendingReason = null;
+        // A superseded build's release is a no-op (stale token).
+        const _rel = _apiLoadGuard.release(_loadToken);
+        if (_rel.released && _rel.pending) {
+          const nextReason = _rel.pending;
           logger.info('[data-source] running coalesced follow-up fleet load (' + nextReason + ')');
           setTimeout(() => { _loadFleetViaApiStartup(nextReason); }, 250);
         }
@@ -2127,7 +2144,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         const a = trayState.trayAction({
           animateOnlyWhenBusy: true,
           busy: trayState.isBusy({
-            apiLoadInFlight: _apiLoadInFlight,
+            apiLoadInFlight: _apiLoadGuard.isBusy(),
             deepScanRunning: _deepScanRunning,
             rescanInProgress: _rescanInProgress,
             isSyncing: !!(ctx && ctx.isSyncing),

@@ -58,6 +58,13 @@ const TOKEN_PAGE_URL = AAP_ORIGIN + '/v2/page/817ca098-8441-4329-a71e-6768f9d7e6
 const WARM_IDLE_MS   = 3 * 60 * 1000;   // tear the window down after 3 min idle
 const PAGE_LOAD_MS   = 45000;           // budget for the page to auth + settle
 const TOKEN_WAIT_MS  = 10000;           // how long to wait for a token on load
+// Hard caps on every page.evaluate. executeJavaScript can stay pending forever
+// (e.g. the SPA re-navigates mid-evaluate), which would hold _lock and wedge
+// every AAP caller. XHR_TIMEOUT_MS < EVAL_REQUEST_MS so a stalled request
+// normally settles in-page first; the outer cap fires only if the page is dead.
+const EVAL_HOOK_MS    = 20000;          // hook install + token wait evaluates
+const EVAL_REQUEST_MS = 60000;          // request / generic in-page evaluates
+const XHR_TIMEOUT_MS  = 45000;          // in-page xhr.timeout
 
 const _isSSO = (u) => /midway-auth\.amazon\.com|\/SSO\/redirect/i.test(u || '');
 
@@ -100,6 +107,26 @@ function dispose() {
   // Release the shared headless Playwright browser (no-op on the Electron path,
   // where openPage creates a per-call BrowserWindow that _page.close() destroys).
   try { if (provider.kind() === 'playwright') provider.shutdown(); } catch (_) {}
+}
+
+// Race page.evaluate against a timer. On timeout, tear the window down and
+// reject with AAP_API_TIMEOUT so the _withLock callback rejects and the lock is
+// released. The abandoned evaluate is not cancelled, only orphaned. This is a
+// NON-auth failure: callers must not report it through _reportAuth, and the
+// message must not match the "session expired/rejected" auth patterns.
+function _evalWithTimeout(page, script, ms) {
+  let timer = null;
+  const evalP = Promise.resolve().then(() => page.evaluate(script));
+  evalP.catch(() => {});   // a late rejection after the race is lost is ignored
+  const timeoutP = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      dispose();
+      reject(Object.assign(new Error('AAP page evaluate timed out after ' + ms + 'ms'),
+        { code: 'AAP_API_TIMEOUT' }));
+    }, ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([evalP, timeoutP]).finally(() => clearTimeout(timer));
 }
 
 // In-page bootstrap: hook XHR.setRequestHeader to capture the live
@@ -164,11 +191,12 @@ async function _ensureWindow() {
   // Install the XHR hook + wait briefly for a token-bearing XHR to fire. The
   // page already loaded authenticated (provider rejected on an SSO bounce).
   try {
-    await page.evaluate(_HOOK_SCRIPT);
-    const tok = await page.evaluate(_waitTokenScript(TOKEN_WAIT_MS));
+    await _evalWithTimeout(page, _HOOK_SCRIPT, EVAL_HOOK_MS);
+    const tok = await _evalWithTimeout(page, _waitTokenScript(TOKEN_WAIT_MS), EVAL_HOOK_MS);
     _token = tok || null;   // may be null for pure-GET usage; POST re-checks
   } catch (e) {
     dispose();
+    if (e && e.code === 'AAP_API_TIMEOUT') throw e;
     throw Object.assign(new Error('AAP API token capture failed: ' + (e && e.message)),
       { code: 'AAP_API_LOAD_FAILED' });
   }
@@ -199,6 +227,7 @@ function _requestScript(method, url, bodyLiteral) {
         ${isPost ? `xhr.setRequestHeader('Content-Type', 'application/json;charset=utf-8');
         xhr.setRequestHeader('anti-csrftoken-a2z', token);` : ''}
         xhr.withCredentials = true;
+        xhr.timeout = ${XHR_TIMEOUT_MS};
         xhr.onreadystatechange = function () {
           if (xhr.readyState === 4) {
             var txt = xhr.responseText || '';
@@ -212,6 +241,7 @@ function _requestScript(method, url, bodyLiteral) {
           }
         };
         xhr.onerror = function () { resolve({ ok: false, status: 0, netErr: true }); };
+        xhr.ontimeout = function () { resolve({ ok: false, status: 0, timeout: true }); };
         ${isPost ? `xhr.send(${bodyLiteral});` : 'xhr.send();'}
       } catch (e) { resolve({ ok: false, status: -1, error: e.message }); }
     });
@@ -224,7 +254,7 @@ async function _request(method, path, body) {
     const url = path.startsWith('http') ? path : (AAP_ORIGIN + path);
     const bodyLiteral = body != null ? JSON.stringify(JSON.stringify(body)) : 'null';
     const script = _requestScript(method, url, bodyLiteral);
-    const r = await page.evaluate(script);
+    const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
     _scheduleTeardown();
     if (!r || !r.ok) {
       // Surface the server's error body — AAP returns a JSON error object on 4xx
@@ -233,6 +263,7 @@ async function _request(method, path, body) {
       let detail = (r && r.text) || '';
       if (!detail && r && r.json) { try { detail = JSON.stringify(r.json); } catch (_) {} }
       if (!detail && r && r.error) detail = r.error;
+      if (!detail && r && r.timeout) detail = 'request timed out';
       if (!detail) detail = 'HTTP ' + (r && r.status);
       // A 401/403 or an SSO redirect body means the session lapsed mid-call.
       if (r && (r.status === 401 || r.status === 403)) {
@@ -258,7 +289,7 @@ async function _request(method, path, body) {
 async function evaluateInPage(script) {
   return _withLock(async () => {
     const page = await _ensureWindow();
-    const r = await page.evaluate(script);
+    const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
     _scheduleTeardown();
     return r;
   });
@@ -2472,7 +2503,7 @@ async function uploadDocumentFile(uploadLink, bytes, mime) {
   })();`;
   return _withLock(async () => {
     const page = await _ensureWindow();
-    const r = await page.evaluate(script);
+    const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
     _scheduleTeardown();
     if (!r || !r.ok) {
       throw Object.assign(new Error('S3 upload failed: HTTP ' + (r && r.status) + (r && r.text ? ' ' + r.text : '')),
