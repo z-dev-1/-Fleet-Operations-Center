@@ -193,7 +193,9 @@ function registerAapApiIPC(ctx) {
     if (!unit) return { ok: false, error: 'no unit number' };
     try {
       const row = await api().refreshUnit(unit);
-      return { ok: true, row };
+      // relay-extract §12.3 #9 / §12.5: mirrors computed here; fact blocks never reach the renderer.
+      const woFacts = require('../repair-intel/wo-facts');
+      return { ok: true, row: woFacts.rendererRow(woFacts.refreshRowFacts(row, require('../config/perf-flags').loadExtract())) };
     } catch (e) {
       return { ok: false, error: e.message, code: e.code || null };
     }
@@ -301,6 +303,17 @@ function registerAapApiIPC(ctx) {
         if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, notesStore);
       } catch (e) { logger.warn('[load-via-api] notes merge skipped: ' + e.message); }
 
+      // 3) relay-extract §12.3 #4b: bulk rows carry no fact blocks, so keep the
+      //    previous fleetData's blocks for the same WR and recompute the mirrors.
+      try {
+        const xf = require('../config/perf-flags').loadExtract();
+        if (xf.enabled) {
+          const woFacts = require('../repair-intel/wo-facts');
+          rows = woFacts.carryFactBlocks(rows, (store.load('fleetData', {}) || {}).rows || []);
+          woFacts.refreshFleetFacts(rows, xf);
+        }
+      } catch (e) { logger.warn('[load-via-api] fact refresh skipped: ' + e.message); }
+
       const now = new Date().toISOString();
       const outPayload = {
         rows,
@@ -364,6 +377,15 @@ function registerAapApiIPC(ctx) {
           let rows = ds.rows || [];
           try { const uu = (store.load('uptakeHash', {}).units) || []; if (ctx && ctx.mergeUptakeIntoRows) rows = ctx.mergeUptakeIntoRows(rows, uu); } catch (_) {}
           try { const ns = store.load('notesStore', {}); if (ctx && ctx.mergeRelayIntoRows) rows = ctx.mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
+          // relay-extract §12.3 #4: same-WR fact blocks from the previous fleetData + mirrors.
+          try {
+            const xf = require('../config/perf-flags').loadExtract();
+            if (xf.enabled) {
+              const woFacts = require('../repair-intel/wo-facts');
+              rows = woFacts.carryFactBlocks(rows, (store.load('fleetData', {}) || {}).rows || []);
+              woFacts.refreshFleetFacts(rows, xf);
+            }
+          } catch (e) { logger.warn('[data-source] fact refresh skipped: ' + e.message); }
           const now = new Date().toISOString();
           const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, syncedAt: now, scrapedAt: now, stale: false, source: 'aap-api' };
           store.save('fleetData', out);

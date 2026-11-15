@@ -160,7 +160,15 @@ const JS_EXTRACT_TABLE = `(function(){
     var c = tr.querySelectorAll('td');
     if (c.length < 3) return;
     var o = {};
-    for (var i = 0; i < c.length; i++) { o[h[i]||'c'+i] = (c[i].innerText||'').trim(); }
+    for (var i = 0; i < c.length; i++) {
+      var txt = (c[i].innerText||'').trim();
+      // An ellipsized geofence keeps its full name in a title attribute.
+      if (h[i] === 'Last geofences' && /(\.\.\.|\u2026)$/.test(txt)) {
+        var tEl = c[i].querySelector('[title]'); var tt = (c[i].title || (tEl && tEl.title) || '').trim();
+        if (tt.length > txt.length - 3) txt = tt;
+      }
+      o[h[i]||'c'+i] = txt;
+    }
     if (!o['Equipment ID'] && !o[h[1]]) return;
     if (dueDateIdx >= 0 && c[dueDateIdx]) {
       var dueMap = _parseDueDateMap(c[dueDateIdx]);
@@ -1128,20 +1136,22 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           const prev = store.load('fleetData', null);
           if (prev && Array.isArray(prev.rows) && prev.rows.length) {
             // UNIT-level enrichment: true for the asset regardless of which WR is open.
-            const CARRY_UNIT = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift','geofence'];
+            const CARRY_UNIT = ['pmBDue','pmXDue','dotDue','quarterlyLiftDue','pmB','pmX','dot','quarterlyLift','geofence',
+              'pmADue','washDue','apuDue','svrDue','stateInspDue','r360Due','semiannualLiftDue','pmSchedule'];
             // WR-level enrichment: the offsite (dealer estimate / SR / DTNA case)
             // and its scraped dealer notes belong to ONE work request. Carry them
             // ONLY when the open WR is unchanged — otherwise a completed WO's
             // offsite stuck to the unit forever (B12260/B62049/B62064, 10/28).
             const CARRY_WR = OFFSITE_FIELDS;
             const blank = (v) => v == null || v === '' || v === '--';
+            const blankV = (v) => blank(v) || (Array.isArray(v) && !v.length);   // pmSchedule: [] is blank
             const prevById = new Map(prev.rows.map((r) => [r.equipmentId, r]));
             for (const row of rows) {
               const p = prevById.get(row.equipmentId);
               if (!p) continue;
               for (const k of CARRY_UNIT) {
                 // carry prior value only when the fresh rebuild left it blank/'--'
-                if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+                if (blankV(row[k]) && !blankV(p[k])) row[k] = p[k];
               }
               // Conversation: the bulk rebuild is withComments:false, so without
               // this every 5-min refresh blanked fullConversation until hydration
@@ -1152,8 +1162,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                   row.fullConversation = p.fullConversation;
                   if (p._convFetchedAt) row._convFetchedAt = p._convFetchedAt;
                 }
+                // Relay fact block (relay-extract §12.2): per WR, like the conversation.
+                if (!row.relayFacts && p.relayFacts && p.relayFactsWr === row.workRequestId) {
+                  row.relayFacts = p.relayFacts;
+                  row.relayFactsWr = p.relayFactsWr;
+                }
                 for (const k of CARRY_WR) {
-                  if (blank(row[k]) && !blank(p[k])) row[k] = p[k];
+                  if (blankV(row[k]) && !blankV(p[k])) row[k] = p[k];
                 }
                 if (p._offsiteWrId && blank(row._offsiteWrId)) row._offsiteWrId = p._offsiteWrId;
                 // Extra open WOs (secondary / planned WR cards in the unit panel).
@@ -1169,6 +1184,12 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             }
           }
         } catch (e) { logger.warn('[data-source] carry-forward merge skipped: ' + e.message); }
+
+        // relay-extract §12.3 #2: mirrors/fills recomputed from the carried blocks.
+        try {
+          const _xf = require('../config/perf-flags').loadExtract();
+          if (_xf.enabled) require('../repair-intel/wo-facts').refreshFleetFacts(rows, _xf);
+        } catch (e) { logger.warn('[data-source] fact refresh skipped: ' + e.message); }
 
         const now = new Date().toISOString();
         const payload = {
@@ -1338,10 +1359,18 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               // PM due dates (raw + pills), offsite URL (Split View right pane),
               // and location — all from getAsset + the WO comment thread.
               if (fr) {
-                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift', 'geofence']) {
+                for (const k of ['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmB', 'pmX', 'dot', 'quarterlyLift', 'geofence',
+                  'pmADue', 'washDue', 'apuDue', 'svrDue', 'stateInspDue', 'r360Due', 'semiannualLiftDue']) {
                   if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
                 }
+                if (Array.isArray(fr.pmSchedule) && fr.pmSchedule.length) r.pmSchedule = fr.pmSchedule;
                 if (fr.vin && !r.vin) r.vin = fr.vin;
+                // relay-extract §12.2: WR-level fact block + structured fills, same WR only.
+                if (fr.workRequestId && fr.workRequestId === r.workRequestId) {
+                  for (const k of ['relayFacts', 'relayFactsWr', 'createdBy', 'needBy', 'alternativeId', 'cause', 'correction', 'totalCost', 'salesforceCase', 'salesforceCaseUrl']) {
+                    if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
+                  }
+                }
 
                 // OFFSITE OWNERSHIP (2026-10-28): the offsite belongs to the WR
                 // whose comments contain it. fr is the unit's CURRENT WR with its
@@ -1393,6 +1422,11 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               const _cur = (store.load('fleetData', {}) || {}).rows || [];
               require('../orcha/canonical_runner').overlayDeepScanFields(payload.rows || [], _cur);
             } catch (_) {}
+            // relay-extract §12.3 #3: mirrors for the rows refreshUnit just hydrated.
+            try {
+              const _xf = require('../config/perf-flags').loadExtract();
+              if (_xf.enabled) require('../repair-intel/wo-facts').refreshFleetFacts(payload.rows || [], _xf);
+            } catch (e) { logger.warn('[data-source] hydrate fact refresh skipped: ' + e.message); }
             payload.syncedAt = new Date().toISOString();
             store.save('fleetData', payload);
             if (ctx) ctx.lastData = payload;
@@ -1442,6 +1476,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       logger.info('[data-source] PM/location fill: ' + todo.length + ' units to enrich (throttled background)');
       (async () => {
         try {
+          const xf = require('../config/perf-flags').loadExtract();
           const api = require('../scrapers/aap_api');
           const mapper = require('../scrapers/aap_api_mapper');
           const { parsePMDates } = require('../scrapers/relay');
@@ -1454,9 +1489,14 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             try {
               const cur = store.load('fleetData', null);
               if (!cur || !Array.isArray(cur.rows)) return;
+              const woFacts = xf.enabled ? require('../repair-intel/wo-facts') : null;
               for (const row of cur.rows) {
                 const fields = pmByUnit[row.equipmentId];
-                if (fields) Object.assign(row, fields);
+                if (fields) {
+                  Object.assign(row, fields);
+                  // relay-extract §12.3 #11: pmOverdue + fact mirrors see the new pmSchedule.
+                  if (woFacts) woFacts.refreshRowFacts(row, xf);
+                }
               }
               cur.syncedAt = new Date().toISOString();
               store.save('fleetData', cur);
@@ -1471,11 +1511,16 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               if (!aaid) continue;
               const full = await api.getAsset(aaid);
               if (full) {
-                const pmRaw = mapper.pmDueFields(full);
-                const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+                const pmRaw = mapper.pmDueFields(full, xf.enabled ? { all: true, now: Date.now() } : undefined);
+                const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue
+                  || pmRaw.pmADue || pmRaw.washDue || pmRaw.apuDue || pmRaw.svrDue || pmRaw.stateInspDue || pmRaw.r360Due
+                  || pmRaw.semiannualLiftDue || (Array.isArray(pmRaw.pmSchedule) && pmRaw.pmSchedule.length);
                 const fields = {};
                 if (_hasPm) {
-                  for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) fields[k] = pmRaw[k]; }
+                  for (const k of Object.keys(pmRaw)) {
+                    if (Array.isArray(pmRaw[k]) && !pmRaw[k].length) continue;
+                    if (pmRaw[k]) fields[k] = pmRaw[k];
+                  }
                   if (parsePMDates) { const pm = parsePMDates(pmRaw); fields.pmB = pm.pmB; fields.pmX = pm.pmX; fields.dot = pm.dot; fields.quarterlyLift = pm.quarterlyLift; }
                 }
                 const ll = (full.latestLocation) || (full.asset && full.asset.latestLocation) || {};

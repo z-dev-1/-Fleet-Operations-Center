@@ -401,6 +401,53 @@ function getService(serviceId) {
   return apiGet('/api/v1/serviceaggregates/' + encodeURIComponent(serviceId));
 }
 
+// relay-extract §11.3: module-level timeout (buildFleetDataset keeps its local
+// helper). apiGet has no own timeout.
+function _withTimeout(p, ms) {
+  let t = null;
+  return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error('detail-timeout')), ms); })])
+    .finally(() => { if (t) clearTimeout(t); });
+}
+
+// Endpoint 2b: Relay service change history ({serviceChangeLogs: []}).
+function getServiceHistory(serviceId) {
+  return apiGet('/api/v1/serviceaggregates/' + encodeURIComponent(serviceId) + '/history');
+}
+
+// Process cache: serviceId -> {mod, logs}. Max 500 entries (oldest evicted). A hit
+// with an equal modified stamp skips the call; an error is cached as logs:null and
+// warned once per serviceId per process.
+const HISTORY_CACHE_MAX = 500;
+const _historyCache = new Map();
+const _historyWarned = new Set();
+async function _cachedServiceHistory(serviceId, mod) {
+  const id = String(serviceId || '');
+  if (!id) return null;
+  const key = mod != null ? String(mod) : '';
+  const hit = _historyCache.get(id);
+  if (hit && hit.mod === key) return hit.logs;
+  let logs = null;
+  try {
+    const res = await _withTimeout(getServiceHistory(id), 8000);
+    logs = Array.isArray(res && res.serviceChangeLogs) ? res.serviceChangeLogs : (Array.isArray(res) ? res : []);
+  } catch (e) {
+    if (!_historyWarned.has(id)) {
+      _historyWarned.add(id);
+      logger.warn('history unavailable ' + id.slice(0, 8) + ': ' + ((e && (e.code || e.status)) || 'error'));
+    }
+    logs = null;
+  }
+  _historyCache.delete(id);
+  if (_historyCache.size >= HISTORY_CACHE_MAX) _historyCache.delete(_historyCache.keys().next().value);
+  _historyCache.set(id, { mod: key, logs });
+  return logs;
+}
+function _resetHistoryCacheForTest() { _historyCache.clear(); _historyWarned.clear(); }
+
+function _extractFlags() {
+  try { return require('../config/perf-flags').loadExtract(); } catch (_) { return { enabled: false, aiOutput: false }; }
+}
+
 // Endpoint 3: full asset (VIN, model, odometer, GPS).
 function getAsset(aaid) {
   return apiGet('/api/v1/assets/' + encodeURIComponent(aaid));
@@ -931,6 +978,7 @@ async function buildFleetDataset(opts = {}) {
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('detail-timeout')), ms))]);
 
   const rows = [];
+  const _xf = _extractFlags();
   let detailDone = 0;
   let woFallbacks = 0;
   for (const assetSummary of assetEntries) {
@@ -1028,7 +1076,7 @@ async function buildFleetDataset(opts = {}) {
     try {
       const mss = (assetSummary.asset && assetSummary.asset.maintenanceScheduleStatuses);
       if (Array.isArray(mss) && mss.length) {
-        const pmRaw = mapper.pmDueFields({ maintenanceScheduleStatuses: mss });
+        const pmRaw = mapper.pmDueFields({ maintenanceScheduleStatuses: mss }, _xf.enabled ? { all: true, now: Date.now() } : undefined);
         Object.assign(row, pmRaw);
         const { parsePMDates } = require('./relay');
         if (parsePMDates) {
@@ -1192,7 +1240,14 @@ async function refreshUnit(unitNumber) {
   let full = null;
   if (aaid) { try { full = await getAsset(aaid); } catch (_) {} }
 
-  const row = mapper.toFleetRow(wo || { assetDisplayName: u }, assetSummary, serviceDetail);
+  // relay-extract §9.1/§11.3: Relay service history + fact extraction (flag on only).
+  const _xf = _extractFlags();
+  let _history = null;
+  if (_xf.enabled && wo && (wo.id || wo.workRequestId)) {
+    _history = await _cachedServiceHistory(wo.id || wo.workRequestId, wo.modifiedTimestamp || (serviceDetail && serviceDetail.modifiedDateTime));
+  }
+  const row = mapper.toFleetRow(wo || { assetDisplayName: u }, assetSummary, serviceDetail,
+    _xf.enabled ? { extract: _xf, history: _history, now: Date.now() } : undefined);
 
   // Attach ONLY the OTHER CURRENTLY-OPEN work orders as secondary cards (a unit
   // with one open unplanned + one open planned WR shows both). We deliberately
@@ -1235,10 +1290,15 @@ async function refreshUnit(unitNumber) {
     // the short display pills (pmB/pmX/dot/quarterlyLift) via relay's parser so
     // the detail panel + grid show them exactly like the scrape path did.
     try {
-      const pmRaw = mapper.pmDueFields(full);
-      const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue;
+      const pmRaw = mapper.pmDueFields(full, _xf.enabled ? { all: true, now: Date.now() } : undefined);
+      const _hasPm = pmRaw.pmBDue || pmRaw.pmXDue || pmRaw.dotDue || pmRaw.quarterlyLiftDue
+        || pmRaw.pmADue || pmRaw.washDue || pmRaw.apuDue || pmRaw.svrDue || pmRaw.stateInspDue || pmRaw.r360Due
+        || pmRaw.semiannualLiftDue || (Array.isArray(pmRaw.pmSchedule) && pmRaw.pmSchedule.length);
       if (_hasPm) {
-        for (const k of Object.keys(pmRaw)) { if (pmRaw[k]) row[k] = pmRaw[k]; }
+        for (const k of Object.keys(pmRaw)) {
+          if (Array.isArray(pmRaw[k]) && !pmRaw[k].length) continue;
+          if (pmRaw[k]) row[k] = pmRaw[k];
+        }
         const { parsePMDates } = require('./relay');
         if (parsePMDates) {
           const pm = parsePMDates(pmRaw);
@@ -1275,6 +1335,11 @@ async function refreshUnit(unitNumber) {
     row.level2 = '';
     row.relaySynced = false;
     row._secondaryWRs = [];
+    if (_xf.enabled) {
+      // The ten WR keys toFleetRow writes with extraction on (AC29).
+      row.relayFacts = null;
+      for (const k of ['relayFactsWr', 'createdBy', 'needBy', 'alternativeId', 'cause', 'correction', 'totalCost', 'salesforceCase', 'salesforceCaseUrl']) row[k] = '';
+    }
   }
   return row;
 }
@@ -1333,9 +1398,17 @@ async function getWorkOrderDetailViaApi(equipmentId) {
   // Full conversation + offsite URL via the proven mapper helpers.
   let fullConversation = '';
   let offsite = null;
+  // relay-extract §9.1 (single-unit path): history + facts when extraction is on.
+  const _xf = _extractFlags();
+  let _extra;
+  if (_xf.enabled) {
+    const history = await _cachedServiceHistory(serviceId, wo.modifiedTimestamp || (detail && detail.modifiedDateTime));
+    _extra = { extract: _xf, history, now: Date.now() };
+  }
+  let mapped = null;
   try {
-    const row = mapper.toFleetRow(wo, { asset: { displayName: u, aaid: wo.aaid } }, detail);
-    fullConversation = row.fullConversation || '';
+    mapped = mapper.toFleetRow(wo, { asset: { displayName: u, aaid: wo.aaid } }, detail, _extra);
+    fullConversation = mapped.fullConversation || '';
   } catch (_) { /* leave blank */ }
   try { offsite = mapper.extractOffsiteFromComments(detail); } catch (_) {}
 
@@ -1351,7 +1424,19 @@ async function getWorkOrderDetailViaApi(equipmentId) {
   let offsiteUrl = offsite ? offsite.url : '';
   if (!offsiteUrl && wr.caseNumber) offsiteUrl = 'https://aap-na.corp.amazon.com/v2/offsite-events/' + String(wr.caseNumber).trim();
 
-  return {
+  // Extraction on: structured fills from the mapped row; totalCost is always a
+  // '$1,234.56' string (or ''), never the raw reduce number (AC42).
+  const _x = _xf.enabled ? {
+    cause:             (mapped && mapped.cause) || firstWO.cause || '',
+    correction:        (mapped && mapped.correction) || firstWO.correction || '',
+    totalCost:         (mapped && mapped.totalCost) || (totalCost ? mapper._usd(Number(totalCost)) : ''),
+    relayFacts:        (mapped && mapped.relayFacts) || null,
+    relayFactsWr:      (mapped && mapped.relayFactsWr) || '',
+    salesforceCase:    (mapped && mapped.salesforceCase) || '',
+    salesforceCaseUrl: (mapped && mapped.salesforceCaseUrl) || '',
+  } : null;
+
+  const out = {
     // identity
     equipmentId:         wr.assetDisplayName || detail && detail.assetDisplayName || u,
     workRequestId:       wr.id || serviceId || '',
@@ -1390,6 +1475,8 @@ async function getWorkOrderDetailViaApi(equipmentId) {
     source:              'aap-api',
     scrapedAt:           new Date().toISOString(),
   };
+  if (_x) Object.assign(out, _x);
+  return out;
 }
 
 // ── Work-order creation (VRE recommendation API) ─────────────────────────────
@@ -2787,6 +2874,8 @@ module.exports = {
   buildFleetDataset,
   refreshUnit,
   getService,
+  getServiceHistory,            // relay-extract §11.3: /serviceaggregates/{id}/history
+  _resetHistoryCacheForTest,    // test seam: clear the process history cache
   getAsset,
   getServiceMoves,
   getMaintenanceSchedules,

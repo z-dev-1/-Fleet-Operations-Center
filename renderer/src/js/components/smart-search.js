@@ -99,6 +99,15 @@ function _search(query) {
       { key: 'repairTimeline', label: 'Timeline' },
       { key: 'geofence', label: 'Location' },
       { key: 'workDuration', label: 'Duration' },
+      // relay-extract scalar mirrors
+      { key: 'partNumbers', label: 'Part #' },
+      { key: 'orderNumbers', label: 'Order #' },
+      { key: 'roNumbers', label: 'RO #' },
+      { key: 'dealerRo', label: 'Dealer RO' },
+      { key: 'decisivCaseId', label: 'Decisiv Case' },
+      { key: 'oemCaseId', label: 'OEM Case' },
+      { key: 'towRefs', label: 'Tow Ref' },
+      { key: 'pmOverdue', label: 'PM Overdue' },
     ];
 
     for (const f of fields) {

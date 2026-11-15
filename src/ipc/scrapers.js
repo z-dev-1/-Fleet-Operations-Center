@@ -767,7 +767,7 @@ function registerScrapersIPC(ctx) {
     if (_refreshUnitLock) {
       // Don't hard-fail — return the current cache so the caller can proceed.
       const cache = store.load('relayCache', {});
-      return { ok: false, busy: true, unit: null, cache: cache[id] || null };
+      return { ok: false, busy: true, unit: null, cache: require('../repair-intel/wo-facts').rendererRow(cache[id] || null) };
     }
     _refreshUnitLock = true;
     try {
@@ -852,7 +852,9 @@ function registerScrapersIPC(ctx) {
       // refresh pulled fresh dealer notes but the timeline waited for the next
       // full deep-scan (≥20 min, and that scan used stale cache).
       if (freshRow && opts.rebuildTimeline !== false) _maybeRebuildTimeline(freshRow);
-      return { ok: true, unit: freshRow, cache: relayCache[id] || null };
+      // relay-extract §12.5: fact blocks stay in the main process (store + cache keep them).
+      const { rendererRow } = require('../repair-intel/wo-facts');
+      return { ok: true, unit: rendererRow(freshRow), cache: rendererRow(relayCache[id] || null) };
     } catch (e) {
       throw new ScraperError(e.message, 'relay:refresh-unit', { equipmentId: id });
     } finally {

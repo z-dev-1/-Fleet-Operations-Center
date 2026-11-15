@@ -68,6 +68,12 @@ const _CHROME_RE = /^(sort by:|latest posts|most recent activity|refresh this fe
 //   "September 24, 2026 — AFP FAS (Partner): 07/28 — Work order created ... "
 //   "October 13, 2026 — CRM Admin: closed this case (In-Repair to Closed)"
 function parseFeed(raw) {
+  return parseFeedFull(raw).slice(0, 8000);
+}
+
+// Same thread as parseFeed, uncapped (relay-extract §3.5: the extractor needs the
+// oldest entries of long feeds; enrichDtna keeps a 20000-char head as rawThread).
+function parseFeedFull(raw) {
   const lines = String(raw || '').split('\n').map(l => l.replace(/\u00a0/g, ' ').trim()).filter(Boolean);
   const DATE_RE = /^[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}(\s+at\s+\d{1,2}:\d{2}\s*[AP]M)?$/;
   // An author/action line: "<Name> (Partner...)", "<Name> updated this record.",
@@ -118,8 +124,8 @@ function parseFeed(raw) {
   flush();
 
   // Newest-first in the DOM; keep chronological-ish order as rendered (Salesforce
-  // default is latest-first). Cap length for the timeline.
-  return entries.join('\n').slice(0, 8000);
+  // default is latest-first). parseFeed caps the length for the timeline.
+  return entries.join('\n');
 }
 
 // Expand the lazy Lightning feed so the FULL thread renders: scroll to the
@@ -210,6 +216,7 @@ async function enrichDtna(caseUrl) {
           ok: true, caseUrl, source: 'dtna', scrapedAt: new Date().toISOString(),
           offsiteText: thread, statusText: thread, estimateComments: thread,
           offsiteStage: stage, bestUrl: caseUrl, bestLabel: 'DTNA Case', error: null,
+          rawThread: parseFeedFull(d.text).slice(0, 20000),
         });
       } catch (e) {
         clearTimeout(t);
@@ -222,4 +229,4 @@ async function enrichDtna(caseUrl) {
   });
 }
 
-module.exports = { enrichDtna, parseFeed, DTNA_CASE_RE };
+module.exports = { enrichDtna, parseFeed, parseFeedFull, DTNA_CASE_RE };

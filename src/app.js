@@ -213,7 +213,11 @@ app.whenReady().then(async () => {
       }
       _lastPushTs = t;
     }
-    _send('fleet:data',   d);
+    // relay-extract §12.5: the renderer gets rows without the fact blocks; every
+    // hook below (briefing, awareness, WBR) keeps the full d.
+    let _view = d;
+    try { _view = require('./repair-intel/wo-facts').rendererView(d); } catch (_) { _view = d; }
+    _send('fleet:data',   _view);
     // Run anomaly detection + morning briefing + recommendations on every data push
     // (extracted to src/orcha/briefing.js — Phase 4)
     try {

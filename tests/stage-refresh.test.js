@@ -109,3 +109,75 @@ describe('dealer never set a status (322504)', () => {
     expect(out[0]).toMatchObject({ offsiteStage: '', offsiteStageDetail: sr.NO_STATUS, offsiteStageSince: '' });
   });
 });
+
+// relay-extract AC41 (§11.1, §12.3 #10): the stage refresh keeps the case status history
+// and recomputes the fact mirrors before its save.
+describe('stage refresh keeps history (AC41)', () => {
+  const woFacts = require('../src/repair-intel/wo-facts');
+  // 27-entry 39582 shape (June prior episode, then Sept..Nov), served unsorted.
+  const HISTORY = (() => {
+    const out = [];
+    for (let i = 0; i < 27; i++) {
+      const d = i < 6 ? new Date(Date.UTC(2026, 5, 15 + i, 14)) : new Date(Date.UTC(2026, 8, 20 + (i - 6) * 2, 14));
+      out.push({ stage: ['arrival', 'diagnosis', 'approval', 'repair'][i % 4], status: i % 3 ? 'Hold (parts)' : 'Working', at: d.toISOString() });
+    }
+    return out.reverse();
+  })();
+  const ST = { ok: true, stage: 'repair', status: 'Road Test', since: '2026-10-28T18:26:37-04:00', history: HISTORY };
+  function withExtract(f, enabled, woFactsDep) {
+    f.deps.loadExtract = () => ({ enabled, aiOutput: enabled });
+    if (woFactsDep) f.deps.woFacts = woFactsDep;
+    const saves = [];
+    const save = f.deps.store.save;
+    f.deps.store.save = (k, v) => { saves.push([k, JSON.parse(JSON.stringify(v))]); save(k, v); };
+    return saves;
+  }
+  it('enabled: offsiteStageHistory written sorted (<= 80) on the same-WR row; a history-only change counts', async () => {
+    const f = fakes({ '20945735': ST });
+    withExtract(f, true);
+    const res = await sr.refreshStages({ deps: f.deps });
+    expect(res.changed).toBe(1);
+    const h = f.data.fleetData.rows[0].offsiteStageHistory;
+    expect(h).toHaveLength(27);
+    expect(h.map((x) => Date.parse(x.at))).toEqual(h.map((x) => Date.parse(x.at)).sort((a, b) => a - b));
+    sr._resetForTests();
+    const res2 = await sr.refreshStages({ deps: f.deps, force: true });
+    expect(res2.changed).toBe(0);                                   // same trio + same history
+    f.deps.decisiv.getCaseStatusSummary = async (id) => (id === '20945735'
+      ? Object.assign({}, ST, { history: HISTORY.concat([{ stage: 'repair', status: 'QC', at: '2026-11-11T14:00:00Z' }]) })
+      : { ok: false });
+    sr._resetForTests();
+    const res3 = await sr.refreshStages({ deps: f.deps, force: true });
+    expect(res3.changed).toBe(1);                                   // history-only change
+  });
+  it('enabled: the saved row deep-equals refreshRowFacts(row); refreshFleetFacts once, after applyStages, before the save', async () => {
+    const f = fakes({ '20945735': ST });
+    const order = [];
+    const spy = { refreshFleetFacts: vi.fn((rows, flags, today) => { order.push('refresh:' + !!rows[0].offsiteStageHistory); return woFacts.refreshFleetFacts(rows, flags, today); }) };
+    const saves = withExtract(f, true, spy);
+    const save = f.deps.store.save;
+    f.deps.store.save = (k, v) => { order.push('save:' + k); save(k, v); };
+    await sr.refreshStages({ deps: f.deps });
+    expect(spy.refreshFleetFacts).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['refresh:true', 'save:fleetData']);
+    const savedRow = saves.find((s) => s[0] === 'fleetData')[1].rows[0];
+    const again = woFacts.refreshRowFacts(JSON.parse(JSON.stringify(savedRow)), { enabled: true, aiOutput: true });
+    expect(savedRow).toEqual(JSON.parse(JSON.stringify(again)));
+    expect(savedRow.offsiteStageHistory).toHaveLength(27);
+  });
+  it('disabled: saved rows byte-identical to today (no history key, no refresh)', async () => {
+    const f = fakes({ '20945735': ST });
+    const spy = { refreshFleetFacts: vi.fn() };
+    const saves = withExtract(f, false, spy);
+    await sr.refreshStages({ deps: f.deps });
+    expect(spy.refreshFleetFacts).not.toHaveBeenCalled();
+    const want = ROWS();
+    Object.assign(want[0], { _stageReadAt: f.data.fleetData.rows[0]._stageReadAt, offsiteStage: 'repair', offsiteStageDetail: 'Road Test', offsiteStageSince: '2026-10-28T18:26:37-04:00' });
+    expect(JSON.stringify(saves.find((s) => s[0] === 'fleetData')[1].rows)).toBe(JSON.stringify(want));
+  });
+  it('applyStages without a history array leaves offsiteStageHistory alone', () => {
+    const rows = [{ equipmentId: 'A', _offsiteWrId: 'w', offsiteStageHistory: [{ stage: 'repair', status: 'x', at: '2026-11-01T00:00:00Z' }] }];
+    sr.applyStages(rows, [{ equipmentId: 'A', wrId: 'w', stage: 'repair', status: 's', since: 't' }]);
+    expect(rows[0].offsiteStageHistory).toHaveLength(1);
+  });
+});

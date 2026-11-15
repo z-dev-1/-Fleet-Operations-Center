@@ -60,24 +60,60 @@ const MAX_RESPONSE_HOPS = 3; // bounds the SR -> response-case -> response-case 
 // PACCAR pssmfleet estimates too — the activity_logs endpoint is identical
 // across all Decisiv hosts.
 const EST_ID_RE = /https?:\/\/(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net\/fleet\/estimates\/(\d+)/i;
-async function _estimateCommentsViaApi(estimateUrl) {
-  if (process.env.DECISIV_API === '0') return '';
+// relay-extract §11.2: -> {text, rawNotes, estId, total, partial, estimateDetail}.
+// With extraction on (opts.allPages) it reads every activity_logs page plus the
+// estimate detail; text stays the page-1 thread exactly as before.
+async function _estimateNotesViaApi(estimateUrl, opts = {}) {
+  const none = { text: '', rawNotes: null, estId: '', total: null, partial: false, estimateDetail: null };
+  if (process.env.DECISIV_API === '0') return none;
   const m = String(estimateUrl || '').match(EST_ID_RE);
   const estId = m && m[1];
-  if (!estId) return ''; // id isn't numeric (API keys on the numeric estimate id)
+  if (!estId) return none; // id isn't numeric (API keys on the numeric estimate id)
   try {
     const api = require('./decisiv_api');
-    const res = await api.getEstimateComments(estId, { srUrl: estimateUrl });
+    const res = await api.getEstimateComments(estId, opts.allPages ? { srUrl: estimateUrl, allPages: true } : { srUrl: estimateUrl });
     if (res && res.ok && res.text) {
       logger.info('[ae] estimate comments via API | est:', estId, '| notes:', res.count);
-      return res.text;
+      let estimateDetail = null;
+      if (opts.allPages) {
+        try { const d = await api.getEstimateDetail(estId, { srUrl: estimateUrl }); estimateDetail = d && d.ok ? { estimate: d.estimate } : null; } catch (_) {}
+      }
+      return { text: res.text, rawNotes: Array.isArray(res.rawNotes) ? res.rawNotes : null, estId,
+        total: res.total != null ? res.total : null, partial: !!res.partial, estimateDetail };
     }
     logger.info('[ae] estimate API returned no notes (est ' + estId + ') -> DOM fallback');
   } catch (e) {
     logger.warn('[ae] estimate API error (est ' + estId + '), DOM fallback:', e.message);
   }
-  return '';
+  return Object.assign({}, none, { estId });
 }
+async function _estimateCommentsViaApi(estimateUrl) {
+  return (await _estimateNotesViaApi(estimateUrl)).text;
+}
+
+function _extractFlags() {
+  try { return require('../config/perf-flags').loadExtract(); } catch (_) { return { enabled: false, aiOutput: false }; }
+}
+// Decisiv notes -> offsite fact block (API notes only; DOM text is not structured input).
+function _offsiteFactsOf(n) {
+  if (!n || !Array.isArray(n.rawNotes) || !n.rawNotes.length) return null;
+  try {
+    return require('../repair-intel/wo-extract').extractDecisivNotes(n.rawNotes,
+      { estimateId: n.estId, estimateDetail: n.estimateDetail, now: Date.now(), partial: n.partial });
+  } catch (e) { logger.warn('[ae] offsite fact extraction skipped (est ' + n.estId + '): ' + (e && e.name || 'error')); return null; }
+}
+function _dealerOf(block) {
+  if (!block) return '';
+  try { return require('../repair-intel/wo-facts').dealerOf(block) || ''; } catch (_) { return ''; }
+}
+function _dealerCodeOf(block) {
+  if (!block || !Array.isArray(block.facts)) return '';
+  const codes = block.facts.filter((f) => f && f.kind === 'dealerCode' && f.episode !== 'prior' && f.value);
+  if (!codes.length) return '';
+  codes.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+  return String(codes[0].value);
+}
+function _byAt(a, b) { const x = Date.parse(a && a.at) || 0; const y = Date.parse(b && b.at) || 0; return x - y; }
 
 // API-FIRST case stage (2026-10-28): Arrival/Diagnosis/Approval/Repair/Ready
 // + the detail status ("Road Test", "Hold (parts)") and since-when, straight
@@ -94,18 +130,26 @@ async function _caseStatusViaApi(estimateUrl) {
   } catch (_) { return null; }
 }
 // Fields every enrich result carries for the stage (empty when unknown).
-function _stageFields(api, fallbackStage, fallbackConf) {
+// withHistory (extraction on, relay-extract §11.1) adds offsiteStageHistory: the
+// API status history sorted by `at`, last 80; [] on the empty and fallback branches.
+function _stageFields(api, fallbackStage, fallbackConf, withHistory) {
   if (api && api.empty) {
     // Dealer never set a status: a real API answer. Clears any guessed stage.
-    return { offsiteStage: '', offsiteStageConfidence: 'api',
+    const o = { offsiteStage: '', offsiteStageConfidence: 'api',
       offsiteStageDetail: 'No status set by the dealer yet', offsiteStageSince: '' };
+    if (withHistory) o.offsiteStageHistory = [];
+    return o;
   }
   if (api) {
-    return { offsiteStage: api.stage, offsiteStageConfidence: 'api',
+    const o = { offsiteStage: api.stage, offsiteStageConfidence: 'api',
       offsiteStageDetail: api.status || '', offsiteStageSince: api.since || '' };
+    if (withHistory) o.offsiteStageHistory = Array.isArray(api.history) ? api.history.slice().sort(_byAt).slice(-80) : [];
+    return o;
   }
-  return { offsiteStage: fallbackStage || '', offsiteStageConfidence: fallbackStage ? (fallbackConf || 'page') : '',
+  const o = { offsiteStage: fallbackStage || '', offsiteStageConfidence: fallbackStage ? (fallbackConf || 'page') : '',
     offsiteStageDetail: '', offsiteStageSince: '' };
+  if (withHistory) o.offsiteStageHistory = [];
+  return o;
 }
 
 const ASIST_SCRAPE = String.raw`
@@ -450,6 +494,7 @@ async function enrichVolvoAsist(srUrl){
   const part=partitionForUrl(srUrl);
   if(!part)return _empty(srUrl,'no partition found');
   logger.info('[ae] START',srUrl.slice(0,80),_isDirectEstimate?'(direct estimate)':'(service request)');
+  const _xf = _extractFlags();
 
   // ── Direct estimate URL path ────────────────────────────────────────────
   // The offsite link is ALREADY a Fleet Estimate (common for PACCAR, where
@@ -461,7 +506,10 @@ async function enrichVolvoAsist(srUrl){
     // API-FIRST: pull the comment thread straight from Decisiv's JSON API. If it
     // yields nothing (non-numeric id, API/session error) fall back to the
     // Notes-tab DOM scrape (waits for the lazy #notes_workspace to render).
-    let estComments = (await _estimateCommentsViaApi(srUrl)).trim();
+    const _notes = await _estimateNotesViaApi(srUrl, { allPages: _xf.enabled });
+    let estComments = _notes.text.trim();
+    // Facts are mined from the raw API notes, before (and independent of) the 6000 cap.
+    const _offFacts = _xf.enabled ? _offsiteFactsOf(_notes) : null;
     let est = null;
     if (!estComments) {
       est = await openAndScrapeEstimate(srUrl,part);
@@ -478,14 +526,16 @@ async function enrichVolvoAsist(srUrl){
     // towed out" (that's an inbound tow TO the dealer, repair not started).
     var _directStage = _stageReady(estComments) ? 'ready' : '';
     // API stage first (real Arrival..Ready position); text inference is the fallback.
-    const _stg = _stageFields(await _caseStatusViaApi(srUrl), _directStage, 'text-fallback');
+    const _stg = _stageFields(await _caseStatusViaApi(srUrl), _directStage, 'text-fallback', _xf.enabled);
     logger.info('[ae] DONE (direct estimate) | offsiteStage:', _stg.offsiteStage || '(none)', '| stageConf:', _stg.offsiteStageConfidence || '-',
       _stg.offsiteStageDetail ? '| detail: ' + _stg.offsiteStageDetail + ' since ' + _stg.offsiteStageSince : '');
-    return{ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
+    const _out={ok:true,srUrl,srNumber:'',caseNumber:estId,caseUrl:'',estimateUrl:srUrl,bestUrl:srUrl,
       bestLabel:estId?'Fleet Estimate | '+estId:'Fleet Estimate',source:'estimate',
-      scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:'',
+      scrapedAt:new Date().toISOString(),error:null,srStatus:'',dealer:(_offFacts && _dealerOf(_offFacts)) || '',
       complaint:'',assetVin:'',unitNumber:'',..._stg,
       statusText:estComments,estimateComments:estComments,offsiteText};
+    if (_xf.enabled) { _out.offsiteFacts = _offFacts; _out.dealerCode = _dealerCodeOf(_offFacts); }
+    return _out;
   }
 
   let srNum='',caseNum='',caseUrl='',estUrl='';
@@ -526,9 +576,14 @@ async function enrichVolvoAsist(srUrl){
   // mirrored to the SR Responses thread) were lost. Non-fatal: on failure we
   // fall back to the SR status thread exactly as before.
   let estimateComments = '';
+  let _offFacts = null;
   if (estUrl) {
     // API-FIRST: Decisiv's JSON activity_logs endpoint for this estimate.
-    try { estimateComments = (await _estimateCommentsViaApi(estUrl)).trim(); } catch (_) {}
+    try {
+      const _notes = await _estimateNotesViaApi(estUrl, { allPages: _xf.enabled });
+      estimateComments = _notes.text.trim();
+      if (_xf.enabled) _offFacts = _offsiteFactsOf(_notes);
+    } catch (_) {}
     if (!estimateComments) {
       try {
         // Fallback: Notes-tab-aware DOM scrape (waits for the lazy-loaded Notes
@@ -564,10 +619,12 @@ async function enrichVolvoAsist(srUrl){
   let _pageStage = sr.offsiteStage || '';
   let _pageConf = sr.offsiteStageConfidence || '';
   if (!_pageStage && _stageReady(statusText)) { _pageStage = 'ready'; _pageConf = 'text-fallback'; }
-  const _stg = _stageFields(estUrl ? await _caseStatusViaApi(estUrl) : null, _pageStage, _pageConf);
+  const _stg = _stageFields(estUrl ? await _caseStatusViaApi(estUrl) : null, _pageStage, _pageConf, _xf.enabled);
   logger.info('[ae] DONE | offsiteStage:', _stg.offsiteStage || '(none)', '| stageConf:', _stg.offsiteStageConfidence || '-',
     _stg.offsiteStageDetail ? '| detail: ' + _stg.offsiteStageDetail + ' since ' + _stg.offsiteStageSince : '');
-  return{ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',..._stg,statusText,estimateComments,offsiteText};
+  const _out={ok:true,srUrl,srNumber:srNum,caseNumber:caseNum,caseUrl,estimateUrl:estUrl,bestUrl:bUrl,bestLabel:bLabel,source:src,scrapedAt:new Date().toISOString(),error:null,srStatus:sr.srStatus||'',dealer:sr.dealer||_dealerOf(_offFacts)||'',complaint:sr.complaint||'',assetVin:sr.assetVin||'',unitNumber:sr.unitNumber||'',..._stg,statusText,estimateComments,offsiteText};
+  if (_xf.enabled) { _out.offsiteFacts = _offFacts; _out.dealerCode = _dealerCodeOf(_offFacts); }
+  return _out;
 }
 
 const SOURCE_RANK={estimate:3,case:2,service_request:1,none:0};
@@ -575,4 +632,5 @@ function isUpgrade(es,ns){return(SOURCE_RANK[ns]||0)>(SOURCE_RANK[es]||0);}
 
 // enrichVolvoAsist kept as the name for back-compat with existing callers;
 // enrichAsist is the accurate alias now that it handles Volvo AND PACCAR.
-module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE,openAndScrape,openAndScrapeEstimate};
+module.exports={enrichVolvoAsist,enrichAsist:enrichVolvoAsist,isUpgrade,SOURCE_RANK,SR_RE,openAndScrape,openAndScrapeEstimate,
+  _estimateNotesViaApi,_stageFields};   // exported for tests

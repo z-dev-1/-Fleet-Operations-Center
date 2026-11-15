@@ -16,6 +16,8 @@ const OFFSITE_FIELDS = [
   'offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'savedOffsiteEvent',
   'asistSrUrl', 'asistLabel', 'asistSource', 'asistNotes', 'asistScrapedAt',
   'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'dealerName',
+  // relay-extract §12.1: offsite fact block, stage history and dealer ids belong to the offsite too.
+  'offsiteFacts', 'offsiteStageHistory', 'dealerCode', 'decisivDealerId',
 ];
 
 function offsiteUrlOf(row) {

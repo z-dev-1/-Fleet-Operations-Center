@@ -287,7 +287,31 @@ async function getActivityLogs(estimateId, opts = {}) {
   const page = opts.page || 1;
   const perPage = opts.perPage || 50;
   const path = `/mobilecomm/api/estimates/${encodeURIComponent(id)}/activity_logs?page=${page}&per_page=${perPage}`;
-  return _apiGet(origin, path, _caseUrl(origin, id, opts));
+  return _get(origin, path, _caseUrl(origin, id, opts));
+}
+
+// Test seam: replaces the windowed GET for getActivityLogs / getEstimateDetail.
+let _apiGetForTest = null;
+function _get(origin, path, landingUrl) { return (_apiGetForTest || _apiGet)(origin, path, landingUrl); }
+function _setApiGetForTest(fn) { _apiGetForTest = typeof fn === 'function' ? fn : null; }
+
+/**
+ * getEstimateDetail(estimateId, opts) -> { ok, estimate } | { ok:false }.
+ * GET /mobilecomm/api/estimates/{id}.json (dealer {id,name}, asset). Never throws.
+ * (/fleet/estimates/{id}.json answers 500 and is not used.)
+ */
+async function getEstimateDetail(estimateId, opts = {}) {
+  try {
+    const id = String(estimateId || '').trim();
+    if (!id) return { ok: false };
+    const origin = originFor(opts.host || opts.vendor || opts.srUrl || DEFAULT_HOST);
+    const j = await _get(origin, '/mobilecomm/api/estimates/' + encodeURIComponent(id) + '.json', _caseUrl(origin, id, opts));
+    const estimate = j && j.estimate && typeof j.estimate === 'object' ? j.estimate : null;
+    return estimate ? { ok: true, estimate } : { ok: false };
+  } catch (e) {
+    logger.warn('[decisiv-api] estimate detail failed estimate=' + estimateId + ': ' + (e.code || 'error'));
+    return { ok: false };
+  }
 }
 
 /** Estimate contacts (dealer + Amazon) — supporting endpoint, read-only. */
@@ -323,7 +347,7 @@ function _noteDate(n) {
  * in the SAME shape asist_enrich.js's estimateComments/offsiteText produce, so
  * this is a drop-in replacement for the Notes DOM scrape.
  *
- * Newest-last (chronological) to match how the scraped thread reads. Skips
+ * Lines keep the input order; the live API serves notes newest-first. Skips
  * purely system/platform-generated bookkeeping notes when opts.includeSystem is
  * falsy (default), so the timeline shows real dealer<->us messages.
  * Returns { text, count, newest } .
@@ -356,13 +380,45 @@ function formatActivityLogs(json, opts = {}) {
  * Convenience wrapper: fetch + format in one call, matching the field the
  * enricher wants (estimateComments). Never throws — returns { ok:false, error }
  * so the caller can fall back to the DOM scrape.
+ *
+ * opts.allPages (relay-extract §11.2): also reads pages 2..4 (50 per page, stops
+ * on a short page or at total_count) and returns rawNotes (all pages, served
+ * order, deduped by id), total, pages, partial. text/count/newest still come from
+ * page 1 only, so they are byte-identical to allPages:false.
  */
+const ACTIVITY_MAX_PAGES = 4;
+const ACTIVITY_PER_PAGE = 50;
+function _notesOf(json) { return (json && Array.isArray(json.notes)) ? json.notes : (Array.isArray(json) ? json : []); }
 async function getEstimateComments(estimateId, opts = {}) {
   try {
     const raw = await getActivityLogs(estimateId, opts);
     const { text, count, newest } = formatActivityLogs(raw, opts);
     logger.info('[decisiv-api] activity_logs estimate=' + estimateId + ' notes=' + count);
-    return { ok: true, text, count, newest, raw };
+    if (!opts.allPages) return { ok: true, text, count, newest, raw };
+    const rawNotes = [];
+    const seen = new Set();
+    const add = (list) => { for (const n of list) { if (!n) continue; const k = n.id != null ? String(n.id) : null; if (k && seen.has(k)) continue; if (k) seen.add(k); rawNotes.push(n); } };
+    const p1 = _notesOf(raw);
+    add(p1);
+    const total = Number.isFinite(Number(raw && raw.total_count)) ? Number(raw.total_count) : null;
+    let pages = 1;
+    let partial = false;
+    let last = p1.length;
+    while (pages < ACTIVITY_MAX_PAGES && last >= ACTIVITY_PER_PAGE && !(total != null && rawNotes.length >= total)) {
+      const page = pages + 1;
+      try {
+        const j = await getActivityLogs(estimateId, Object.assign({}, opts, { page, perPage: ACTIVITY_PER_PAGE }));
+        const list = _notesOf(j);
+        add(list);
+        last = list.length;
+        pages = page;
+      } catch (e) {
+        partial = true;
+        logger.warn('[decisiv-api] activity_logs page ' + page + ' failed estimate=' + estimateId + ': ' + (e.code || 'error'));
+        break;
+      }
+    }
+    return { ok: true, text, count, newest, raw, rawNotes, total, pages, partial };
   } catch (e) {
     logger.warn('[decisiv-api] getEstimateComments failed estimate=' + estimateId + ': ' + e.message);
     return { ok: false, error: e.message, code: e.code || 'DECISIV_API_ERROR', text: '', count: 0 };
@@ -480,11 +536,11 @@ async function withWindow(urlOrVendor, fn) {
 
 module.exports = {
   HOSTS, originFor,
-  getActivityLogs, getEstimateContacts, getEstimateComments,
+  getActivityLogs, getEstimateContacts, getEstimateComments, getEstimateDetail,
   apiGet, withWindow,
   getCaseStatus, summarizeCaseStatus, getCaseStatusSummary, STAGES,
   formatActivityLogs,
   dispose,
   // exported for tests
-  _plain, _noteDate, _landingUrl, _caseUrl,
+  _plain, _noteDate, _landingUrl, _caseUrl, _setApiGetForTest,
 };

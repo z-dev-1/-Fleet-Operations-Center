@@ -24,7 +24,8 @@ const GAP_MS = 6 * 3600 * 1000;
 
 // Fields deep-scan updates on its in-memory rows (offsite enrich + case stage).
 const DS_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince',
-  'asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl'];
+  'asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl',
+  'offsiteFacts', 'offsiteStageHistory'];
 
 /**
  * overlayDeepScanFields(liveRows, scannedRows) -> number of rows updated.
@@ -36,14 +37,19 @@ const DS_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince',
 // what's already stored. FIX (2026-10-28): deep-scan works on rows loaded
 // before it started; a stage refresh that saved "322504 = no status" was then
 // overwritten by the deep-scan's stale in-memory "ready". Newer read wins.
-const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl'];
-const STAGE_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt'];
+// relay-extract §12.1: the offsite fact block travels with the notes, the stage
+// history with the stage trio.
+const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl', 'offsiteFacts'];
+const STAGE_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'offsiteStageHistory'];
 const _t = (v) => { const n = v ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : 0; };
 
 function overlayDeepScanFields(liveRows, scannedRows) {
   if (!Array.isArray(liveRows) || !Array.isArray(scannedRows) || !scannedRows.length) return 0;
   const byId = new Map();
   for (const s of scannedRows) if (s && s.equipmentId) byId.set(String(s.equipmentId), s);
+  // relay-extract §12.3 #7: read once; every matched row gets its fact mirrors recomputed.
+  let xf = null; let woFacts = null;
+  try { xf = require('../config/perf-flags').loadExtract(); if (xf.enabled) woFacts = require('../repair-intel/wo-facts'); } catch (_) { woFacts = null; }
   let n = 0;
   for (const r of liveRows) {
     const s = r && byId.get(String(r.equipmentId));
@@ -57,9 +63,16 @@ function overlayDeepScanFields(liveRows, scannedRows) {
     // Stage trio (incl. an API "no status" answer = empty stage): newer
     // _stageReadAt wins, copied together so stage/detail/since never mix.
     if (_t(s._stageReadAt) > _t(r._stageReadAt)) {
-      for (const k of STAGE_FIELDS) if ((s[k] == null ? '' : s[k]) !== (r[k] == null ? '' : r[k])) { r[k] = s[k] == null ? '' : s[k]; touched = true; }
+      for (const k of STAGE_FIELDS) {
+        if (k === 'offsiteStageHistory') {   // arrays: only a scanned array, compared by value
+          if (Array.isArray(s[k]) && JSON.stringify(s[k]) !== JSON.stringify(r[k])) { r[k] = s[k]; touched = true; }
+          continue;
+        }
+        if ((s[k] == null ? '' : s[k]) !== (r[k] == null ? '' : r[k])) { r[k] = s[k] == null ? '' : s[k]; touched = true; }
+      }
     }
     if (touched) n++;
+    if (woFacts) woFacts.refreshRowFacts(r, xf);
   }
   return n;
 }

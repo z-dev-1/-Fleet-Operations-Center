@@ -47,6 +47,10 @@ function stageTargets(rows) {
  * results: [{ equipmentId, wrId, stage, status, since }]. Only applied when the
  * row's offsite still belongs to the same WR it was read for.
  */
+// results[].history (extraction on only, relay-extract §11.1): the case status
+// history, written sorted by `at` (last 80) as offsiteStageHistory; a history-only
+// change counts the row as changed.
+const _histAt = (h) => { const t = Date.parse(h && h.at); return Number.isFinite(t) ? t : 0; };
 function applyStages(rows, results, readAtIso) {
   const byId = new Map((results || []).map((x) => [String(x.equipmentId), x]));
   const readAt = readAtIso || new Date().toISOString();
@@ -56,12 +60,18 @@ function applyStages(rows, results, readAtIso) {
     if (!x || String(r._offsiteWrId || '') !== String(x.wrId || '')) continue;
     // Stamp the read time every time (so an older copy can't overwrite it).
     r._stageReadAt = readAt;
+    let changed = false;
     if (r.offsiteStage !== x.stage || r.offsiteStageDetail !== (x.status || '') || r.offsiteStageSince !== (x.since || '')) {
       r.offsiteStage = x.stage;
       r.offsiteStageDetail = x.status || '';
       r.offsiteStageSince = x.since || '';
-      n++;
+      changed = true;
     }
+    if (Array.isArray(x.history)) {
+      const h = x.history.slice().sort((a, b) => _histAt(a) - _histAt(b)).slice(-80);
+      if (JSON.stringify(h) !== JSON.stringify(r.offsiteStageHistory)) { r.offsiteStageHistory = h; changed = true; }
+    }
+    if (changed) n++;
   }
   return n;
 }
@@ -87,6 +97,8 @@ async function refreshStages(opts = {}) {
     const decisiv = deps.decisiv || require('../scrapers/decisiv_api');
     const readyNotify = deps.readyNotify || require('../scrapers/ready_pickup_notify');
     const runCanonical = deps.runCanonicalPass || require('./canonical_runner').requestCanonicalPass;
+    let xf = { enabled: false };
+    try { xf = (deps.loadExtract || require('../config/perf-flags').loadExtract)() || { enabled: false }; } catch (_) { xf = { enabled: false }; }
 
     const startRows = ((store.load('fleetData', {}) || {}).rows) || [];
     const targets = stageTargets(startRows);
@@ -98,8 +110,11 @@ async function refreshStages(opts = {}) {
     for (const t of targets) {
       const s = await decisiv.getCaseStatusSummary(t.estId, { srUrl: t.url });
       // s.empty = dealer never set a status: clears any old guessed stage.
-      if (s && s.ok) results.push({ equipmentId: t.equipmentId, wrId: t.wrId, stage: s.stage || '', status: s.empty ? NO_STATUS : s.status, since: s.since || '' });
-      else failed++;
+      if (s && s.ok) {
+        const res = { equipmentId: t.equipmentId, wrId: t.wrId, stage: s.stage || '', status: s.empty ? NO_STATUS : s.status, since: s.since || '' };
+        if (xf.enabled) res.history = Array.isArray(s.history) ? s.history : [];
+        results.push(res);
+      } else failed++;
     }
 
     // Apply onto the LIVE stored rows (re-read: other writers may have saved
@@ -107,6 +122,12 @@ async function refreshStages(opts = {}) {
     const fd = store.load('fleetData', {}) || {};
     const rows = Array.isArray(fd.rows) ? fd.rows : [];
     const changed = applyStages(rows, results, new Date(deps.now ? deps.now() : Date.now()).toISOString());
+    // relay-extract §12.3 #10: the canonical pass below passes no scannedRows, so
+    // the dwell-derived mirrors are recomputed here, before the save.
+    if (xf.enabled) {
+      try { (deps.woFacts || require('../repair-intel/wo-facts')).refreshFleetFacts(rows, xf); }
+      catch (e) { log.warn('[stage-refresh] fact refresh skipped (non-fatal): ' + e.message); }
+    }
     if (results.length) {           // save the read stamps even when nothing changed
       store.save('fleetData', fd);
       if (opts.ctx) opts.ctx.lastData = fd;

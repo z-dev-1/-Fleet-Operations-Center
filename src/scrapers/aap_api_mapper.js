@@ -144,9 +144,62 @@ function _isoToPmRaw(iso, monthOnly) {
     ? (_PM_MONTHS[mo] + ' ' + y)              // "Feb 2027"
     : (_PM_MONTHS[mo] + ' ' + d + ', ' + y);  // "Sep 11, 2026"
 }
-function pmDueFields(assetFull) {
+// relay-extract §10: every maintenance type gets a raw key (opts.all); unknown
+// types are kept in pmSchedule[] only. STATE is accepted as an alias of STATE_DOT.
+const PM_TYPE_KEY = { PM_A: 'pmADue', PM_B: 'pmBDue', PM_X: 'pmXDue', DOT: 'dotDue', QUARTERLY_LIFT: 'quarterlyLiftDue',
+  SEMIANNUAL_LIFT: 'semiannualLiftDue', WASH: 'washDue', APU: 'apuDue', SVR: 'svrDue', STATE_DOT: 'stateInspDue',
+  STATE: 'stateInspDue', R360_HANDOFF_INSPECTION: 'r360Due' };
+function pmTypeKey(type) { return PM_TYPE_KEY[String(type || '').toUpperCase()] || null; }
+function _pmEndOfDay(iso) {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const t = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999).getTime();
+  return Number.isNaN(t) ? null : t;
+}
+function _pmScheduleEntry(s, type, now) {
+  const due = s.nextDueDate || null;
+  const end = due ? _pmEndOfDay(due) : null;
+  const ue = Array.isArray(s.usageEventList) ? s.usageEventList.find((u) => u && Number.isFinite(Number(u.usagePercentage))) : null;
+  const lse = s.lastServiceEvent && typeof s.lastServiceEvent === 'object' ? s.lastServiceEvent : null;
+  return {
+    type,
+    label: s.maintenanceTypeDisplay || (lse && lse.maintenanceTypeDisplay) || type,
+    nextDueIso: due,
+    displayFormat: s.dueDateDisplayFormat || null,
+    overdueDays: (end != null && now > end) ? Math.floor((now - end) / 864e5) : null,
+    interval: s.nextIntervalDue != null ? s.nextIntervalDue : null,
+    lastCompletedIso: s.lastCompletedDate != null ? s.lastCompletedDate : null,
+    lastVendor: (lse && lse.vendor) || null,
+    status: s.statusDisplay || null,
+    usagePct: ue ? Math.round(Number(ue.usagePercentage)) : null,
+  };
+}
+function _pmDueAll(statuses, opts) {
+  const out = { pmBDue: null, pmXDue: null, dotDue: null, quarterlyLiftDue: null };
+  for (const k of Object.values(PM_TYPE_KEY)) if (!(k in out)) out[k] = null;
+  out.pmSchedule = [];
+  if (!Array.isArray(statuses)) return out;
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  for (const s of statuses) {
+    if (!s || typeof s !== 'object') continue;
+    const type = String(s.maintenanceType || '').toUpperCase();
+    if (!type) continue;
+    const key = PM_TYPE_KEY[type];
+    if (key && s.nextDueDate) {
+      const monthOnly = String(s.dueDateDisplayFormat || '').toUpperCase() === 'MONTH_AND_YEAR';
+      const raw = _isoToPmRaw(s.nextDueDate, monthOnly);
+      if (raw) out[key] = raw;
+    }
+    out.pmSchedule.push(_pmScheduleEntry(s, type, now));
+  }
+  out.pmSchedule.sort((a, b) => (a.nextDueIso ? 0 : 1) - (b.nextDueIso ? 0 : 1)
+    || (a.nextDueIso && b.nextDueIso ? (a.nextDueIso < b.nextDueIso ? -1 : a.nextDueIso > b.nextDueIso ? 1 : 0) : 0));
+  return out;
+}
+function pmDueFields(assetFull, opts) {
   const statuses = (assetFull && (assetFull.asset && assetFull.asset.maintenanceScheduleStatuses
     || assetFull.maintenanceScheduleStatuses)) || [];
+  if (opts && opts.all) return _pmDueAll(statuses, opts);
   const out = { pmBDue: null, pmXDue: null, dotDue: null, quarterlyLiftDue: null };
   if (!Array.isArray(statuses)) return out;
   const KEY = { PM_B: 'pmBDue', PM_X: 'pmXDue', DOT: 'dotDue', QUARTERLY_LIFT: 'quarterlyLiftDue' };
@@ -327,7 +380,38 @@ function assetDetailFields(full) {
 // detail with comments) into the app's fleet-row field names. This mirrors the
 // field set relay.js/mergeRelayIntoRows produces so the renderer + downstream
 // merges (Uptake, offsite) see a familiar row.
-function toFleetRow(wo, assetSummary, serviceDetail) {
+// relay-extract §9.1: '$24,804.13' string form, like DOM-era rows (aap_wo_scraper).
+function _usd(n) { return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+// relay-extract §9.1 fills, only with extra.extract.enabled and a service detail.
+// The modules are pure and required lazily (wo-extract requires this mapper lazily).
+function _extractFills(wo, serviceDetail, extra) {
+  const woExtract = require('../repair-intel/wo-extract');
+  const woFacts = require('../repair-intel/wo-facts');
+  const D = require('../repair-intel/wo-extract-dates');
+  const { buildSalesforceUrl } = require('../utils/salesforce-url');
+  const wr = (serviceDetail && serviceDetail.workRequest) || {};
+  const now = Number.isFinite(extra.now) ? extra.now : Date.now();
+  const rf = woExtract.extractRelay(serviceDetail, { history: extra.history || null, vendor: wo.vendor,
+    vendorWorkOrderIds: wo.vendorWorkOrderIds || [], now, collect: collectAllComments });
+  const fsOnly = woFacts.buildFactSet({ relayFacts: rf, created: _epochToIso(wo.scheduledDateTime) }, { today: D.ymd(now) });
+  return {
+    createdBy:         wr.createdBy || '',
+    needBy:            _epochToIso(wr.needByDateTime),
+    alternativeId:     wr.alternateUniqueId || '',
+    relayFacts:        rf,
+    relayFactsWr:      wo.workRequestId || wo.id || '',
+    cause:             woFacts.joinLines(fsOnly.cause),
+    correction:        woFacts.joinLines(fsOnly.correction),
+    totalCost:         fsOnly.estimate.approvedTotal != null ? _usd(fsOnly.estimate.approvedTotal) : '',
+    salesforceCase:    fsOnly.caseIds.salesforce || '',
+    salesforceCaseUrl: fsOnly.caseIds.salesforce ? buildSalesforceUrl(fsOnly.caseIds.salesforce) : '',
+  };
+}
+
+// extra = { extract: {enabled}, history, now } (relay-extract §9.1). Callers that
+// pass 3 arguments (or extract disabled) get exactly the 3-argument output.
+function toFleetRow(wo, assetSummary, serviceDetail, extra = {}) {
   const aSum = (assetSummary && assetSummary.asset) || {};
   const loc  = (wo && wo.latestLocation) || (assetSummary && assetSummary.latestLocation) || {};
 
@@ -365,7 +449,7 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
 
   const downStart = wo.actualStartDateTime || wo.expectedStartDateTime || wo.scheduledDateTime;
 
-  return {
+  const out = {
     // identity / AAP-native
     equipmentId:     wo.assetDisplayName || aSum.displayName || '',
     assetId:         wo.aaid || aSum.aaid || '',
@@ -441,6 +525,8 @@ function toFleetRow(wo, assetSummary, serviceDetail) {
     // now, so any row that carries a vendor / issue / WR id is "relay-synced".
     relaySynced:     !!(mapVendor(wo.vendor) || wo.damageDescription || wo.workRequestId || wo.id),
   };
+  if (extra && extra.extract && extra.extract.enabled && serviceDetail) Object.assign(out, _extractFills(wo, serviceDetail, extra));
+  return out;
 }
 
 // Map ONE work-order aggregate into the lightweight "secondary WR card" shape
@@ -491,6 +577,8 @@ module.exports = {
   toSecondaryWR,
   woStatus,
   pmDueFields,
+  pmTypeKey,
+  _usd,
   extractOffsiteFromComments,
   collectAllComments,
   commentsToTimeline,

@@ -791,8 +791,11 @@ function extractDecisivNotes(rawNotes, opts = {}) {
         raw: c.name, role: c.jobRole || null, location: c.location || undefined, side: c.side,
       });
     }
-    if (n.side === 'dealer' && n.location && !seenLoc.has(n.location)) {
-      seenLoc.add(n.location);
+    // One location fact per episode: a dealer first seen in a prior episode must
+    // still yield a current-episode fact (dealerOf / dealerModel skip prior facts).
+    const locKey = (episode || 'current') + '|' + n.location;
+    if (n.side === 'dealer' && n.location && !seenLoc.has(locKey)) {
+      seenLoc.add(locKey);
       _sf(ctx, 'dealer', n.location, Object.assign({}, prov, { via: 'location' }), 'from.location', n.location, { via: 'location' });
     }
   }

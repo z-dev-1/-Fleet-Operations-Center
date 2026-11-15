@@ -859,8 +859,17 @@ const _resolvedLastUpdated = {};
 // comments. The deep Volvo-ASIST page enrichment (asistNotes/asistSrUrl, the
 // 8000-char dealer-page text) is NOT available via API — those are left blank
 // here and the DOM fallback still fills them when needed.
+// relay-extract §9.1: with extraction on, getWorkOrderDetailViaApi also returns the
+// Relay fact block and the structured fills; they ride along in the cache entry.
+// Flag off the API result has no relayFacts key, so the entry keeps today's keys.
+const _API_FACT_KEYS = ['relayFacts', 'relayFactsWr', 'cause', 'correction', 'totalCost', 'salesforceCase', 'salesforceCaseUrl'];
 function _relayCacheFromApi(api) {
   if (!api || api.noWO || api.error) return null;
+  const entry = _relayCacheFromApiBase(api);
+  if ('relayFacts' in api) for (const k of _API_FACT_KEYS) if (k in api) entry[k] = api[k];
+  return entry;
+}
+function _relayCacheFromApiBase(api) {
   return {
     vendor:              api.vendor || '',
     serviceState:        api.serviceState || '',
@@ -1254,6 +1263,14 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
             _serviceUUID:        serviceUUID,
             _lastUpdated:        (_resolvedLastUpdated[equipmentId] || ''),
             _cachedAt:           Date.now(),
+            // relay-extract §9.3/§11: offsite facts, stage history and the dealer
+            // from the enrich result even when no source upgrade happened.
+            ...(_extractFlags().enabled ? {
+              dealerName:          (_finalOffsite && _finalOffsite.dealerName) || (_asistEnrich && _asistEnrich.dealer) || '',
+              dealerCode:          (_asistEnrich && _asistEnrich.dealerCode) || '',
+              offsiteFacts:        (_asistEnrich && _asistEnrich.offsiteFacts) || null,
+              offsiteStageHistory: (_asistEnrich && Array.isArray(_asistEnrich.offsiteStageHistory)) ? _asistEnrich.offsiteStageHistory : [],
+            } : {}),
           });
 
         } catch (e) {
@@ -1530,8 +1547,7 @@ function _parsePMDates(row) {
 // Pick the offsite notes (asistNotes + asistScrapedAt) from whichever source
 // was fetched more recently. Undated text loses to dated text; if neither is
 // dated, the relay cache wins (previous behavior).
-function _newerOffsite(cacheEntry, row) {
-  const c = cacheEntry || {}, w = row || {};
+function _offsiteUseRow(c, w) {
   const ct = c.asistScrapedAt ? new Date(c.asistScrapedAt).getTime() : NaN;
   const wt = w.asistScrapedAt ? new Date(w.asistScrapedAt).getTime() : NaN;
   const cText = c.asistNotes || '', wText = w.asistNotes || '';
@@ -1542,6 +1558,12 @@ function _newerOffsite(cacheEntry, row) {
   else useRow = !cText;
   if (useRow && !wText) useRow = false; // never trade real text for nothing
   if (!useRow && !cText && wText) useRow = true;
+  return useRow;
+}
+function _newerOffsite(cacheEntry, row) {
+  const c = cacheEntry || {}, w = row || {};
+  const cText = c.asistNotes || '', wText = w.asistNotes || '';
+  const useRow = _offsiteUseRow(c, w);
   return useRow
     ? { asistNotes: wText, asistScrapedAt: w.asistScrapedAt || c.asistScrapedAt || '' }
     : { asistNotes: cText, asistScrapedAt: c.asistScrapedAt || w.asistScrapedAt || '' };
@@ -1561,9 +1583,52 @@ function _newerConversation(cacheEntry, row) {
   return cText;
 }
 
+function _extractFlags() {
+  try { return require('../config/perf-flags').loadExtract(); } catch (_) { return { enabled: false, aiOutput: false }; }
+}
+function _isFactBlock(b) { return !!b && typeof b === 'object' && b.v === 2 && Array.isArray(b.facts); }
+function _estimateIdOf(url) { const m = /\/fleet\/estimates\/([A-Za-z0-9_-]+)/i.exec(String(url || '')); return m ? m[1] : ''; }
+// Which side the stage-trio selector in mergeRelayIntoRows takes (same conditions, same order).
+function _stageSide(r, row) {
+  if (row._stageReadAt && Date.parse(row._stageReadAt) > Date.parse(r._stageReadAt || 0)) return 'row';
+  if (r.offsiteStageConfidence === 'api' && !r.offsiteStage) return 'cache';
+  if (r.offsiteStageSince || !row.offsiteStageSince) return 'either';
+  return 'row';
+}
+// relay-extract §12.3 #1 (extraction on only): WR-guarded relayFacts, offsite facts
+// from the same side as asistNotes, stage history with the stage trio, subVendor
+// without the geofence fallback; refreshRowFacts then derives fills and mirrors.
+function _mergeFacts(out, r, row, xf, woFacts) {
+  if (_isFactBlock(r.relayFacts) && r.relayFactsWr && r.relayFactsWr === row.workRequestId) {
+    out.relayFacts = r.relayFacts;
+    out.relayFactsWr = r.relayFactsWr;
+  }
+  // Offsite facts: same side as asistNotes; the other side's block survives only
+  // for the estimate the row's current offsite URL points at (a DOM-only refresh
+  // never erases API facts, and never resurrects another estimate's facts).
+  const useRow = _offsiteUseRow(r, row);
+  const mine = useRow ? row.offsiteFacts : r.offsiteFacts;
+  const other = useRow ? r.offsiteFacts : row.offsiteFacts;
+  const curEst = _estimateIdOf(out.offsiteShopEventUrl);
+  let of = null;
+  if (_isFactBlock(mine)) of = mine;
+  else if (_isFactBlock(other) && other.estimateId && curEst && String(other.estimateId) === curEst) of = other;
+  else if (_isFactBlock(row.offsiteFacts) && !row.offsiteFacts.estimateId) of = row.offsiteFacts;   // non-Decisiv (DTNA) block
+  if (of) out.offsiteFacts = of; else if ('offsiteFacts' in out) delete out.offsiteFacts;
+  const side = _stageSide(r, row);
+  const rh = Array.isArray(r.offsiteStageHistory) ? r.offsiteStageHistory : null;
+  const wh = Array.isArray(row.offsiteStageHistory) ? row.offsiteStageHistory : null;
+  const hist = side === 'row' ? wh : side === 'cache' ? (rh || wh) : ((rh && rh.length) ? rh : (wh || rh));
+  if (hist) out.offsiteStageHistory = hist;
+  out.subVendor = r.dealerName || row.dealerName || '';
+  return woFacts.refreshRowFacts(out, xf);
+}
+
 function mergeRelayIntoRows(aapRows, relayData, notesStore) {
   const relay = relayData || {};
   const notes = notesStore || {};
+  const _xf = _extractFlags();   // read once per call
+  const _woFacts = _xf.enabled ? require('../repair-intel/wo-facts') : null;
 
   return (aapRows || []).map(row => {
     const r  = relay[row.equipmentId] || {};
@@ -1588,7 +1653,7 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
     const _openWR = (parseInt(row.openUnplanned, 10) || 0) + (parseInt(row.openPlanned, 10) || 0);
     const _activeNoWR = _isInService && _openWR === 0 && !r.serviceUrl && !r.workRequestId;
 
-    return {
+    const out = {
       ...row,
 
       // PM date pills (parsed from raw dueDate string)
@@ -1715,10 +1780,11 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       _plannedWRData:   r._plannedWRData   || row._plannedWRData || null,
       _secondaryWRs:    r._secondaryWRs    || row._secondaryWRs  || null,
     };
+    return _woFacts ? _mergeFacts(out, r, row, _xf, _woFacts) : out;
   });
 }
 
-module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation, _newerOffsite, _newerConversation,
+module.exports = { scrapeRelay, mergeRelayIntoRows, scrapeUnitPage, pickOffsiteFromConversation, _newerOffsite, _newerConversation, _relayCacheFromApi,
   // Exposed so the API path (src/scrapers/aap_api.js) can reuse the exact same
   // PM date formatter for its pills (from asset.maintenanceScheduleStatuses).
   parsePMDates: _parsePMDates, formatPmDate: _formatPmDate };

@@ -120,6 +120,15 @@ async function _tickFleet() {
     let rows = ds.rows || [];
     try { const uu = (store.load('uptakeHash', {}).units) || []; if (uu.length) rows = require('../scrapers/uptake').mergeUptakeIntoRows(rows, uu); } catch (_) {}
     try { const ns = store.load('notesStore', {}); rows = require('../scrapers/relay').mergeRelayIntoRows(rows, {}, ns); } catch (_) {}
+    // relay-extract §12.3 #5: same-WR fact blocks from the previous fleetData + mirrors.
+    try {
+      const xf = require('../config/perf-flags').loadExtract();
+      if (xf.enabled) {
+        const woFacts = require('../repair-intel/wo-facts');
+        rows = woFacts.carryFactBlocks(rows, (store.load('fleetData', {}) || {}).rows || []);
+        woFacts.refreshFleetFacts(rows, xf);
+      }
+    } catch (e) { logger.warn('[standby-daemon] fact refresh skipped: ' + e.message); }
     const now = new Date().toISOString();
     const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, scrapedAt: now, syncedAt: now, stale: false, source: 'aap-api-standby' };
     store.save('fleetData', out);              // shared key → auto-published if leader (Stage 9)
