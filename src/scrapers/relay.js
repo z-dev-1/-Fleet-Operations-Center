@@ -1099,8 +1099,7 @@ async function scrapeUnitPage(equipmentId, partition, relayCache) {
                                ? _convData.salesforceLinks[0] : null;
               // Build SF URL in main process using Node Buffer (not renderer btoa which may fail)
               if (convSalesforce && convSalesforce.caseNumber && !convSalesforce.url) {
-                const _sfJson = JSON.stringify({"componentDef":"forceSearch:searchPageDesktop","attributes":{"term":convSalesforce.caseNumber,"scopeMap":{"type":"TOP_RESULTS"},"context":{"FILTERS":{},"disableIntentQuery":false,"disableSpellCorrection":false},"groupId":"DEFAULT"},"state":{}});
-                convSalesforce.url = 'https://amazonfreightpartner.lightning.force.com/one/one.app#' + Buffer.from(_sfJson).toString('base64');
+                convSalesforce.url = require('../utils/salesforce-url').buildSalesforceUrl(convSalesforce.caseNumber);
               }
               if (convOffsite)    logger.info('[Relay] Phase3 offsite for',    equipmentId, '|', convOffsite.url ? convOffsite.url.slice(0,80) : '(no url)');
               if (convSalesforce) logger.info('[Relay] Phase3 salesforce for', equipmentId, '|', convSalesforce.caseNumber, '| urlType:', typeof convSalesforce.url, '| urlLen:', convSalesforce.url ? convSalesforce.url.length : 0, '| url:', convSalesforce.url ? convSalesforce.url.slice(0,80) : '(no url)');

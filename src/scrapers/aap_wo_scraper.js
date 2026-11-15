@@ -71,21 +71,9 @@ function buildWRUrl(serviceUUID) {
   return AAP_SERVICE_BASE + serviceUUID;
 }
 
-// Salesforce: build deep-link URL from case number (same logic as relay.js Phase 3)
+// Salesforce: build deep-link URL from case number (shared pure builder)
 function buildSalesforceUrl(caseNumber) {
-  if (!caseNumber) return '';
-  const sfJson = JSON.stringify({
-    componentDef: 'forceSearch:searchPageDesktop',
-    attributes: {
-      term: caseNumber,
-      scopeMap: { type: 'TOP_RESULTS' },
-      context: { FILTERS: {}, disableIntentQuery: false, disableSpellCorrection: false },
-      groupId: 'DEFAULT'
-    },
-    state: {}
-  });
-  return 'https://amazonfreightpartner.lightning.force.com/one/one.app#' +
-    Buffer.from(sfJson).toString('base64');
+  return require('../utils/salesforce-url').buildSalesforceUrl(caseNumber);
 }
 
 // ── DOM scripts ──────────────────────────────────────────────────────────────

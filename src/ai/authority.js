@@ -46,6 +46,12 @@ const FIELD_AUTHORITY = {
   insights: ['uptake'],
   // Vendor: fleet record then relay-derived.
   vendor: ['fleetdata', 'relaygarage', 'aap'],
+  // Structured extraction (relay-extract): field-specific orders, highest first.
+  dealerName:     ['decisiv', 'paccar', 'offsiteevent', 'relaygarage', 'fleetdata'],
+  repairEtc:      ['decisiv', 'offsiteevent', 'relaygarage/vendor', 'relaygarage', 'notes'],
+  partsEta:       ['decisiv', 'relaygarage/vendor', 'relaygarage', 'notes'],
+  estimateAmount: ['relaygarage/approver', 'decisiv', 'relaygarage/vendor'],
+  salesforceCase: ['relaygarage', 'notes'],
 };
 
 // Freshness rank so, within equal authority, a fresher value wins.

@@ -67,6 +67,12 @@
  *
  *   settings.ai.dbrLookup / FLEET_AI_DBR_LOOKUP '0' | '1'
  *
+ * Structured extraction (default ON; see resolveExtractFlags below; read per call):
+ *
+ *   settings.extract.enabled  / FLEET_EXTRACT           '0' | '1'
+ *   settings.extract.aiOutput / FLEET_EXTRACT_AI_OUTPUT '0' | '1'  (forced off without enabled)
+ *   settings.extract.reviewRounds 0..2 (default 1), settings.extract.reviewMaxPerRun 0..200 (default 200)
+ *
  * Aki AI lane (enabled default ON; only used by the Aki preference modes; see
  * resolveAiAkiFlags below):
  *
@@ -577,6 +583,49 @@ function loadFleetDbr(deps = {}) {
   }
 }
 
+// ── Structured extraction (Relay + offsite facts; default ON) ──────────────
+//   settings.extract.enabled      (!== false, default ON)  / FLEET_EXTRACT            '0'|'1'
+//   settings.extract.aiOutput     (!== false, default ON)  / FLEET_EXTRACT_AI_OUTPUT  '0'|'1'
+//                                                            (alias FLEET_EXTRACT_AIOUTPUT, used only when the primary is unset)
+//   settings.extract.reviewRounds    integer 0..2   (default 1)   — self-review rounds per timeline / trends output
+//   settings.extract.reviewMaxPerRun integer 0..200 (default 200) — self-reviews per deep-scan run (trends: per-call deadline only)
+//   DBR is not governed by reviewRounds / reviewMaxPerRun: it always runs the merged planner's one review round.
+// aiOutput = enabled && aiOutput. Read per call (not memoized). No new store key.
+const EXTRACT_ENV = { enabled: 'FLEET_EXTRACT', aiOutput: 'FLEET_EXTRACT_AI_OUTPUT', aiOutputAlias: 'FLEET_EXTRACT_AIOUTPUT' };
+const EXTRACT_REVIEW_ROUNDS_DEFAULT = 1;
+const EXTRACT_REVIEW_MAX_PER_RUN_DEFAULT = 200;
+
+function resolveExtractFlags(settings, env) {
+  const x = _obj(_obj(settings).extract);
+  let enabled = x.enabled !== false;
+  let ai = x.aiOutput !== false;
+  const e = _envBool(env, EXTRACT_ENV.enabled);
+  if (e !== null) enabled = e;
+  let a = _envBool(env, EXTRACT_ENV.aiOutput);
+  if (a === null) a = _envBool(env, EXTRACT_ENV.aiOutputAlias);
+  if (a !== null) ai = a;
+  return {
+    enabled,
+    aiOutput: enabled && ai,
+    reviewRounds: _intIn(x.reviewRounds, 0, 2, EXTRACT_REVIEW_ROUNDS_DEFAULT),
+    reviewMaxPerRun: _intIn(x.reviewMaxPerRun, 0, 200, EXTRACT_REVIEW_MAX_PER_RUN_DEFAULT),
+  };
+}
+
+function loadExtract(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveExtractFlags(settings, env);
+  } catch (_) {
+    return resolveExtractFlags({}, {});
+  }
+}
+
 // ── Aki AI lane (enabled default ON) ─────────────────────────────────────────
 //   settings.ai.aki.enabled         (!== false)            / FLEET_AI_AKI '0'|'1' (env wins)
 //   settings.ai.aki.allowUntrusted  (=== true, default OFF)
@@ -856,6 +905,7 @@ module.exports = {
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
   resolveFleetDbrFlags, loadFleetDbr, FLEET_DBR_ENV,
+  resolveExtractFlags, loadExtract, EXTRACT_ENV,
   resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,

@@ -250,6 +250,45 @@ function etcKeywordNegated(text, start, end) {
   return NEG_BEFORE_RE.test(t.slice(Math.max(0, start - 40), start)) || NEG_AFTER_RE.test(t.slice(end));
 }
 
+// Explicit repair-completion miss / revision markers (relay-extract Path B). The ONE marker
+// vocabulary for a counted "missed" repair ETC; wo-extract-dates requires it from here.
+// Missed-date capture groups: 1, 2, 3, 5, 8. New-date groups (never the miss): 4, 6, 7.
+const _MISS_D = '(\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?)';
+const REPAIR_MISS_MARKER_RE = new RegExp(
+  '\\b(?:missed\\s+(?:the\\s+)?(?:ETC|ETR)\\b(?:\\s+(?:of|on|for|date\\s+of)\\s+' + _MISS_D + ')?'
+  + '|did\\s+not\\s+(?:complete|finish)\\b(?:[^.\\n]{0,30}?\\b(?:by|on)\\s+' + _MISS_D + ')?'
+  + '|(?:ETC|ETR)\\s+(?:was\\s+)?(?:revised|moved|pushed|changed)\\s+(?:out\\s+)?(?:from\\s+' + _MISS_D + '\\s+)?to\\s+' + _MISS_D
+  + '|revised\\s+(?:ETC|ETR)(?:\\s+from\\s+' + _MISS_D + ')?\\s+to\\s+' + _MISS_D
+  + '|pushed\\s+(?:out\\s+)?to\\s+' + _MISS_D
+  + '|no\\s+longer\\s+(?:expected|on\\s+track)\\s+for\\s+' + _MISS_D + ')',
+  'gid');
+const _MISS_GROUPS = [1, 2, 3, 5, 8];
+const _NEW_GROUPS = [4, 6, 7];
+
+// -> [{ date: 'YYYY-MM-DD'|null, start, end }] for every explicit repair-miss marker in text.
+// date = the cited missed date (must be < today; later or invalid cited dates are dropped);
+// null when the marker cites none (the caller attaches it to the open repair entry).
+// start/end = the cited date's span, else the marker span up to (not including) a new date.
+function explicitRepairMiss(text, today) {
+  const t = _str(text);
+  const out = [];
+  if (!t) return out;
+  for (const m of t.matchAll(REPAIR_MISS_MARKER_RE)) {
+    const g = _MISS_GROUPS.find((k) => m[k] != null);
+    if (g != null) {
+      const dm = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/.exec(m[g]);
+      const date = dm ? inferDate(dm[1], dm[2], dm[3], today) : null;
+      if (!date || !(date < _str(today))) continue;
+      out.push({ date, start: m.indices[g][0], end: m.indices[g][1] });
+      continue;
+    }
+    const n = _NEW_GROUPS.find((k) => m[k] != null);
+    const end = n != null ? m.indices[n][0] : m.index + m[0].length;
+    out.push({ date: null, start: m.index, end: Math.max(m.index, end) });
+  }
+  return out;
+}
+
 // Every positive (non-negated, valid) ETC date in a text, as unpadded 'M/D', de-duplicated in
 // text order. Used by the AI gate's per-unit etcDates (not only the parseEtc winner).
 function etcMentionDates(text, today) {
@@ -694,5 +733,6 @@ module.exports = {
   COLUMNS, EDITABLE_IDS, AI_CELL_IDS, HARD_CELL_IDS, BARRIER_RULES, COMMON_REPAIR_MIN, RECENT_TIMELINE_LINES,
   OEM_VENDOR_RE, ONSITE_VENDOR_RE, EMAIL_RE, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
   isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates, etcKeywordNegated,
+  REPAIR_MISS_MARKER_RE, explicitRepairMiss,
   classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,
 };
