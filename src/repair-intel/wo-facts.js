@@ -221,7 +221,7 @@ function _entry(ev) {
     date: ev.date, kind: ev.kind, chain: ev.chain, labels: [], status: 'open', statedAt: ev.at, lastConfirmedAt: null,
     confirmCount: 1, missedAt: null, metAt: null, arrivedAt: null, reason: null, source: ev.tag, tag: ev.tag,
     factIds: [ev.id], snippet: ev.snippet, tentative: !!ev.tentative, approx: ev.approx || null, explicitMiss: false,
-    explicitAt: null,
+    explicitAt: null, explicitSnippet: null,
   };
   _addLabel(e, _label(ev));
   return e;
@@ -241,12 +241,16 @@ function _runChains(stream, today, reasonOf, onStep) {
     for (let i = ch.length - 1; i >= 0; i--) if (same(ch[i])) { prev = ch[i]; break; }
     const d = ev.day;
     if (ev.type === 'miss') {
+      // A dated marker attaches only to an existing text-chain entry with the cited date. A cited
+      // date never stated on its own (the marker consumes its span) or only in the structured chain
+      // sets no explicitMiss, so the unit counts its current head (future/none). Conservative by
+      // design (plan.md "ETC rule": a marker "attached to" a repair-completion entry).
       let e = null;
       if (ev.date) e = ch.find((x) => x.date === ev.date && same(x)) || ch.find((x) => x.date === ev.date) || null;
       else e = prev;
       if (e && d > e.date) {
         if (e.status === 'open' || e.status === 'superseded') { e.status = 'missed'; e.missedAt = d; }
-        if (ev.repair && isRep) { e.explicitMiss = true; e.explicitAt = ev.at; }
+        if (ev.repair && isRep) { e.explicitMiss = true; e.explicitAt = ev.at; e.explicitSnippet = ev.snippet || null; }
       }
       if (e && e.status === 'missed' && !e.reason) e.reason = reasonOf(ev);
     } else if (ev.type === 'met') {
@@ -433,7 +437,10 @@ function etcModel(facts, opts = {}) {
     explicitMisses: explicit.map((e) => ({ date: e.date, at: e.explicitAt, reason: e.reason || null, source: e.tag })),
     etcMissCount: explicitDates.length,
     counted,
-    _countedEntry: countedEntry ? { source: countedEntry.tag, statedAt: _stated(countedEntry), snippet: countedEntry.snippet } : null,
+    // A missed entry is as fresh as its explicit marker, not its original statement.
+    _countedEntry: !countedEntry ? null : (state === 'missed'
+      ? { source: countedEntry.tag, statedAt: countedEntry.explicitAt || _stated(countedEntry), snippet: countedEntry.explicitSnippet || countedEntry.snippet }
+      : { source: countedEntry.tag, statedAt: _stated(countedEntry), snippet: countedEntry.snippet }),
     conflicts,
   };
 }

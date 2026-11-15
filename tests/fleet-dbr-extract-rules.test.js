@@ -80,10 +80,19 @@ describe('Path B: counted Missed needs an explicit repair-completion marker', ()
     const r = F.parseEtc({ _factsOn: true, _factEtc: fe({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'relaygarage/fas', statedAt: '2026-11-09T15:00:00Z', snippet: 'ETC revised from 11/07 to 11/14' }) }, TODAY);
     expect(r).toMatchObject({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'extracted' });
   });
-  it('an explicit _factEtc miss outranks an older legacy future ETC that does not take over', () => {
+  it('an explicit _factEtc miss outranks an older legacy future ETC that does not take over (deliberate Path-B deviation from §14.6, incl. savedNotes)', () => {
     const r = F.parseEtc({ _factsOn: true, savedNotes: 'ETC 11/14',
       _factEtc: fe({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'relaygarage/fas', statedAt: '2026-11-09T15:00:00Z' }) }, TODAY);
     expect(r).toMatchObject({ state: 'missed', date: '2026-11-07' });
+  });
+  it('ETC 11/07 -> revised to 11/14 -> ETC: N/A: a negated missed _factEtc that takes over stays missed', () => {
+    const r = F.parseEtc({ _factsOn: true, _factEtc: fe({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'relaygarage/fas', statedAt: '2026-11-09T15:00:00Z', snippet: 'ETC revised from 11/07 to 11/14', negated: true }) }, TODAY);
+    expect(r).toMatchObject({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'extracted' });
+  });
+  it('a repairTimeline line older than the explicit marker does not take over the missed _factEtc', () => {
+    const r = F.parseEtc({ _factsOn: true, repairTimeline: '11/08 - FAS: ETC 11/14',
+      _factEtc: fe({ state: 'missed', date: '2026-11-07', explicitMissDate: '2026-11-07', source: 'relaygarage/fas', statedAt: '2026-11-09T15:00:00Z', snippet: 'ETC revised from 11/07 to 11/14' }) }, TODAY);
+    expect(r).toMatchObject({ state: 'missed', date: '2026-11-07', source: 'extracted', snippet: 'ETC revised from 11/07 to 11/14' });
   });
   it('_factEtc.state today -> today', () => {
     expect(F.parseEtc({ _factsOn: true, _factEtc: fe({ state: 'today', date: TODAY, source: 'decisiv', statedAt: '2026-11-10T15:28:00Z' }) }, TODAY).state).toBe('today');

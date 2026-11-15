@@ -363,6 +363,8 @@ function _withFactEtc(res, win, field, r, today) {
   }
   if (take) {
     const snippet = fe.snippet ? _snippet(fe.snippet, 0) : '';
+    // Precedence today > missed > future > none: a newer negation never hides an explicit miss.
+    if (fe.state === 'missed' && fe.date) return { state: 'missed', date: fe.date, source: 'extracted', snippet, explicitMissDate: fe.explicitMissDate || fe.date };
     if (fe.negated || !fe.date) return { state: 'none', date: null, source: 'extracted', snippet };
     const state = ['today', 'missed', 'future', 'none'].includes(fe.state) ? fe.state : _classifyEtc(fe.date, today);
     const out = { state, date: state === 'none' ? null : fe.date, source: 'extracted', snippet };
@@ -374,6 +376,8 @@ function _withFactEtc(res, win, field, r, today) {
     out = Object.assign({}, res, { state: 'none', date: null, missDowngraded: true });
   } else if (res.state !== 'missed' && fe && fe.state === 'missed' && fe.date) {
     // An explicit repair-completion miss outranks a legacy future/none (precedence today > missed).
+    // Deliberate Path-B deviation from design §14.6/AC35: this also applies when the legacy winner
+    // is user-authored savedNotes / canonical* (including a user "No ETC").
     if (res.state !== 'today') {
       out = { state: 'missed', date: fe.date, source: 'extracted', snippet: fe.snippet ? _snippet(fe.snippet, 0) : '', explicitMissDate: fe.explicitMissDate || fe.date };
     }

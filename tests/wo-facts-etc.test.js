@@ -12,6 +12,7 @@ import * as V from './fixtures/extract/relay-vendors.js';
 const require = createRequire(import.meta.url);
 const X = require('../src/repair-intel/wo-extract');
 const F = require('../src/repair-intel/wo-facts');
+const DBR = require('../src/dbr/fleet-dbr');
 
 const NOW = Date.parse('2026-11-11T15:00:00Z');
 const ON = { enabled: true, aiOutput: true };
@@ -126,6 +127,25 @@ describe('explicit Missed needs a repair-miss marker', () => {
   it('only "ETC 11/07" (past, no marker) -> none, no arithmetic miss', () => {
     const etc = fsOf({ relayFacts: relayOf([c('2026-11-05T15:00:00Z', 'fasuser1', 'ETC 11/07')]) }).etc;
     expect(etc.counted.state).toBe('none');
+    expect(etc.etcMissCount).toBe(0);
+  });
+  it('miss then a newer "ETC: N/A" -> still missed in the mirrors and in parseEtc; statedAt = marker time', () => {
+    const rf = relayOf([
+      c('2026-11-05T15:00:00Z', 'fasuser1', 'ETC 11/07'),
+      c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC revised from 11/07 to 11/14'),
+      c('2026-11-10T15:00:00Z', 'fasuser1', 'ETC: N/A'),
+    ]);
+    const row = { equipmentId: 'U3', relayFacts: rf };
+    F.refreshRowFacts(row, ON, '2026-11-11');
+    expect(row.etcMissed).toBe(true);
+    expect(row._factEtc).toMatchObject({ state: 'missed', explicitMissDate: '2026-11-07' });
+    expect(Date.parse(row._factEtc.statedAt)).toBe(Date.parse('2026-11-09T15:00:00Z'));
+    expect(DBR.parseEtc(row, '2026-11-11')).toMatchObject({ state: 'missed', date: '2026-11-07', source: 'extracted' });
+  });
+  it('a revision whose cited date was never stated on its own is not a miss (conservative, pinned)', () => {
+    const etc = fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC revised from 11/07 to 11/14')]) }).etc;
+    expect(etc.explicitMisses).toEqual([]);
+    expect(etc.counted.state).toBe('future');
     expect(etc.etcMissCount).toBe(0);
   });
   it('current head == today with a prior explicit miss -> today', () => {
