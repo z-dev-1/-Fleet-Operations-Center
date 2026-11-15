@@ -73,6 +73,10 @@
  *   settings.extract.aiOutput / FLEET_EXTRACT_AI_OUTPUT '0' | '1'  (forced off without enabled)
  *   settings.extract.reviewRounds 0..2 (default 1), settings.extract.reviewMaxPerRun 0..200 (default 200)
  *
+ * Fleet DBR server SCAC coverage query (default OFF; see resolveDbrServerFilterFlags; read per call):
+ *
+ *   settings.dbr.serverScacFilter / FLEET_DBR_SERVER_SCAC '0' | '1'
+ *
  * Aki AI lane (enabled default ON; only used by the Aki preference modes; see
  * resolveAiAkiFlags below):
  *
@@ -626,6 +630,33 @@ function loadExtract(deps = {}) {
   }
 }
 
+// ── Fleet DBR server-side SCAC coverage query (default OFF) ─────────────────
+//   settings.dbr.serverScacFilter (=== true) / FLEET_DBR_SERVER_SCAC '0'|'1' (env wins)
+// Coverage-only: the DBR rows always come from stored fleet data. Read per build call.
+const DBR_SERVER_FILTER_ENV = { serverScac: 'FLEET_DBR_SERVER_SCAC' };
+
+function resolveDbrServerFilterFlags(settings, env) {
+  const d = _obj(_obj(settings).dbr);
+  let serverScac = d.serverScacFilter === true;
+  const e = _envBool(env, DBR_SERVER_FILTER_ENV.serverScac);
+  if (e !== null) serverScac = e;
+  return { serverScac };
+}
+
+function loadDbrServerFilter(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveDbrServerFilterFlags(settings, env);
+  } catch (_) {
+    return resolveDbrServerFilterFlags({}, {});
+  }
+}
+
 // ── Aki AI lane (enabled default ON) ─────────────────────────────────────────
 //   settings.ai.aki.enabled         (!== false)            / FLEET_AI_AKI '0'|'1' (env wins)
 //   settings.ai.aki.allowUntrusted  (=== true, default OFF)
@@ -906,6 +937,7 @@ module.exports = {
   resolveDbrLookupFlags, loadDbrLookup,
   resolveFleetDbrFlags, loadFleetDbr, FLEET_DBR_ENV,
   resolveExtractFlags, loadExtract, EXTRACT_ENV,
+  resolveDbrServerFilterFlags, loadDbrServerFilter, DBR_SERVER_FILTER_ENV,
   resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,

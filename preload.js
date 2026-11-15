@@ -516,7 +516,7 @@ expose('wbr', {
 expose('fleetDbr', {
   status:     ()  => ipcRenderer.invoke('fleet-dbr:status'),
   get:        ()  => ipcRenderer.invoke('fleet-dbr:get'),
-  build:      ()  => ipcRenderer.invoke('fleet-dbr:build'),
+  build:      (p) => ipcRenderer.invoke('fleet-dbr:build', p),
   draft:      (p) => ipcRenderer.invoke('fleet-dbr:draft', p),
   saveEdit:   (p) => ipcRenderer.invoke('fleet-dbr:save-edit', p),
   resetRow:   (p) => ipcRenderer.invoke('fleet-dbr:reset-row', p),

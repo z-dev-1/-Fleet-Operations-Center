@@ -5,7 +5,9 @@
  *
  *   fleet-dbr:status        ()                    -> { ok, enabled, aiDraft }
  *   fleet-dbr:get           ()                    -> { ok, model | null }   (null = no snapshot today)
- *   fleet-dbr:build         ()                    -> { ok, model, saved } | { ok:false, code:'no-fleet-data' }
+ *   fleet-dbr:build         ({ scacs? })          -> { ok, model, saved, serverCoverage? } | { ok:false, code:'no-fleet-data' }
+ *                                                    serverCoverage only with settings.dbr.serverScacFilter on AND scacs given:
+ *                                                    { ok, sites, serverOpenWos, missingFromFleet (<=20 ids), missingCount } | { ok:false, code, sites }
  *   fleet-dbr:draft         ({ key })             -> { ok, key, cells, sources, flags, disagreements, etcUnits, etcDisagreements,
  *                                                      etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
  *                                                      dropped, rounds, reviewSkipped, mode, draftedAt, saved, model?,
@@ -279,6 +281,96 @@ function _save(name, data) {
 const CTRL_VALUE_RE = /[\u0000-\u0008\u000B-\u001F\u007F]/g; // keeps \t (09) and \n (0A); strips \r
 const CTRL_NAME_RE = /[\u0000-\u001F\u007F]/;
 
+// Synchronous build from stored fleet data (the only source of DBR rows) -> { res, rows }.
+function _buildLocal(f) {
+  const t0 = Date.now();
+  const today = _today();
+  const fleet = _getFleet();
+  const rows = _fleetRows(fleet);
+  if (!rows.length) { log.info('[fleet-dbr] build', { code: 'no-fleet-data' }); return { res: { ok: false, code: 'no-fleet-data' }, rows }; }
+  const built = dbr.buildFleetDbr(rows, { today });
+  const prev = _store().load(SNAP, null);
+  const keys = new Set(built.rows.map((r) => r.key));
+  const drafts = {};
+  if (prev && prev.day === today) {
+    for (const [k, d] of Object.entries(_plain(prev.drafts))) if (keys.has(k)) drafts[k] = d; // stale tagged by hash in applyOverlays
+  }
+  const snap = {
+    version: 1, day: today, builtAt: _now().toISOString(),
+    fleetSyncedAt: (fleet && (fleet.syncedAt || fleet.scrapedAt)) || null,
+    fleetCount: built.fleetCount, downCount: built.downCount,
+    rows: built.rows, conflicts: built.conflicts, drafts,
+  };
+  const saved = _save(SNAP, snap);
+  const model = _model(snap, today, f);
+  log.info('[fleet-dbr] build', { rows: built.rows.length, down: built.downCount, conflicts: built.conflicts.length, ms: Date.now() - t0 });
+  return { res: { ok: true, model, saved }, rows };
+}
+
+// ── Server SCAC coverage (settings.dbr.serverScacFilter, default OFF) ───────
+// build payload { scacs?: string[] } (the panel's selected SCACs). With the flag on and SCACs
+// selected, ONE bounded open-WO search filtered by the selected SCACs' domiciles reports units
+// Relay has open WOs for but fleet data lacks. Attached to the RESPONSE only: the snapshot and
+// the rows never change.
+const MAX_SCACS = 100;
+const MAX_SCAC_CHARS = 40;
+const MAX_MISSING = 20;
+const SERVER_MAX_PAGES = 10;
+function _scacsOf(payload) {
+  const list = payload && typeof payload === 'object' && Array.isArray(payload.scacs) ? payload.scacs : [];
+  const out = new Set();
+  for (const s of list.slice(0, MAX_SCACS)) {
+    if (typeof s === 'string' && s && s.length <= MAX_SCAC_CHARS && !CTRL_NAME_RE.test(s)) out.add(dbr.normCode(s));
+  }
+  return [...out];
+}
+function _serverFlags() {
+  try {
+    const load = _o.loadServerFlags || require('../config/perf-flags').loadDbrServerFilter;
+    return load() || {};
+  } catch (_) { return {}; }
+}
+function _search() {
+  return _o.search || ((req, o) => require('../scrapers/aap_api').searchAllPages(req, o));
+}
+async function _withServerCoverage(res, rows, scacs) {
+  const t0 = Date.now();
+  const sel = new Set(scacs);
+  const sites = new Set();
+  const fleetIds = new Set();
+  for (const r of rows) {
+    const id = String(r.equipmentId == null ? '' : r.equipmentId).trim().toUpperCase();
+    if (id) fleetIds.add(id);
+    if (!sel.has(dbr.normCode(r.operator))) continue;
+    const d = dbr.normCode(r.domicileSite || r.domicile || '');
+    if (d && d !== '(BLANK)') sites.add(d);
+  }
+  const assetDomicileSites = [...sites].sort();
+  if (!assetDomicileSites.length) return Object.assign({}, res, { serverCoverage: { ok: false, code: 'no-sites', sites: [] } });
+  let list;
+  try {
+    list = await _search()({}, { maxPages: SERVER_MAX_PAGES, filters: { assetDomicileSites } });
+  } catch (e) {
+    const code = String((e && e.code) || 'search-failed').slice(0, 40);
+    log.warn('[fleet-dbr] server-scac', { sites: assetDomicileSites.length, code, ms: Date.now() - t0 });
+    return Object.assign({}, res, { serverCoverage: { ok: false, code, sites: assetDomicileSites } });
+  }
+  const wos = Array.isArray(list) ? list.filter((w) => w && typeof w === 'object') : [];
+  const missing = new Set();
+  for (const w of wos) {
+    const id = String(w.assetDisplayName || w.equipmentId || '').trim().toUpperCase();
+    if (id && !fleetIds.has(id)) missing.add(id);
+  }
+  const missingAll = [...missing].sort();
+  log.info('[fleet-dbr] server-scac', { sites: assetDomicileSites.length, serverOpenWos: wos.length, missing: missingAll.length, ms: Date.now() - t0 });
+  return Object.assign({}, res, {
+    serverCoverage: {
+      ok: true, sites: assetDomicileSites, serverOpenWos: wos.length,
+      missingFromFleet: missingAll.slice(0, MAX_MISSING), missingCount: missingAll.length,
+    },
+  });
+}
+
 const handlers = {
   status: guarded('status', () => {
     const f = _flags();
@@ -296,31 +388,14 @@ const handlers = {
     return { ok: true, model: snap ? _model(snap, today, f) : null };
   }),
 
-  build: guarded('build', () => {
+  build: guarded('build', (_e, payload) => {
     const f = _flags();
     if (f.enabled !== true) return OFF;
-    const t0 = Date.now();
-    const today = _today();
-    const fleet = _getFleet();
-    const rows = _fleetRows(fleet);
-    if (!rows.length) { log.info('[fleet-dbr] build', { code: 'no-fleet-data' }); return { ok: false, code: 'no-fleet-data' }; }
-    const built = dbr.buildFleetDbr(rows, { today });
-    const prev = _store().load(SNAP, null);
-    const keys = new Set(built.rows.map((r) => r.key));
-    const drafts = {};
-    if (prev && prev.day === today) {
-      for (const [k, d] of Object.entries(_plain(prev.drafts))) if (keys.has(k)) drafts[k] = d; // stale tagged by hash in applyOverlays
-    }
-    const snap = {
-      version: 1, day: today, builtAt: _now().toISOString(),
-      fleetSyncedAt: (fleet && (fleet.syncedAt || fleet.scrapedAt)) || null,
-      fleetCount: built.fleetCount, downCount: built.downCount,
-      rows: built.rows, conflicts: built.conflicts, drafts,
-    };
-    const saved = _save(SNAP, snap);
-    const model = _model(snap, today, f);
-    log.info('[fleet-dbr] build', { rows: built.rows.length, down: built.downCount, conflicts: built.conflicts.length, ms: Date.now() - t0 });
-    return { ok: true, model, saved };
+    const scacs = _scacsOf(payload);
+    if (!scacs.length || _serverFlags().serverScac !== true) return _buildLocal(f).res;
+    const { res, rows } = _buildLocal(f);
+    if (!res.ok) return res;
+    return _withServerCoverage(res, rows, scacs);
   }),
 
   draft: guarded('draft', async (_e, payload) => {

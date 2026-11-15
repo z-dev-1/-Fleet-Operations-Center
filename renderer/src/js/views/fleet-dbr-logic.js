@@ -94,6 +94,19 @@ const _scacFiltered = (model, scacs) => {
   return rows.filter((r) => r && set.has(String(r.scac)));
 };
 
+// Server-side search filter for the selected SCACs: { assetDomicileSites: sorted unique
+// domiciles of the rows whose SCAC is selected }, or null when no SCAC is selected.
+export function serverFilterFor(model, scacs) {
+  const sel = normalizeScacs(scacs, model);
+  if (!sel.length) return null;
+  const set = new Set();
+  for (const r of _scacFiltered(model, sel)) {
+    const d = r && r.domicile != null ? String(r.domicile) : '';
+    if (d && d !== '(BLANK)') set.add(d);
+  }
+  return { assetDomicileSites: [...set].sort(_sortStr) };
+}
+
 // Rows shown in the table: SCAC filter (empty = all), then hide-zero.
 export function visibleRows(model, hideZero, scacs) {
   const rows = _scacFiltered(model, scacs);

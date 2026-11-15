@@ -304,11 +304,15 @@ function apiPut(path, body)  { return _request('PUT',  path, body); }
 // bare/partial body — it needs the FULL filter schema. We default to the proven
 // DEFAULT_SEARCH_REQUEST captured from the real AAP export (same body the
 // long-dwell CSV fetch uses) and shallow-merge any caller overrides on top.
-function searchServices(searchRequest) {
+// opts.filters: optional server-side filters (aap_search_filters.SEARCH_FILTER_KEYS),
+// merged last only when they carry a value; none -> byte-identical body.
+function _searchBody(searchRequest, filters) {
   let base;
   try { base = require('./aap_longdwell').DEFAULT_SEARCH_REQUEST; } catch (_) { base = {}; }
-  const body = Object.assign({}, base, searchRequest || {});
-  return apiPost('/api/v1/serviceaggregates/search', body);
+  return Object.assign({}, base, searchRequest || {}, require('./aap_search_filters').cleanSearchFilters(filters));
+}
+function searchServices(searchRequest, opts) {
+  return apiPost('/api/v1/serviceaggregates/search', _searchBody(searchRequest, opts && opts.filters));
 }
 
 // Endpoint (inventory, v2): paginated bulk ASSET search — 200K+ assets. NOTE:
@@ -570,7 +574,7 @@ async function searchAllPages(baseRequest, opts = {}) {
   let page = 1;
   for (; page <= maxPages; page++) {
     const req = Object.assign({}, baseRequest, { page });
-    const res = await searchServices(req);
+    const res = await searchServices(req, { filters: opts.filters });
     // Confirmed list key is `serviceAggregates`; keep fallbacks for safety.
     const list = (res && (res.serviceAggregates || res.results || res.content || res.items || res.data)) || [];
     if (!Array.isArray(list) || list.length === 0) break;
@@ -592,7 +596,7 @@ async function buildLongDwellSources(opts = {}) {
   const woStatusStr = _woStatusStr;
   // 1) Work orders — the exact DEFAULT_SEARCH_REQUEST filter the CSV export used
   //    (UNPLANNED, open statuses, UNAVAILABLE, DSP-MMBT/vupAfp, the fleet IDs).
-  const woList = await searchAllPages(opts.searchRequest || {}, { maxPages: opts.maxPages || 50 });
+  const woList = await searchAllPages(opts.searchRequest || {}, { maxPages: opts.maxPages || 50, filters: opts.filters });
   const _epochIso = (ms) => { const n = Number(ms); if (!n || Number.isNaN(n)) return ''; try { return new Date(n).toISOString(); } catch (_) { return ''; } };
   const wrRows = woList.map((w) => {
     const l1 = []; const l2 = [];
@@ -2868,6 +2872,7 @@ module.exports = {
   associateDocument,
   uploadWrAttachments,
   searchServices,
+  _searchBody,                  // exported: search body = defaults + request + cleaned filters (tests)
   searchAssets,
   getFleet,
   buildTrackerRows,

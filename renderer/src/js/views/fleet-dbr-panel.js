@@ -257,7 +257,7 @@ function createController(deps) {
     if (st.building) return false;
     st.building = true;
     note('Building from fleet data\u2026');
-    const res = await _call('build');
+    const res = await _call('build', { scacs: L.normalizeScacs(st.scacs, st.model) });
     st.building = false;
     if (st.closed) return false;
     if (!res.ok) {
@@ -269,6 +269,13 @@ function createController(deps) {
     st.stale = false;
     st.rowStatus = {};
     st.note = res.saved === false ? '\u26a0 Built but not saved; edits and AI drafts may not persist' : '';
+    const cov = res.serverCoverage;
+    if (cov && Array.isArray(cov.missingFromFleet) && cov.missingFromFleet.length) {
+      const n = Number(cov.missingCount) || cov.missingFromFleet.length;
+      const sites = Array.isArray(cov.sites) ? cov.sites.join(', ') : '';
+      st.note = [st.note, 'Relay shows ' + n + ' open WO' + (n === 1 ? '' : 's') + ' at ' + sites
+        + ' that are not in fleet data \u2014 run a sync'].filter(Boolean).join(' \u00b7 ');
+    }
     renderAll();
     return true;
   }

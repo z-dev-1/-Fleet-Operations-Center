@@ -27,10 +27,12 @@ function registerAapApiIPC(ctx) {
 
   // Bulk WORK-ORDER search (POST). Overrides shallow-merge onto the proven full
   // filter body (a bare body 500s). Pass { page, statuses, ... } to override.
+  // Optional { filters } = server-side non-date filters (aap_search_filters).
   handle('aap-api:search', async (_e, payload) => {
     const req = (payload && typeof payload === 'object') ? payload : {};
+    const { filters, ...rest } = req;
     try {
-      const res = await api().searchServices(req);
+      const res = await api().searchServices(rest, { filters });
       return { ok: true, result: res };
     } catch (e) {
       return { ok: false, error: e.message, code: e.code || null };
