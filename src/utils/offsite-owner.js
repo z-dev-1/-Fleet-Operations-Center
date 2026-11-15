@@ -28,6 +28,10 @@ function clearOffsite(row) {
   const was = offsiteUrlOf(row);
   for (const k of OFFSITE_FIELDS) if (k in row) row[k] = '';
   row._offsiteWrId = '';
+  // relay-extract own-fill records (wo-facts _fill) go with the offsite fields they describe.
+  if (row._factFilled && typeof row._factFilled === 'object') {
+    for (const k of ['dealerName', 'dealerCode', 'decisivDealerId']) delete row._factFilled[k];
+  }
   return was;
 }
 
