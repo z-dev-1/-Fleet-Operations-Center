@@ -2875,6 +2875,7 @@ module.exports = {
   refreshUnit,
   getService,
   getServiceHistory,            // relay-extract §11.3: /serviceaggregates/{id}/history
+  getServiceHistoryCached: _cachedServiceHistory, // per-unit callers only (8 s timeout, process cache)
   _resetHistoryCacheForTest,    // test seam: clear the process history cache
   getAsset,
   getServiceMoves,

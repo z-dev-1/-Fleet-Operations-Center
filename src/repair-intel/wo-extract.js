@@ -11,6 +11,7 @@
 
 const crypto = require('crypto');
 const D = require('./wo-extract-dates');
+const WH = require('./wo-history');
 
 // ── Enums and caps ──────────────────────────────────────────────────────────
 const SOURCES = Object.freeze(['relay', 'relaygarage/vendor', 'relaygarage/fas', 'relaygarage/approver', 'decisiv', 'dtna', 'notes', 'email']);
@@ -707,7 +708,14 @@ function extractRelay(serviceDetail, opts = {}) {
   block.facts = _finishRefs(ctx.facts);
   block.counts.rejected = ctx.rejected;
   block.counts.truncated = ctx.truncated;
-  return _capBlock(block, CAPS.relayBlockBytes);
+  const out = _capBlock(block, CAPS.relayBlockBytes);
+  // Derived history trend (own caps), attached after the fact cap so it never evicts facts.
+  // Only with a non-empty history: blocks without one stay byte-identical.
+  if (history.length) {
+    const trend = WH.historyTrend(history, { classify: (r) => classifyRelayAuthor(r, opts), now });
+    if (trend) out.historyTrend = trend;
+  }
+  return out;
 }
 
 // ── Decisiv (§3.4) ──────────────────────────────────────────────────────────

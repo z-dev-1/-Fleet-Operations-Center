@@ -418,10 +418,17 @@ function parseEtc(row, today) {
     const res = win.m.negated
       ? { state: 'none', date: null, source: field, snippet }
       : { state: _classifyEtc(win.m.date, today), date: win.m.date, source: field, snippet };
-    return r._factsOn ? _withFactEtc(res, win, field, r, today) : res;
+    return r._factsOn ? _withSlip(_withFactEtc(res, win, field, r, today), r) : res;
   }
   const none = { state: 'none', date: null, source: null, snippet: '' };
-  return r._factsOn ? _withFactEtc(none, null, null, r, today) : none;
+  return r._factsOn ? _withSlip(_withFactEtc(none, null, null, r, today), r) : none;
+}
+// Relay history ETC revisions (wo-facts _factEtc.slip) ride along on the parsed ETC; rows
+// without them return the same object as before.
+function _withSlip(out, r) {
+  const s = r._factEtc && r._factEtc.slip;
+  if (!s || typeof s !== 'object') return out;
+  return Object.assign({}, out, { slip: { count: Number(s.count) || 0, seq: Array.isArray(s.seq) ? s.seq.slice() : [] } });
 }
 
 // ── Barrier rules (one table; tune here) ────────────────────────────────────
@@ -650,7 +657,15 @@ function _detailLine(u, why) {
 function _missedCell(missed) {
   return [String(missed.length)].concat(missed.map((u) => '\u2022 ' + u.id + ' (ETC ' + _md(u.etc.date) + '): '
     + (u.etc.explicitMissDate ? 'ETC ' + _md(u.etc.explicitMissDate) + ' explicitly missed' + (u.etc.snippet ? ": '" + u.etc.snippet + "'" : '')
-      : (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)')))).join('\n');
+      : (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)'))
+    + _slipSuffix(u.etc.slip))).join('\n');
+}
+// '; ETC moved N× (M/D→M/D→…)' from Relay history (last 6 dates); '' without slips.
+function _slipSuffix(slip) {
+  if (!slip || !(slip.count > 0)) return '';
+  const seq = (Array.isArray(slip.seq) ? slip.seq : []).map(_md).filter(Boolean);
+  const shown = seq.length > 6 ? ['\u2026'].concat(seq.slice(-6)) : seq;
+  return '; ETC moved ' + slip.count + '\u00d7' + (shown.length ? ' (' + shown.join('\u2192') + ')' : '');
 }
 
 function buildFleetDbr(rows, opts = {}) {

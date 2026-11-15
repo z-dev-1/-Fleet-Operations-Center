@@ -31,6 +31,7 @@ const FACT_BLOCK_KEYS = Object.freeze(['relayFacts', 'offsiteFacts']);
 const FILL_KEYS = Object.freeze(['dealerName', 'dealerCode', 'decisivDealerId', 'salesforceCase', 'salesforceCaseUrl', 'cause', 'correction', 'totalCost', 'vin']);
 const AI_KEYS = Object.freeze(['_factsOn', '_factEtc', '_factPartsWhy', '_factEstimateWhy']);
 const DIGEST_MAX = 16 * 1024;
+const ESTIMATE_WHY_MAX = 160;
 
 // Fact source -> authority tag (§8). resolveField matches tags by substring.
 const AUTH_TAG = Object.freeze({
@@ -697,13 +698,18 @@ function _ccLines(facts, kind, field, today) {
 }
 
 // ── Fact set (§7 buildFactSet) ──────────────────────────────────────────────
+// Relay change-history trend (wo-history.historyTrend) carried on the Relay block; null when absent.
+function _historyOf(rf) {
+  const h = rf && rf.historyTrend;
+  return h && typeof h === 'object' && h.etc && typeof h.etc === 'object' && h.estimate && typeof h.estimate === 'object' ? h : null;
+}
 function _emptyFactSet(row) {
   return {
     parts: [], partsStatus: '', orders: [], ros: [], dealerRo: '',
     etc: etcModel([], {}), estimate: estimateModel([]), caseIds: caseIds([]), dealer: dealerModel([], row || {}),
     cause: [], correction: [], warranty: [], vendorDelayReason: '', leadTime: '', pmAddedToRo: false, tow: [], dtna: [], vins: [],
     pmSchedule: Array.isArray(row && row.pmSchedule) ? row.pmSchedule : [],
-    conflicts: [], events: [], typed: _typed([]), stageDwell: null,
+    conflicts: [], events: [], typed: _typed([]), stageDwell: null, history: null,
     counts: { facts: 0, prior: 0, rejected: 0, truncated: 0 }, sources: { relay: false, offsite: false, notes: false },
     blocks: { relayAt: null, offsiteAt: null, relayCounts: null, offsiteCounts: null },
   };
@@ -812,6 +818,7 @@ function buildFactSet(row, opts = {}) {
     pmSchedule: Array.isArray(r.pmSchedule) ? r.pmSchedule : [],
     conflicts, events, typed: _typed(all),
     stageDwell: Array.isArray(r.offsiteStageHistory) && r.offsiteStageHistory.length ? stageDwell(r.offsiteStageHistory, { since: sinceMs != null ? sinceMs : undefined }) : null,
+    history: _historyOf(rf),
     counts: {
       facts: all.length, prior: all.length - cur.length,
       rejected: ((rf && rf.counts && rf.counts.rejected) || 0) + ((of && of.counts && of.counts.rejected) || 0),
@@ -875,6 +882,7 @@ function rowMirrors(fs) {
     etcMissed: etc.counted.state === 'missed',
     etcReason: etc.counted.reason || '',
     partsMissCount: etc.partsMissCount,
+    etcSlipCount: fs.history ? fs.history.etc.slipCount || 0 : '',
     estimateApprovedAmount: est.approvedTotal != null ? est.approvedTotal : '',
     estimateStatus: est.status || '',
     estimateVersion: est.latestVersion != null ? est.latestVersion : '',
@@ -895,13 +903,19 @@ function _factEtc(fs) {
   const ce = etc.currentEtc;
   const ent = etc._countedEntry;
   const negated = !!(ce && ce.negated && ce.kind === 'repairCompletion');
-  return {
+  const out = {
     date: c.date || null, kind: 'repairCompletion', state: c.state, explicitMissDate: c.explicitMissDate || null,
     source: ent ? ent.source : (negated ? ce.source || null : null),
     statedAt: ent ? ent.statedAt || null : (negated ? ce.statedAt || null : null),
     snippet: ent ? ent.snippet || '' : '',
     negated, reason: c.reason || null,
   };
+  // Relay history ETC revisions (only when the WR's history has any ETC field).
+  const h = fs.history;
+  if (h && h.etc.available) {
+    out.slip = { count: h.etc.slipCount || 0, seq: (h.etc.seq || []).map((iso) => _day(iso)).filter(Boolean) };
+  }
+  return out;
 }
 
 function _partsWhy(fs) {
@@ -923,7 +937,15 @@ function _partsWhy(fs) {
 function _estimateWhy(fs) {
   const lr = fs.estimate.latestRejectReason;
   if (!lr || fs.estimate.approvedAfterReject) return '';
-  return 'V' + lr.v + ' ' + lr.status + ': ' + _str(lr.reason).slice(0, 80);
+  const base = 'V' + lr.v + ' ' + lr.status + ': ' + _str(lr.reason).slice(0, 80);
+  // Relay history: ' · rejected N× since M/D; $A→$B' (only with >= 1 recorded rejection).
+  const he = fs.history && fs.history.estimate;
+  if (!he || !(he.rejectCount >= 1)) return base;
+  const first = (he.decisions || []).find((d) => d.outcome === 'rejected');
+  const revs = he.revisions || [];
+  let tail = ' \u00b7 rejected ' + he.rejectCount + '\u00d7' + (first ? ' since ' + D.md(_day(first.at)) : '');
+  if (revs.length >= 2) tail += '; ' + _usd(revs[0].to) + '\u2192' + _usd(revs[revs.length - 1].to);
+  return (base + tail).slice(0, ESTIMATE_WHY_MAX);
 }
 
 // Blank-or-own-fill writer (§9).
@@ -1119,6 +1141,19 @@ function digestForRi(fs) {
     warranty: fs.warranty.slice(0, 4).map((w) => ({ value: w.value, side: w.side, at: w.at })),
     conflicts: fs.conflicts.map((c) => c.field),
   };
+  const h = fs.history;
+  if (h) {
+    const tail = (a, n) => (Array.isArray(a) ? a.slice(Math.max(0, a.length - n)) : []);
+    d.history = {
+      etcSlipCount: h.etc.slipCount || 0,
+      etcSeq: tail(h.etc.seq, 12),
+      estimateRevisions: tail(h.estimate.revisions, 8).map((r) => ({ at: r.at, from: r.from, to: r.to })),
+      decisions: tail(h.estimate.decisions, 8).map((x) => ({ at: x.at, outcome: x.outcome, amount: x.amount, reason: x.reason ? _str(x.reason).slice(0, 60) : null })),
+      vendorChanges: tail(h.vendor && h.vendor.changes, 6).map((v) => ({ at: v.at, field: v.field, from: v.from, to: v.to })),
+      createOnly: !!h.createOnly,
+    };
+    if (JSON.stringify(d).length > DIGEST_MAX) delete d.history;   // history goes first
+  }
   while (JSON.stringify(d).length > DIGEST_MAX && d.etc.priorEtcs.length) d.etc.priorEtcs.pop();
   if (JSON.stringify(d).length > DIGEST_MAX) for (const v of d.estimate.versions) v.reason = v.reason ? _str(v.reason).slice(0, 40) : v.reason;
   return d;

@@ -190,6 +190,14 @@ function _extractedCard(x) {
     }).join('');
     return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc(title) + '</div>' + items + '</div>';
   }
+  function slipCol(rows) {
+    if (!rows || !rows.length) return '';
+    var items = rows.slice(0, 8).map(function(r){
+      return '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
+        '<span class="tr-rank-n">' + esc(String(r.slips)) + ' / ' + esc(String(r.wos)) + ' WO' + (r.wos === 1 ? '' : 's') + '</span></div></div>';
+    }).join('');
+    return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc('ETC moved (Relay history) by vendor (slips / WOs)') + '</div>' + items + '</div>';
+  }
   function dwellCol(rows) {
     if (!rows || !rows.length) return '';
     var items = rows.slice(0, 8).map(function(r){
@@ -209,6 +217,7 @@ function _extractedCard(x) {
     '<div class="tr-bo-cols">' +
       missCol('ETC misses by vendor (misses / WOs)', x.etcMissByVendor) +
       missCol('ETC misses by dealer (misses / WOs)', x.etcMissByDealer) +
+      slipCol(x.etcSlipsByVendor) +
       cycle +
       dwellCol(x.dealerDwell) +
     '</div></div>';

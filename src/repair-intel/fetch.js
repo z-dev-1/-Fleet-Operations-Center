@@ -173,10 +173,14 @@ async function syncUnit(equipmentId, opts = {}) {
           if (!detail) { det.failed++; return; }
           const dealer = dealerLink.dealerFromDetail(detail, mapper);
           store.setWoDetail(sid, { dealer, evidence: dealerLink.evidenceFromDetail(detail, mapper), modifiedAt: row.modified_at });
-          // relay-extract §13.3 3a: extracted digest + parts (comments + structured fields; no extra GET).
+          // relay-extract §13.3 3a: extracted digest + parts (comments + structured fields + Relay history).
           if (xf.enabled) {
             try {
-              const rf = woExtract.extractRelay(detail, { vendor: row.vendor, vendorWorkOrderIds: [], now: Date.now(), collect: mapper.collectAllComments });
+              // Relay change history for this WO (per-unit Build / Fetch New only; null on failure).
+              let history = null;
+              try { history = api.getServiceHistoryCached ? await api.getServiceHistoryCached(sid, row.modified_at) : null; } catch (_) { history = null; }
+              const rf = woExtract.extractRelay(detail, { vendor: row.vendor, vendorWorkOrderIds: [], now: Date.now(), collect: mapper.collectAllComments,
+                history: Array.isArray(history) ? history : undefined });
               const fs = woFacts.buildFactSet({ relayFacts: rf, created: row.created_at ? new Date(row.created_at).toISOString() : '' }, { today: _ymd(Date.now()) });
               store.setExtractedFacts(sid, woFacts.digestForRi(fs));
               store.setPartsForSource(sid, eq, fs.parts);

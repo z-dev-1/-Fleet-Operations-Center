@@ -134,6 +134,37 @@ function _estimateLine(fs, purpose) {
   const line = 'estimate: ' + parts.join(' \u2190 ');
   return purpose === 'trend' ? _clip(line, 200) : line;
 }
+// Relay change history (wo-history trend): ETC revision path, estimate $ path, decisions, vendor
+// change, current-state dwell. Sides only, never requester logins. null without history.
+const HISTORY_CREATE_ONLY = 'Relay history: work request created only (dealer-integrated; ETC/estimate revisions are not recorded in Relay)';
+function _historyLine(fs, purpose) {
+  const h = fs.history;
+  if (!h) return null;
+  if (h.createOnly) return HISTORY_CREATE_ONLY;
+  const amt = purpose !== 'timeline';
+  const bits = [];
+  const rc = (h.etc.revisions || []).filter((r) => r.kind === 'repairCompletion');
+  if (h.etc.available && (h.etc.seq || []).length) {
+    const moved = rc.filter((r) => r.dir !== 'set').length;
+    const last = rc[rc.length - 1];
+    const path = h.etc.seq.map(_mdAt).filter(Boolean).join(' \u2192 ');
+    bits.push('ETC revised ' + moved + '\u00d7 (slipped ' + (h.etc.slipCount || 0) + '\u00d7, pulled in ' + (h.etc.pullInCount || 0) + '\u00d7): '
+      + path + (last && last.side ? ' (latest ' + last.side + '-set)' : ''));
+  } else {
+    bits.push('no ETC change recorded');
+  }
+  const revs = h.estimate.revisions || [];
+  if (amt && revs.length) bits.push('estimate ' + revs.map((r) => _usd(r.to)).join(' \u2192 '));
+  const dec = (h.estimate.decisions || []).slice(-6);
+  if (dec.length) {
+    bits.push('decisions: ' + dec.map((d) => d.outcome + ' ' + _mdAt(d.at) + (d.reason ? ' (' + _clip(d.reason, 60) + ')' : '')).join(', '));
+  }
+  const vc = ((h.vendor && h.vendor.changes) || []).filter((c) => c.field === 'Vendor' && c.from);
+  if (vc.length) { const c = vc[vc.length - 1]; bits.push('vendor ' + c.from + ' \u2192 ' + c.to + ' ' + _mdAt(c.at)); }
+  const open = (h.states || []).filter((s) => s.leftAt == null && Number.isFinite(s.ms)).slice(-1)[0];
+  if (open) bits.push('in ' + open.state + ' ' + (Math.round((open.ms / DAY_MS) * 10) / 10) + 'd');
+  return _clip('Relay history: ' + bits.join(' \u00b7 '), 600);
+}
 function _dealerLine(fs, purpose) {
   const d = fs.dealer;
   if (!d.name && !d.code && !d.decisivDealerId) return null;
@@ -240,6 +271,7 @@ function factSheet(fs, opts = {}) {
   add(_partsHistoryLine(fs));
   add(_repairMissLine(fs));
   add(_estimateLine(fs, purpose));
+  add(_historyLine(fs, purpose));
   add(_dealerLine(fs, purpose));
   add(_refsLine(fs));
   add(_pmLine(fs, row));

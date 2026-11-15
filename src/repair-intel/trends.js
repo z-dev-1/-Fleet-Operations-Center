@@ -129,6 +129,7 @@ function _extracted(where, limit) {
   const reasons = {};
   const dwell = {};
   const calls = {};
+  const slips = {};
   for (const r of rows) {
     const d = _json(r.extracted_facts);
     const vs = (d && d.estimate && Array.isArray(d.estimate.versions)) ? d.estimate.versions : [];
@@ -152,6 +153,12 @@ function _extracted(where, limit) {
       if (Number.isFinite(dw.approval)) g.approval.push(dw.approval);
       if (Number.isFinite(dw.repair)) g.repair.push(dw.repair);
     }
+    // Relay change history: ETC slips (revised later) per vendor, digests with history only.
+    if (d && d.history && typeof d.history === 'object') {
+      const vk = r.vendor || 'unknown';
+      const g = slips[vk] || (slips[vk] = { slips: 0, wos: 0 });
+      g.slips += Number(d.history.etcSlipCount) || 0; g.wos += 1;
+    }
     const ca = d && d.dealer ? Number(d.dealer.callAttempts) || 0 : 0;
     if (ca > 0 && r.dealer_name) {
       const g = calls[r.dealer_name] || (calls[r.dealer_name] = { calls: 0, wos: 0 });
@@ -171,6 +178,7 @@ function _extracted(where, limit) {
     })), 'total').map(({ key, reasons: rs }) => ({ key, reasons: rs })),
     dealerDwell: top(Object.entries(dwell).map(([key, g]) => ({ key, medianApprovalMs: _median(g.approval), medianRepairMs: _median(g.repair), n: g.n })), 'n'),
     unansweredCallsByDealer: top(Object.entries(calls).map(([key, g]) => ({ key, calls: g.calls, wos: g.wos })), 'calls'),
+    etcSlipsByVendor: top(Object.entries(slips).map(([key, g]) => ({ key, slips: g.slips, wos: g.wos, rate: g.wos ? Math.round((g.slips / g.wos) * 100) / 100 : 0 })), 'slips'),
     coverage: { eventsWithFacts: cov.x || 0, events: cov.n || 0 },
   };
 }

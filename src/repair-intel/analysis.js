@@ -181,6 +181,7 @@ function _factsLine(raw) {
   if (parts.length) bits.push('parts ' + parts.slice(0, 4).join(', '));
   const etc = d.etc || {};
   if (etc.missCount > 0) bits.push('ETC misses ' + etc.missCount + (etc.etcReason ? ' (' + String(etc.etcReason).slice(0, 40) + ')' : ''));
+  if (d.history && Number(d.history.etcSlipCount) > 0) bits.push('ETC moved ' + Number(d.history.etcSlipCount) + '\u00d7');
   const est = d.estimate || {};
   if (est.approvedTotal != null && Number.isFinite(Number(est.approvedTotal))) bits.push('estimate approved ' + _usd(est.approvedTotal));
   if (d.dealer && d.dealer.name) bits.push('dealer ' + String(d.dealer.name).slice(0, 60));
