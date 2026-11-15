@@ -88,7 +88,24 @@ describe('apply routing — SAFETY: a vendor message never auto-posts to the wro
     expect(ask.destination).toBe('offsite');
   });
 
-  it('MODE A + integrated vendor chase: posts to relay_vendor (safe — lives in Relay)', async () => {
+  it('MODE A + integrated vendor chase with approval required (default): STAGED approval-required', async () => {
+    const decision = {
+      equipmentId: 'U3', _workRequestId: 'wr-3', relayHasLatest: true,
+      nextActionType: 'request_update', followUpNeeded: true, isStale: true,
+      dealerAsk: 'Following up on the backordered parts for unit U3 — can you confirm the revised ETC?',
+      repairPhase: 'parts_backordered', waitingOn: 'parts', threadOfRecord: 'relay_integrated_vendor',
+      confidence: 0.9, reasoning: 'stale integrated',
+    };
+    store.save('settings', {});
+    const res = await apply.applyReconcile(decision, { cfg: CFG_AUTO });
+    const ask = res.posts.find(p => p.kind === 'dealer-ask');
+    expect(ask.destination).toBe('relay_vendor');
+    expect(ask.action).toBe('staged');
+    expect(ask.reason).toBe('approval-required');
+  });
+
+  it('MODE A + integrated vendor chase with writes.requireApproval false: posts to relay_vendor (safe — lives in Relay)', async () => {
+    store.save('settings', { writes: { requireApproval: false } });
     const decision = {
       equipmentId: 'U3', _workRequestId: 'wr-3', relayHasLatest: true,
       nextActionType: 'request_update', followUpNeeded: true, isStale: true,
@@ -104,6 +121,7 @@ describe('apply routing — SAFETY: a vendor message never auto-posts to the wro
     const ask = res.posts.find(p => p.kind === 'dealer-ask');
     expect(ask.destination).toBe('relay_vendor');
     expect(['posted', 'skipped']).toContain(ask.action);
+    store.save('settings', {});
   });
 
   it('confirmPending refuses to post an offsite item to Relay (needs manual route)', async () => {

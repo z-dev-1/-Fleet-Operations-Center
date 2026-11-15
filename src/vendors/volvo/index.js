@@ -319,8 +319,10 @@ class VolvoWorkflow extends VendorWorkflow {
       const note = 'Volvo/ASIST SR Created: ' + srNumber
         + (srUrl ? ' | ' + srUrl : '')
         + ' | Relay Ref: ' + (altId || '');
-      await mod.addConversationNote(unit.workRequestId || unit.serviceUrl, note);
-      logger.info('[volvo] relay note | SR:', srNumber);
+      // Non-interactive: the Relay write-approval gate queues the note (never auto-sent).
+      const r = await mod.addConversationNote(unit.workRequestId || unit.serviceUrl, note,
+        { origin: 'volvo-sr-note', interactive: false, unit: unit.equipmentId || '' });
+      logger.info('[volvo] relay note ' + ((r && r.outcome) || (r && r.ok ? 'sent' : 'failed')) + ' | SR:', srNumber);
     } catch (e) { logger.warn('[volvo] relay note (non-fatal):', e.message); }
   }
 }

@@ -915,6 +915,9 @@ async function _submitActiveTab(btn) {
     towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
     copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
     autoSubmit: true,
+    // The window.confirm above showed this WR and the user confirmed: that is
+    // the Relay write approval (src/writes/write-gate.js approvedBy wr-modal-confirm).
+    userConfirmed: true, origin: 'wr-modal',
   };
 
   try {
@@ -1013,6 +1016,9 @@ async function _submitOneTabSilently(key) {
     towDirection: (key === 'tow' && _towPlan) ? (_towPlan.towDirection || 'to-dealer') : '',
     copiedFromWorkRequestId: key === 'tow' ? ((st.submitted.repair && st.submitted.repair.workRequestId) || null) : null,
     autoSubmit: true,
+    // The window.confirm above showed this WR and the user confirmed: that is
+    // the Relay write approval (src/writes/write-gate.js approvedBy wr-modal-confirm).
+    userConfirmed: true, origin: 'wr-modal',
   };
   try {
     _logProgress('[' + key + '] Creating work request...');
@@ -1653,6 +1659,7 @@ function _wireSubmit() {
       _logProgress('Creating work order with vendor ' + commitVendor + '…', 'run');
       const result = await aap.createWorkOrder({
         ...payload, assetUrl, confirmVendor: true, vendor: commitVendor,
+        userConfirmed: true, origin: 'wr-modal', // approved by the confirm above
       });
       if (_progUnsub) { _progUnsub(); _progUnsub = null; }
 

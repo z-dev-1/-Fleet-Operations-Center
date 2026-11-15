@@ -1,0 +1,259 @@
+// tests/write-gate.test.js — the Relay write-approval gate (src/writes/write-gate.js):
+// requireApproval default TRUE (no env override), interactive prompt approve/deny/timeout,
+// the non-interactive pending-approval queue, single-shot approve of the stored payload,
+// reject / expiry, approvedBy, dedup, and logs that never carry the comment text.
+// All sends are mocks; nothing reaches the network.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+
+const flags = require('../src/config/perf-flags');
+const gate = require('../src/writes/write-gate');
+
+const WR = '0a1b2c3d-1111-2222-3333-444455556666';
+const TEXT = 'Dealer advised parts ETA 11/12.\nLine two <b>&</b> "quotes"';
+
+function memStore() {
+  const data = {};
+  return {
+    data,
+    load: (k, d) => (k in data ? JSON.parse(JSON.stringify(data[k])) : d),
+    save: (k, v) => { data[k] = JSON.parse(JSON.stringify(v)); },
+  };
+}
+
+let apiPost, logs, store, notify, nowMs, win, sent;
+function setup(over = {}) {
+  apiPost = vi.fn(async () => ({ ok: true }));
+  logs = [];
+  store = memStore();
+  notify = vi.fn();
+  nowMs = Date.parse('2026-11-10T12:00:00Z');
+  sent = [];
+  win = { isDestroyed: () => false, webContents: { send: vi.fn((ch, data) => sent.push({ ch, data })) } };
+  gate._setDepsForTest(Object.assign({
+    apiPost, store, notify, now: () => nowMs, log: (m) => logs.push(m), flags: { requireApproval: true },
+  }, over));
+  gate.setWindowGetter(null);
+}
+const spec = (o = {}) => Object.assign({
+  kind: 'addComment', origin: 'test', unit: 'B62020', workRequestId: WR,
+  payload: { workRequestId: WR, text: TEXT }, interactive: false,
+}, o);
+const flush = () => new Promise((r) => setImmediate(r));
+
+beforeEach(() => setup());
+afterEach(() => { vi.useRealTimers(); gate._setDepsForTest({}); gate.setWindowGetter(null); });
+
+describe('resolveWriteFlags', () => {
+  it('requireApproval defaults to true; only an explicit false disables it', () => {
+    expect(flags.resolveWriteFlags({}).requireApproval).toBe(true);
+    expect(flags.resolveWriteFlags({ writes: {} }).requireApproval).toBe(true);
+    expect(flags.resolveWriteFlags(null).requireApproval).toBe(true);
+    expect(flags.resolveWriteFlags({ writes: { requireApproval: 'false' } }).requireApproval).toBe(true);
+    expect(flags.resolveWriteFlags({ writes: { requireApproval: false } }).requireApproval).toBe(false);
+  });
+  it('has no env override', () => {
+    const prev = process.env.FLEET_WRITES_REQUIRE_APPROVAL;
+    process.env.FLEET_WRITES_REQUIRE_APPROVAL = '0';
+    try {
+      expect(flags.loadWrites({ load: () => ({}) }).requireApproval).toBe(true);
+      expect(flags.resolveWriteFlags({}, { FLEET_WRITES_REQUIRE_APPROVAL: '0' }).requireApproval).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.FLEET_WRITES_REQUIRE_APPROVAL; else process.env.FLEET_WRITES_REQUIRE_APPROVAL = prev;
+    }
+    expect(flags.loadWrites({ load: () => { throw new Error('x'); } }).requireApproval).toBe(true);
+  });
+});
+
+describe('interactive prompt', () => {
+  it('deny -> 0 sends, skipped-not-approved', async () => {
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(spec({ interactive: true }));
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].ch).toBe('relayWrites:approval-request');
+    expect(gate.respond(sent[0].data.id, false).ok).toBe(true);
+    const r = await p;
+    expect(r.outcome).toBe('skipped-not-approved');
+    expect(r.ok).toBe(false);
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(gate.list().items.find((i) => i.id === r.id).state).toBe('not-approved');
+  });
+
+  it('grant -> exactly 1 addComment with the previewed text byte-for-byte', async () => {
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(spec({ interactive: true, aiDrafted: true }));
+    await flush();
+    const req = sent[0].data;
+    expect(req.kind).toBe('addComment');
+    expect(req.aiDrafted).toBe(true);
+    expect(req.preview).toContain('AI-drafted: yes');
+    expect(req.preview).toContain('https://aap-na.corp.amazon.com/v2/service/' + WR);
+    expect(req.preview).toContain('Visibility: internal-only');
+    gate.respond(req.id, true);
+    const r = await p;
+    expect(r.outcome).toBe('sent');
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    const [path, body] = apiPost.mock.calls[0];
+    expect(path).toBe('/api/v1/addComment');
+    expect(body).toEqual({ workRequestId: WR, text: TEXT, internalOnly: true, externalConsumers: [] });
+    expect(req.preview.endsWith('\n' + body.text)).toBe(true);
+    expect(gate.list().items.find((i) => i.id === r.id).state).toBe('sent');
+  });
+
+  it('text over 2000 chars: the preview shows the same truncated text that is sent', async () => {
+    gate.setWindowGetter(() => win);
+    const long = 'x'.repeat(2100);
+    const p = gate.requestWrite(spec({ interactive: true, payload: { workRequestId: WR, text: long } }));
+    await flush();
+    gate.respond(sent[0].data.id, true);
+    await p;
+    const body = apiPost.mock.calls[0][1];
+    expect(body.text).toHaveLength(2000);
+    expect(sent[0].data.preview.endsWith('\n' + body.text)).toBe(true);
+  });
+
+  it('no answer within APPROVAL_WAIT_MS -> skipped, 0 sends', async () => {
+    vi.useFakeTimers();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(spec({ interactive: true }));
+    await vi.advanceTimersByTimeAsync(gate.APPROVAL_WAIT_MS + 10);
+    const r = await p;
+    expect(r.outcome).toBe('skipped-not-approved');
+    expect(apiPost).not.toHaveBeenCalled();
+    // A late answer cannot send it.
+    expect(gate.respond(r.id, true).ok).toBe(false);
+    expect((await gate.approve(r.id)).ok).toBe(false);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+});
+
+describe('non-interactive queue', () => {
+  it('no window -> pending-approval, 0 sends; approve sends the stored payload once', async () => {
+    const r = await gate.requestWrite(spec({ interactive: true }));   // interactive but no window
+    expect(r.outcome).toBe('pending-approval');
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('relayWrites:updated', expect.anything());
+    const item = gate.list().items.find((i) => i.id === r.id);
+    expect(item.state).toBe('pending');
+    expect(item.payload).toBeUndefined();          // list never exposes payloads
+    const a = await gate.approve(r.id);
+    expect(a.outcome).toBe('sent');
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    expect(apiPost.mock.calls[0][1].text).toBe(TEXT);
+    const again = await gate.approve(r.id);
+    expect(again.ok).toBe(false);
+    expect(apiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it('reject -> never sent', async () => {
+    const r = await gate.requestWrite(spec());
+    expect(gate.reject(r.id).ok).toBe(true);
+    expect((await gate.approve(r.id)).ok).toBe(false);
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(gate.list().items.find((i) => i.id === r.id).state).toBe('rejected');
+  });
+
+  it('pending over 24 h -> expired and refused', async () => {
+    const r = await gate.requestWrite(spec());
+    nowMs += gate.PENDING_TTL_MS + 1000;
+    const a = await gate.approve(r.id);
+    expect(a.ok).toBe(false);
+    expect(a.error).toMatch(/expired/);
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(gate.list().items.find((i) => i.id === r.id).state).toBe('expired');
+  });
+
+  it('identical pending writes reuse the id', async () => {
+    const a = await gate.requestWrite(spec());
+    const b = await gate.requestWrite(spec());
+    expect(b.id).toBe(a.id);
+    expect(gate.list().items.filter((i) => i.state === 'pending')).toHaveLength(1);
+    const c = await gate.requestWrite(spec({ payload: { workRequestId: WR, text: TEXT + '!' } }));
+    expect(c.id).not.toBe(a.id);
+  });
+
+  it('a payload over 2 MB is held in memory only and still sends exactly once', async () => {
+    const big = { aaid: 'aaid-1', vendor: 'COX', vendorCode: 'COX', title: 'T', attachments: [{ name: 'a.png', dataUrl: 'data:image/png;base64,' + 'A'.repeat(2.2 * 1024 * 1024) }] };
+    const commitWorkOrder = vi.fn(async () => ({ ok: true, phase: 'commit', workRequestId: 'wr-new' }));
+    setup({ commitWorkOrder });
+    const r = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'test', unit: 'U1', payload: big, interactive: false });
+    expect(r.outcome).toBe('pending-approval');
+    expect(store.data.relayWritesPending.items[0].payload).toBeNull();
+    expect(store.data.relayWritesPending.items[0].memoryOnly).toBe(true);
+    const a = await gate.approve(r.id);
+    expect(a.outcome).toBe('sent');
+    expect(commitWorkOrder).toHaveBeenCalledTimes(1);
+    expect(commitWorkOrder.mock.calls[0][0]).toBe(big);
+  });
+});
+
+describe('approvedBy / requireApproval false', () => {
+  it('approvedBy -> 1 send, no prompt, logged approved by=', async () => {
+    gate.setWindowGetter(() => win);
+    const r = await gate.requestWrite(spec({ interactive: true, approvedBy: 'relay-reconcile-overlay' }));
+    expect(r.outcome).toBe('sent');
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(0);
+    expect(logs.some((l) => /\[write\] approved .*by=relay-reconcile-overlay/.test(l))).toBe(true);
+  });
+
+  it('requireApproval false -> 1 send, no prompt', async () => {
+    setup({ flags: { requireApproval: false } });
+    gate.setWindowGetter(() => win);
+    const r = await gate.requestWrite(spec({ interactive: true }));
+    expect(r.outcome).toBe('sent');
+    expect(apiPost).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('send failure -> send-failed', async () => {
+    setup({ apiPost: vi.fn(async () => { throw new Error('AAP API 500: boom'); }) });
+    const r = await gate.requestWrite(spec({ approvedBy: 'x' }));
+    expect(r.outcome).toBe('send-failed');
+    expect(r.ok).toBe(false);
+    expect(logs.some((l) => l.startsWith('[write] send-failed'))).toBe(true);
+  });
+});
+
+describe('createWorkOrder preview + token', () => {
+  it('preview lists the WR fields from the stored payload', () => {
+    const pv = gate.previewOf('createWorkOrder', {
+      title: 'Check engine light', vendor: 'Amerit', vendorCode: 'AMERITFLT', offSite: true,
+      locStreet: '1 Main St', locCity: 'Allentown', locState: 'PA', locZip: '18101',
+      towToStreet: '2 Yard Rd', towToCity: 'Bethlehem', towDirection: 'return-to-yard',
+      areaPairs: [{ area: 'ENG', subcategory: 'CEL', subSubcategory: '' }], urgent: 'Yes', urgencyReason: 'DEA - Asset Shortage',
+      comments: 'Please diagnose', shareWith: 'internal', contactName: 'Z', contactPhone: '716-614-2167',
+      attachments: [{ name: 'photo.png', dataUrl: 'data:' }], copiedFromWorkRequestId: WR,
+    }, { unit: 'B62020', origin: 'fas-action' });
+    for (const s of ['Unit: B62020', 'Title: Check engine light', 'Vendor: Amerit -> AMERITFLT', 'Off-site: 1 Main St, Allentown, PA, 18101',
+      'Tow destination: 2 Yard Rd, Bethlehem (return-to-yard)', 'ENG / CEL', 'Urgent: yes (DEA - Asset Shortage)', 'internal-only',
+      'Contact: Z, 716-614-2167', 'Attachments: 1 (photo.png)', 'Linked WR: ' + WR, 'Origin: fas-action', 'Please diagnose']) {
+      expect(pv).toContain(s);
+    }
+  });
+
+  it('isApprovalToken accepts only a live gate token, once', async () => {
+    let seen = null;
+    const commitWorkOrder = vi.fn(async (_o, t) => { seen = gate.isApprovalToken(t); return { ok: true, workRequestId: 'w' }; });
+    setup({ commitWorkOrder });
+    await gate.requestWrite({ kind: 'createWorkOrder', origin: 't', payload: { aaid: 'a' }, approvedBy: 'x' });
+    expect(seen).toBe(true);
+    expect(gate.isApprovalToken({})).toBe(false);
+    expect(gate.isApprovalToken(null)).toBe(false);
+  });
+});
+
+describe('logging', () => {
+  it('logs attempted, gated, approved, sent — never the comment text', async () => {
+    const r = await gate.requestWrite(spec());
+    await gate.approve(r.id);
+    const joined = logs.join('\n');
+    for (const ev of ['attempted', 'gated', 'approved', 'sent']) expect(joined).toContain('[write] ' + ev + ' kind=addComment');
+    expect(joined).toContain('status=pending-approval');
+    expect(joined).toContain('len=' + TEXT.length);
+    expect(joined).not.toContain('Dealer advised');
+    expect(joined).not.toContain('Line two');
+  });
+});

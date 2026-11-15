@@ -316,6 +316,12 @@ const REGISTRY = {
   //   { items: [ { id, equipmentId, serviceUrl, kind:'gap-fill'|'dealer-ask',
   //       text, decision, stagedAt, state:'pending'|'posted'|'dismissed' } ] }.
   relayReconcilePending:   () => path.join(P.dataDir, 'relay_reconcile_pending.json'),
+  // Relay write approval queue (src/writes/write-gate.js): addComment /
+  // createWorkOrder commits awaiting explicit user approval. Shape:
+  //   { items: [ { id, kind, origin, unit, workRequestId, payload, preview,
+  //       hash, aiDrafted, createdAt, state:'pending'|'sent'|'failed'|
+  //       'rejected'|'not-approved'|'expired', memoryOnly? } ] }.
+  relayWritesPending:      () => path.join(P.dataDir, 'relay_writes_pending.json'),
   // Dedup ledger so the same gap-fill / dealer-ask isn't re-staged or re-posted
   // on every 5-min rescan. Keyed by equipmentId -> { lastGapSig, lastAskSig, lastAt }.
   relayReconcileLog:       () => path.join(P.dataDir, 'relay_reconcile_log.json'),

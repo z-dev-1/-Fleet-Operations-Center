@@ -13,7 +13,9 @@
  *      missing) and the dealer-ask (a stale-unit request) — are LIVE writes to
  *      AAP that colleagues will see, so they are gated:
  *        - MODE A (cfg.autoPostToRelay=true): post immediately via
- *          addConversationNote during sync. Hands-off.
+ *          addConversationNote during sync — ONLY when
+ *          settings.writes.requireApproval is false. With approval required
+ *          (the default) MODE A stages with reason 'approval-required'.
  *        - MODE B (default): stage the post into relayReconcilePending for an
  *          explicit confirm in the UI before anything hits AAP.
  *
@@ -186,12 +188,15 @@ function _notifyRenderer(p) {
 }
 
 // ── Actual Relay WR comment post ────────────────────────────────────────────
-async function _postToRelay(decision, text) {
+// Every post passes the Relay write-approval gate (src/writes/write-gate.js);
+// gateOpts carries origin / approvedBy / aiDrafted / interactive.
+async function _postToRelay(decision, text, gateOpts) {
   const target = decision._serviceUrl || decision._workRequestId;
   if (!target) return { ok: false, error: 'no Relay work-request target (serviceUrl/workRequestId) for ' + decision.equipmentId };
   try {
     const { addConversationNote } = require('./aap_create_wr');
-    const r = await addConversationNote(target, text);
+    const g = Object.assign({ origin: 'relay-reconcile', interactive: false, aiDrafted: true, unit: decision.equipmentId || '' }, gateOpts || {});
+    const r = await addConversationNote(target, text, g);
     return r && r.ok ? { ok: true } : { ok: false, error: (r && r.error) || 'addComment failed' };
   } catch (e) {
     return { ok: false, error: e.message };
@@ -262,6 +267,10 @@ async function applyReconcile(decision, opts) {
   }
 
   const lowConfidence = Number(decision.confidence) < Number(cfg.minConfidence);
+  // Relay write-approval gate (settings.writes.requireApproval, default TRUE):
+  // MODE A never auto-posts while approval is required — it stages instead.
+  let requireApproval = true;
+  try { requireApproval = require('../config/perf-flags').loadWrites().requireApproval !== false; } catch (_) { requireApproval = true; }
 
   for (const c of candidates) {
     // Dedup: gap-fill = exact text; dealer-ask/reply = re-ask window.
@@ -281,8 +290,8 @@ async function applyReconcile(decision, opts) {
     // A reply to a vendor question is a judgment call -> ALWAYS stage, never
     // auto-post, regardless of MODE A. Low-confidence decisions also never
     // auto-post (staged for review even in MODE A; timeline already has status).
-    if (cfg.autoPostToRelay && !lowConfidence && !c.forceStage && canAutoPostDest) {
-      const r = await _postToRelay(decision, c.text);
+    if (cfg.autoPostToRelay && !lowConfidence && !c.forceStage && canAutoPostDest && !requireApproval) {
+      const r = await _postToRelay(decision, c.text, { origin: 'relay-reconcile-auto' });
       if (r.ok) {
         _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
         out.posts.push({ kind: c.kind, action: 'posted', destination });
@@ -297,7 +306,8 @@ async function applyReconcile(decision, opts) {
       _stage(decision, c.kind, c.text, destination);
       _markHandled(decision.equipmentId, dedupKind, c.text, c.followUpCount);
       const reason = c.forceStage ? 'reply-needs-confirm'
-        : (!canAutoPostDest ? ('destination-' + destination) : undefined);
+        : (!canAutoPostDest ? ('destination-' + destination)
+          : (cfg.autoPostToRelay && !lowConfidence && requireApproval ? 'approval-required' : undefined));
       out.posts.push({ kind: c.kind, action: 'staged', destination, reason });
       logger.info('[relay-reconcile] staged ' + c.kind + ' -> ' + destination + ' for ' + decision.equipmentId + ' (confirm to route/post)');
     }
@@ -328,7 +338,10 @@ async function confirmPending(id, opts) {
     return { ok: false, needsDecision: true, destination: dest,
       error: 'This item requires a human decision (' + (item.decisionQuestion || 'judgment call') + ') before anything is sent.' };
   }
-  const r = await _postToRelay({ _serviceUrl: item.serviceUrl, _workRequestId: item.workRequestId, equipmentId: item.equipmentId }, item.text);
+  // The overlay showed the full staged text and the user confirmed: that is the
+  // approval. The exact staged text is sent unchanged.
+  const r = await _postToRelay({ _serviceUrl: item.serviceUrl, _workRequestId: item.workRequestId, equipmentId: item.equipmentId }, item.text,
+    { origin: 'relay-reconcile', approvedBy: 'relay-reconcile-overlay', aiDrafted: true });
   if (r.ok) {
     item.state = 'posted';
     item.postedAt = new Date().toISOString();

@@ -187,6 +187,16 @@ expose('relayReconcile', {
   onUpdated:  (cb)          => on('relayReconcile:updated', cb),
 });
 
+// ── Relay write approval (addComment / WR commits need explicit approval) ──
+expose('relayWrites', {
+  list:      ()             => ipcRenderer.invoke('relayWrites:list'),
+  approve:   (id)           => ipcRenderer.invoke('relayWrites:approve', id),
+  reject:    (id)           => ipcRenderer.invoke('relayWrites:reject', id),
+  respond:   (id, approved) => ipcRenderer.invoke('relayWrites:respond', id, approved === true),
+  onRequest: (cb)           => on('relayWrites:approval-request', cb),
+  onUpdated: (cb)           => on('relayWrites:updated', cb),
+});
+
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
 expose('longDwell', {
   getAll:     ()            => ipcRenderer.invoke('long-dwell:get-all'),

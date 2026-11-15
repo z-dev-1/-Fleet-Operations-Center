@@ -77,6 +77,10 @@
  *
  *   settings.dbr.serverScacFilter / FLEET_DBR_SERVER_SCAC '0' | '1'
  *
+ * Relay writes approval gate (default: approval REQUIRED; see resolveWriteFlags; read per write):
+ *
+ *   settings.writes.requireApproval (only `false` disables)  — NO env override
+ *
  * Aki AI lane (enabled default ON; only used by the Aki preference modes; see
  * resolveAiAkiFlags below):
  *
@@ -657,6 +661,27 @@ function loadDbrServerFilter(deps = {}) {
   }
 }
 
+// ── Relay writes approval gate (default: approval REQUIRED) ─────────────────
+//   settings.writes.requireApproval (!== false, default TRUE)
+// Deliberately NO env override: a stray env var must never turn on automatic
+// Relay comment / WR writes. Read per write attempt by src/writes/write-gate.js.
+function resolveWriteFlags(settings) {
+  return { requireApproval: _obj(_obj(settings).writes).requireApproval !== false };
+}
+
+function loadWrites(deps = {}) {
+  try {
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveWriteFlags(settings);
+  } catch (_) {
+    return resolveWriteFlags({});
+  }
+}
+
 // ── Aki AI lane (enabled default ON) ─────────────────────────────────────────
 //   settings.ai.aki.enabled         (!== false)            / FLEET_AI_AKI '0'|'1' (env wins)
 //   settings.ai.aki.allowUntrusted  (=== true, default OFF)
@@ -938,6 +963,7 @@ module.exports = {
   resolveFleetDbrFlags, loadFleetDbr, FLEET_DBR_ENV,
   resolveExtractFlags, loadExtract, EXTRACT_ENV,
   resolveDbrServerFilterFlags, loadDbrServerFilter, DBR_SERVER_FILTER_ENV,
+  resolveWriteFlags, loadWrites,
   resolveAiAkiFlags, loadAiAki, AKI_DEFAULTS,
   resolveRepairIntelFlags, loadRepairIntel, REPAIR_INTEL_ENV,
   resolveLongDwellSpFlags, loadLongDwellSp, LONGDWELL_SP_ENV,

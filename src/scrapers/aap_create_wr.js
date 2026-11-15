@@ -1,11 +1,14 @@
 'use strict';
 const logger = require('../utils/logger').createLogger('aap_create_wr');
 /**
- * AAP Create Work Request — Direct API
- * 3-step flow: createRepair → createDriverConnection → updateWorkRequest
+ * AAP Create Work Request / WR comment.
+ *
+ * Both writes go through the working AAP transport (aap_api: in-page XHR with
+ * the captured a2z token) and the user-approval gate (src/writes/write-gate.js):
+ *   createWorkRequest   -> aap_api.createWorkOrder({ ..., confirmVendor:true })
+ *   addConversationNote -> write-gate requestWrite({ kind:'addComment' })
+ * The old cookie-only session fetch (HTTP 403) is gone.
  */
-
-const AAP_BASE = 'https://aap-na.corp.amazon.com/api/v1';
 
 // WR title hard cap — AAP's own field limit. Enforced regardless of caller.
 const WR_TITLE_MAX = 90;
@@ -78,31 +81,6 @@ const VENDOR_IDS = {
   'KWNE (Kenworth NE)':     '', // legacy key
 };
 
-// Known WR UUIDs for supplier ID resolution.
-// When VENDOR_IDS has no supplierId for a vendor, resolveSupplierIdForVendor()
-// fetches one of these WRs from AAP and extracts the supplierId from the response,
-// then caches it in VENDOR_IDS for the rest of the session.
-// Seeded from scraper logs 2026-07-26.
-const VENDOR_SAMPLE_WR = {
-  'Volvo (ASIST)':          '88ce1ce2-942d-4e39-a1c0-c91e60398680',
-  'Volvo':                  '88ce1ce2-942d-4e39-a1c0-c91e60398680',
-  'VOLVO':                  '88ce1ce2-942d-4e39-a1c0-c91e60398680',
-  'FREIGHTLINER':           '375a6bc3-961b-400a-944b-ad85913ed672',
-  'Freightliner (DAIMLER)': '375a6bc3-961b-400a-944b-ad85913ed672',
-  'DAIMLER':                '375a6bc3-961b-400a-944b-ad85913ed672',
-  'Peterbilt (PACCAR)':     'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
-  'PETERBILT':              'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
-  'Kenworth (PACCAR)':      'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af', // PACCAR family -- use Peterbilt WR until Kenworth WR captured
-  'KENWORTH':               'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
-  'PACCAR':                 'ffb8271d-b8ad-4c12-9fa4-27fcbe75a3af',
-  'Amerit':                 '58791f1a-2d69-408c-82f5-d3a0ad47a93b',
-  'AMERIT':                 '58791f1a-2d69-408c-82f5-d3a0ad47a93b',
-  'CEI':                    '4ca84908-a4ef-40bc-bfab-f4ae300e2082',
-  'CUMMINS':                'fef19166-69c4-4001-968c-dd3f3b438c75',
-  'Cummins':                'fef19166-69c4-4001-968c-dd3f3b438c75',
-  'TA':                     '0593c832-2d33-49ad-a637-9405c2588e1c',
-};
-
 // Vendor portal URLs -- informational; surfaced in vendor review modal for
 // vendors that do NOT have an automated Decisiv workflow.
 // PACCAR + Volvo portals live in src/vendors/index.js PORTAL_URLS.
@@ -131,363 +109,93 @@ const VENDOR_PORTAL_URLS = {
 };
 
 /**
- * Resolve supplierId for a vendor name.
- * 1. Check VENDOR_IDS cache (pre-populated or cached from a prior call this session).
- * 2. If empty, find a known sample WR UUID in VENDOR_SAMPLE_WR, fetch it from AAP,
- *    extract supplierId, cache it in VENDOR_IDS, and return it.
- * 3. If no sample WR known either, return null.
+ * Resolve the unit argument to a row with assetUrl / aaid. Accepts a fleet row,
+ * or an equipmentId string / an object without assetUrl+aaid, which is looked
+ * up in the stored fleetData rows (read-only).
  */
-async function resolveSupplierIdForVendor(vendorName, log) {
-  if (!log) log = console.log;
-  if (!vendorName) return null;
-
-  // Cache hit
-  if (VENDOR_IDS[vendorName]) return VENDOR_IDS[vendorName];
-
-  const sampleWrId = VENDOR_SAMPLE_WR[vendorName];
-  if (!sampleWrId) {
-    log('[ResolveSupplier] No sample WR known for vendor "' + vendorName + '" -- cannot auto-resolve supplierId.');
-    return null;
-  }
-
-  log('[ResolveSupplier] Looking up supplierId for "' + vendorName + '" via WR ' + sampleWrId + '...');
+function _resolveUnit(unit, payload) {
+  const isObj = unit && typeof unit === 'object';
+  if (isObj && (unit.assetUrl || unit.aaid)) return unit;
+  const id = String((isObj ? (unit.equipmentId || unit.unit) : unit) || (payload && payload.unit) || '').trim();
+  if (!id) return isObj ? unit : null;
   try {
-    // Run the fetch from within an existing AAP browser window so it is same-origin
-    // and uses the page's full auth context (cookies + any session tokens).
-    // ses.fetch() from the main process triggers a CORS preflight that AAP rejects
-    // with net::ERR_FAILED for GET requests -- executeJavaScript bypasses that.
-    const { BrowserWindow } = require('electron');
-    const wins = BrowserWindow.getAllWindows().filter(w => !w.isDestroyed());
-    // Prefer a window already on aap-na.corp.amazon.com
-    const win = wins.find(w => {
-      try { return w.webContents.getURL().includes('aap-na.corp.amazon.com'); } catch(_) { return false; }
-    }) || wins[0];
-
-    if (!win) {
-      log('[ResolveSupplier] No browser window available for lookup.');
-      return null;
-    }
-
-    const resultStr = await win.webContents.executeJavaScript(`
-      (async () => {
-        try {
-          const r = await fetch('/api/v1/workRequests/' + ${JSON.stringify(sampleWrId)} + '', {
-            credentials: 'include',
-            headers: { 'Accept': 'application/json' }
-          });
-          if (!r.ok) return JSON.stringify({ _error: r.status, _body: await r.text().catch(() => '') });
-          return JSON.stringify(await r.json());
-        } catch(e) {
-          return JSON.stringify({ _error: e.message });
-        }
-      })()
-    `);
-
-    const wr = JSON.parse(resultStr);
-    if (wr._error !== undefined) {
-      log('[ResolveSupplier] WR fetch error: ' + wr._error + (wr._body ? ' -- ' + String(wr._body).slice(0, 200) : ''));
-      return null;
-    }
-    const resolved = wr.supplierId || (wr.supplier && wr.supplier.id) || null;
-    if (!resolved) {
-      log('[ResolveSupplier] WR response had no supplierId. Keys: ' + Object.keys(wr).slice(0, 20).join(', '));
-      return null;
-    }
-    log('[ResolveSupplier] Resolved supplierId=' + resolved + ' for "' + vendorName + '" -- caching.');
-    VENDOR_IDS[vendorName] = resolved;
-    return resolved;
-  } catch (e) {
-    log('[ResolveSupplier] Error: ' + e.message);
-    return null;
-  }
+    const fd = require('../store').load('fleetData', {}) || {};
+    const row = (fd.rows || []).find((r) => String((r && r.equipmentId) || '').trim().toUpperCase() === id.toUpperCase());
+    if (row) return isObj ? Object.assign({}, row, unit, { assetUrl: row.assetUrl, aaid: row.aaid }) : row;
+  } catch (_) { /* fall through */ }
+  return isObj ? unit : { equipmentId: id };
 }
 
-
-async function createWorkRequest(payload, unit, log) {
-  if (!log) log = console.log;
-
-  // Extract aaid from unit's assetUrl
-  const assetUrl = unit.assetUrl || '';
-  const aaid = assetUrl.includes('/v2/asset/') ? assetUrl.split('/v2/asset/')[1].split('?')[0] : '';
-  if (!aaid) {
-    return { ok: false, error: 'No AAID found for unit ' + payload.unit + '. Run a scan first.' };
+/**
+ * createWorkRequest(payload, unit, log, gateOpts) — create a Relay WR from the
+ * legacy payload shape. Routed through the working AAP transport
+ * (aap_api.createWorkOrder, in-page XHR + a2z token) with confirmVendor:true,
+ * so the write-approval gate (src/writes/write-gate.js) decides whether it is
+ * sent. gateOpts: { origin, interactive (default true), userConfirmed }.
+ *
+ * Returns { ok:true, workRequestId, title, copiedFromWorkRequestId } or
+ * { ok:false, outcome?, error } — outcome 'pending-approval' /
+ * 'skipped-not-approved' means nothing was sent to Relay.
+ */
+async function createWorkRequest(payload, unit, log, gateOpts) {
+  if (!log) log = (m) => logger.info(m);
+  payload = payload || {};
+  const g = gateOpts || {};
+  const row = _resolveUnit(unit, payload);
+  const opts = require('./aap_wr_opts').toCreateWorkOrderOpts(payload, row || {}, log);
+  if (!opts.aaid && !(opts.assetUrl && opts.assetUrl.includes('/v2/asset/'))) {
+    return { ok: false, error: 'No AAID found for unit ' + (payload.unit || (row && row.equipmentId) || '') + '. Run a scan first.' };
   }
-  log('[CreateWR] AAID: ' + aaid);
+  opts.confirmVendor = true;
+  opts.origin = g.origin || payload.origin || 'createWorkRequest';
+  opts.interactive = g.interactive !== false;
+  if (g.userConfirmed === true) opts.userConfirmed = true;
+  if (!opts.unit) opts.unit = (row && row.equipmentId) || payload.unit || '';
 
-  // Resolve location = WHERE THE UNIT ACTUALLY IS NOW.
-  //
-  // Default: the unit's home domicile geofence (correct for a repair at the
-  // yard, or a to-dealer tow where the unit starts at the yard).
-  //
-  // EXCEPTION — return-from-dealer / yard-to-yard tow: the unit is NOT at the
-  // home yard, it's at the tow PICKUP location (the dealer, for a return tow).
-  // Submitting the home geofence here was the bug — it told Relay the unit was
-  // at AVP40 when it was actually sitting at the dealer. We have the pickup
-  // address in the payload (towFrom*), so use it. We don't geocode, so instead
-  // of a false home geofence we record the pickup STREET ADDRESS in
-  // yardLocation and clear geofenceCode (no coords -> null lat/long), which is
-  // the honest "it's at this address, not a known yard" signal.
-  const domicile = (unit.site || payload.domicile || 'ABE40').toUpperCase();
-  const _dir = String(payload.towDirection || '').toLowerCase();
-  const _pickupParts = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip]
-    .map(s => String(s || '').trim()).filter(Boolean);
-  const _pickupAddr = _pickupParts.join(', ');
-  const _unitIsAtPickup = (_dir === 'return-to-yard' || _dir === 'yard-to-yard') && _pickupAddr.length > 0;
-
-  let currentLocation;
-  if (_unitIsAtPickup) {
-    currentLocation = {
-      latitude: null,
-      longitude: null,
-      yardLocation: _pickupAddr,  // the dealer/pickup address the unit is at
-      geofenceCode: null          // NOT the home yard
-    };
-    log('[CreateWR] Tow direction "' + _dir + '" -- unit is at PICKUP, submitting location: ' + _pickupAddr);
-  } else {
-    const base = DOMICILE_COORDS[domicile] || DOMICILE_COORDS['ABE40'];
-    currentLocation = {
-      latitude: base.latitude,
-      longitude: base.longitude,
-      yardLocation: null,
-      geofenceCode: domicile
-    };
-  }
-
-  // TOW handling: if area is TOW, always urgent + FleetNet vendor
-  const isTow = (payload.areaPairs || []).some(p => p.area === 'TOW');
-  if (isTow) {
-    // Ensure urgency for tow events
-    if (!payload.urgent || payload.urgent !== 'Yes') {
-      payload.urgent = 'Yes';
-      payload.urgencyReason = payload.urgencyReason || 'DEA - Asset Shortage';
-    }
-  }
-
-  // Resolve vendor + supplierId
-  const vendorName = payload.vendor || '';
-  const supplierId = await resolveSupplierIdForVendor(vendorName, log);
-  if (!vendorName) {
-    log('[CreateWR] No vendor specified -- proceeding with supplierId=null.');
-  } else if (!supplierId) {
-    log('[CreateWR] No supplierId resolved for vendor "' + vendorName + '" -- attempting API with null.');
-  } else {
-    log('[CreateWR] Resolved supplierId for "' + vendorName + '": ' + supplierId);
-  }
-
-  // Build suggestedItems from areaPairs. Values are now AAP AVM CODES (the WR
-  // modal's live cascading dropdowns emit codes, not display text): area=L1
-  // code, subcategory=L2 code, subSubcategory=L3 code ('' when the L2 has no
-  // children — the common case). TOW stays a passthrough (area:'TOW',
-  // subcategory:<tow reason>) — it is NOT an avmCode and flows straight through.
-  const suggestedItems = (payload.areaPairs || []).map(pair => ({
-    level1: pair.area || '',
-    level2: pair.subcategory || '',
-    level3: pair.subSubcategory || ''
-  }));
-
-  // Build comments array
-  const comments = [];
-  if (payload.comments) {
-    comments.push({
-      text: payload.comments,
-      internalOnly: (payload.shareWith || '').toLowerCase().includes('internal'),
-      externalConsumers: []
-    });
-  }
-
-  // Timestamps
-  const now = new Date();
-  const needBy = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24h from now
-
-  // WR title has a hard 90-character limit (AAP's own field cap). Enforce it
-  // here too so it holds regardless of caller (UI, AI, vendor flow).
   const wrTitle = capWrTitle(payload.title);
-
-  // Second-WR / dealer-tracking support: when the caller supplies
-  // copiedFromWorkRequestId (a second WR built by reusing an existing WR's
-  // data with a NEW, different title — e.g. a Dealer Tracking Event alongside
-  // the repair WR), pass it to AAP so the new WR is linked to the source.
   const copiedFrom = normalizeCopiedFromId(payload.copiedFromWorkRequestId);
-
-  // STEP 1: createRepair
-  const repairBody = {
-    aaid: aaid,
-    title: wrTitle,
-    damageDescription: payload.issue || wrTitle || '',
-    vendor: vendorName.split(' (')[0].toUpperCase(), // "Volvo (ASIST)" → "VOLVO"
-    supplierId: supplierId || null,
-    calltype: 'OFFSITE',
-    urgent: payload.urgent === 'Yes',
-    urgencyReason: (payload.urgent === 'Yes') ? (payload.urgencyReason || 'DEA - Asset Shortage') : null,
-    severity: (payload.urgent === 'Yes') ? 'HIGH' : 'LOW',
-    suggestedItems: suggestedItems,
-    comments: comments,
-    currentLocation: currentLocation,
-    assetAvailableDateTime: now.toISOString(),
-    needByDateTime: needBy.toISOString(),
-    assetLoaded: false,
-    assetRefrigerated: false,
-    tireIssue: false,
-    arcClaimNumber: payload.arcClaim || null,
-    simNumber: payload.simNumber || null,
-    recommendationInfo: {
-      vendor: vendorName.split(' (')[0],
-      vendorOpenWRCount: null,
-      vendorDistanceToAsset: null
-    },
-    campaign: null,
-    source: null,
-    dvirId: null,
-    copiedFromWorkRequestId: copiedFrom,
-    relatedAsset: null,
-    sourceNotificationIds: null,
-    vendorIntegrationType: null
-  };
-
-  log('[CreateWR] Step 1: createRepair for ' + payload.unit);
-
-  let workRequestId;
+  let r;
   try {
-    const resp1 = await aapFetch('/createRepair', repairBody);
-    log('[CreateWR] Step 1 response: HTTP ' + resp1.status + ' ' + resp1.statusText);
-    if (!resp1.ok) {
-      let errBody = '';
-      try { errBody = await resp1.text(); } catch(_) {}
-      log('[CreateWR] Step 1 error body: ' + errBody.slice(0, 400));
-      return { ok: false, error: 'createRepair HTTP ' + resp1.status + (errBody ? ': ' + errBody.slice(0, 200) : '') };
-    }
-    const data1 = await resp1.json();
-    workRequestId = data1.workRequestId || data1.id;
-    if (!workRequestId) {
-      log('[CreateWR] Step 1 no workRequestId in response: ' + JSON.stringify(data1).slice(0, 300));
-      return { ok: false, error: 'createRepair returned no workRequestId' };
-    }
-    log('[CreateWR] Step 1 OK: workRequestId = ' + workRequestId);
-  } catch(e) {
-    return { ok: false, error: 'createRepair error: ' + e.message };
+    r = await require('./aap_api').createWorkOrder(opts);
+  } catch (e) {
+    return { ok: false, error: 'createWorkOrder error: ' + e.message };
   }
-
-  // STEP 2: createDriverConnection (contact info)
-  const contactBody = {
-    workRequestId: workRequestId,
-    aaid: aaid,
-    driverName: payload.contactName || 'Z',
-    driverPhoneNumber: toAapPhone(payload.contactPhone) || '1-7166142167'
-  };
-
-  log('[CreateWR] Step 2: createDriverConnection');
-  try {
-    const resp2 = await aapFetch('/createDriverConnection', contactBody);
-    if (!resp2.ok) {
-      log('[CreateWR] Step 2 WARNING: ' + resp2.status);
-    } else {
-      log('[CreateWR] Step 2 OK');
-    }
-  } catch(e) {
-    log('[CreateWR] Step 2 error (non-fatal): ' + e.message);
+  if (r && r.phase === 'gated') {
+    log('[CreateWR] Not sent to Relay (' + r.outcome + ') for ' + (opts.unit || '?'));
+    return { ok: false, outcome: r.outcome, id: r.id || null, error: r.error || r.outcome };
   }
-
-  // STEP 3: updateWorkRequest (images/attachments)
-  const images = [];
-  // FEATURE (2026-07-23): payload.attachments now carries every file the
-  // user attached (auto Uptake screenshot + manual/drag-and-drop files) --
-  // previously only the single legacy screenshotDataUrl field was sent.
-  if (Array.isArray(payload.attachments)) {
-    for (const dataUrl of payload.attachments) {
-      if (dataUrl && dataUrl.startsWith('data:') && images.indexOf(dataUrl) === -1) images.push(dataUrl);
-    }
+  if (r && r.ok && r.workRequestId) {
+    log('[CreateWR] SUCCESS — WR created: ' + r.workRequestId + (copiedFrom ? ' (copied from ' + copiedFrom + ')' : ''));
+    return { ok: true, workRequestId: r.workRequestId, title: wrTitle, copiedFromWorkRequestId: copiedFrom || null };
   }
-  // Legacy single-field fallback, kept for backward compat with any caller
-  // still only setting screenshotDataUrl.
-  if (payload.screenshotDataUrl && payload.screenshotDataUrl.startsWith('data:') && images.indexOf(payload.screenshotDataUrl) === -1) {
-    images.push(payload.screenshotDataUrl);
-  }
-
-  const updateBody = {
-    workRequestId: workRequestId,
-    images: images
-  };
-
-  log('[CreateWR] Step 3: updateWorkRequest (images: ' + images.length + ')');
-  try {
-    const resp3 = await aapFetch('/updateWorkRequest', updateBody);
-    if (!resp3.ok) {
-      log('[CreateWR] Step 3 WARNING: ' + resp3.status);
-    } else {
-      log('[CreateWR] Step 3 OK');
-    }
-  } catch(e) {
-    log('[CreateWR] Step 3 error (non-fatal): ' + e.message);
-  }
-
-  log('[CreateWR] SUCCESS — WR created: ' + workRequestId + (copiedFrom ? ' (copied from ' + copiedFrom + ')' : ''));
-  return { ok: true, workRequestId: workRequestId, title: wrTitle, copiedFromWorkRequestId: copiedFrom || null };
+  return { ok: false, error: (r && r.error) || 'WR not created' };
 }
 
 /**
- * Make authenticated fetch to AAP API
- * Uses the Electron session cookies (same auth as AAP scraper)
+ * addConversationNote(wrIdOrUrl, text, gateOpts) — post an internal comment on
+ * a Relay WR. The send (the addComment POST over the working AAP transport)
+ * happens only inside the write-approval gate. gateOpts: { origin, unit,
+ * interactive, approvedBy, aiDrafted }. Returns { ok, outcome, error }.
  */
-async function aapFetch(endpoint, body) {
-  // Use session.fetch() so requests go through Electron's Chromium network
-  // stack, which handles the corporate proxy, SSL certs, and AAP auth
-  // cookies automatically -- global fetch() bypasses all of that and
-  // produces "fetch failed" (network-level error) on internal URLs.
-  const { session } = require('electron');
-  const ses = session.defaultSession;
-
-  const cookies = await ses.cookies.get({ url: 'https://aap-na.corp.amazon.com' });
-  const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
-
-  const url = AAP_BASE + endpoint;
-  const response = await ses.fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json;charset=UTF-8',
-      'Cookie': cookieStr,
-      'Accept': 'application/json',
-      'Origin': 'https://aap-na.corp.amazon.com',
-      'Referer': 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24'
-    },
-    body: JSON.stringify(body)
-  });
-
-  return response;
-}
-
-
-/**
- * Make authenticated GET fetch to AAP API
- */
-async function aapGetFetch(endpoint) {
-  const { session } = require('electron');
-  const ses = session.defaultSession;
-  const cookies = await ses.cookies.get({ url: 'https://aap-na.corp.amazon.com' });
-  const cookieStr = cookies.map(c => c.name + '=' + c.value).join('; ');
-  const url = AAP_BASE + endpoint;
-  return ses.fetch(url, {
-    method: 'GET',
-    headers: {
-      'Cookie': cookieStr,
-      'Accept': 'application/json',
-      'Origin': 'https://aap-na.corp.amazon.com',
-      'Referer': 'https://aap-na.corp.amazon.com/v2/page/891a81dc-538d-4f10-be93-441545840a24'
-    }
-  });
-}
-
-/** addConversationNote -- S25-8: post internal comment on AAP WR */
-async function addConversationNote(wrIdOrUrl,text){
-  if(!wrIdOrUrl||!text)return{ok:false,error:"missing args"};
-  var workRequestId=wrIdOrUrl;
-  var m=String(wrIdOrUrl).match(/\/v2\/service\/([a-f0-9-]{36})/i);
-  if(m)workRequestId=m[1];
-  var body={workRequestId:workRequestId,text:String(text).slice(0,2000),internalOnly:true,externalConsumers:[]};
-  try{
-    var resp=await aapFetch("/addComment",body);
-    if(!resp.ok){var e=await resp.text().catch(function(){return String(resp.status);});return{ok:false,error:"addComment HTTP "+resp.status+": "+String(e).slice(0,120)};}
-    return{ok:true};
-  }catch(e){return{ok:false,error:e.message};}
+async function addConversationNote(wrIdOrUrl, text, gateOpts) {
+  if (!wrIdOrUrl || !text) return { ok: false, error: 'missing args' };
+  let workRequestId = wrIdOrUrl;
+  const m = String(wrIdOrUrl).match(/\/v2\/service\/([a-f0-9-]{36})/i);
+  if (m) workRequestId = m[1];
+  const g = gateOpts || {};
+  try {
+    const r = await require('../writes/write-gate').requestWrite({
+      kind: 'addComment',
+      workRequestId: String(workRequestId),
+      payload: { workRequestId: String(workRequestId), text: String(text) },
+      origin: g.origin || 'addConversationNote',
+      unit: g.unit || '',
+      interactive: g.interactive === true,
+      approvedBy: g.approvedBy,
+      aiDrafted: !!g.aiDrafted,
+    });
+    return { ok: !!(r && r.ok), outcome: r && r.outcome, id: r && r.id, error: r && r.ok ? undefined : (r && r.error) };
+  } catch (e) { return { ok: false, outcome: 'send-failed', error: e.message }; }
 }
 
 // AAP stores the driver phone as "<countryCode>-<number>" and splits on the

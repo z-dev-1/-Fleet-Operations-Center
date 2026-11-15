@@ -468,7 +468,9 @@ async function _executeAction(taskId) {
         domicile: row.domicileSite || '',
       };
       const log = (m) => logger.info('[tasks:exec][create_wr] ' + m);
-      const r = await createWorkRequest(payload, row, log);
+      // Non-interactive: the write-approval gate queues it; never auto-sent.
+      const r = await createWorkRequest(payload, row, log, { origin: 'daily-tasks', interactive: false });
+      if (r && r.outcome === 'pending-approval') return { ok: false, pending: true, message: 'Queued for your approval (Relay writes)' };
       if (r && r.ok) { _markDone(); return { ok: true, message: 'Work Request created for ' + unitId + (r.workRequestId ? ' (' + r.workRequestId + ')' : '') }; }
       return { ok: false, error: (r && r.error) || 'createWorkRequest failed' };
     }

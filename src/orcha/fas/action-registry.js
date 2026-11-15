@@ -211,7 +211,9 @@ const SUBMIT_WORK_REQUEST = {
     // Reuse the app's create-WR path via IPC-equivalent function.
     const createWr = require('../../scrapers/aap_create_wr');
     if (!createWr || !createWr.createWorkRequest) return { ok: false, error: 'create-WR unavailable' };
-    const res = await createWr.createWorkRequest(args.payload, args.unit, () => {});
+    // Non-interactive: the Relay write-approval gate queues it (never auto-sent).
+    const res = await createWr.createWorkRequest(args.payload, args.unit, () => {}, { origin: 'fas-action', interactive: false });
+    if (res && res.outcome === 'pending-approval') return { ok: false, pending: true, error: 'pending-approval', result: res };
     return { ok: !!(res && res.ok), result: res, error: res && res.error };
   },
   verify(args, ctx, runResult) {

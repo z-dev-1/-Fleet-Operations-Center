@@ -476,8 +476,10 @@ class PACCARWorkflow extends VendorWorkflow {
     if (typeof mod.addConversationNote !== 'function') return;
     const note = 'PACCAR SR Created: ' + srNumber
       + (caseUrl ? ' | ' + caseUrl : '') + ' | Relay Ref: ' + (altId || '');
-    await mod.addConversationNote(unit.workRequestId || unit.serviceUrl, note);
-    logger.info('[paccar] Relay note written | SR:', srNumber);
+    // Non-interactive: the Relay write-approval gate queues the note (never auto-sent).
+    const r = await mod.addConversationNote(unit.workRequestId || unit.serviceUrl, note,
+      { origin: 'paccar-sr-note', interactive: false, unit: unit.equipmentId || '' });
+    logger.info('[paccar] Relay note ' + ((r && r.outcome) || (r && r.ok ? 'sent' : 'failed')) + ' | SR:', srNumber);
   }
 }
 

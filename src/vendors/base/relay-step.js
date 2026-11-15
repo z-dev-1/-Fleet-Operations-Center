@@ -140,7 +140,12 @@ async function createDealerTrackingWO(unit, vendor) {
 
   logger.info("[relay-step] Creating dealer WO for", unit.equipmentId, "| vendor:", vendor, "| title:", title);
 
-  const result = await createWorkRequest(payload, unit, (msg) => logger.info(msg));
+  // Non-interactive: the Relay write-approval gate queues it (never auto-sent).
+  const result = await createWorkRequest(payload, unit, (msg) => logger.info(msg), { origin: "relay-step", interactive: false });
+  if (result && result.outcome === "pending-approval") {
+    logger.info("[relay-step] dealer WO queued for approval (not sent) for", unit.equipmentId);
+    return { ok: false, pendingApproval: true, error: "pending-approval", isDuplicate: false };
+  }
   if (!result.ok) {
     logger.warn("[relay-step] createWorkRequest failed:", result.error);
     return { ok: false, error: result.error, isDuplicate: false };
@@ -191,6 +196,9 @@ async function runRelayStep(unit) {
 
   // Step 3: create WO
   const result = await createDealerTrackingWO(unit, vendor);
+  if (result && result.pendingApproval) {
+    return { vendor, altId: "", workRequestId: "", serviceUrl: "", isDuplicate: false, pendingApproval: true };
+  }
   if (!result.ok) throw new Error("[relay-step] WO creation failed: " + result.error);
 
   return {

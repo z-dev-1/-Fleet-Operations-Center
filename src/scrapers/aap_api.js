@@ -1894,6 +1894,11 @@ function _readRecommendation(resp) {
  * Returns:
  *   Phase 1 (recommend):  { ok, phase:'recommend', recommendation:{vendor,ruleName,autoAssignable,vendors[]} }
  *   Phase 2 (commit):     { ok, phase:'commit', vendor, autoAssignable, workRequestId, raw }
+ *   Not approved:         { ok:false, phase:'gated', outcome:'pending-approval'|'skipped-not-approved', id, error }
+ *
+ * Every commit passes the user-approval gate (src/writes/write-gate.js) first.
+ * Gate opts: origin, unit, interactive (default true), userConfirmed (the WR
+ * modal already showed the content and the user confirmed).
  */
 async function createWorkOrder(opts = {}) {
   const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
@@ -1954,6 +1959,51 @@ async function createWorkOrder(opts = {}) {
   // vendorId (not a naive uppercase that VendorConfigDynamo may not have).
   const vendorCode = await _resolveVendorCode(opts.vendor);
 
+  // RELAY WRITE APPROVAL GATE (src/writes/write-gate.js). Every commit — from
+  // any caller — must be approved by the user before /createRepair is sent.
+  // The gate stores exactly these resolved opts; the approved send re-enters
+  // through _commitApprovedWorkOrder with a gate-issued token.
+  const writeGate = require('../writes/write-gate');
+  const stored = Object.assign({}, opts, { aaid, vendorCode });
+  const gated = await writeGate.requestWrite({
+    kind: 'createWorkOrder',
+    payload: stored,
+    origin: opts.origin || 'unknown',
+    unit: opts.unit || opts.equipmentId || aaid,
+    interactive: opts.interactive !== false,
+    approvedBy: opts.userConfirmed === true ? 'wr-modal-confirm' : undefined,
+  });
+  if (gated && gated.result && typeof gated.result === 'object') return gated.result;
+  if (gated && gated.outcome === 'send-failed') {
+    return { ok: false, phase: 'create-failed', aaid, vendor: vendorCode, error: gated.error || 'send failed' };
+  }
+  return {
+    ok: false, phase: 'gated', aaid, vendor: vendorCode,
+    outcome: (gated && gated.outcome) || 'skipped-not-approved',
+    id: (gated && gated.id) || null,
+    error: (gated && gated.error) || 'Not sent to Relay (approval required)',
+  };
+}
+
+// Commit a gate-approved work order. `token` must be a live approval token
+// issued by write-gate for this send; anything else is refused (no network).
+async function _commitApprovedWorkOrder(opts, token) {
+  const writeGate = require('../writes/write-gate');
+  if (!writeGate.isApprovalToken(token)) {
+    return { ok: false, phase: 'gated', outcome: 'skipped-not-approved', error: 'commit refused: no write-gate approval token' };
+  }
+  opts = opts || {};
+  const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
+  if (!aaid) return { ok: false, phase: 'create-failed', error: 'no aaid' };
+  let assetFull = null;
+  try { assetFull = await getAsset(aaid); } catch (e) {
+    logger.warn('createWorkOrder: getAsset failed, using fallback location: ' + e.message);
+  }
+  const vendorCode = opts.vendorCode || await _resolveVendorCode(opts.vendor);
+  return _commitWorkOrder(opts, aaid, assetFull, vendorCode);
+}
+
+async function _commitWorkOrder(opts, aaid, assetFull, vendorCode) {
   // STEP A: get the VRE recommendation (read-only) — it carries the
   // recommendationInfo (groupingId/ruleName/ruleId/supplier) that the real
   // /createRepair body requires to link the recommendation to the created WR.
@@ -2859,6 +2909,7 @@ module.exports = {
   apiPost,
   apiPut,
   createWorkOrder,
+  _commitApprovedWorkOrder,     // write-gate send path only (token-checked)
   _parseAapErrorField,          // exported for self-healing unit tests
   _correctCreateRepairField,    // exported for self-healing unit tests
   _resolveVendorCode,           // exported: resolve vendor display name -> live AAP vendorId

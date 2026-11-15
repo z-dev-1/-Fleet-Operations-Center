@@ -39,6 +39,7 @@ const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerEmailIntelIPC }    = require('./email-intel');
 const { registerRelayReconcileIPC } = require('./relay-reconcile');
+const { registerRelayWritesIPC }   = require('./relay-writes');
 const { registerAuthHealthIPC }    = require('./auth-health');
 const { registerRepairIntelIPC }   = require('./repair-intel');
 const { registerAssistantIPC }     = require('./assistant');
@@ -78,6 +79,7 @@ function registerAllIPC(ctx) {
   registerEmailTriageIPC(ctx);
   registerEmailIntelIPC(ctx);
   registerRelayReconcileIPC(ctx);
+  registerRelayWritesIPC(ctx);  // Relay write-approval gate (addComment / WR commits)
   const { registerContactsHandlers } = require('./contacts');
   registerContactsHandlers();
   registerAuthHealthIPC(ctx);

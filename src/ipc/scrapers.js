@@ -166,7 +166,11 @@ function registerScrapersIPC(ctx) {
       log(payload.confirmVendor
         ? 'Creating work order in AAP (committing with vendor ' + (payload.vendor || '—') + ')…'
         : 'Asking AAP for a vendor recommendation…');
-      const result = await aapApi.createWorkOrder(payload);
+      const result = await aapApi.createWorkOrder(Object.assign({ origin: payload.origin || 'aap:create-wr-api' }, payload));
+      if (result && result.phase === 'gated') {
+        log('Work order NOT sent to Relay: ' + result.outcome);
+        return { ok: false, phase: 'gated', error: 'Not sent to Relay: ' + result.outcome, outcome: result.outcome, id: result.id, logs };
+      }
       if (result && result.phase === 'recommend') {
         log('AAP recommended vendor: ' + (result.recommendation.vendor || '(none)') +
             (result.recommendation.ruleName ? ' [' + result.recommendation.ruleName + ']' : ''));
@@ -495,60 +499,16 @@ function registerScrapersIPC(ctx) {
       // + business-error messages. Unify every WR (repair AND tow) on it.
       const aapApi = require("../../src/scrapers/aap_api");
 
-      // Map the modal/tow payload into createWorkOrder opts.
-      const opts = {
-        assetUrl: (unit && unit.assetUrl) || '',
-        aaid: (unit && unit.aaid) || undefined,
-        title: payload.title,
-        issue: payload.issue,
-        comments: payload.comments,
-        shareWith: payload.shareWith,
-        areaPairs: payload.areaPairs || [],
-        urgent: payload.urgent,
-        urgencyReason: payload.urgencyReason,
-        arcClaim: payload.arcClaim,
-        simNumber: payload.simNumber,
-        vendor: payload.vendor,
-        contactName: payload.contactName,
-        contactPhone: payload.contactPhone,
-        attachments: (payload.attachments || []).map((d, i) => (typeof d === 'string' ? { name: 'attachment-' + (i + 1), dataUrl: d } : d)),
-        domicile: (unit && (unit.site || unit.domicileSite)) || payload.domicile || '',
-        copiedFromWorkRequestId: payload.copiedFromWorkRequestId || null,
-        // TOW: pass the DESTINATION (where the unit is going) + direction so the
-        // create body can set AAP's separate `destination` field + transloading
-        // flag (AAP stores tow pickup in reportedLocation and the target in a
-        // distinct `destination` object — confirmed from a hand-made ref WR).
-        towDirection: payload.towDirection || '',
-        towToStreet: payload.towStreet || '', towToCity: payload.towCity || '',
-        towToState: payload.towState || '', towToZip: payload.towZip || '',
-        confirmVendor: true, // modal auto-submits → commit directly
-      };
-
-      // TOW LOCATION: for a return-to-yard / yard-to-yard tow the unit is NOT at
-      // its home yard — it's at the tow PICKUP (the dealer). Tell createWorkOrder
-      // via its off-site address fields so currentLocation reflects where the
-      // unit actually is. For a to-dealer tow the unit is still at the home yard,
-      // so leave the GPS/domicile location as-is.
-      const dir = String(payload.towDirection || '').toLowerCase();
-      // DIAGNOSTIC: log exactly what pickup/destination/offSite arrived, so a
-      // swapped pickup/destination is unambiguous in the log.
-      log('[create-wr] tow fields: dir=' + (dir || 'none') +
-        ' | pickup(towFrom)=' + [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].filter(Boolean).join(', ') +
-        ' | destination(tow)=' + [payload.towStreet, payload.towCity, payload.towState, payload.towZip].filter(Boolean).join(', ') +
-        ' | offSite=' + payload.offSite + ' loc=' + [payload.locStreet, payload.locCity, payload.locState, payload.locZip].filter(Boolean).join(', '));
-      if (dir === 'return-to-yard' || dir === 'yard-to-yard') {
-        const pickup = [payload.towFromStreet, payload.towFromCity, payload.towFromState, payload.towFromZip].map(s => String(s || '').trim());
-        if (pickup.some(Boolean)) {
-          opts.offSite = true;
-          opts.locStreet = payload.towFromStreet || '';
-          opts.locCity   = payload.towFromCity   || '';
-          opts.locState  = payload.towFromState  || '';
-          opts.locZip    = payload.towFromZip    || '';
-          log('[create-wr] tow direction "' + dir + '" — unit is at pickup, using off-site location: ' + pickup.filter(Boolean).join(', '));
-        }
-      }
+      // Map the modal/tow payload into createWorkOrder opts (aap_wr_opts.js;
+      // also forwards the write-gate fields origin / userConfirmed).
+      const opts = require('../scrapers/aap_wr_opts').toCreateWorkOrderOpts(payload, unit, log);
+      if (!opts.origin) opts.origin = 'aap:create-wr';
 
       const result = await aapApi.createWorkOrder(opts);
+      if (result && result.phase === 'gated') {
+        log('Work order NOT sent to Relay: ' + result.outcome);
+        return { ok: false, error: 'Not sent to Relay: ' + result.outcome, outcome: result.outcome, id: result.id };
+      }
       // Normalize to the shape the modal expects ({ ok, workRequestId, error }).
       if (result && result.phase === 'commit' && result.workRequestId) {
         log('Work order created: ' + result.workRequestId);
