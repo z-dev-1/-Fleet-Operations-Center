@@ -5,7 +5,7 @@
  *
  * Moved verbatim from ipc/scrapers.js aap:create-wr so the legacy
  * aap_create_wr.createWorkRequest callers use the same mapping. Also forwards
- * the write-gate fields origin / userConfirmed / interactive. No I/O.
+ * the write-gate fields origin / interactive (never userConfirmed). No I/O.
  *
  * Returns the opts object. The optional log(msg) receives the tow diagnostics.
  */
@@ -40,9 +40,10 @@ function toCreateWorkOrderOpts(payload, unit, log) {
     towToState: payload.towState || '', towToZip: payload.towZip || '',
     confirmVendor: true, // modal auto-submits → commit directly
   };
-  // Write-gate fields (src/writes/write-gate.js).
+  // Write-gate fields (src/writes/write-gate.js). payload.userConfirmed is NOT
+  // forwarded: it is a caller-level statement ("the WR modal showed this and the
+  // user clicked"), set only by the aap:create-wr IPC handler, never by payload data.
   if (payload.origin) opts.origin = payload.origin;
-  if (payload.userConfirmed === true) opts.userConfirmed = true;
   if (payload.interactive === false) opts.interactive = false;
   if (unit && unit.equipmentId) opts.unit = unit.equipmentId;
 

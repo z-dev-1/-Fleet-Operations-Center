@@ -194,7 +194,8 @@ function _extractedCard(x) {
     if (!rows || !rows.length) return '';
     var items = rows.slice(0, 8).map(function(r){
       return '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
-        '<span class="tr-rank-n">' + esc(String(r.slips)) + ' / ' + esc(String(r.wos)) + ' WO' + (r.wos === 1 ? '' : 's') + '</span></div></div>';
+        '<span class="tr-rank-n">' + (r.wos ? esc(String(r.slips)) + ' / ' + esc(String(r.wos)) + ' WO' + (r.wos === 1 ? '' : 's') : 'no ETC data') +
+        (r.notRecorded ? ' · ' + esc(String(r.notRecorded)) + ' not recorded' : '') + '</span></div></div>';
     }).join('');
     return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc('ETC moved (Relay history) by vendor (slips / WOs)') + '</div>' + items + '</div>';
   }

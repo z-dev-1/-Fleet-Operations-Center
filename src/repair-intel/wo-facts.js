@@ -1146,6 +1146,7 @@ function digestForRi(fs) {
     const tail = (a, n) => (Array.isArray(a) ? a.slice(Math.max(0, a.length - n)) : []);
     d.history = {
       etcSlipCount: h.etc.slipCount || 0,
+      etcAvailable: !!h.etc.available,   // false: Relay recorded no ETC revisions for this WR
       etcSeq: tail(h.etc.seq, 12),
       estimateRevisions: tail(h.estimate.revisions, 8).map((r) => ({ at: r.at, from: r.from, to: r.to })),
       decisions: tail(h.estimate.decisions, 8).map((x) => ({ at: x.at, outcome: x.outcome, amount: x.amount, reason: x.reason ? _str(x.reason).slice(0, 60) : null })),

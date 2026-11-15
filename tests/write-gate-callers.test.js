@@ -179,3 +179,42 @@ describe('relay reconcile', () => {
     expect(sesFetch).not.toHaveBeenCalled();
   });
 });
+describe('review fixes: caller-level approval only', () => {
+  it('a FAS payload carrying userConfirmed:true still queues (pending-approval), 0 writes, preview says AI-drafted: yes', async () => {
+    const { getAction } = require('../src/orcha/fas/action-registry');
+    const res = await getAction('SUBMIT_WORK_REQUEST').run({ unit: 'B62020', payload: { title: 'CEL', vendor: 'Cox', userConfirmed: true, issue: 'AI issue text' } });
+    expect(res.pending).toBe(true);
+    expect(writes()).toEqual([]);
+    const q = pendingWrites();
+    expect(q).toHaveLength(1);
+    expect(q[0].preview).toContain('AI-drafted: yes');
+    expect(q[0].preview).toContain('AI issue text');
+    expect(logs.some((l) => /by=wr-modal-confirm/.test(l))).toBe(false);
+  });
+  it('createWorkRequest ignores payload.userConfirmed with interactive:false; unknown aiDrafted without gateOpts', async () => {
+    const { createWorkRequest } = require('../src/scrapers/aap_create_wr');
+    const r = await createWorkRequest({ unit: 'B62020', title: 'T', vendor: 'Cox', userConfirmed: true }, 'B62020', () => {}, { origin: 'daily-tasks', interactive: false });
+    expect(r.outcome).toBe('pending-approval');
+    expect(writes()).toEqual([]);
+    expect(pendingWrites()[0].preview).toContain('AI-drafted: unknown');
+  });
+  it('daily-tasks: re-running the task reuses the queued WR; approving it from the list sends once and marks the task done', async () => {
+    vi.useFakeTimers();
+    const dt = require('../src/ipc/daily-tasks');
+    dt.registerDailyTasksIPC({});
+    dt.__test__.resetForTests();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    store.save('dailyTasks', { ai: [{ id: 't2', action: 'create_wr', unitId: 'B62020', done: false }], manual: [] });
+    await handlers['tasks:execute-action']({}, 't2');
+    await handlers['tasks:execute-action']({}, 't2');
+    const q = pendingWrites();
+    expect(q).toHaveLength(1);
+    expect(q[0].ref).toEqual({ taskId: 't2' });
+    expect(q[0].preview).toContain('AI-drafted: no');
+    const a = await gate.approve(q[0].id);
+    expect(a.outcome).toBe('sent');
+    expect(writes().filter((c) => /createRepair$/.test(c))).toHaveLength(1);
+    expect(store.load('dailyTasks').ai[0].done).toBe(true);
+  });
+});

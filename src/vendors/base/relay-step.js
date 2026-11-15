@@ -118,6 +118,15 @@ async function checkExistingDealerWO(unit) {
  * @param {string} vendor  paccar | volvo
  * @returns {Promise<{ok, workRequestId, altId, serviceUrl, isDuplicate, error}>}
  */
+// A dealer WO queued behind the Relay write-approval gate is sent later from the
+// Relay writes list; the vendor workflow has already moved on, so log the link.
+try {
+  require("../../writes/write-gate").onSent("relay-step", (item) => {
+    const ref = (item && item.ref) || {};
+    logger.info("[relay-step] queued dealer WO approved and sent for", ref.unit || item.unit || "?",
+      "| vendor:", ref.vendor || "?", "| workRequestId:", item.sentWorkRequestId || "(unknown)");
+  });
+} catch (_) {}
 async function createDealerTrackingWO(unit, vendor) {
   if (!DEALER_WO_TITLES[vendor]) {
     return { ok: false, error: "createDealerTrackingWO: unknown vendor: " + vendor };
@@ -141,7 +150,8 @@ async function createDealerTrackingWO(unit, vendor) {
   logger.info("[relay-step] Creating dealer WO for", unit.equipmentId, "| vendor:", vendor, "| title:", title);
 
   // Non-interactive: the Relay write-approval gate queues it (never auto-sent).
-  const result = await createWorkRequest(payload, unit, (msg) => logger.info(msg), { origin: "relay-step", interactive: false });
+  const result = await createWorkRequest(payload, unit, (msg) => logger.info(msg),
+    { origin: "relay-step", interactive: false, aiDrafted: false, ref: { unit: unit.equipmentId || unit.id || "", vendor } });
   if (result && result.outcome === "pending-approval") {
     logger.info("[relay-step] dealer WO queued for approval (not sent) for", unit.equipmentId);
     return { ok: false, pendingApproval: true, error: "pending-approval", isDuplicate: false };

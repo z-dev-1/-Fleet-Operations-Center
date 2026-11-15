@@ -257,3 +257,55 @@ describe('logging', () => {
     expect(joined).not.toContain('Line two');
   });
 });
+describe('review fixes: preview completeness, aiDrafted tri-state, dedup, onSent', () => {
+  const WO = {
+    aaid: 'aaid-1', title: 'Check engine light', issue: 'AI: CEL on, derate after 20 mi', vendor: 'Cox', vendorCode: 'COX',
+    supplierId: 'SUP-9', arcClaim: 'ARC-77', simNumber: 'SIM-5', comments: 'Please diagnose', contactName: 'Z',
+    areaPairs: [{ area: 'ENG', subcategory: 'CEL' }],
+  };
+  it('createWorkOrder preview shows the description, supplier, ARC claim, SIM and comment author', () => {
+    const pv = gate.previewOf('createWorkOrder', WO, { unit: 'B62020', aiDrafted: true });
+    for (const s of ['Description (exact, 30 chars):\nAI: CEL on, derate after 20 mi', 'Supplier: SUP-9', 'ARC claim: ARC-77',
+      'SIM number: SIM-5', 'Comment author: Z', 'AI-drafted: yes']) expect(pv).toContain(s);
+  });
+  it('description falls back to the title, then the generic text, like the /createRepair body', () => {
+    expect(gate.previewOf('createWorkOrder', { title: 'T1' }, {})).toContain('Description (exact, 2 chars):\nT1');
+    expect(gate.previewOf('createWorkOrder', {}, {})).toContain('Repair requested via Fleet Ops Center');
+    expect(gate.previewOf('createWorkOrder', { vendorCode: 'UNASSIGNED', supplierId: 'S' }, {})).toContain('Supplier: (the Relay vendor recommendation');
+  });
+  it('AI-drafted is unknown when the caller does not say, no only when it says false', async () => {
+    expect(gate.previewOf('createWorkOrder', WO, {})).toContain('AI-drafted: unknown');
+    expect(gate.previewOf('createWorkOrder', WO, { aiDrafted: false })).toContain('AI-drafted: no');
+    const r = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'approve-wr', payload: WO, interactive: false });
+    const it0 = gate.list().items.find((i) => i.id === r.id);
+    expect(it0.aiDrafted).toBeNull();
+    expect(it0.preview).toContain('AI-drafted: unknown');
+  });
+  it('a repeat WR request that differs only in live GPS / address reuses the pending item', async () => {
+    const a = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'daily-tasks', payload: Object.assign({}, WO,
+      { locationLatest: { geoPoint: { latitude: 40.1, longitude: -75.1 } }, offSite: true, locStreet: '1 Main St' }), interactive: false });
+    const b = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'daily-tasks', payload: Object.assign({}, WO,
+      { locationLatest: { geoPoint: { latitude: 40.2, longitude: -75.2 } }, offSite: true, locStreet: '9 Other Rd' }), interactive: false });
+    expect(b.id).toBe(a.id);
+    expect(gate.list().items.filter((i) => i.state === 'pending')).toHaveLength(1);
+    const c = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'daily-tasks', payload: Object.assign({}, WO, { title: 'Other' }), interactive: false });
+    expect(c.id).not.toBe(a.id);
+  });
+  it('onSent tells the origin when its queued item is approved and sent (ref + WR id), not on reject', async () => {
+    const commitWorkOrder = vi.fn(async () => ({ ok: true, phase: 'commit', workRequestId: 'wr-77' }));
+    setup({ commitWorkOrder });
+    const seen = [];
+    gate.onSent('daily-tasks', (item) => seen.push(item));
+    try {
+      const r = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'daily-tasks', payload: WO, interactive: false, ref: { taskId: 't9' } });
+      expect(seen).toHaveLength(0);
+      await gate.approve(r.id);
+      expect(seen).toHaveLength(1);
+      expect(seen[0].ref).toEqual({ taskId: 't9' });
+      expect(seen[0].sentWorkRequestId).toBe('wr-77');
+      const r2 = await gate.requestWrite({ kind: 'createWorkOrder', origin: 'daily-tasks', payload: Object.assign({}, WO, { title: 'X' }), interactive: false, ref: { taskId: 't10' } });
+      gate.reject(r2.id);
+      expect(seen).toHaveLength(1);
+    } finally { gate.onSent('daily-tasks', null); }
+  });
+});

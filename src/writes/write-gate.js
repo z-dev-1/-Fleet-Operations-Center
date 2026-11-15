@@ -98,9 +98,24 @@ function _target(kind, payload, spec) {
   if (kind === 'addComment') return _str(payload.workRequestId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
+// Dedup key for a work-order write: the fields that define WHAT is requested.
+// Live context resolved per call (locationLatest, the reverse-geocoded GPS
+// address, gate/caller flags) is left out, so a re-run of the same request
+// reuses the pending item instead of queuing a second WR.
+const WO_HASH_FIELDS = ['aaid', 'title', 'issue', 'vendor', 'vendorCode', 'supplierId', 'areaPairs',
+  'comments', 'shareWith', 'urgent', 'urgencyReason', 'arcClaim', 'simNumber', 'towDirection',
+  'towToStreet', 'towToCity', 'towToState', 'towToZip', 'copiedFromWorkRequestId'];
+function _hashSubject(kind, payload) {
+  if (kind !== 'createWorkOrder' || !payload || typeof payload !== 'object') return payload;
+  const out = {};
+  for (const k of WO_HASH_FIELDS) out[k] = payload[k] == null ? null : payload[k];
+  out.attachments = (Array.isArray(payload.attachments) ? payload.attachments : [])
+    .map((a, i) => (a && typeof a === 'object' && a.name) ? _str(a.name) : ('attachment-' + (i + 1)));
+  return out;
+}
 function _hash(kind, target, payload) {
   let json = '';
-  try { json = JSON.stringify(payload); } catch (_) { json = String(_now()); }
+  try { json = JSON.stringify(_hashSubject(kind, payload)); } catch (_) { json = String(_now()); }
   return crypto.createHash('sha256').update(kind + '\n' + target + '\n' + json).digest('hex');
 }
 function _newId() {
@@ -120,6 +135,9 @@ function _normalizePayload(kind, payload) {
   return p;
 }
 
+// aiDrafted is tri-state: true / false when the caller knows, null = unknown.
+function _aiTri(v) { return typeof v === 'boolean' ? v : null; }
+function _aiLabel(v) { return v === true ? 'yes' : (v === false ? 'no' : 'unknown'); }
 // ── preview (deterministic, from the stored payload only) ───────────────────
 function previewOf(kind, payload, meta) {
   const m = meta || {};
@@ -131,7 +149,7 @@ function previewOf(kind, payload, meta) {
     lines.push('Unit: ' + (m.unit || '-'));
     lines.push('Relay WR: ' + wr + '  ' + SERVICE_URL + wr);
     lines.push('Visibility: internal-only');
-    lines.push('AI-drafted: ' + (m.aiDrafted ? 'yes' : 'no'));
+    lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
     lines.push('Origin: ' + (m.origin || 'unknown'));
     lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
     lines.push(_str(p.text));
@@ -165,8 +183,21 @@ function previewOf(kind, payload, meta) {
   lines.push('Contact: ' + ([_str(p.contactName).trim(), _str(p.contactPhone).trim()].filter(Boolean).join(', ') || '(none)'));
   lines.push('Attachments: ' + atts.length + (atts.length ? ' (' + attNames.join(', ') + ')' : ''));
   lines.push('Linked WR: ' + (_str(p.copiedFromWorkRequestId) || '(none)'));
-  lines.push('AI-drafted: ' + (m.aiDrafted ? 'yes' : 'no'));
+  // Same values aap_api._buildWoBody / _buildCreateRepairBody send.
+  const vendorCode = _str(p.vendorCode);
+  lines.push('Supplier: ' + ((vendorCode && vendorCode !== 'UNASSIGNED' && p.supplierId)
+    ? _str(p.supplierId) : '(the Relay vendor recommendation\'s supplier, if any)'));
+  lines.push('ARC claim: ' + (_str(p.arcClaim) || '(none)'));
+  lines.push('SIM number: ' + (_str(p.simNumber) || '(none)'));
+  lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
   lines.push('Origin: ' + (m.origin || 'unknown'));
+  const description = _str(p.issue).trim() || _str(p.title).trim() || 'Repair requested via Fleet Ops Center';
+  lines.push('Description (exact, ' + description.length + ' chars):');
+  lines.push(description);
+  if (comment) {
+    const author = _str(p.createdBy || p.contactName || p.operatorAlias || 'Fleet Ops Center').trim() || 'Fleet Ops Center';
+    lines.push('Comment author: ' + author);
+  }
   lines.push('Comment text (exact, ' + comment.length + ' chars):');
   lines.push(comment || '(none)');
   return lines.join('\n');
@@ -250,7 +281,8 @@ function _stageItem(f, payload) {
     origin: f.origin || 'unknown',
     unit: f.unit || '',
     workRequestId: f.workRequestId || '',
-    aiDrafted: !!f.aiDrafted,
+    aiDrafted: _aiTri(f.aiDrafted),
+    ref: (f.ref && typeof f.ref === 'object') ? f.ref : null,
     preview: previewOf(f.kind, payload, f),
     hash: f.hash,
     createdAt: new Date(_now()).toISOString(),
@@ -298,10 +330,29 @@ async function _sendPending(id, by) {
   const f = { kind: it.kind, origin: it.origin, unit: it.unit, id: it.id };
   _logLine('approved', f, 'by=' + (by || 'user'));
   const r = await _send(f, payload);
-  _setState(id, r.ok ? 'sent' : 'failed', r.ok ? { approvedBy: by || 'user' } : { approvedBy: by || 'user', error: _str(r.error).slice(0, 300) });
+  const sentWr = r.ok && r.result && typeof r.result === 'object' && r.result.workRequestId ? _str(r.result.workRequestId) : '';
+  const done = _setState(id, r.ok ? 'sent' : 'failed', r.ok
+    ? Object.assign({ approvedBy: by || 'user' }, sentWr ? { sentWorkRequestId: sentWr } : {})
+    : { approvedBy: by || 'user', error: _str(r.error).slice(0, 300) });
+  if (r.ok && done) _fireSent(done, r);
   return r;
 }
 
+// Callers whose writes can be queued (daily tasks, relay-step) register here
+// to be told when a queued item they created is approved and sent.
+const _sentHandlers = new Map();   // origin -> fn(item, result)
+function onSent(origin, fn) {
+  if (!origin) return;
+  if (typeof fn === 'function') _sentHandlers.set(String(origin), fn); else _sentHandlers.delete(String(origin));
+}
+function _fireSent(item, r) {
+  const fn = _sentHandlers.get(_str(item.origin));
+  if (!fn) return;
+  try {
+    const out = fn(_publicItem(item), r);
+    if (out && typeof out.catch === 'function') out.catch((e) => _log('[write] sent handler failed origin=' + item.origin + ': ' + (e && e.message)));
+  } catch (e) { _log('[write] sent handler failed origin=' + item.origin + ': ' + (e && e.message)); }
+}
 // ── public API ──────────────────────────────────────────────────────────────
 async function requestWrite(spec) {
   const s = spec || {};
@@ -313,7 +364,8 @@ async function requestWrite(spec) {
     origin: _str(s.origin) || 'unknown',
     unit: _str(s.unit),
     workRequestId: _str(s.workRequestId || (kind === 'addComment' ? payload.workRequestId : '')),
-    aiDrafted: !!s.aiDrafted,
+    aiDrafted: _aiTri(s.aiDrafted),
+    ref: (s.ref && typeof s.ref === 'object') ? s.ref : null,
     id: _newId(),
   };
   f.hash = _hash(kind, _target(kind, payload, s), payload);
@@ -413,6 +465,7 @@ module.exports = {
   reject,
   respond,
   list,
+  onSent,
   setWindowGetter,
   isApprovalToken,
   APPROVAL_WAIT_MS,

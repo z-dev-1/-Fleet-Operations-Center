@@ -212,7 +212,7 @@ const SUBMIT_WORK_REQUEST = {
     const createWr = require('../../scrapers/aap_create_wr');
     if (!createWr || !createWr.createWorkRequest) return { ok: false, error: 'create-WR unavailable' };
     // Non-interactive: the Relay write-approval gate queues it (never auto-sent).
-    const res = await createWr.createWorkRequest(args.payload, args.unit, () => {}, { origin: 'fas-action', interactive: false });
+    const res = await createWr.createWorkRequest(args.payload, args.unit, () => {}, { origin: 'fas-action', interactive: false, aiDrafted: true });   // FAS agent writes the payload
     if (res && res.outcome === 'pending-approval') return { ok: false, pending: true, error: 'pending-approval', result: res };
     return { ok: !!(res && res.ok), result: res, error: res && res.error };
   },

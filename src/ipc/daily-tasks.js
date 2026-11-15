@@ -433,13 +433,7 @@ async function _executeAction(taskId) {
   const row = (fd.rows || []).find((r) => String(r.equipmentId || '').trim() === unitId);
   if (!row) return { ok: false, error: 'unit ' + unitId + ' not in fleet data — sync first' };
 
-  const _markDone = () => {
-    try {
-      const s = _load();
-      const t = (s.ai || []).find((x) => x.id === taskId);
-      if (t) { t.done = true; t.resolvedAt = new Date().toISOString(); t.updatedAt = t.resolvedAt; _save(s); }
-    } catch (_) {}
-  };
+  const _markDone = () => _markTaskDone(taskId);
 
   try {
     // Follow-up / escalate / chase / status-sync -> run the Relay↔Offsite
@@ -469,7 +463,8 @@ async function _executeAction(taskId) {
       };
       const log = (m) => logger.info('[tasks:exec][create_wr] ' + m);
       // Non-interactive: the write-approval gate queues it; never auto-sent.
-      const r = await createWorkRequest(payload, row, log, { origin: 'daily-tasks', interactive: false });
+      // ref.taskId lets the gate mark this task done once the queued WR is approved and sent.
+      const r = await createWorkRequest(payload, row, log, { origin: 'daily-tasks', interactive: false, aiDrafted: false, ref: { taskId } });
       if (r && r.outcome === 'pending-approval') return { ok: false, pending: true, message: 'Queued for your approval (Relay writes)' };
       if (r && r.ok) { _markDone(); return { ok: true, message: 'Work Request created for ' + unitId + (r.workRequestId ? ' (' + r.workRequestId + ')' : '') }; }
       return { ok: false, error: (r && r.error) || 'createWorkRequest failed' };
@@ -484,7 +479,25 @@ async function _executeAction(taskId) {
 }
 
 // ── IPC ───────────────────────────────────────────────────────────────────────
+function _markTaskDone(taskId) {
+  try {
+    const s = _load();
+    const t = (s.ai || []).find((x) => x.id === taskId);
+    if (t) { t.done = true; t.resolvedAt = new Date().toISOString(); t.updatedAt = t.resolvedAt; _save(s); }
+  } catch (_) {}
+}
 function registerDailyTasksIPC(ctx) {
+  // A create_wr task queued behind the Relay write-approval gate is marked done
+  // when the user approves it from the Relay writes list and it is sent.
+  try {
+    require('../writes/write-gate').onSent('daily-tasks', (item) => {
+      const taskId = item && item.ref && item.ref.taskId;
+      if (taskId) {
+        _markTaskDone(taskId);
+        logger.info('[tasks] queued WR for task ' + taskId + ' sent' + (item.sentWorkRequestId ? ' (' + item.sentWorkRequestId + ')' : '') + '; task marked done');
+      }
+    });
+  } catch (_) {}
   handle('tasks:list', async () => {
     return _load();
   });

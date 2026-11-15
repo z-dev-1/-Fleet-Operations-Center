@@ -500,9 +500,12 @@ function registerScrapersIPC(ctx) {
       const aapApi = require("../../src/scrapers/aap_api");
 
       // Map the modal/tow payload into createWorkOrder opts (aap_wr_opts.js;
-      // also forwards the write-gate fields origin / userConfirmed).
+      // also forwards the write-gate field origin).
       const opts = require('../scrapers/aap_wr_opts').toCreateWorkOrderOpts(payload, unit, log);
       if (!opts.origin) opts.origin = 'aap:create-wr';
+      // The WR modal sends userConfirmed only after its own window.confirm of
+      // this submit; this renderer IPC is the only place that flag is honored.
+      if (payload && payload.userConfirmed === true) opts.userConfirmed = true;
 
       const result = await aapApi.createWorkOrder(opts);
       if (result && result.phase === 'gated') {

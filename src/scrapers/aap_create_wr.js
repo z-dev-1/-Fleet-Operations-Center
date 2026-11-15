@@ -131,7 +131,9 @@ function _resolveUnit(unit, payload) {
  * legacy payload shape. Routed through the working AAP transport
  * (aap_api.createWorkOrder, in-page XHR + a2z token) with confirmVendor:true,
  * so the write-approval gate (src/writes/write-gate.js) decides whether it is
- * sent. gateOpts: { origin, interactive (default true), userConfirmed }.
+ * sent. gateOpts: { origin, interactive (default true), userConfirmed,
+ * aiDrafted (true/false; omitted = unknown), ref (stored on a queued item) }.
+ * A userConfirmed key inside the payload is ignored.
  *
  * Returns { ok:true, workRequestId, title, copiedFromWorkRequestId } or
  * { ok:false, outcome?, error } — outcome 'pending-approval' /
@@ -149,7 +151,16 @@ async function createWorkRequest(payload, unit, log, gateOpts) {
   opts.confirmVendor = true;
   opts.origin = g.origin || payload.origin || 'createWorkRequest';
   opts.interactive = g.interactive !== false;
+  // Only the caller (never payload data) can say the user already confirmed.
+  delete opts.userConfirmed;
   if (g.userConfirmed === true) opts.userConfirmed = true;
+  // aiDrafted is tri-state: true / false when the caller knows, absent = unknown.
+  delete opts.aiDrafted;
+  if (typeof g.aiDrafted === 'boolean') opts.aiDrafted = g.aiDrafted;
+  // Caller reference (e.g. { taskId }) stored on a queued item so the caller
+  // can be told when it is approved and sent.
+  delete opts.writeRef;
+  if (g.ref && typeof g.ref === 'object') opts.writeRef = g.ref;
   if (!opts.unit) opts.unit = (row && row.equipmentId) || payload.unit || '';
 
   const wrTitle = capWrTitle(payload.title);

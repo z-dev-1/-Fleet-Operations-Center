@@ -1898,7 +1898,8 @@ function _readRecommendation(resp) {
  *
  * Every commit passes the user-approval gate (src/writes/write-gate.js) first.
  * Gate opts: origin, unit, interactive (default true), userConfirmed (the WR
- * modal already showed the content and the user confirmed).
+ * modal already showed the content and the user confirmed), aiDrafted
+ * (true/false; absent = unknown), writeRef (caller reference kept on a queued item).
  */
 async function createWorkOrder(opts = {}) {
   const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
@@ -1972,6 +1973,8 @@ async function createWorkOrder(opts = {}) {
     unit: opts.unit || opts.equipmentId || aaid,
     interactive: opts.interactive !== false,
     approvedBy: opts.userConfirmed === true ? 'wr-modal-confirm' : undefined,
+    aiDrafted: typeof opts.aiDrafted === 'boolean' ? opts.aiDrafted : undefined,   // absent = unknown
+    ref: opts.writeRef,
   });
   if (gated && gated.result && typeof gated.result === 'object') return gated.result;
   if (gated && gated.outcome === 'send-failed') {

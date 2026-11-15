@@ -103,6 +103,20 @@ describe('digest, trends, analysis line', () => {
     const ev = store.eventsForUnit('B12195', { includeExcluded: true }).find((e) => e.source_id === 'SB12195');
     expect(analysis._factsLine(ev.extracted_facts)).toContain('ETC moved 1\u00d7');
   });
+  it('create-only / no-ETC WOs count as notRecorded, never as 0 slips in the rate', () => {
+    expect(W.digestForRi(fsOf(relay(V.relayB12195, { history: H.histB12195Full }))).history.etcAvailable).toBe(true);
+    expect(W.digestForRi(fsOf(relay(V.relay322355, { history: H.hist39582CreateOnly }))).history.etcAvailable).toBe(false);
+    const mk = (sid, unit, vendor) => ({ workRequestId: sid, assetDisplayName: unit, vendor, category: 'Unplanned Repair',
+      status: { description: { value: 'OPEN' } }, suggestedItems: [{ level1: 'Engine' }], damageDescription: 'no start',
+      reportedDateTime: '2026-11-07T20:54:59Z', createdDateTime: '2026-11-07T20:54:59Z', lastModifiedDateTime: '2026-11-10T00:00:00Z' });
+    T.seed(store, [
+      { sid: 'SB12195', unit: 'B12195', wo: mk('SB12195', 'B12195', 'COX'), row: { relayFacts: relay(V.relayB12195, { history: H.histB12195Full, vendor: 'COX' }), created: '2026-11-07T20:54:59Z' }, history: null },
+      { sid: 'S39582', unit: '39582', wo: mk('S39582', '39582', 'VOLVO'), row: { relayFacts: relay(V.relay322355, { history: H.hist39582CreateOnly, vendor: 'VOLVO' }), created: '2026-11-07T20:54:59Z' }, history: null },
+    ]);
+    const x = trends.buildTrends({ sinceMs: 0 }).extracted;
+    expect(x.etcSlipsByVendor.find((r) => r.key === 'COX')).toMatchObject({ slips: 1, wos: 1, notRecorded: 0 });
+    expect(x.etcSlipsByVendor.find((r) => r.key === 'VOLVO')).toEqual({ key: 'VOLVO', slips: 0, wos: 0, rate: null, notRecorded: 1 });
+  });
 });
 
 // ── fake AAP backend (pattern of tests/relay-refresh-unit-facts.test.js) ────────
