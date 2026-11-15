@@ -272,7 +272,8 @@ describe('allocate (water-filling, §4.3)', () => {
     expect(cs.lines.length).toBeLessThan(20);
     expect(cs.lines.length).toBeGreaterThanOrEqual(E.KEEP.conv);
     expect(t.segments.find((s) => s.kind === 'timeline').lines).toHaveLength(1);
-    expect(t.fasLines).toHaveLength(cs.lines.length);
+    // D6: the newest FAS-authored lines moved to the protected fasLog segment.
+    expect(t.fasLines).toHaveLength(cs.lines.length + t.segments.find((s) => s.kind === 'fasLog').lines.length);
     expect(t.fasDates.has('11/20')).toBe(true);
     expect(t.fasDates.has('11/1')).toBe(false);
     expect(t.lines.length).toBeLessThan(e.lines.length);

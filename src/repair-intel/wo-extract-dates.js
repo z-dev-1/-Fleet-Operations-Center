@@ -247,7 +247,8 @@ function taDigitsToDates(text, opts = {}) {
 
 // ── Amounts (§5.3) ──────────────────────────────────────────────────────────
 const TA_CENTS_RE = /\$\s?(\d{1,3}(?: \d{3})*) (\d{2})\b/g;
-const AMOUNT_RE = /\$\s?(\d{1,3}(?:,\s?\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)(?!\d)/g;
+// Extraction vocabulary only (not a gate token rule; the gate's AMOUNT_RE lives in fleet-dbr-gate).
+const DOLLAR_RE = /\$\s?(\d{1,3}(?:,\s?\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?)(?!\d)/g;
 
 function normAmount(v) {
   const n = typeof v === 'number' ? v : Number(_str(v).replace(/[$,\s]/g, ''));
@@ -269,7 +270,7 @@ function findAmounts(text, opts = {}) {
     }
     set.add(found);
   }
-  for (const m of t.matchAll(AMOUNT_RE)) {
+  for (const m of t.matchAll(DOLLAR_RE)) {
     const start = m.index; const end = m.index + m[0].length;
     if (set.overlaps(start, end)) continue;
     const v = normAmount(m[1].replace(/[,\s]/g, ''));

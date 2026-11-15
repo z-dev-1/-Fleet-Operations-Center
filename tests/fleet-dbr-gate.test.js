@@ -196,11 +196,11 @@ describe('E2 quote checks', () => {
 
 describe('AC28 FAS entries with envelopes', () => {
   const ok = env({ fas: [F('11/10', 'called TA')] });
-  it('vendor update: kept in Details / ETC why, FAS needs "No FAS action logged"', () => {
+  it('vendor update: kept in Details / ETC why, FAS kept without a claim', () => {
     const t = 'Volvo update 11/09: estimate submitted; next: push MCS for approval';
     expect(res(t, undefined, ['B61002'], 'details')).toBe('kept');
     expect(res(t, undefined, ['B61002'], 'etcWhy')).toBe('kept');
-    expect(res(t, undefined, ['B61002'], 'fasActions')).toBe('unfounded-fas-action');
+    expect(res(t, undefined, ['B61002'], 'fasActions')).toBe('kept');
     expect(res('No FAS action logged; ' + t, undefined, ['B61002'], 'fasActions')).toBe('kept');
   });
   it('lead-verb claims without / with a vendor-only quote', () => {
@@ -753,12 +753,12 @@ describe('coverage (AC2 basis, AC25, AC38, AC50)', () => {
   it('AC38 / AC50 coverage line is redacted and has no [em:] marker', () => {
     const c = makeCtx({ units: { D10001: { vendor: 'TA', savedRepairStatus: 'Waiting for vendor', repairTimeline: '11/09 - old line\n11/11 - emailed a.b@c.com, call 555-123-4567 [em:1a2b3c4d]' } }, today: TODAY }).ctx;
     const r = G.renderCells(G.validateRowDraft(answer({ barriers: N6() }), c), c);
-    expect(r.cells.fasActions).toMatch(/^\u2022 D10001: \u26a0 no verified AI line \u2014 /);
-    expect(r.cells.fasActions).toContain('[redacted]');
+    expect(r.cells.fasActions).toMatch(/^\u2022 D10001: \u26a0 (?:\d+d, )?Waiting for vendor, TA \u2014 awaiting update \(review\)$/);
+    expect(r.cells.fasActions).not.toContain('emailed');
     expect(r.cells.fasActions).not.toContain('a.b@c.com');
     expect(r.cells.fasActions).not.toContain('555-123-4567');
     expect(r.cells.fasActions).not.toContain('[em:');
-    expect(r.cells.fasActions).toContain('latest: 11/11 - emailed');
+    expect(r.cells.fasActions).not.toContain('latest:');
     expect(r.flags.fasActions).toBe('review');
     expect(r.coverageFilled).toEqual(['D10001']);
   });

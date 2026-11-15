@@ -90,7 +90,8 @@ const ENVELOPE_RULES = [
   '- In ANY field, a clause where FAS, I or we act, or that begins with an action verb (called, emailed, escalated, followed up, submitted, sent, scheduled …), must contain a src.fas date; an undated FAS action is removed.',
 ].join('\n');
 
-const FAS_RULE = '- FAS Actions entry: ";"-separated clauses. First the dated FAS actions with outcome, "M/D <action>", each in src.fas; with no [FAS] line start "No FAS action logged;" and the status. Then "<party> update M/D: <event>" facts. Last "next: <next step>". Name parts, ETAs, dealer/vendor and ASIST/RO/WR/case refs when present.';
+// D7 (relay-extract output fix B): status-first when the unit has no [FAS] line.
+const FAS_RULE = "- FAS Actions entry: ';'-separated clauses. First the dated FAS actions with outcome, 'M/D <action>', each in src.fas. If the unit has no [FAS] line, lead with the unit's current status and the newest party update instead (e.g. '<status>; Dealer update M/D: <event>'); do not start with 'No FAS action logged'. Last 'next: <concrete next step>'.";
 const ETC_RULE = '- ETC why: required for "missed" (why the vendor missed it) and for "none" when the evidence has an earlier ETC date (why it no longer applies, e.g. "ETC 11/08 cancelled, waiting on parts"); else "".';
 const SUPPORT_RULE = '- Support asks are the ask itself ("MCS approval on B61002 estimate"), not past FAS actions. team is one of: ' + G.SUPPORT_TEAMS.join(', ') + '. "None" when nothing is needed.';
 const UNITS_RULE = '- unit / units are copied exactly from DOWN UNITS.';
@@ -113,7 +114,7 @@ const ROW_EXAMPLE = Object.freeze({
   fasActions: [
     { unit: 'B61001', text: '11/10 called TA for a callout tech; TA update 11/10: bay confirmed for 11/12; next: confirm tech on site 11/12 AM.', src: { fas: [{ date: '11/10', quote: 'called TA re tech callout' }] } },
     { unit: 'B61002', text: '11/09 escalated ASIST case 7712345 (no dealer status since 11/03); next: follow up with the MHC Kenworth service writer for the diag result.', src: { fas: [{ date: '11/09', quote: 'escalated ASIST case 7712345' }] } },
-    { unit: 'B61004', text: 'No FAS action logged; Dealer update 11/11: waiting on EGR cooler, ETC 11/08 missed; next: call dealer for a new ETC.' },
+    { unit: 'B61004', text: 'Waiting on EGR cooler; Dealer update 11/11: ETC 11/08 missed; next: call dealer for a new ETC.' },
   ],
   support: [{ team: 'OEM/dealer', ask: 'Dealer escalation for diag status on B61002 (no status since 11/03)', units: ['B61002'] }],
 });
@@ -176,6 +177,10 @@ const REVIEW_CHECKLIST = [
 ].join('\n');
 const REVIEW_END_SINGLE = 'Return the corrected, COMPLETE FINAL JSON in the same contract (not a diff). For each entry you keep or rewrite that reports a FAS action, re-declare its src.fas from a [FAS] line.';
 const REVIEW_END_MR = 'Return the corrected FINAL JSON {barriers, support, fasActions}, fasActions for the missing units only. For each entry you keep or rewrite that reports a FAS action, re-declare its src.fas from a [FAS] line or an f: item.';
+// D4 (relay-extract; only when a unit of the row has _factsOn, like D2/D3/D5): self-questions +
+// brainstorm, and a tolerated leading QA: block (extractJsonObject skips it; never parsed into cells).
+const REVIEW_ITEM_8 = '8. First add up to 5 questions of your own (Q-SELF-1..Q-SELF-5) that would make this row more accurate. For every checklist item, every question in QUESTIONS and each of yours, brainstorm 2-3 candidate answers from the evidence and keep the best-supported one. Then write the FINAL. You may put your answers before the JSON under `QA:`; they are not shown.';
+const REVIEW_QA_LEAD = 'You may start with a QA: block; then return the FINAL JSON. ';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -292,8 +297,11 @@ function _parts(kind, ctx, o = {}) {
   const ids = o.ids || ctx.ids;
   const head = [_role(kind, ctx, o), _countsSection(ctx.row || {}), COLUMN_GUIDANCE, _hintsSection(ctx, ids), _downUnits(ids)].join('\n\n') + '\n\n';
   let tail = '\n\n' + contractText(kind, ctx, o);
-  if (kind === 'review') tail = '\n\n' + REVIEW_CHECKLIST + tail + '\n' + REVIEW_END_SINGLE;
-  if (kind === 'review-mr') tail = '\n\n' + REVIEW_CHECKLIST + tail + '\n' + REVIEW_END_MR;
+  const facts = _hasFacts(ctx);
+  const chk = REVIEW_CHECKLIST + (facts ? '\n' + REVIEW_ITEM_8 : '');
+  const lead = facts ? REVIEW_QA_LEAD : '';
+  if (kind === 'review') tail = '\n\n' + chk + tail + '\n' + lead + REVIEW_END_SINGLE;
+  if (kind === 'review-mr') tail = '\n\n' + chk + tail + '\n' + lead + REVIEW_END_MR;
   return { head, tail };
 }
 // R-M1: the fixed overhead of a call kind, measured on the real strings (asserted <= OVERHEAD_MAX).
@@ -466,8 +474,10 @@ function _reviewLists(ctx, cur, missing, beyond) {
 }
 
 // R-M1: base = everything but the embed; the embed gets the slack (<= DRAFT_EMBED_MAX).
+// opts.questions (relay-extract D4): a QUESTIONS block appended after the lists ('' = today's prompt).
 // -> { tooLarge:true } | { prompt, embed:{E, D, entries}, gapUnits, base }
-function buildReviewPrompt(mode, ctx, cur) {
+function buildReviewPrompt(mode, ctx, cur, opts = {}) {
+  const questions = opts && typeof opts.questions === 'string' ? opts.questions : '';
   const single = mode === 'single';
   const gap = ctx.ids.filter((u) => !(cur.fas && cur.fas[u]));
   let evidence;
@@ -494,7 +504,7 @@ function buildReviewPrompt(mode, ctx, cur) {
   const p = _parts(kind, ctx, o);
   const lists = _reviewLists(ctx, cur, gapUnits, beyond);
   const pre = p.head + evidence + '\n\n' + DRAFT_OPEN + '\n';
-  const post = '\n' + DRAFT_CLOSE + '\n\n' + lists + p.tail;
+  const post = '\n' + DRAFT_CLOSE + '\n\n' + lists + (questions ? '\n\nQUESTIONS:\n' + questions : '') + p.tail;
   const base = pre.length + post.length;
   const embedMax = CALL_PROMPT_MAX - base;
   const minEmbed = ctx.n * (30 + (single ? 40 : 10)) + EMBED_RESERVE;
@@ -510,10 +520,35 @@ function assertFits(prompt) {
 }
 
 // ── Context (§5.1) ──────────────────────────────────────────────────────────
+function _typedArg(ctx) { return ctx.typed && Object.keys(ctx.typed).length ? ctx.typed : undefined; }
+function _hasFacts(ctx) { return !!(ctx && Array.isArray(ctx.rawOf) && ctx.rawOf.some((r) => r && r._factsOn)); }
 function _setBatches(ctx, batches) {
   ctx.batches = batches;
   ctx.blocks = [].concat(...batches);
-  ctx.gate = G.gateContext({ row: ctx.row, evidences: ctx.blocks, fleetIds: ctx.fleetIds, today: ctx.today, unitRows: ctx.unitRows });
+  ctx.gate = G.gateContext({ row: ctx.row, evidences: ctx.blocks, fleetIds: ctx.fleetIds, today: ctx.today, unitRows: ctx.unitRows, typed: _typedArg(ctx) });
+}
+// D3 (relay-extract): per-unit typed index for rows with _factsOn; {} when none (gate unchanged).
+function _typedIndexes(ids, rawOf, en, today) {
+  const out = {};
+  ids.forEach((id, i) => {
+    const raw = rawOf[i];
+    if (!raw || !raw._factsOn) return;
+    try {
+      const W = require('../repair-intel/wo-facts');
+      const O = require('../repair-intel/wo-fact-output');
+      out[id] = W.typedIndex(W.buildFactSet(raw, { today, notesFacts: EV.userNotesFacts(_plain(en[id])) }), { today, rowDates: O.rowDates(raw) });
+    } catch (_) { /* unit stays non-strict */ }
+  });
+  return out;
+}
+// D4: the review QUESTIONS block ('' when no unit has _factsOn).
+function _qBlock(ctx, mode) {
+  if (!_hasFacts(ctx)) return '';
+  try {
+    const O = require('../repair-intel/wo-fact-output');
+    const rows = ctx.ids.map((id, i) => Object.assign({}, ctx.rawOf[i], { equipmentId: id }));
+    return O.dbrQuestions(rows, ctx.ids, { today: ctx.today, mode, notesFactsOf: (id) => EV.userNotesFacts(_plain(ctx.enrich[id])) });
+  } catch (_) { return ''; }
 }
 // -> { row, today, ids, n, evidences (untrimmed), blocks (final, aligned with ids), batches,
 //      batchIds, mode, demand, gate (gateContext over the final blocks), mapUnits }
@@ -532,11 +567,8 @@ function draftContext({ row, unitRows, built, enrich, fasNames, fasAlias, fleetI
   const names = Array.isArray(fasNames) ? fasNames.filter((x) => typeof x === 'string') : [];
   const alias = typeof fasAlias === 'string' ? fasAlias : '';
   let k = 0;
-  const evidences = units.map((u, i) => {
-    const id = ids[i];
-    const raw = /^\(no id #\d+\)$/.test(id) ? (noId[k++] || {}) : (byId.get(id) || {});
-    return EV.buildUnitEvidence(raw, Object.assign({}, u, { id }), _plain(en[id]), today, names, alias);
-  });
+  const rawOf = ids.map((id) => (/^\(no id #\d+\)$/.test(id) ? (noId[k++] || {}) : (byId.get(id) || {})));
+  const evidences = units.map((u, i) => EV.buildUnitEvidence(rawOf[i], Object.assign({}, u, { id: ids[i] }), _plain(en[ids[i]]), today, names, alias));
   const own = new Set(ids);
   const foreign = new Set();
   for (const x of (built && Array.isArray(built.rows) ? built.rows : [])) {
@@ -551,9 +583,10 @@ function draftContext({ row, unitRows, built, enrich, fasNames, fasAlias, fleetI
   const ctx = {
     row: r, today, ids, n: ids.length, evidences, unitRows: raws, fleetIds: [...foreign],
     mode: plan.mode, demand: plan.demand, batches: [], batchIds: [], blocks: [], mapUnits: {},
+    rawOf, enrich: en, typed: _typedIndexes(ids, rawOf, en, today),
   };
   if (plan.mode === 'too-large') {
-    ctx.gate = G.gateContext({ row: r, evidences, fleetIds: ctx.fleetIds, today, unitRows: raws });
+    ctx.gate = G.gateContext({ row: r, evidences, fleetIds: ctx.fleetIds, today, unitRows: raws, typed: _typedArg(ctx) });
     return ctx;
   }
   let start = 0;
@@ -632,7 +665,12 @@ async function _draftRow(opts) {
     const t0 = now();
     st.calls += 1;
     const entry = { kind, promptChars: prompt.length, outChars: 0, ms: 0 };
-    if (blocks) entry.fasTagged = blocks.filter((b) => b.fasLines && b.fasLines.length).length;
+    if (blocks) {
+      entry.fasTagged = blocks.filter((b) => b.fasLines && b.fasLines.length).length;
+      // D6 diagnostics (counts only): [FAS] lines sent, lines trimmed from the protected fasLog.
+      entry.fasLines = blocks.reduce((s, b) => s + (b.fasLines ? b.fasLines.length : 0), 0);
+      entry.fasLogTrimmed = blocks.reduce((s, b) => s + ((b.segments || []).filter((x) => x.kind === 'fasLog').reduce((t, x) => t + (x.dropped || 0), 0)), 0);
+    }
     st.log.push(entry);
     try {
       const text = _textOf(await ask(prompt, signal ? { timeoutMs, signal } : { timeoutMs }));
@@ -740,14 +778,33 @@ async function _draftRow(opts) {
 
   let reviewSkipped = null;
   let roundsDone = 0;
+  const qFull = _qBlock(ctx, 'full');
+  const qShort = qFull ? _qBlock(ctx, 'short') : '';
   for (let r = 0; r < rounds; r++) {
     if (deadline - now() < REVIEW_MIN_MS) { reviewSkipped = 'deadline'; break; }
-    const rp = self.buildReviewPrompt(single ? 'single' : 'mapreduce', ctx, cur);
+    const mode = single ? 'single' : 'mapreduce';
+    // D4 fit rule: the QUESTIONS block never costs the draft embed (its per-line E / per-entry D
+    // clips) and never turns a buildable prompt into tooLarge; else the short block, else none.
+    const rp0 = self.buildReviewPrompt(mode, ctx, cur);
+    const fitsAsRp0 = (x) => !x.tooLarge && assertFits(x.prompt).fits && !rp0.tooLarge
+      && x.embed.D >= rp0.embed.D && x.embed.E >= rp0.embed.E;
+    let rp = rp0;
+    let trimmed = qFull ? 'none' : null;
+    if (qFull) {
+      const rp1 = self.buildReviewPrompt(mode, ctx, cur, { questions: qFull });
+      if (fitsAsRp0(rp1)) { rp = rp1; trimmed = null; } else if (qShort) {
+        const rp2 = self.buildReviewPrompt(mode, ctx, cur, { questions: qShort });
+        if (fitsAsRp0(rp2)) { rp = rp2; trimmed = 'short'; }
+      }
+    }
     if (rp.tooLarge || !assertFits(rp.prompt).fits) { reviewSkipped = 'too-large'; break; }
     let text;
     try { text = await call('review', rp.prompt, single ? ctx.blocks : null); } catch (e) { reviewSkipped = _failCode(e); break; } finally {
       const last = st.log[st.log.length - 1];
-      if (last && last.kind === 'review') { last.embedChars = rp.embed.chars; last.embedD = rp.embed.D; last.gap = rp.gapUnits.length; }
+      if (last && last.kind === 'review') {
+        last.embedChars = rp.embed.chars; last.embedD = rp.embed.D; last.gap = rp.gapUnits.length;
+        if (qFull) last.reviewQuestionsTrimmed = trimmed;
+      }
     }
     const next = G.validateRowDraft(text, ctx.gate, { kind: single ? 'row' : 'review-mr', gapUnits: rp.gapUnits });
     note(st.log[st.log.length - 1], single ? 'review' : 'review-mr', text, next,
@@ -778,6 +835,7 @@ module.exports = {
   CALL_PROMPT_MAX, OUTPUT_TARGET_CHARS, OVERHEAD_MAX, LISTS_MAX, DRAFT_EMBED_MAX, CALL_TIMEOUT_MS,
   MIN_CALL_MS, REVIEW_MIN_MS, DRAFT_REVIEW_ROUNDS, DEADLINE_CAP_MS,
   NEXT_RULE, COLUMN_GUIDANCE, OUTPUT_CONTRACT, MAP_CONTRACT, REDUCE_CONTRACT, EXAMPLE_LABEL,
+  FAS_RULE, REVIEW_CHECKLIST, REVIEW_END_SINGLE, REVIEW_END_MR, REVIEW_ITEM_8, REVIEW_QA_LEAD,
   ROW_EXAMPLE, MAP_EXAMPLE, REDUCE_EXAMPLE, EVIDENCE_OPEN, FACTS_OPEN, GAP_OPEN, DRAFT_OPEN, DRAFT_CLOSE,
   contractText, overhead, buildDraftPrompt, buildMapPrompt, buildReducePrompt, buildReviewPrompt, factLine,
   compactEmbed, assertFits, draftContext, draftRow,

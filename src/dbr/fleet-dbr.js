@@ -9,10 +9,12 @@
 //
 // Every Y/N, count and Details line comes from a real field value or a verbatim (redacted,
 // <= 80 char) snippet. Nothing is guessed: no parsed ETC date => NO ETC.
+// Also requires the pure ../utils/offsite-notes-order (asistNotes entry dates).
 'use strict';
 
 const crypto = require('crypto');
 const engine = require('./review-engine');
+const { offsiteEntries } = require('../utils/offsite-notes-order');
 
 const _col = (id, header, editable) => Object.freeze({ id, header, editable: !!editable });
 
@@ -307,7 +309,83 @@ function _classifyEtc(date, today) {
   return date < today ? 'missed' : 'future';
 }
 
+// Bug fix 2 (§15.3): the asistNotes winner is the mention in the newest-dated offsite entry;
+// ties and undated text -> the smallest start (the head = newest). -> { m, text } | null
+function _newestOffsiteMention(text, today) {
+  const ms = _etcMentions(text, today);
+  if (!ms.length) return null;
+  const entries = offsiteEntries(text);
+  const atOf = (i) => {
+    const e = entries.find((x) => i >= x.start && i < x.end);
+    return e && e.atMs != null ? e.atMs : -Infinity;
+  };
+  let best = null;
+  for (const m of ms) {
+    const at = atOf(m.start);
+    if (!best || at > best.at || (at === best.at && m.start < best.m.start)) best = { m, at };
+  }
+  return { m: best.m, text };
+}
+
+function _localDay(v) {
+  const ms = typeof v === 'number' ? v : Date.parse(_str(v));
+  if (!Number.isFinite(ms)) return '';
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + _pad(d.getMonth() + 1) + '-' + _pad(d.getDate());
+}
+// An extracted ETC exists (state none + no source + not negated = "no extracted ETC").
+function _hasFactEtc(fe) {
+  return !!fe && typeof fe === 'object' && !!(fe.source || fe.negated || (fe.state && fe.state !== 'none'));
+}
+// Legacy winner keeps 'missed' only with an explicit repair-miss marker for that date (or a
+// date-less marker on the mention's own line).
+function _winnerHasMarker(win, today) {
+  const t = _str(win.text);
+  const lineOf = (i) => [t.lastIndexOf('\n', i - 1) + 1, (t.indexOf('\n', i) + 1 || t.length + 1) - 1];
+  const [ls, le] = lineOf(win.m.start);
+  return explicitRepairMiss(t, today).some((x) => (x.date ? x.date === win.m.date : x.start >= ls && x.start <= le));
+}
+// relay-extract §14.6 freshness takeover by _factEtc + Path B (only for rows with _factsOn).
+// Counted conservatively by design; met/revision nuance lives in the Details prose, not the counts.
+function _withFactEtc(res, win, field, r, today) {
+  const fe = r._factEtc;
+  let take = false;
+  if (_hasFactEtc(fe)) {
+    const stated = _localDay(fe.statedAt);
+    if (!field) take = true;
+    else if (field === 'asistNotes') {
+      const e = offsiteEntries(win.text).find((x) => win.m.start >= x.start && win.m.start < x.end);
+      const day = e && e.atMs != null ? _localDay(e.atMs) : '';
+      take = !day || (!!stated && stated >= day);
+    } else if (field === 'repairTimeline') {
+      take = !!stated && !!win.date && stated >= win.date;
+    }
+  }
+  if (take) {
+    const snippet = fe.snippet ? _snippet(fe.snippet, 0) : '';
+    if (fe.negated || !fe.date) return { state: 'none', date: null, source: 'extracted', snippet };
+    const state = ['today', 'missed', 'future', 'none'].includes(fe.state) ? fe.state : _classifyEtc(fe.date, today);
+    const out = { state, date: state === 'none' ? null : fe.date, source: 'extracted', snippet };
+    if (state === 'missed') out.explicitMissDate = fe.explicitMissDate || fe.date;
+    return out;
+  }
+  let out = res;
+  if (res.state === 'missed' && !(fe && fe.state === 'missed') && !(win && _winnerHasMarker(win, today))) {
+    out = Object.assign({}, res, { state: 'none', date: null, missDowngraded: true });
+  } else if (res.state !== 'missed' && fe && fe.state === 'missed' && fe.date) {
+    // An explicit repair-completion miss outranks a legacy future/none (precedence today > missed).
+    if (res.state !== 'today') {
+      out = { state: 'missed', date: fe.date, source: 'extracted', snippet: fe.snippet ? _snippet(fe.snippet, 0) : '', explicitMissDate: fe.explicitMissDate || fe.date };
+    }
+  }
+  if (_hasFactEtc(fe) && fe.date && res.date && fe.date !== res.date && out.source === res.source) {
+    out = Object.assign({}, out, { factConflict: { date: fe.date, source: fe.source || null } });
+  }
+  return out;
+}
+
 // -> { state: 'today'|'missed'|'future'|'none', date: 'YYYY-MM-DD'|null, source, snippet }
+// Rows with _factsOn (relay-extract) also go through _withFactEtc; others are unchanged.
 function parseEtc(row, today) {
   const r = row || {};
   for (const field of ETC_SOURCES) {
@@ -325,16 +403,21 @@ function parseEtc(row, today) {
           if (a > b || (a === b && (line.index > win.line.index || (line.index === win.line.index && mm.start > win.m.start)))) win = cand;
         }
       }
+    } else if (field === 'asistNotes') {
+      win = _newestOffsiteMention(text, today);
     } else {
       const ms = _etcMentions(text, today);
       if (ms.length) win = { m: ms[ms.length - 1], text };
     }
     if (!win) continue;
     const snippet = _snippet(win.text, win.m.start);
-    if (win.m.negated) return { state: 'none', date: null, source: field, snippet };
-    return { state: _classifyEtc(win.m.date, today), date: win.m.date, source: field, snippet };
+    const res = win.m.negated
+      ? { state: 'none', date: null, source: field, snippet }
+      : { state: _classifyEtc(win.m.date, today), date: win.m.date, source: field, snippet };
+    return r._factsOn ? _withFactEtc(res, win, field, r, today) : res;
   }
-  return { state: 'none', date: null, source: null, snippet: '' };
+  const none = { state: 'none', date: null, source: null, snippet: '' };
+  return r._factsOn ? _withFactEtc(none, null, null, r, today) : none;
 }
 
 // ── Barrier rules (one table; tune here) ────────────────────────────────────
@@ -400,7 +483,9 @@ const BARRIER_RULES = Object.freeze([
       if (!(OEM_VENDOR_RE.test(vendor) || _eq(r.lifecycleReason, 'Offsite Shop Repair'))) return null;
       const signal = _oemSignal(r, ctx);
       if (!signal) return null;
-      return { why: 'at OEM/dealer ' + (vendor || 'no vendor') + ': ' + signal };
+      // relay-extract §12.4: unanswered dealer calls only extend an existing OEM signal.
+      const calls = Number(r.dealerCallAttempts) > 0 ? '; ' + Number(r.dealerCallAttempts) + ' unanswered dealer calls' : '';
+      return { why: 'at OEM/dealer ' + (vendor || 'no vendor') + ': ' + signal + calls };
     },
   }),
   Object.freeze({
@@ -408,6 +493,8 @@ const BARRIER_RULES = Object.freeze([
     test(r, ctx) {
       const cost = parseFloat(_str(r.estimatePendingCost).replace(/[$,\s]/g, ''));
       if (Number.isFinite(cost) && cost > 0) return { why: 'estimate pending $' + cost };
+      const fe = _str(r._factEstimateWhy).trim();                    // relay-extract (flag-on rows only)
+      if (fe) return { why: 'estimate ' + fe };
       const status = _str(r.savedRepairStatus).trim();
       if (_eq(status, 'Awaiting estimate') || _eq(status, 'Awaiting approval')) return { why: 'status ' + status };
       if (_eq(r.serviceState, 'Estimate rejected')) return { why: 'estimate rejected' };
@@ -423,11 +510,13 @@ const BARRIER_RULES = Object.freeze([
     id: 'partner', ynCol: 'partnerYN', detailsCol: 'partnerDetails',
     test(r, ctx) {
       const vendor = _str(r.vendor).trim();
-      if (/^dsp[_ ]?entered$/i.test(vendor)) return { why: 'DSP-entered (carrier-managed)' };
-      if (/\bcei\b/i.test(vendor)) return { why: 'CEI (accident/claims managed)' };
-      if (_eq(r.lifecycleReason, 'Accident')) return { why: 'Accident (carrier/insurance owned)' };
+      // relay-extract §12.4: an SF (accident) case extends the partner why on _factsOn rows.
+      const sf = r._factsOn && _str(r.salesforceCase).trim() ? '; SF case ' + _str(r.salesforceCase).trim() : '';
+      if (/^dsp[_ ]?entered$/i.test(vendor)) return { why: 'DSP-entered (carrier-managed)' + sf };
+      if (/\bcei\b/i.test(vendor)) return { why: 'CEI (accident/claims managed)' + sf };
+      if (_eq(r.lifecycleReason, 'Accident')) return { why: 'Accident (carrier/insurance owned)' + sf };
       const m = PARTNER_TEXT_RE.exec(ctx.recentText);
-      if (m) return { why: "'" + _snippet(ctx.recentText, m.index) + "'" };
+      if (m) return { why: "'" + _snippet(ctx.recentText, m.index) + "'" + sf };
       return null;
     },
   }),
@@ -443,6 +532,12 @@ const BARRIER_RULES = Object.freeze([
       if (/parts/i.test(detail)) whys.push('offsite: ' + _snippet(detail, detail.search(/parts/i)));
       const m = PARTS_TEXT_RE.exec(ctx.recentText);
       if (m) whys.push("'" + _snippet(ctx.recentText, m.index) + "'");
+      // relay-extract §12.4 (keys exist only with extraction on): a parts-type vendor delay enum
+      // is a parts hit; the extracted parts summary only extends an existing hit.
+      const vdr = _str(r.vendorDelayReason).trim();
+      if (vdr && PARTS_CODE_RE.test(_norm(vdr))) whys.push('vendor delay ' + vdr);
+      const pw = _str(r._factPartsWhy).trim();
+      if (pw && whys.length) whys.push(pw);
       return whys.length ? { why: whys.join('; ') } : null;
     },
   }),
@@ -527,8 +622,9 @@ const EVIDENCE_HASH_FIELDS = Object.freeze([
   'delayReasonCodes', 'offsiteStage', 'offsiteStageDetail', 'escalations', 'estimatePendingCost',
 ]);
 function evidenceHash(downRows) {
+  // D5 (relay-extract): r._factsSig only when present, so flag-off hashes are unchanged.
   const parts = (downRows || []).map((r) => JSON.stringify(
-    [_idOf(r)].concat(EVIDENCE_HASH_FIELDS.map((f) => _str(r && r[f]).trim())),
+    [_idOf(r)].concat(EVIDENCE_HASH_FIELDS.map((f) => _str(r && r[f]).trim()), r && r._factsSig ? [_str(r._factsSig)] : []),
   )).sort();
   return crypto.createHash('sha1').update(parts.join('\n')).digest('hex');
 }
@@ -549,7 +645,8 @@ function _detailLine(u, why) {
 // units[].etc for the drill-down).
 function _missedCell(missed) {
   return [String(missed.length)].concat(missed.map((u) => '\u2022 ' + u.id + ' (ETC ' + _md(u.etc.date) + '): '
-    + (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)'))).join('\n');
+    + (u.etc.explicitMissDate ? 'ETC ' + _md(u.etc.explicitMissDate) + ' explicitly missed' + (u.etc.snippet ? ": '" + u.etc.snippet + "'" : '')
+      : (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)')))).join('\n');
 }
 
 function buildFleetDbr(rows, opts = {}) {

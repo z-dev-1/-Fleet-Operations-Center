@@ -13,7 +13,7 @@
 
 const { extractJsonObject } = require('../utils/ai-json');
 const { inferDate, etcMentionDates, etcKeywordNegated, parseTimelineLines, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE } = require('./fleet-dbr');
-const { FAS_ACT_SRC, normQuote, redactEvidence } = require('./fleet-dbr-evidence');
+const { FAS_ACT_SRC, normQuote, redactEvidence, textEvidence } = require('./fleet-dbr-evidence');
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const FIELD_MAX = 16000;
@@ -95,6 +95,21 @@ const RANGE_UNIT_RE = /^\s{0,3}(?:(?:business|working|calendar|more|additional|e
 // A dash/dot number pair right after a location noun is a range, not a date ("bay 3-4 open").
 const RANGE_NOUN_BEFORE_RE = /\b(?:bays?|lanes?|doors?|stalls?|docks?|spots?|slots?|units?|trucks?|techs?|rows?|levels?)\s*$/i;
 const ENV_DATE_RE = /^\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s*$/;
+// Labelled typed refs (relay-extract §14.3.1). Group 1 = label, group 2 = value, group 3 = amz- tow/FleetNet id.
+const TYPED_REF_RE = /\b(part\s*(?:#|no\.?|number)|p\/n|order\s*(?:#|no\.?|number)|r\.?o\.?\s*#|(?:sales\s?force|sf)\s*case\s*#?|asist\s*case\s*#?|case\s*#|dealer\s*code)\s*:?\s*((?=[A-Z0-9-]{0,24}\d)[A-Z0-9][A-Z0-9-]{2,24})\b|\b(amz-[a-z0-9]{12,})\b/gi;
+const PARTS_LABEL_BEFORE_RE = /\bparts?\s+$/i;      // "Parts ETC 10/26": the keyword is parts-labelled
+// Label -> typed kind(s) (typedIndex.byKind keys; 'case.*' = a case namespace).
+const TYPED_LABEL_KINDS = Object.freeze([
+  [/^(?:part|p\/n)/i, ['part']],
+  [/^order/i, ['order']],
+  [/^r\.?o/i, ['ro']],
+  [/^(?:sales\s?force|sf)/i, ['case.salesforce']],
+  [/^asist/i, ['case.decisivCase']],
+  [/^case/i, ['case.salesforce', 'case.decisivCase', 'case.oemCase', 'case.unknown']],
+  [/^dealer/i, ['dealerCode']],
+].map(Object.freeze));
+const TYPED_KINDS = Object.freeze(['part', 'order', 'ro', 'dealerCode', 'tow', 'fleetnet',
+  'case.salesforce', 'case.decisivCase', 'case.oemCase', 'case.unknown']);
 const EMAIL_MARKER_ALL_RE = /\s*\[em:[0-9a-f]{8}\]/gi;
 const NAME_TOKEN_RE = /(?<![\w-])[A-Z][A-Za-z]{3,}\b/g;
 const CLAUSE_START_RE = /^\s*(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)?\s*[-\u2013:,]?\s*$/;
@@ -238,7 +253,7 @@ function _datesAfterAt(text, re, window, today, opts = {}) {
     if (opts.skipKeyword && opts.skipKeyword(t, m.index, end)) continue;
     const d = mdDates(t.slice(end, end + window + 30), today, { loose: !!opts.loose })[0];
     if (!d || d.index > window || /[\n\d]/.test(t.slice(end, end + d.index))) continue;
-    out.push({ md: d.md, ymd: d.ymd, at: end + d.index, alts: d.alts });
+    out.push({ md: d.md, ymd: d.ymd, at: end + d.index, alts: d.alts, kwAt: m.index });
   }
   return out;
 }
@@ -299,10 +314,14 @@ function _newestTimelineLine(raw, today) {
   return lines.length ? lines[0].raw.trim() : '';
 }
 
-// { row, evidences, fleetIds, today, unitRows? } -> gate ctx. `evidences` is an array aligned with
+// { row, evidences, fleetIds, today, unitRows?, typed? } -> gate ctx. `evidences` is an array aligned with
 // row.units (builder order) or an object keyed by downId; each is a fleet-dbr-evidence block as
 // sent to the model (after allocate). `unitRows` (raw fleet rows) feeds the coverage line.
-function gateContext({ row, evidences, fleetIds, today, unitRows } = {}) {
+// `typed` (relay-extract §14.3.1) = { [unitId]: wo-facts.typedIndex(...) }: { tokenText, byKind:{part,
+// order, ro, dealerCode, tow, fleetnet: Set, case:{salesforce, decisivCase, oemCase, unknown}: Set},
+// etcRepair: Set<'M/D'>, partsDates: Set<'M/D'>, factIds }. Units with an entry turn ctx.strict on;
+// without `typed` the returned ctx is exactly the pre-relay-extract object.
+function gateContext({ row, evidences, fleetIds, today, unitRows, typed } = {}) {
   const r = row || {};
   const units = Array.isArray(r.units) ? r.units : [];
   const downIds = syntheticIds(units);
@@ -364,8 +383,35 @@ function gateContext({ row, evidences, fleetIds, today, unitRows } = {}) {
   for (const b of BARRIERS) {
     ctx.rules[b.id] = { yn: cells[b.ynCol] === 'Y' ? 'Y' : 'N', details: _s(cells[b.detailsCol]) };
   }
+  if (_plainObj(typed)) _addTyped(ctx, typed, today);
   ctx.limits = limits(ctx);
   return ctx;
+}
+
+// relay-extract §14.3.1 (3): typed evidence per unit; inert for units without an entry.
+function _addTyped(ctx, typed, today) {
+  for (const id of ctx.downIds) {
+    const ti = typed[id];
+    if (!_plainObj(ti)) continue;
+    if (!ctx.strict) { ctx.strict = true; ctx.typed = {}; ctx.repairEtcDates = {}; ctx.partsDates = {}; }
+    ctx.typed[id] = ti;
+    const text = ctx.unitEvidence[id] || '';
+    const tt = _s(ti.tokenText);
+    if (tt) {
+      ctx.unitEvidence[id] = text + '\n' + tt;
+      for (const d of _evidenceDates(tt, today)) ctx.dates[id].add(d);
+      for (const x of _refSet(tt)) ctx.refs[id].add(x);
+      for (const x of _amounts(tt)) ctx.amounts[id].add(x);
+    }
+    const partsLab = (t, s) => PARTS_LABEL_BEFORE_RE.test(t.slice(Math.max(0, s - 8), s));
+    const rep = new Set(ti.etcRepair instanceof Set ? ti.etcRepair : []);
+    for (const d of _etcPhraseDates(text, today, { loose: true, skipKeyword: (t, s, e) => etcKeywordNegated(t, s, e) || partsLab(t, s) })) rep.add(d.md);
+    const parts = new Set(ti.partsDates instanceof Set ? ti.partsDates : []);
+    for (const d of _etcPhraseDates(text, today, { loose: true, skipKeyword: (t, s, e) => etcKeywordNegated(t, s, e) || !partsLab(t, s) })) parts.add(d.md);
+    ctx.repairEtcDates[id] = rep;
+    ctx.partsDates[id] = parts;
+    for (const d of (ti.etcRepair instanceof Set ? ti.etcRepair : [])) ctx.etcDates[id].add(d);
+  }
 }
 
 // ── Limits (§5.4) and output budget (§3) ────────────────────────────────────
@@ -598,10 +644,62 @@ function proseTokens(text, scope, ctx, opts = {}) {
   }
   // (d) ETC-phrase dates (any date form) must be ETC dates of the scope (next: clauses included)
   const etc = new Set([..._scopeUnion(scope, ctx.etcDates), ...extra]);
-  for (const d of _etcPhraseDates(text, today)) {
-    if (!_dateAllowed(d, etc)) return 'unknown-etc-date';
+  if (!ctx.strict) {
+    for (const d of _etcPhraseDates(text, today)) {
+      if (!_dateAllowed(d, etc)) return 'unknown-etc-date';
+    }
+  } else {
+    // relay-extract strict branch: a parts date written as a repair ETC is dropped.
+    const rep = _scopeUnion(scope, ctx.repairEtcDates || {});
+    const parts = _scopeUnion(scope, ctx.partsDates || {});
+    for (const d of _etcPhraseDates(text, today)) {
+      const partsLab = PARTS_LABEL_BEFORE_RE.test(text.slice(Math.max(0, d.kwAt - 8), d.kwAt));
+      if (partsLab) { if (_dateAllowed(d, parts) || _dateAllowed(d, etc)) continue; return 'unknown-etc-date'; }
+      if (_dateAllowed(d, rep)) continue;
+      if (_dateAllowed(d, parts)) return 'parts-date-as-etc';
+      if (_dateAllowed(d, etc)) continue;
+      return 'unknown-etc-date';
+    }
   }
   return null;
+}
+
+// S6 (relay-extract, strict ctx only): a labelled ref must be typed as what its label says.
+// -> { code } | { untyped: [value…] }
+function typedRefProblem(text, scope, ctx) {
+  const sets = {};
+  for (const k of TYPED_KINDS) sets[k] = new Set();
+  for (const u of scope) {
+    const bk = ctx.typed && ctx.typed[u] && ctx.typed[u].byKind;
+    if (!_plainObj(bk)) continue;
+    for (const k of TYPED_KINDS) {
+      const [a, b] = k.split('.');
+      const s = b ? (bk[a] && bk[a][b]) : bk[a];
+      for (const v of (s instanceof Set ? s : [])) sets[k].add(_s(v).toUpperCase());
+    }
+  }
+  const refs = _scopeUnion(scope, ctx.refs);
+  const ev = _scopeText(scope, ctx);
+  const untyped = [];
+  TYPED_REF_RE.lastIndex = 0;
+  let m;
+  while ((m = TYPED_REF_RE.exec(text))) {
+    const raw = m[2] || m[3];
+    let kinds;
+    if (m[3]) kinds = ['tow', 'fleetnet'];
+    else {
+      const hit = TYPED_LABEL_KINDS.find(([re]) => re.test(m[1].trim()));
+      kinds = hit ? hit[1] : [];
+    }
+    const X = raw.toUpperCase();
+    const alts = [X, X.replace(/-/g, '')];
+    const inKinds = (ks) => ks.some((k) => alts.some((x) => sets[k].has(x)));
+    if (inKinds(kinds)) continue;
+    if (inKinds(TYPED_KINDS.filter((k) => !kinds.includes(k)))) return { code: 'misclassified-ref' };
+    if (alts.some((x) => refs.has(x.toLowerCase())) || _bounded(raw, ev, 'i')) { if (!untyped.includes(X)) untyped.push(X); continue; }
+    return { code: 'unknown-ref' };
+  }
+  return { untyped };
 }
 
 function isFasClaim(c, field) {
@@ -642,11 +740,9 @@ function _claimVerbs(body) {
 // the narrow subject+verb / lead-verb test applies.
 function fasClaimProblem(text, env, field, today) {
   const fasMd = new Set(env.fas.map((f) => f.md));
-  if (field === 'fasActions') {
-    const noFas = NO_FAS_RE.test(text);
-    if (noFas && fasMd.size) return 'bad-envelope';
-    if (!noFas && !fasMd.size) return 'unfounded-fas-action';
-  }
+  // D7 (relay-extract): no entry-level "needs src.fas or 'No FAS action logged'" rule; a claim-free
+  // entry (status + party update + next:) is valid, and every claim clause is still checked below.
+  if (field === 'fasActions' && NO_FAS_RE.test(text) && fasMd.size) return 'bad-envelope';
   const clauses = _splitClauses(text);
   for (let i = 0; i < clauses.length; i++) {
     const c = clauses[i];
@@ -725,15 +821,43 @@ function gateEntry(text, src, scope, ctx, opts = {}) {
   const fasMds = new Set(env.fas.map((f) => f.md));
   p = proseTokens(text, scope, ctx, { field, part: 'tokens', fasMds, extraDates: opts.extraDates });
   if (p) return fail(p);
+  let tp = null;
+  if (ctx.strict) {
+    tp = typedRefProblem(text, scope, ctx);
+    if (tp.code) return fail(tp.code);
+  }
   p = fasClaimProblem(text, env, field, ctx.today);
   if (p) return fail(p);
-  return {
+  const out = {
     ok: true, text,
     fas: env.fas.map((f) => ({ date: f.date, quote: f.quote })),
     envOver: env.over, envMissing: env.missing,
     names: nameFlags(text, scope, ctx),
     unbound: dateBindingFlags(text, scope, ctx, field),
   };
+  if (tp) out.untyped = tp.untyped || [];
+  return out;
+}
+
+// relay-extract §14.3.1 (7): gateEntry's stage order and codes minus E2/E4 (no [FAS] index or
+// envelope outside DBR), for the timeline / trends consumers. opts: { field, ownDates }.
+function gateProse(text, src, scope, ctx, opts = {}) {
+  const field = opts.field || 'details';
+  const env = parseEnvelope(src, field, ctx.today);
+  if (!env.ok) return { ok: false, code: env.code };
+  const p = proseTokens(text, scope, ctx, { field, part: 'all', fasMds: opts.ownDates ? new Set(opts.ownDates) : undefined });
+  if (p) return { ok: false, code: p };
+  const tp = ctx.strict ? typedRefProblem(text, scope, ctx) : {};
+  if (tp.code) return { ok: false, code: tp.code };
+  return { ok: true, text, names: nameFlags(text, scope, ctx), unbound: dateBindingFlags(text, scope, ctx, field), untyped: tp.untyped || [] };
+}
+
+// relay-extract §14.3.1 (8): a one-unit gate ctx over plain prompt text (timeline / trends).
+function textContext({ text, today, typed, id = 'U' } = {}) {
+  return gateContext({
+    row: { units: [{ id }] }, evidences: [textEvidence(id, _s(text), today)], fleetIds: [], today,
+    typed: typed ? { [id]: typed } : undefined,
+  });
 }
 
 // ── Structural validation (§5.3) ────────────────────────────────────────────
@@ -1108,14 +1232,30 @@ function mergeFinal(cur, next, mode) {
 }
 
 // ── Coverage (§5.4) ─────────────────────────────────────────────────────────
+// Word-boundary cut with NO ellipsis (D7). '' when fewer than 3 chars would remain.
+function _cutWord(s, max) {
+  const t = _s(s).trim();
+  if (t.length <= max) return t;
+  let cut = t.slice(0, Math.max(0, max));
+  const sp = cut.lastIndexOf(' ');
+  if (sp > 0) cut = cut.slice(0, sp);
+  cut = cut.replace(/[\s,;:\-\u2013\u2014]+$/, '');
+  return cut.length >= 3 ? cut : '';
+}
+// D7 coverage marker from STRUCTURED fields only (never timeline / conversation text):
+// '⚠ <n>d, <status>, <vendor> — awaiting update (review)' or '⚠ needs review'.
 function _codeLine(info, lineCap) {
   const red = (s) => redactEvidence(_clean(_s(s).replace(EMAIL_MARKER_ALL_RE, '')));
-  const days = info.daysDown == null ? '?' : String(info.daysDown);
-  const status = _clip(red(info.status || info.lifecycleReason) || 'no status', 40);
-  const vendor = _clip(red(info.vendor) || 'no vendor', 30);
-  const latest = red(info.latest);
-  const text = '\u26a0 no verified AI line \u2014 ' + days + 'd, ' + status + ', ' + vendor + (latest ? '; latest: ' + latest : '');
-  return _clipWord(text, lineCap);
+  const days = info.daysDown == null ? '' : String(info.daysDown) + 'd';
+  const status = _cutWord(red(info.status || info.lifecycleReason), 40);
+  const vendor = _cutWord(red(info.vendor), 30);
+  const head = [days, status, vendor].filter(Boolean).join(', ');
+  const W = '\u26a0 ';
+  const tail = ' \u2014 awaiting update (review)';
+  const line = head ? W + head + tail : W + 'needs review';
+  if (!lineCap || line.length <= lineCap) return line;
+  const h = head ? _cutWord(head, Math.max(0, lineCap - W.length - tail.length)) : '';
+  return h ? W + h + tail : W + 'needs review';
 }
 // Every down unit without a surviving FAS entry gets a code-built ⚠ line from its own (redacted)
 // fields. Idempotent. -> draft with coverageFilled.
@@ -1280,4 +1420,5 @@ module.exports = {
   mdDates, datesAfter, syntheticIds, gateContext, limits, outBudget,
   parseEnvelope, checkFas, nextClause, freeDateProblem, proseTokens, isFasClaim, fasClaimProblem, nameFlags, dateBindingFlags,
   gateEntry, reconcileEtc, validateRowDraft, validateMapFacts, mergeFinal, coverage, renderCells, removalLine,
+  TYPED_REF_RE, PARTS_LABEL_BEFORE_RE, typedRefProblem, gateProse, textContext, _codeLine, _cutWord,
 };

@@ -1,14 +1,16 @@
 // Fleet DBR evidence — one redacted, typed text block per down unit for the AI draft
 // (design §4). Pure: no I/O, no clock (the caller passes `today` as 'YYYY-MM-DD'), no logging.
 //
-// A block is a list of segments (head, refs, issue, [FAS notes], canonical, insights, timeline,
-// manual entries, conversation, email evidence, ASIST notes). Each rendered line carries a tag
+// A block is a list of segments (head, refs, [FAS actions logged], issue, [FAS notes], canonical,
+// insights, timeline, manual entries, conversation, email evidence, ASIST notes, [verified facts]).
+// Each rendered line carries a tag
 // (fas | fasNotes | email | logged | conv | other) so the envelope gate (fleet-dbr-gate.js) can
 // check a FAS quote and date against exactly the FAS-authored lines the model saw. `allocate`
 // trims the oldest lines first (never a unit), and `planBatches` picks single vs map/reduce.
 'use strict';
 
 const { EMAIL_RE, parseTimelineLines, inferDate } = require('./fleet-dbr');
+const { offsiteNewestFirst } = require('../utils/offsite-notes-order');
 
 // ── Constants (§4.4) ────────────────────────────────────────────────────────
 const EVIDENCE_BUDGET = 36000;
@@ -36,7 +38,14 @@ const EMAIL_ENTRY_MAX = 300;
 const ASIST_MAX = 3000;
 const ASIST_KEEP = 1200;
 
-const KEEP = Object.freeze({ timeline: 8, manual: 10, conv: 5, email: 3 });
+const KEEP = Object.freeze({ timeline: 8, manual: 10, conv: 5, email: 3, facts: 6, fasLog: 4 });
+// D6 (relay-extract output fix B): the protected FAS-authored segment.
+const FAS_LOG_MAX = 6;
+const FAS_LINE_CLIP = 160;
+const FAS_LINE_MIN = 60;
+const FAS_LOG_LABEL = 'FAS actions logged (newest first):';
+const FACTS_LABEL = 'verified facts (extracted):';
+const FACTS_BUDGET = 1200;
 
 // ── Regexes (§4.1, §4.2) ────────────────────────────────────────────────────
 // Phones need phone-shaped separators, so case/RO/ASIST numbers and "number date" runs survive.
@@ -363,8 +372,20 @@ function buildUnitEvidence(raw, unit, enrichRec, today, fasNames, fasAlias) {
     });
   if (emails.length) segs.push(_seg('email', 'email evidence:', emails, KEEP.email));
 
-  const asist = _t(r.asistNotes).trim();
-  if (asist) segs.push(_seg('asist', 'ASIST notes (latest):', [_line(_clipTail(asist, ASIST_MAX), 'other')]));
+  // D1 (§15.2): asistNotes are newest-first; keep the head (newest), never the tail.
+  const asist = offsiteNewestFirst(_t(r.asistNotes).trim());
+  if (asist) segs.push(_seg('asist', 'ASIST notes (newest first):', [_line(_clip(asist, ASIST_MAX), 'other')]));
+
+  // D2 (relay-extract): verified facts segment, only for rows with _factsOn. Tagged 'other', so
+  // a fact line can never back a FAS claim. Any failure omits the segment (§14.7).
+  if (r._factsOn) {
+    try {
+      const lines = require('../repair-intel/wo-fact-output').dbrFactLines(r, { today, budget: FACTS_BUDGET, notesFacts: userNotesFacts(en) });
+      if (lines.length) segs.push(_seg('facts', FACTS_LABEL, lines.map((l) => _line(_one(_s(l)), 'other')), KEEP.facts));
+    } catch (_) { /* facts segment omitted */ }
+  }
+
+  _protectFasLog(segs, today);
 
   const ev = _finish(id, segs, 0, 0);
   const rawDemand = ev.text().length;
@@ -372,6 +393,65 @@ function buildUnitEvidence(raw, unit, enrichRec, today, fasNames, fasAlias) {
   capped.rawDemand = rawDemand;
   capped.demand = capped.text().length;
   return capped;
+}
+
+// relay-extract notesFacts: the user's own app text typed by the extractor (manualEntries minus
+// [em:] email-intel writes, source 'notes'; email evidence values, source 'email'). savedNotes is
+// never typed (deep-scan writes it from the AI NOTE). Lazy require: no load-time cycle.
+function userNotesFacts(enrichRec) {
+  const en = enrichRec && typeof enrichRec === 'object' ? enrichRec : {};
+  const X = require('../repair-intel/wo-extract');
+  const facts = [];
+  for (const m of Array.isArray(en.manualEntries) ? en.manualEntries : []) {
+    if (typeof m !== 'string' || !m.trim() || EMAIL_MARKER_RE.test(m)) continue;
+    facts.push(...X.extractText(m, { source: 'notes' }).facts);
+  }
+  for (const e of Array.isArray(en.email) ? en.email : []) {
+    if (!e || typeof e !== 'object' || typeof e.value !== 'string' || !e.value.trim()) continue;
+    facts.push(...X.extractText(e.value, { source: 'email', at: typeof e.observedAt === 'string' ? e.observedAt : null }).facts);
+  }
+  return facts;
+}
+
+function _lineYmd(l, today) {
+  const md = l.entryMd || _mdOf(l.text.slice(l.bodyAt));
+  const m = /^(\d{1,2})\/(\d{1,2})$/.exec(md || '');
+  return m ? (inferDate(m[1], m[2], undefined, today) || '') : '';
+}
+// D6: MOVE the newest FAS_LOG_MAX FAS-authored lines of timeline / manual / conv (by entry date,
+// then position) into a protected 'fasLog' segment right after the head and refs. Tags, entryMd and
+// fasAuthored are kept, so _finish indexes them in fasLines / fasDates exactly as before.
+function _protectFasLog(segs, today) {
+  const pool = [];
+  let pos = 0;
+  for (const s of segs) {
+    if (!['timeline', 'manual', 'conv'].includes(s.kind)) continue;
+    for (const l of s.lines) { if (l.fasAuthored) pool.push({ l, s, pos, ymd: _lineYmd(l, today) }); pos += 1; }
+  }
+  if (!pool.length) return;
+  pool.sort((a, b) => (a.ymd === b.ymd ? a.pos - b.pos : (a.ymd < b.ymd ? 1 : -1)));
+  const pick = pool.slice(0, FAS_LOG_MAX);
+  const moved = new Set(pick.map((p) => p.l));
+  for (const s of segs) if (s.lines.some((l) => moved.has(l))) s.lines = s.lines.filter((l) => !moved.has(l));
+  for (let i = segs.length - 1; i >= 0; i--) if (['timeline', 'manual', 'conv'].includes(segs[i].kind) && !segs[i].lines.length) segs.splice(i, 1);
+  const at = segs.findIndex((s) => s.kind !== 'head' && s.kind !== 'refs');
+  segs.splice(at < 0 ? segs.length : at, 0, _seg('fasLog', FAS_LOG_LABEL, pick.map((p) => p.l), KEEP.fasLog));
+}
+
+// relay-extract §14.3.1 (8): plain prompt text as one evidence block (timeline / trends gate).
+// One 'data' segment, one line per input line; entryMd = the line's leading M/D or the nearest
+// one above it. No FAS tagging, no trimming, no redaction (the evidence equals what the model saw).
+function textEvidence(id, text, today) {
+  void today;
+  let md = '';
+  const lines = _s(text).replace(/\r/g, '').split('\n').map((t) => {
+    const lead = /^\s*(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?(?![\d/])/.exec(t);
+    if (lead && +lead[1] >= 1 && +lead[1] <= 12 && +lead[2] >= 1 && +lead[2] <= 31) md = (+lead[1]) + '/' + (+lead[2]);
+    return _line(t, 'other', { entryMd: md });
+  });
+  const ev = _finish(_s(id) || 'U', [_seg('data', '', lines)], 0, 0);
+  ev.demand = ev.rawDemand = ev.text().length;
+  return ev;
 }
 
 // Render + indexes over the prompt-visible lines (rebuilt after every trim).
@@ -451,28 +531,39 @@ function _trim(ev, cap) {
   };
   if (over() <= 0) return _finish(ev.id, segs, ev.demand, ev.rawDemand);
 
-  // Line trimming, oldest first.
+  // Line trimming, oldest first. asist is newest-first: clips keep its head (D1).
   dropTo('conv', KEEP.conv);
   dropTo('email', KEEP.email);
   dropTo('timeline', KEEP.timeline);
-  clipEach('asist', ASIST_KEEP, true);
+  dropTo('facts', KEEP.facts);
+  clipEach('asist', ASIST_KEEP, false);
   dropTo('manual', KEEP.manual);
   dropTo('conv', 2);
   dropTo('timeline', 3);
   // Char clipping of kept content, fixed order.
-  clipEach('asist', 300, true);
+  clipEach('asist', 300, false);
   dropTo('email', 1);
   dropTo('conv', 1);
   dropTo('timeline', 1);
   dropTo('manual', 2);
+  dropTo('fasLog', KEEP.fasLog);
+  dropTo('fasLog', 2);
   dropTo('insights', 0);
   clipEach('canonical', 120, false);
   clipTotalTail('fasNotes', 300);
   clipEach('issue', 200, false);
   clipEach('refs', 300, false);
   clipEach('head', HEAD_MAX, false);
-  // Maximal trimming: only the head line (and one marker) can remain.
-  for (const kind of ['asist', 'email', 'conv', 'timeline', 'manual', 'canonical', 'fasNotes', 'issue', 'refs']) dropTo(kind, 0);
+  // D6: head-clip every remaining fasLog line (keeps '[FAS] M/D - ' and the lead verb).
+  const fl = by('fasLog');
+  if (fl && over() > 0) for (const l of fl.lines) if (l.text.length > FAS_LINE_CLIP) l.text = _clip(l.text, FAS_LINE_CLIP);
+  // Maximal trimming: only the head line, one fasLog line (and markers) can remain. The one-line
+  // floor holds for every allocate budget (>= MIN_BLOCK); a direct trim below MIN_BLOCK gives
+  // fasLog no protection (dropped first), as before D6.
+  const floor = cap >= MIN_BLOCK;
+  for (const kind of (floor ? [] : ['fasLog']).concat(['asist', 'email', 'conv', 'timeline', 'manual', 'canonical', 'fasNotes', 'issue', 'facts', 'refs'])) dropTo(kind, 0);
+  dropTo('fasLog', floor ? 1 : 0);
+  if (over() > 0) clipEach('fasLog', FAS_LINE_MIN, false);
   return _finish(ev.id, segs, ev.demand, ev.rawDemand);
 }
 
@@ -524,7 +615,8 @@ function planBatches(evidences, budget = EVIDENCE_BUDGET) {
 module.exports = {
   EVIDENCE_BUDGET, SINGLE_SLACK, SINGLE_MAX_UNITS, MAP_MAX_UNITS, MAX_MAP_BATCHES, MAX_UNITS_AI,
   MIN_BLOCK, UNIT_HARD_MAX, GAP_EVIDENCE_MAX, GAP_FAS_MAX, KEEP,
+  FAS_LOG_MAX, FAS_LINE_CLIP, FAS_LINE_MIN, FAS_LOG_LABEL, FACTS_LABEL,
   FAS_ACT_SRC, FAS_LEAD_RE, LEAD_MD_RE, EMAIL_MARKER_RE, FAS_ACTION_DATE_RE, EVID_PHONE_RE, ENTRY_RE,
   buildUnitEvidence, conversationEntries, redactEvidence, fasNameMatch, classifyManual, normQuote,
-  allocate, planBatches, trimEvidence: _trim,
+  allocate, planBatches, trimEvidence: _trim, textEvidence, userNotesFacts,
 };
