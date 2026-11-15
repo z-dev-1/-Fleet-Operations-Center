@@ -67,7 +67,6 @@ function _newest(list) {
   return best;
 }
 function _uniq(arr) { return arr.filter((v, i, a) => v != null && v !== '' && a.indexOf(v) === i); }
-function _pad2(n) { return String(n).padStart(2, '0'); }
 function _mdPad(ymdStr) { const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(_str(ymdStr)); return m ? m[1] + '/' + m[2] : ''; }
 function _localMidnight(ymdStr) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(_str(ymdStr));

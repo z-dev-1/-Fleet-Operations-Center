@@ -87,9 +87,6 @@ async function _estimateNotesViaApi(estimateUrl, opts = {}) {
   }
   return Object.assign({}, none, { estId });
 }
-async function _estimateCommentsViaApi(estimateUrl) {
-  return (await _estimateNotesViaApi(estimateUrl)).text;
-}
 
 function _extractFlags() {
   try { return require('../config/perf-flags').loadExtract(); } catch (_) { return { enabled: false, aiOutput: false }; }
