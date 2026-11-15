@@ -197,6 +197,8 @@ const _COLS = [
   'estimate_cost','invoiced_cost','source_refs','source_conflict','excluded_vendor','raw_hash','first_seen_at','last_synced_at',
 ];
 
+const _KEEP_COLS = new Set(['estimate_cost', 'wait_diagnosis_ms', 'wait_parts_ms', 'wait_approval_ms']);
+
 // Idempotent upsert of one normalized event. Preserves first_seen_at on update,
 // and skips the write entirely when raw_hash is unchanged (avoids churn). AI-
 // filled columns (outcome, *_root_cause, etc.) are NOT overwritten by a re-sync.
@@ -212,7 +214,8 @@ function upsertEvent(row) {
     // Update only the source-derived columns; leave AI columns intact.
     const aiCols = new Set(['outcome','symptoms','tech_findings','diagnosed_problem','confirmed_root_cause','suspected_root_cause','corrective_actions','complaint_resolved','verification_result','outstanding_issues','in_scope','out_of_scope_reason','specialist_required','receiving_vendor','transfer_result']);
     const setCols = _COLS.filter(c => !aiCols.has(c));
-    const set = setCols.map(c => c + ' = @' + c).join(', ');
+    // relay-extract §13.2: a re-sync whose source value is null never erases an extracted value.
+    const set = setCols.map(c => (_KEEP_COLS.has(c) ? c + ' = COALESCE(@' + c + ', ' + c + ')' : c + ' = @' + c)).join(', ');
     const stmt = engine.prepare('UPDATE ri_repair_event SET ' + set + ' WHERE source_id = @source_id');
     stmt.run(_params(row, setCols.concat(['source_id'])));
     return 'updated';
@@ -271,6 +274,71 @@ function setWo3c(sourceId, obj, hash) {
   const json = obj == null ? null : (typeof obj === 'string' ? obj : JSON.stringify(obj));
   const stmt = engine.prepare('UPDATE ri_repair_event SET wo_3c = ?, wo_3c_hash = ? WHERE source_id = ?');
   if (stmt) stmt.run(json, hash == null ? null : String(hash), String(sourceId));
+}
+
+// ── relay-extract §13.2: extracted facts (vendor / structured sources, never AI) ──
+const _DIGEST_MAX = 16 * 1024;
+function _clipStr(s, n) { const t = String(s == null ? '' : s); return t.length > n ? t.slice(0, n) : t; }
+
+// d = wo-facts.digestForRi(fs). Writes extracted_facts / extract_hash / etc_miss_count /
+// dealer_name, the estimate cost when present, and vendor-stated cause / correction
+// (extract_cc = 1). Skipped when extract_hash is unchanged. Returns true when written.
+function setExtractedFacts(sourceId, d) {
+  if (!ensureSchema() || !sourceId || !d || typeof d !== 'object') return false;
+  const json = JSON.stringify(d);                // digestForRi already caps the digest at 16 KB
+  if (json.length > _DIGEST_MAX * 2) return false;
+  const hash = crypto.createHash('sha1').update(json).digest('hex');
+  const sel = engine.prepare('SELECT extract_hash FROM ri_repair_event WHERE source_id = ?');
+  const cur = sel ? sel.get(String(sourceId)) : null;
+  if (!cur || cur.extract_hash === hash) return false;
+  const est = d.estimate || {};
+  const cost = est.approvedTotal != null ? est.approvedTotal : (est.latestSubmitted != null ? est.latestSubmitted : null);
+  const etc = d.etc || {};
+  const params = {
+    source_id: String(sourceId), extracted_facts: json, extract_hash: hash,
+    etc_miss_count: Number.isFinite(Number(etc.missCount)) ? Number(etc.missCount) : 0,
+    dealer_name: (d.dealer && d.dealer.name) || null,
+  };
+  const sets = ['extracted_facts = @extracted_facts', 'extract_hash = @extract_hash', 'etc_miss_count = @etc_miss_count', 'dealer_name = @dealer_name'];
+  if (cost != null && Number.isFinite(Number(cost))) { sets.push('estimate_cost = @estimate_cost'); params.estimate_cost = Number(cost); }
+  const cause = Array.isArray(d.cause) ? d.cause : [];
+  const corr = Array.isArray(d.correction) ? d.correction : [];
+  if (cause.length || corr.length) {
+    sets.push('extract_cc = 1');
+    if (cause.length) { sets.push('confirmed_root_cause = @confirmed_root_cause'); params.confirmed_root_cause = _clipStr(cause.map((c) => c.text).filter(Boolean).join('; '), 600); }
+    if (corr.length) { sets.push('corrective_actions = @corrective_actions'); params.corrective_actions = _clipStr(corr.map((c) => c.text).filter(Boolean).join('; '), 800); }
+  }
+  const stmt = engine.prepare('UPDATE ri_repair_event SET ' + sets.join(', ') + ' WHERE source_id = @source_id');
+  if (!stmt) return false;
+  stmt.run(params);
+  return true;
+}
+
+// Extracted parts (with a part number) -> ri_repair_part via setParts (delete + insert).
+function setPartsForSource(sourceId, equipmentId, parts) {
+  if (!ensureSchema() || !sourceId || !Array.isArray(parts)) return;
+  const sel = engine.prepare('SELECT id FROM ri_repair_event WHERE source_id = ?');
+  const cur = sel ? sel.get(String(sourceId)) : null;
+  if (!cur) return;
+  const { _PART_RE } = require('./parts-extract');
+  const comp = (desc) => { if (!desc) return null; const m = String(desc).match(_PART_RE); return m ? m[1] || m[0] : null; };
+  setParts(cur.id, equipmentId, parts.filter((p) => p && p.partNo).map((p) => ({
+    name: p.desc || null, number: String(p.partNo), component: comp(p.desc), action: p.status || 'ordered', qty: p.qty || null,
+  })));
+}
+
+// Dealer stage dwell (wo-facts.stageDwell) + the parts-chain wait. Source-derived values win:
+// wait_approval from the dwell, wait_diagnosis only fills a null, wait_parts from the dwell
+// parts status, else the parts chain (first statement -> arrival), else kept.
+function setOffsiteDwell(sourceId, dwell, partsChainMs) {
+  if (!ensureSchema() || !sourceId || !dwell || typeof dwell !== 'object') return;
+  const n = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+  const stmt = engine.prepare('UPDATE ri_repair_event SET offsite_dwell = @dwell, ' +
+    'wait_approval_ms = COALESCE(@approval, wait_approval_ms), ' +
+    'wait_diagnosis_ms = COALESCE(wait_diagnosis_ms, @diagnosis), ' +
+    'wait_parts_ms = COALESCE(@parts, @chain, wait_parts_ms) WHERE source_id = @source_id');
+  if (stmt) stmt.run({ dwell: JSON.stringify(dwell), approval: n(dwell.approval), diagnosis: n(dwell.diagnosis), parts: n(dwell.partsMs),
+    chain: n(partsChainMs), source_id: String(sourceId) });
 }
 
 // Replace the parts for an event (idempotent: delete + insert).
@@ -339,7 +407,13 @@ const _AI_WRITABLE = new Set([
 
 function applyAiToEvent(sourceId, ai) {
   if (!ensureSchema() || !sourceId || !ai || typeof ai !== 'object') return false;
-  const cols = Object.keys(ai).filter(k => _AI_WRITABLE.has(k) && ai[k] != null && ai[k] !== '');
+  let cols = Object.keys(ai).filter(k => _AI_WRITABLE.has(k) && ai[k] != null && ai[k] !== '');
+  // relay-extract §13.2: AI suspicion never overwrites vendor-stated corrective actions.
+  if (cols.includes('corrective_actions')) {
+    const g = engine.prepare('SELECT extract_cc FROM ri_repair_event WHERE source_id = ?');
+    const r = g ? g.get(String(sourceId)) : null;
+    if (r && r.extract_cc === 1) cols = cols.filter(c => c !== 'corrective_actions');
+  }
   if (!cols.length) return false;
   const set = cols.map(c => c + ' = @' + c).join(', ');
   const stmt = engine.prepare('UPDATE ri_repair_event SET ' + set + ' WHERE source_id = @source_id');
@@ -419,6 +493,7 @@ module.exports = {
   EXCLUDED_VENDORS, _isExcludedVendor,
   normalizeWorkOrder, upsertEvent, setParts, setBackorderedParts,
   setWoDetail, setDealerUrlIfEmpty, setWo3c,
+  setExtractedFacts, setPartsForSource, setOffsiteDwell,
   eventsForUnit, getCheckpoint, saveCheckpoint,
   applyAiToEvent, getAiAnalysis, saveAiAnalysis,
   replaceRecommendations, getRecommendations,

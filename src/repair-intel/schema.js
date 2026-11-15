@@ -221,11 +221,19 @@ function _migrate() {
     "ALTER TABLE ri_repair_event ADD COLUMN wo_evidence TEXT",         // JSON capped 3C evidence (no authors)
     "ALTER TABLE ri_repair_event ADD COLUMN wo_3c TEXT",               // JSON per-WO 3C summary
     "ALTER TABLE ri_repair_event ADD COLUMN wo_3c_hash TEXT",          // content hash wo_3c was built from
+    // relay-extract §13.1 (outside store._COLS, like the columns above)
+    "ALTER TABLE ri_repair_event ADD COLUMN extracted_facts TEXT",     // JSON wo-facts.digestForRi (<= 16 KB)
+    "ALTER TABLE ri_repair_event ADD COLUMN extract_hash TEXT",        // sha1 of the digest
+    "ALTER TABLE ri_repair_event ADD COLUMN etc_miss_count INTEGER",   // counted (explicit) repair ETC misses
+    "ALTER TABLE ri_repair_event ADD COLUMN dealer_name TEXT",
+    "ALTER TABLE ri_repair_event ADD COLUMN offsite_dwell TEXT",       // JSON wo-facts.stageDwell
+    "ALTER TABLE ri_repair_event ADD COLUMN extract_cc INTEGER DEFAULT 0", // 1 = cause/correction are vendor-stated
   ];
   for (const sql of adds) {
     try { engine.exec(sql); } catch (e) { /* duplicate column name — already migrated */ }
   }
   try { engine.exec('CREATE INDEX IF NOT EXISTS ix_ev_parts_order ON ri_repair_event(parts_on_order)'); } catch (_) {}
+  try { engine.exec('CREATE INDEX IF NOT EXISTS ix_ev_dealer_name ON ri_repair_event(dealer_name)'); } catch (_) {}
 }
 
 module.exports = { ensureSchema, SCHEMA_VERSION, DDL, INDEXES, _migrate };

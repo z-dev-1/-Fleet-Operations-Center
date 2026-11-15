@@ -149,6 +149,7 @@ async function syncUnit(equipmentId, opts = {}) {
   const detailCache = new Map();
   if (opts.hydrateDetail === true) {
     const dealerLink = require('./dealer-link');
+    const xf = _extractFlags();
     const det = { hydrated: 0, dealerFound: 0, skipped: 0, failed: 0 };
     try {
       const storedMap = new Map();
@@ -172,6 +173,15 @@ async function syncUnit(equipmentId, opts = {}) {
           if (!detail) { det.failed++; return; }
           const dealer = dealerLink.dealerFromDetail(detail, mapper);
           store.setWoDetail(sid, { dealer, evidence: dealerLink.evidenceFromDetail(detail, mapper), modifiedAt: row.modified_at });
+          // relay-extract §13.3 3a: extracted digest + parts (comments + structured fields; no extra GET).
+          if (xf.enabled) {
+            try {
+              const rf = woExtract.extractRelay(detail, { vendor: row.vendor, vendorWorkOrderIds: [], now: Date.now(), collect: mapper.collectAllComments });
+              const fs = woFacts.buildFactSet({ relayFacts: rf, created: row.created_at ? new Date(row.created_at).toISOString() : '' }, { today: _ymd(Date.now()) });
+              store.setExtractedFacts(sid, woFacts.digestForRi(fs));
+              store.setPartsForSource(sid, eq, fs.parts);
+            } catch (e) { logger.warn('[' + eq + '] extract ' + sid + ' failed (' + (e && e.name) + ')'); }
+          }
           detailCache.set(sid, detail);
           det.hydrated++;
           if (dealer) det.dealerFound++;
@@ -183,6 +193,7 @@ async function syncUnit(equipmentId, opts = {}) {
           if (!dealerLink.ownsOffsite(opts.unitRow, row.work_order_id)) continue;
           const d = dealerLink.dealerFromUnitRow(opts.unitRow, row.work_order_id);
           if (d) store.setDealerUrlIfEmpty(row.source_id, d);
+          if (xf.enabled) _unitRowFacts(opts.unitRow, row);
         }
       }
     } catch (e) { result.errors.push('detail hydrate: ' + e.message); }
@@ -231,6 +242,46 @@ async function syncUnit(equipmentId, opts = {}) {
     ' added=' + result.added + ' updated=' + result.updated + ' unchanged=' + result.unchanged + ' excluded=' + result.excluded +
     (result.errors.length ? ' errors=' + result.errors.length : ''));
   return result;
+}
+
+// ── relay-extract §13.3 ───────────────────────────────────────────────────────
+const woExtract = require('./wo-extract');
+const woFacts = require('./wo-facts');
+const DAY_MS = 24 * 3600 * 1000;
+function _extractFlags() {
+  try { return require('../config/perf-flags').loadExtract(); } catch (_) { return { enabled: false, aiOutput: false }; }
+}
+function _ymd(ms) {
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function _ms(v) { if (v == null || v === '') return NaN; if (typeof v === 'number') return v; const t = Date.parse(v); return isNaN(t) ? NaN : t; }
+
+// The WO that owns the unit row's offsite: dealer stage dwell + the parts-chain wait, and the
+// event digest refreshed from the unit row's full fact set (Relay + offsite blocks).
+function _unitRowFacts(unitRow, row) {
+  let fs = null;
+  try {
+    if (unitRow.relayFacts || unitRow.offsiteFacts) {
+      fs = woFacts.buildFactSet(unitRow, { today: _ymd(Date.now()) });
+      store.setExtractedFacts(row.source_id, woFacts.digestForRi(fs));
+      store.setPartsForSource(row.source_id, row.equipment_id, fs.parts);
+    }
+    if (Array.isArray(unitRow.offsiteStageHistory)) {
+      const since = _ms(row.created_at || row.reported_at) - 3 * DAY_MS;
+      const dwell = woFacts.stageDwell(unitRow.offsiteStageHistory, { now: Date.now(), since });
+      store.setOffsiteDwell(row.source_id, dwell, fs ? _partsChainMs(fs) : null);
+    }
+  } catch (e) { logger.warn('[' + (row.equipment_id || '?') + '] offsite facts for ' + row.source_id + ' failed (' + (e && e.name) + ')'); }
+}
+// First parts statement -> chains.parts metAt, only when no parts entry is still open.
+function _partsChainMs(fs) {
+  const ch = (fs.etc && fs.etc.chains && fs.etc.chains.parts) || [];
+  const met = fs.etc && fs.etc.chainMetAt && fs.etc.chainMetAt.parts;
+  if (!ch.length || !met || ch.some((e) => e.status === 'open')) return null;
+  const first = Math.min(...ch.map((e) => _ms(e.statedAt)).filter(Number.isFinite));
+  const end = _ms(met + 'T23:59:59');
+  return Number.isFinite(first) && Number.isFinite(end) && end >= first ? end - first : null;
 }
 
 // Run fn over items with at most n in flight. fn must not throw (callers catch).

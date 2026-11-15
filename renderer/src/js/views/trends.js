@@ -163,6 +163,57 @@ function _backorderCard(bo) {
     '</div></div>';
 }
 
+// relay-extract: facts extracted from the work-order threads and dealer notes. ETC misses are the
+// COUNTED explicit repair-completion misses only (a parts ship-date miss is not counted).
+function _days(ms) {
+  if (ms == null || !isFinite(ms)) return '\u2014';
+  var d = ms / 86400000;
+  return (d >= 10 ? Math.round(d) : Math.round(d * 10) / 10) + 'd';
+}
+function _extractedCard(x) {
+  if (!x) return '';
+  var cov = x.coverage || { eventsWithFacts: 0, events: 0 };
+  var note = '<span class="dp-ri-sub-note">(' + cov.eventsWithFacts + ' of ' + cov.events + ' events have extracted facts)</span>';
+  if (!cov.eventsWithFacts) {
+    return '<div class="tr-card tr-card--wide"><div class="tr-card-title">\uD83E\uDDFE ETC misses / approval cycle / dealer dwell ' + note + '</div>' +
+      '<div class="dp-empty" style="color:var(--mut)">No extracted facts in this window yet.</div></div>';
+  }
+  var chips = (x.byPartNumber && x.byPartNumber.length)
+    ? '<div class="tr-bo-parts"><span class="tr-slice-sub">Part numbers (from the threads):</span> ' +
+        x.byPartNumber.map(function(p){ return '<span class="tr-why tr-why--parts" title="' + esc(p.units + ' unit(s)') + '">#' + esc(p.key) + ' \u00d7' + p.count + '</span>'; }).join(' ') + '</div>'
+    : '';
+  function missCol(title, rows) {
+    if (!rows || !rows.length) return '';
+    var items = rows.slice(0, 8).map(function(r){
+      return '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
+        '<span class="tr-rank-n">' + r.misses + ' / ' + r.wos + ' WO' + (r.wos === 1 ? '' : 's') + '</span></div></div>';
+    }).join('');
+    return '<div class="tr-bo-col"><div class="tr-bo-subtitle">' + esc(title) + '</div>' + items + '</div>';
+  }
+  function dwellCol(rows) {
+    if (!rows || !rows.length) return '';
+    var items = rows.slice(0, 8).map(function(r){
+      return '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">' + esc(r.key) + '</span>' +
+        '<span class="tr-rank-n">approval ' + _days(r.medianApprovalMs) + ' \u00b7 repair ' + _days(r.medianRepairMs) + ' \u00b7 n ' + r.n + '</span></div></div>';
+    }).join('');
+    return '<div class="tr-bo-col"><div class="tr-bo-subtitle">Dealer dwell (median)</div>' + items + '</div>';
+  }
+  var ac = x.approvalCycle || {};
+  var cycle = '<div class="tr-bo-col"><div class="tr-bo-subtitle">Estimate approval cycle</div>' +
+    (ac.n ? '<div class="tr-rank"><div class="tr-rank-head"><span class="tr-rank-key">median ' + _days(ac.medianMs) + ' \u00b7 p90 ' + _days(ac.p90Ms) + '</span>' +
+      '<span class="tr-rank-n">' + ac.n + ' WO' + (ac.n === 1 ? '' : 's') + '</span></div></div>' : '<div class="dp-empty" style="color:var(--mut)">No submitted \u2192 approved pair.</div>') +
+    '</div>';
+  return '<div class="tr-card tr-card--wide"><div class="tr-card-title">\uD83E\uDDFE ETC misses / approval cycle / dealer dwell ' + note + '</div>' +
+    '<div class="tr-bo-note">ETC misses count only repair ETCs the thread explicitly marks as missed or revised; parts ship-date misses are not counted.</div>' +
+    chips +
+    '<div class="tr-bo-cols">' +
+      missCol('ETC misses by vendor (misses / WOs)', x.etcMissByVendor) +
+      missCol('ETC misses by dealer (misses / WOs)', x.etcMissByDealer) +
+      cycle +
+      dwellCol(x.dealerDwell) +
+    '</div></div>';
+}
+
 function fmtDate(ms) {
   if (!ms) return 'Unknown';
   try { var d = new Date(ms); return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2); }
@@ -336,6 +387,7 @@ function _render(data) {
     _rankList('By operator', data.byOperator, { dimension: 'operator' }) +
     _rankList('By make', data.byMake, { dimension: 'make' }) +
     _backorderCard(data.backorder) +
+    _extractedCard(data.extracted) +
   '</div>';
 
   body.innerHTML = stats +

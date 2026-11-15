@@ -19,6 +19,22 @@ const repairHistory = require('./repair-history');
 
 const UNIT_TIMEOUT_MS = 180000;
 
+// relay-extract §14.6: timeline fact gate + self-review time bounds. The deadline runs from
+// _processUnit entry (offsite scrape + draft); it is enforced only around the review call.
+const TL_DEADLINE_MS = 150000;
+const TL_REVIEW_MIN_MS = 45000;
+const TL_REVIEW_CALL_MS = 60000;
+let _factsWarned = false;
+
+// A unit carries an extracted fact block (relay-extract): the AI-output stage runs only then.
+function _hasFactBlock(u) {
+  return !!u && ['relayFacts', 'offsiteFacts'].some((k) => u[k] && typeof u[k] === 'object' && Array.isArray(u[k].facts));
+}
+function _localYmd(ms) {
+  const d = new Date(ms);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
 // Fingerprint the work-order facts that define a unit's current repair event.
 // Used to gate the repair-history write so we only log a NEW history entry when
 // a unit's WO data actually changed (root cause diagnosed, WR closed, new WR,
@@ -154,10 +170,15 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
   // V-C: orcha_ws lives in src/scrapers/
   // Use relay.ask for deep-scan (reliable, proven connection)
     const relay = require('../orcha/relay');
-    const askOrcha = async (prompt) => {
+    const askOrcha = async (prompt, o) => {
       try {
         // Gateway source tag: full-fleet scan = low; forced/on-demand unit = normal.
-        const text = await relay.ask(prompt, { source: opts.aiSource || (opts.force ? 'deep_scan_unit' : 'deep_scan') });
+        const source = opts.aiSource || (opts.force ? 'deep_scan_unit' : 'deep_scan');
+        // {timeoutMs} (timeline self-review only): bounded call via relay.runWithTimeout; the
+        // draft call passes no options and is unchanged.
+        const text = (o && o.timeoutMs > 0 && typeof relay.runWithTimeout === 'function')
+          ? await relay.runWithTimeout((sig) => relay.ask(prompt, { signal: sig, source }), { timeoutMs: o.timeoutMs, timeoutResult: null, source })
+          : await relay.ask(prompt, { source });
         return text ? { ok: true, text } : { ok: false, error: 'empty response' };
       } catch (e) {
         return { ok: false, error: e.message };
@@ -174,6 +195,11 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
   if (batchSize !== DS_BATCH_SIZE) {
     logger.info('[DS] batch size ' + batchSize + ' (Orcha down, Claude pool ' + _poolSize + ')');
   }
+
+  // relay-extract: extraction flags (read once per run) and the per-run self-review budget.
+  let _xf = null;
+  try { _xf = require('../config/perf-flags').loadExtract(); } catch (_) { _xf = null; }
+  const _tlRun = { flags: _xf, budget: _xf && _xf.aiOutput ? { left: _xf.reviewMaxPerRun } : null };
 
   const notesStore = store.load('notesStore', {});
   const _changedIds = new Set(); // units whose notesStore entry this run changed
@@ -258,7 +284,7 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
       : null;
     job.unitsStarted(batch.map(u => u.equipmentId));
     const results = await Promise.allSettled(
-      batch.map(u => _processUnit(u, notesStore, askOrcha))
+      batch.map(u => _processUnit(u, notesStore, askOrcha, _tlRun))
     );
     allResults.push(...results);
 
@@ -298,6 +324,8 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
         if (val.primaryComponent)   row.savedPrimaryComponent = val.primaryComponent;
         row._orchaProcessed   = true;
         row._orchaProcessedAt = new Date().toISOString();
+        // relay-extract: mirrors follow the offsite blocks the live enrich just wrote.
+        if (_xf && _xf.enabled && _hasFactBlock(row)) require('../repair-intel/wo-facts').refreshRowFacts(row, _xf);
       }
 
       if (val.correctedNotes && val.correctedNotes !== 'none') {
@@ -548,7 +576,9 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
 /**
  * _processUnit -- runs AI on a single unit, returns structured result
  */
-async function _processUnit(u, notesStore, askOrcha) {
+async function _processUnit(u, notesStore, askOrcha, tlRun) {
+  const _t0 = Date.now();
+  const _xf = (tlRun && tlRun.flags) || null;
   const ns               = notesStore[u.equipmentId] || {};
   // Read existingNotes from the row first (reflects mid-session manual edits)
   // then fall back to what's in the store
@@ -636,6 +666,13 @@ async function _processUnit(u, notesStore, askOrcha) {
         u.asistSource = enrichResult.source;
         u.asistLabel = enrichResult.bestLabel;
         u.asistSrUrl = enrichResult.bestUrl || offsiteUrl;
+        // relay-extract: the live enrich's fact block, stage history and dealer fill.
+        if (_xf && _xf.enabled) {
+          if (enrichResult.offsiteFacts && Array.isArray(enrichResult.offsiteFacts.facts)) u.offsiteFacts = enrichResult.offsiteFacts;
+          if (Array.isArray(enrichResult.offsiteStageHistory) && enrichResult.offsiteStageHistory.length) u.offsiteStageHistory = enrichResult.offsiteStageHistory;
+          if (enrichResult.dealer && !u.dealerName) u.dealerName = enrichResult.dealer;
+          if (enrichResult.dealerCode && !u.dealerCode) u.dealerCode = enrichResult.dealerCode;
+        }
         // Case stage (Arrival..Ready) + detail, now read from Decisiv's API.
         // Previously never copied here, so the live path lost it (DTNA did).
         // ...or the API said the dealer set NO status yet (clears an old guess).
@@ -673,6 +710,14 @@ async function _processUnit(u, notesStore, askOrcha) {
         u.asistLabel = dr.bestLabel || 'DTNA Case';
         u.asistSrUrl = offsiteUrl;
         if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        // relay-extract: DTNA facts from the 20000-char raw thread (else the 8000-char text).
+        if (_xf && _xf.enabled) {
+          try {
+            const b = require('../repair-intel/wo-extract').extractDtnaFeed(dr.rawThread || dr.offsiteText,
+              { now: Date.now(), wrCreatedAt: (u.relayFacts && u.relayFacts.wrCreatedAt) || u.created });
+            if (b && ((b.facts && b.facts.length) || (b.events && b.events.length))) u.offsiteFacts = b;
+          } catch (e) { logger.warn('[DS] DTNA extract failed for ' + u.equipmentId + ' (' + (e && e.name) + ')'); }
+        }
         logger.info('[DS] DTNA case enriched (live) for ' + u.equipmentId + ' | ' + offsiteText.length + 'ch');
       }
     } catch (e) {
@@ -714,7 +759,21 @@ async function _processUnit(u, notesStore, askOrcha) {
     }
   } catch (_) { /* no canonical record — proceed without the hint */ }
 
-  const prompt =
+  // relay-extract §14.6: verified facts for the timeline (aiOutput on and a fact block present).
+  const _todayYmd = _localYmd(Date.now());
+  let _tl = null;
+  if (_xf && _xf.aiOutput && _hasFactBlock(u)) {
+    try {
+      const O = require('../repair-intel/wo-fact-output');
+      const fs = require('../repair-intel/wo-facts').buildFactSet(u, { today: _todayYmd });
+      _tl = { O, fs, sheet: O.factSheet(fs, { budget: 4000, purpose: 'timeline', row: u }) };
+    } catch (e) {
+      _tl = null;
+      if (!_factsWarned) { _factsWarned = true; logger.warn('[DS] fact set unavailable (' + (e && e.name) + '); timeline built without facts'); }
+    }
+  }
+
+  const _promptHead =
     'You are Orcha, the AI brain for Fleet Operations. Generate the OFFICIAL repair timeline for unit ' + u.equipmentId + '.\n\n' +
     'PURPOSE:\n' +
     'This timeline is the official repair status report sent directly to business partners and management. Every line must be a professional coordinator update — NOT a message transcript. Write every entry in INTERNAL third-person status-log voice (e.g. "Requested updated parts ETA from dealer; response pending." / "Dealer submitted repair estimate; internal approval pending."). NEVER write vendor-facing language ("can you confirm...", "please advise") into the timeline.\n\n' +
@@ -791,7 +850,9 @@ async function _processUnit(u, notesStore, askOrcha) {
     'ALSO PROVIDE:\n' +
     'REPAIR_STATUS: [current stage: Waiting for vendor | Appointment scheduled | Vehicle arrived | Under diagnosis | Diagnosis completed | Awaiting estimate | Awaiting approval | Parts ordered | Parts backordered | Parts received | Repair in progress | Road test | Quality inspection | Ready for pickup | Repair completed | Work order closed]\n' +
     'PRIMARY_COMPONENT: [exactly one: ENGINE/MOTOR SYSTEMS | CHASSIS | ELECTRICAL | CAB/CLIMATE CONTROL/INSTRUMENTATION | ACCESSORIES]\n' +
-    'ISSUE: [One short sentence max 120 chars: the mechanical failure/complaint. NOT the repair status.]\n\n' +
+    'ISSUE: [One short sentence max 120 chars: the mechanical failure/complaint. NOT the repair status.]\n\n';
+  // The exact data the model reads (the gate's evidence): SOURCE DATA through the offsite block.
+  const sourceData =
     'SOURCE DATA:\n' +
     'Unit: ' + u.equipmentId + ' | Vendor: ' + (u.vendor || 'unassigned') + ' | Domicile: ' + (u.domicileSite || '--') + '\n' +
     'Lifecycle: ' + (u.lifecycleState || '--') + ' / ' + (u.lifecycleReason || '--') + '\n' +
@@ -806,7 +867,18 @@ async function _processUnit(u, notesStore, askOrcha) {
     (hasSecondary ? secondaryConvs.map(function (s) {
       return 'RELAY GARAGE CONVERSATION (' + s.label + ' WR -- ' + s.vendor + '):\n' + s.conv + '\n\n';
     }).join('') : '') +
-    (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '') +
+    (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '');
+  if (_tl) {
+    try {
+      _tl.ctx = _tl.O.factContext(_tl.fs, { promptText: sourceData, sheetText: _tl.sheet.text, rowDates: _tl.sheet.rowDates, today: _todayYmd });
+    } catch (e) {
+      _tl = null;
+      if (!_factsWarned) { _factsWarned = true; logger.warn('[DS] fact gate unavailable (' + (e && e.name) + '); timeline built without facts'); }
+    }
+  }
+  const _factBlock = _tl ? _tl.sheet.text + '\n' + _tlRuleLines(_tl.O) + '\n' : '';
+
+  const prompt = _promptHead + sourceData + _factBlock +
     'RESPOND IN EXACTLY THIS FORMAT (no markdown, no backticks):\n' +
     'REPAIR_STATUS: [stage]\n' +
     'PRIMARY_COMPONENT: [component]\n' +
@@ -845,9 +917,29 @@ async function _processUnit(u, notesStore, askOrcha) {
     parsedPrimaryComponent = VALID_PC.includes(up) ? up : null;
   }
 
+  // relay-extract §14.6: gate ISSUE / NOTE / TIMELINE against the prompt data + verified facts,
+  // then the always-on self-review. Runs BEFORE the fallback NOTE, so a dropped ISSUE can never
+  // become a NOTE; the fallback below is built from the gated summary and is not re-gated.
+  let tlGate = null;
+  let _noteDropped = false;
+  if (_tl && _tl.ctx) {
+    const g = await _gateTimelineOutput(u, _tl, { summary, correctedNotes, timeline }, askOrcha, {
+      sourceData, today: _todayYmd, t0: _t0, rounds: _xf.reviewRounds, budget: tlRun && tlRun.budget,
+    });
+    _noteDropped = !!correctedNotes && !g.correctedNotes;
+    summary = g.summary;
+    correctedNotes = g.correctedNotes;
+    timeline = g.timeline;
+    tlGate = g.tlGate;
+    const nDrops = Object.values(tlGate.drops).reduce((a, b) => a + b, 0);
+    logger.info('[DS] tlGate ' + u.equipmentId + ' state=' + tlGate.state + ' drops=' + nDrops + ' ratio=' + tlGate.ratio
+      + ' rounds=' + tlGate.rounds + ' self=' + tlGate.selfQuestions + ' skipped=' + (tlGate.reviewSkipped || '-')
+      + ' qa=' + tlGate.qaAnswered + '/' + tlGate.qaUnanswered + ' qaDrops=' + tlGate.qaDrops);
+  }
+
   // Enforce note length cap
   // If no explicit NOTE but we have SUMMARY, generate note from it
-  if (!correctedNotes && summary) {
+  if (!correctedNotes && summary && !_noteDropped) {
     const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit' });
     correctedNotes = today + ' - ' + summary;
   }
@@ -878,7 +970,114 @@ async function _processUnit(u, notesStore, askOrcha) {
     repairStatus:     parsedRepairStatus,
     primaryComponent: parsedPrimaryComponent,
     existingNotes,
+    ...(tlGate ? { tlGate } : {}),
   };
+}
+
+// ── relay-extract timeline AI-output stage (§14.3.3, §14.5, §14.6) ─────────────
+function _tlRuleLines(O) {
+  return 'FACT RULES:\n- ' + O.RULE_LINES.all + '\n- ' + O.RULE_LINES.timeline +
+    '\n- A timeline line may end with [F<n>,...] naming the VERIFIED FACTS ids it uses.\n';
+}
+
+const _stripMdTl = (s) => (s ? s.replace(/^\*{1,2}\s*/, '').replace(/\s*\*{1,2}$/, '').trim() : s);
+function _shortIssue(s) {
+  let t = _stripMdTl(s);
+  if (t && t.length > 150) t = t.substring(0, 150).replace(/\s\S*$/, '').trim();
+  return t || null;
+}
+
+// FINAL of a review round -> { summary, note, timeline } | null (no timeline lines).
+function _parseTlFinal(final) {
+  const t = String(final || '');
+  const tm = t.match(/TIMELINE:\s*([\s\S]+?)(?=\nNOTE:|$)/i);
+  const timeline = tm ? tm[1].trim() : '';
+  if (!timeline) return null;
+  const sm = t.match(/ISSUE:\s*([^\n]+)/i);
+  const nm = t.match(/NOTE:\s*([\s\S]+)/i);
+  return { summary: sm ? _shortIssue(sm[1].trim()) : null, note: nm ? _stripMdTl(nm[1].trim()) : null, timeline };
+}
+
+function _tlReviewPrompt(u, O, sheet, sourceData, cur, removals, asked) {
+  const rem = (removals || []).slice(0, 12).map((r) => String(r.line || r.text || '').slice(0, 60) + ' \u00b7 ' + r.code);
+  return [
+    'You are Orcha, the AI brain for Fleet Operations. Review and correct the OFFICIAL repair timeline you drafted for unit ' + u.equipmentId + '.',
+    'ROLE / RULES: internal third-person coordinator voice. One line per event, "MM/DD - <professional update>"; consolidate days with no activity into one gap range "MM/DD-MM/DD - [no update logged]" only between events. No dollar amounts or costs, no personal names, phone numbers, email addresses or VINs. Never invent anything.',
+    O.RULE_LINES.all,
+    O.RULE_LINES.timeline,
+    '',
+    sheet.text,
+    '',
+    sourceData,
+    'YOUR DRAFT (after fact check):',
+    'ISSUE: ' + (cur.summary || '(removed by the fact check)'),
+    'TIMELINE:',
+    cur.lines.length ? cur.lines.join('\n') : '(no line survived the fact check)',
+    '',
+    'FACT-CHECK REMOVED (line \u00b7 code):',
+    rem.length ? rem.join('\n') : '(none)',
+    '',
+    O.buildReviewSection(asked),
+    '',
+    O.REVIEW_FORMAT,
+    'FINAL format (no markdown, no backticks):',
+    'ISSUE: [one short sentence: the mechanical failure/complaint]',
+    'TIMELINE:',
+    'MM/DD - [professional update]',
+    '...',
+  ].join('\n');
+}
+
+// Gate the draft, run the review loop, apply the timeline merge rule. Counts only in tlGate.
+async function _gateTimelineOutput(u, tl, out, askOrcha, o) {
+  const O = tl.O;
+  const ctx = tl.ctx;
+  const drops = {};
+  const field = (s, dropped, label) => {
+    if (!s) return s || null;
+    const g = O.gateText(s, ctx);
+    if (g.ok) return s;
+    if (dropped) dropped.push({ line: label + ': ' + s, code: g.code });
+    return null;
+  };
+  const dDrafts = [];
+  const summary = field(out.summary, dDrafts, 'ISSUE');
+  const note = field(out.correctedNotes, dDrafts, 'NOTE');
+  const g0 = O.gateTimeline(out.timeline || '', ctx, { today: o.today });
+  const removals0 = dDrafts.concat(g0.dropped);
+  for (const d of removals0) drops[d.code] = (drops[d.code] || 0) + 1;
+  const kept0 = g0.contentLines - g0.dropped.length;
+  const minKeep = Math.max(1, Math.floor(0.5 * g0.contentLines));
+  const draft = { lines: g0.kept, rejected: g0.ratio > 0.5 || kept0 <= 0, replaced: false, summary, note };
+  const questions = O.buildQuestions(tl.fs, { consumer: 'timeline', today: o.today, removals: removals0, row: u });
+  const rv = await O.reviewLoop({
+    ask: askOrcha, sheet: tl.sheet, ctx, draft, removals: removals0, questions,
+    rounds: o.rounds, deadline: o.t0 + TL_DEADLINE_MS, minMs: TL_REVIEW_MIN_MS, callMaxMs: TL_REVIEW_CALL_MS, budget: o.budget || null,
+    buildPrompt: (sheet, cur, removals, asked) => _tlReviewPrompt(u, O, sheet, o.sourceData, cur, removals, asked),
+    parse: _parseTlFinal,
+    gateEntries: (p, c) => {
+      const dropped = [];
+      const s = field(p.summary, dropped, 'ISSUE');
+      const n = field(p.note, dropped, 'NOTE');
+      const g = O.gateTimeline(p.timeline, c, { today: o.today });
+      return { dropped: dropped.concat(g.dropped), kept: g.kept, ratio: g.ratio, keptContent: g.contentLines - g.dropped.length, summary: s, note: n };
+    },
+    merge: (cur, gf) => {
+      const next = Object.assign({}, cur);
+      if (gf.ratio <= 0.5 && gf.keptContent >= minKeep) { next.lines = gf.kept; next.rejected = false; next.replaced = true; }
+      if (gf.summary) next.summary = gf.summary;
+      if (gf.note) next.note = gf.note;
+      return next;
+    },
+  });
+  const cur = rv.cur;
+  const timeline = !cur.rejected && cur.lines.length ? cur.lines.join('\n') : null;
+  const tlGate = {
+    state: timeline == null ? 'rejected' : (cur.replaced ? 'reviewed' : 'ok'),
+    drops, ratio: Math.round(g0.ratio * 100) / 100, rounds: rv.rounds, selfQuestions: rv.selfQuestions,
+    reviewSkipped: rv.reviewSkipped || null, qaAnswered: rv.qa.answered.length, qaUnanswered: rv.qa.unanswered.length, qaDrops: rv.qa.qaDrops,
+  };
+  return { summary: cur.summary || null, correctedNotes: cur.note || null, timeline, tlGate };
 }
 
 /**
@@ -1035,4 +1234,5 @@ function _outOfScopeNote(u) { return {
   text: `${u.id} needs re-routing (vendor says out of scope). Consider dealer/OEM.`,
   source: 'deep-scan', severity: 'medium' }; }
 
-module.exports = { runOrchaDeepScan, rebuildUnitTimeline, deepScanBatchSize, DS_BATCH_SIZE, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote };
+module.exports = { runOrchaDeepScan, rebuildUnitTimeline, deepScanBatchSize, DS_BATCH_SIZE, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote,
+  _processUnit, TL_DEADLINE_MS, TL_REVIEW_MIN_MS, TL_REVIEW_CALL_MS };

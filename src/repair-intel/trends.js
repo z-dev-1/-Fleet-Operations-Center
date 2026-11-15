@@ -96,6 +96,85 @@ function _monthly(where) {
   }));
 }
 
+// ── relay-extract §12.6: facts extracted from the WO threads / dealer notes ──────
+// Same _where filters as every other section. ETC misses are the COUNTED etc_miss_count
+// (explicit repair-completion misses only, Path B); parts ship-date misses are not counted.
+function _median(values) {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+function _p90(values) {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  return v.length ? v[Math.max(0, Math.ceil(0.9 * v.length) - 1)] : null;
+}
+function _json(s) { if (!s) return null; try { return JSON.parse(s); } catch (_) { return null; } }
+function _atMs(v) { if (v == null || v === '') return null; const t = typeof v === 'number' ? v : Date.parse(v); return Number.isFinite(t) ? t : null; }
+
+function _extracted(where, limit) {
+  const and = where.sql ? ' AND ' : ' WHERE ';
+  // Parts of the filtered events only (the event filter runs in the subquery, unprefixed).
+  const byPartNumber = _rows(
+    'SELECT p.part_number AS k, COUNT(*) AS n, COUNT(DISTINCT p.equipment_id) AS u FROM ri_repair_part p ' +
+    'WHERE p.part_number IS NOT NULL AND p.event_id IN (SELECT id FROM ri_repair_event' + where.sql + ') GROUP BY k ORDER BY n DESC, k ASC LIMIT @_lim',
+    Object.assign({ _lim: limit }, where.params)).map((r) => ({ key: r.k, count: r.n, units: r.u }));
+  const miss = (col) => _rows(
+    'SELECT ' + col + ' AS k, SUM(COALESCE(etc_miss_count, 0)) AS m, COUNT(*) AS n FROM ri_repair_event' + where.sql + and +
+    'extract_hash IS NOT NULL AND ' + col + " IS NOT NULL AND " + col + " <> '' GROUP BY k ORDER BY m DESC, n DESC, k ASC LIMIT @_lim",
+    Object.assign({ _lim: limit }, where.params)).map((r) => ({ key: r.k, misses: r.m || 0, wos: r.n, rate: r.n ? Math.round((r.m / r.n) * 100) / 100 : 0 }));
+  const rows = _rows('SELECT vendor, dealer_name, extracted_facts, offsite_dwell FROM ri_repair_event' + where.sql + and +
+    '(extracted_facts IS NOT NULL OR offsite_dwell IS NOT NULL)', where.params);
+  const cycles = [];
+  const reasons = {};
+  const dwell = {};
+  const calls = {};
+  for (const r of rows) {
+    const d = _json(r.extracted_facts);
+    const vs = (d && d.estimate && Array.isArray(d.estimate.versions)) ? d.estimate.versions : [];
+    const sub = vs.map((v) => _atMs(v && v.submittedAt)).filter((x) => x != null);
+    const app = vs.map((v) => _atMs(v && v.approvedAt)).filter((x) => x != null);
+    if (sub.length && app.length) {
+      const s = Math.min(...sub);
+      const a = Math.min(...app.filter((x) => x >= s));
+      if (Number.isFinite(a)) cycles.push(a - s);
+    }
+    for (const v of vs) {
+      if (!v || !v.reason || (v.status !== 'rejected' && v.status !== 'temp-reject')) continue;
+      const vk = r.vendor || 'unknown';
+      const t = reasons[vk] || (reasons[vk] = {});
+      t[v.reason] = (t[v.reason] || 0) + 1;
+    }
+    const dw = _json(r.offsite_dwell);
+    if (dw && r.dealer_name) {
+      const g = dwell[r.dealer_name] || (dwell[r.dealer_name] = { approval: [], repair: [], n: 0 });
+      g.n += 1;
+      if (Number.isFinite(dw.approval)) g.approval.push(dw.approval);
+      if (Number.isFinite(dw.repair)) g.repair.push(dw.repair);
+    }
+    const ca = d && d.dealer ? Number(d.dealer.callAttempts) || 0 : 0;
+    if (ca > 0 && r.dealer_name) {
+      const g = calls[r.dealer_name] || (calls[r.dealer_name] = { calls: 0, wos: 0 });
+      g.calls += ca; g.wos += 1;
+    }
+  }
+  const top = (list, by) => list.sort((a, b) => (b[by] - a[by]) || String(a.key).localeCompare(String(b.key))).slice(0, limit);
+  const cov = _one('SELECT COUNT(*) AS n, SUM(CASE WHEN extract_hash IS NOT NULL THEN 1 ELSE 0 END) AS x FROM ri_repair_event' + where.sql, where.params) || {};
+  return {
+    byPartNumber,
+    etcMissByVendor: miss('vendor'),
+    etcMissByDealer: miss('dealer_name'),
+    approvalCycle: { medianMs: _median(cycles), p90Ms: _p90(cycles), n: cycles.length },
+    rejectReasonsByVendor: top(Object.entries(reasons).map(([key, t]) => ({
+      key, total: Object.values(t).reduce((a, b) => a + b, 0),
+      reasons: Object.entries(t).map(([k, c]) => ({ key: k, count: c })).sort((a, b) => (b.count - a.count) || a.key.localeCompare(b.key)).slice(0, limit),
+    })), 'total').map(({ key, reasons: rs }) => ({ key, reasons: rs })),
+    dealerDwell: top(Object.entries(dwell).map(([key, g]) => ({ key, medianApprovalMs: _median(g.approval), medianRepairMs: _median(g.repair), n: g.n })), 'n'),
+    unansweredCallsByDealer: top(Object.entries(calls).map(([key, g]) => ({ key, calls: g.calls, wos: g.wos })), 'calls'),
+    coverage: { eventsWithFacts: cov.x || 0, events: cov.n || 0 },
+  };
+}
+
 // Build the full fleet Trends payload for a filter spec.
 function buildTrends(opts = {}) {
   if (!ensureSchema()) return { ok: false, error: 'sqlite unavailable' };
@@ -152,6 +231,7 @@ function buildTrends(opts = {}) {
   const eventsN = totals.events || 0;
   return {
     ok: true,
+    extracted: _extracted(where, opts.limit || 10),
     window: { sinceMs: where.params.since, toMs: opts.toMs || Date.now() },
     totals: {
       events: eventsN,

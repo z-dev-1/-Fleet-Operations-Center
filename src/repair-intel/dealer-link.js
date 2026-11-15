@@ -64,6 +64,21 @@ function _epoch(v) {
   return isNaN(t) ? null : t;
 }
 
+// { cause, correction } joined text from wo-extract cause/correction facts (extraction on only).
+function _extractedCc(detail, mapper) {
+  try {
+    if (!require('../config/perf-flags').loadExtract().enabled) return null;
+    const collect = mapper && typeof mapper.collectAllComments === 'function' ? mapper.collectAllComments : undefined;
+    const rf = require('./wo-extract').extractRelay(detail, { now: Date.now(), collect });
+    const pick = (kind) => {
+      const fs = (rf.facts || []).filter((f) => f && f.kind === kind && f.value);
+      const s = fs.filter((f) => f.via === 'structured');
+      return (s.length ? s : fs).map((f) => _str(f.value)).filter((v, i, a) => v && a.indexOf(v) === i).join('; ');
+    };
+    return { cause: pick('cause'), correction: pick('correction') };
+  } catch (_) { return null; }
+}
+
 // Capped 3C evidence from a getService detail. Only text fields are copied —
 // never author/createdBy/name fields.
 function evidenceFromDetail(detail, mapper) {
@@ -74,8 +89,12 @@ function evidenceFromDetail(detail, mapper) {
   let budget = EV_MAX_TOTAL;
   const take = (s) => { const out = s.slice(0, Math.max(0, budget)); budget -= out.length; return out; };
   const complaint = take(_str(wr.damageDescription || wr.title).slice(0, EV_MAX_COMMENT_CHARS * 2));
-  const cause = take(join('cause').slice(0, EV_MAX_COMMENT_CHARS * 2));
-  const correction = take(join('correction').slice(0, EV_MAX_COMMENT_CHARS * 2));
+  // relay-extract §13.4: the structured keys are often absent; fall back to the extractor's
+  // vendor-stated cause / correction lines (structured first, then the comment templates).
+  let xc = null;
+  if (!join('cause') || !join('correction')) xc = _extractedCc(detail, mapper);
+  const cause = take((join('cause') || (xc ? xc.cause : '')).slice(0, EV_MAX_COMMENT_CHARS * 2));
+  const correction = take((join('correction') || (xc ? xc.correction : '')).slice(0, EV_MAX_COMMENT_CHARS * 2));
 
   let all = [];
   try { all = (mapper && typeof mapper.collectAllComments === 'function') ? (mapper.collectAllComments(detail) || []) : []; } catch (_) { all = []; }

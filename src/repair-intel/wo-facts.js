@@ -1083,6 +1083,14 @@ function typedIndex(fs, opts = {}) {
 }
 
 // ── Repair-intel digest (§13.2) ─────────────────────────────────────────────
+function _firstAt(history, status) {
+  let best = null;
+  for (const h of Array.isArray(history) ? history : []) {
+    if (!h || h.status !== status || _ms(h.at) == null) continue;
+    if (best == null || _ms(h.at) < _ms(best)) best = h.at;
+  }
+  return best;
+}
 function digestForRi(fs) {
   const etc = fs.etc;
   const d = {
@@ -1090,7 +1098,9 @@ function digestForRi(fs) {
     parts: fs.parts.map((p) => ({ partNo: p.partNo, qty: p.qty, orderNo: p.orderNo, vor: p.vor, status: p.status, lastStatusAt: p.lastStatusAt })),
     orders: fs.orders.slice(), ros: fs.ros.slice(),
     caseIds: { salesforce: fs.caseIds.salesforce, decisivCase: fs.caseIds.decisivCase, oemCase: fs.caseIds.oemCase, fleetnet: fs.caseIds.fleetnet, tow: fs.caseIds.tow },
-    estimate: { versions: fs.estimate.versions.map((v) => ({ v: v.v, amount: v.amount, status: v.status, reason: v.reason, at: v.at })),
+    // submittedAt / approvedAt (first of each in the version history) feed Trends approvalCycle (§12.6).
+    estimate: { versions: fs.estimate.versions.map((v) => ({ v: v.v, amount: v.amount, status: v.status, reason: v.reason, at: v.at,
+      submittedAt: _firstAt(v.history, 'submitted'), approvedAt: _firstAt(v.history, 'approved') })),
       approvedTotal: fs.estimate.approvedTotal, latestSubmitted: fs.estimate.latestSubmitted },
     etc: { currentEtc: etc.currentEtc, currentEtcKind: etc.currentEtcKind, missCount: etc.etcMissCount, detailsMissCount: etc.missCount,
       partsMissCount: etc.partsMissCount, counted: etc.counted, etcReason: etc.counted.reason || etc.etcReason, etcSource: etc.etcSource,
