@@ -470,5 +470,6 @@ module.exports = {
   isApprovalToken,
   APPROVAL_WAIT_MS,
   PENDING_TTL_MS,
+  COMMENT_MAX,
   _setDepsForTest,
 };

@@ -195,6 +195,7 @@ expose('relayWrites', {
   respond:   (id, approved) => ipcRenderer.invoke('relayWrites:respond', id, approved === true),
   onRequest: (cb)           => on('relayWrites:approval-request', cb),
   onUpdated: (cb)           => on('relayWrites:updated', cb),
+  addComment: (workRequestId, text, unit) => ipcRenderer.invoke('relay:add-comment', { workRequestId, text, unit }),
 });
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
