@@ -138,6 +138,28 @@ describe('the anti-fabrication gate', () => {
     expect(r.droppedCount).toBe(2);
   });
 
+  it('drops a planted dealer name absent from the evidence (unknown-name), keeps the grounded dealer', async () => {
+    answer = () => 'Unit moved to Rush Truck Centers for the turbo. FAS called Cox on 11/13 for an ETA.';
+    const r = await callDraft({ workRequestId: WR, unit: UNIT });
+    expect(r.ok).toBe(true);
+    expect(r.draft).toBe('FAS called Cox on 11/13 for an ETA.');
+    expect(r.draft).not.toContain('Rush');
+    expect(r.droppedCount).toBe(1);
+    expect(r.dropped[0]).toMatchObject({ code: 'unknown-name' });
+    expect(r.dropped[0].text).toContain('Rush Truck Centers');
+    expectNothingSent();
+  });
+
+  it('drops planted $ amount, RO# and case# tokens not in the evidence', async () => {
+    answer = () => 'Estimate approved at $4,800. Dealer opened RO #778899. Salesforce case #00123456 was filed. FAS called Cox on 11/13 for an ETA.';
+    const r = await callDraft({ workRequestId: WR, unit: UNIT });
+    expect(r.draft).toBe('FAS called Cox on 11/13 for an ETA.');
+    expect(r.droppedCount).toBe(3);
+    for (const d of r.dropped) expect(d.code).toBeTruthy();
+    expect(r.draft).not.toMatch(/4,800|778899|00123456/);
+    expectNothingSent();
+  });
+
   it('NO NEW UPDATE -> noUpdate, empty draft', async () => {
     answer = () => 'NO NEW UPDATE';
     expect(await callDraft({ workRequestId: WR, unit: UNIT })).toMatchObject({ ok: true, noUpdate: true, draft: '', droppedCount: 0 });

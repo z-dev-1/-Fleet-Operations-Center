@@ -199,6 +199,8 @@ function cleanOutput(raw) {
 }
 
 // Each sentence through fleet-dbr-gate.gateProse; failures are dropped with their code.
+// gateProse reports capitalized names missing from the evidence (dealer, shop, person) only
+// as soft `names` flags; this consumer drops those sentences too (code 'unknown-name').
 function gateDraft(text, ctx) {
   const G = require('../dbr/fleet-dbr-gate');
   const sents = _s(text).split('\n').flatMap((l) => l.split(SENT_SPLIT)).map((x) => x.trim()).filter(Boolean);
@@ -207,7 +209,8 @@ function gateDraft(text, ctx) {
   for (const s of sents) {
     let g;
     try { g = G.gateProse(s, undefined, ['U'], ctx, { field: 'details' }); } catch (_) { g = { ok: false, code: 'gate-error' }; }
-    if (g && g.ok) kept.push(s);
+    if (g && g.ok && Array.isArray(g.names) && g.names.length) dropped.push({ text: s, code: 'unknown-name' });
+    else if (g && g.ok) kept.push(s);
     else dropped.push({ text: s, code: (g && g.code) || 'gate-error' });
   }
   return { kept: G._cutWord(kept.join(' '), COMMENT_MAX), dropped };
@@ -255,6 +258,10 @@ async function draftForUnit({ workRequestId, unit, lastData } = {}) {
   const wr = _s(workRequestId).toLowerCase();
   const row = resolveRow({ unit, lastData });
   const id = _s(row.equipmentId).trim();
+  // Consistency check only: resolveRow lays the renderer's workRequestId/serviceUrl over the
+  // stored row, so this confirms the payload WR matches the unit the renderer sent. It is not
+  // an authority check against main's stored row; nothing is written on this path, and the
+  // Send path (relay:add-comment) still goes through the write gate and approval.
   const m = WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl));
   if (!wr || !m || m[0].toLowerCase() !== wr) {
     _log('warn', 'draft refused', { unit: id, code: 'wr-mismatch' });
