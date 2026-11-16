@@ -372,6 +372,102 @@ export function buildEscalationPayload(unit, { add, remove, comment } = {}) {
   };
 }
 
+// ── Internal Relay comment (Repair tab, under the Repair Timeline) ─────────
+// Sends through window.relayWrites.addComment -> relay:add-comment ->
+// aap_create_wr.addConversationNote, so the write-approval gate (and its modal)
+// decides whether anything reaches Relay. AAP/Relay only; no offsite control.
+export const RELAY_COMMENT_MAX = 2000; // mirrors write-gate COMMENT_MAX
+const _rcInFlight = new Set();         // WR ids with a send awaiting its result
+let _rcCurrent = null;                 // { wrId, refresh } of the card on screen
+
+// The unit's open primary Relay WR, or null (no WR id, closed WR, offsite-only).
+export function relayCommentTarget(unit) {
+  const p = openWrChoices(unit).find((c) => c.kind === 'primary');
+  return p ? { workRequestId: p.id } : null;
+}
+
+export function validateRelayComment(text) {
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return { ok: false, error: 'Write a comment first.' };
+  if (t.length > RELAY_COMMENT_MAX) return { ok: false, error: 'Comment must be ' + RELAY_COMMENT_MAX + ' characters or fewer.' };
+  return { ok: true, error: null };
+}
+
+export function relayCommentOutcome(r, wrId) {
+  const o = (r && r.outcome) || '';
+  if (o === 'sent') {
+    return { level: 'success', clear: true,
+      text: 'Internal comment posted to Relay WR ' + String(wrId || '').slice(0, 8) + '. It appears in the Relay conversation after the next refresh.' };
+  }
+  if (o === 'pending-approval') return { level: 'info', clear: true, text: 'Queued in Relay writes. Approve it there to send.' };
+  if (o === 'skipped-not-approved') return { level: 'info', clear: false, text: 'Not sent.' };
+  return { level: 'error', clear: false, text: 'Relay comment failed: ' + ((r && r.error) || 'unknown') };
+}
+
+export function relayCommentComposeHtml(unit) {
+  const t = relayCommentTarget(unit);
+  if (!t) return '';
+  const wr = t.workRequestId;
+  return '<div class="dp-escalate-wrap" id="dp-relay-comment-wrap" data-wr="' + escAttr(wr) + '">' +
+    '<div class="dp-section-title">Add comment to Relay</div>' +
+    '<div class="dp-escalate">' +
+      '<div class="dp-escalate__none">Posts an INTERNAL comment (internal only, not shared with the vendor) on Relay WR ' + escAttr(wr.slice(0, 8)) + '. You approve the exact text before anything is sent.</div>' +
+      '<textarea id="dp-relay-comment-text" class="dp-escalate__comment" maxlength="' + RELAY_COMMENT_MAX + '" rows="3" aria-label="Internal Relay comment" placeholder="Internal comment for the Relay WR"></textarea>' +
+      '<div class="dp-escalate__row">' +
+        '<span class="dp-escalate__count" id="dp-relay-comment-count">0/' + RELAY_COMMENT_MAX + '</span>' +
+        '<button type="button" id="dp-relay-comment-send" class="dp-escalate__btn" disabled>Send to Relay</button>' +
+      '</div>' +
+      '<div class="dp-escalate__none" id="dp-relay-comment-status" role="status" aria-live="polite"></div>' +
+    '</div>' +
+  '</div>';
+}
+
+export function wireRelayComment(root, unit) {
+  const t = relayCommentTarget(unit);
+  if (!root || !t) return;
+  const txt = root.querySelector('#dp-relay-comment-text');
+  const btn = root.querySelector('#dp-relay-comment-send');
+  const cnt = root.querySelector('#dp-relay-comment-count');
+  const st = root.querySelector('#dp-relay-comment-status');
+  if (!txt || !btn) return;
+  const wrId = t.workRequestId;
+  const refresh = () => {
+    const n = String(txt.value || '').length;
+    if (cnt) {
+      cnt.textContent = n + '/' + RELAY_COMMENT_MAX;
+      cnt.classList.toggle('dp-escalate__count--over', n > RELAY_COMMENT_MAX);
+    }
+    btn.disabled = _rcInFlight.has(wrId) || !validateRelayComment(txt.value).ok;
+  };
+  _rcCurrent = { wrId, refresh };
+  if (_rcInFlight.has(wrId) && st) st.textContent = 'Waiting for your approval…';
+  txt.addEventListener('input', refresh);
+  btn.addEventListener('click', async () => {
+    if (_rcInFlight.has(wrId) || !validateRelayComment(txt.value).ok) return;
+    _rcInFlight.add(wrId);
+    refresh();
+    if (st) st.textContent = 'Waiting for your approval…';
+    let r;
+    try {
+      const bridge = (typeof window !== 'undefined' && window && window.relayWrites) || null;
+      r = (bridge && typeof bridge.addComment === 'function')
+        ? await bridge.addComment(wrId, String(txt.value).trim(), String((unit && unit.equipmentId) || ''))
+        : { ok: false, error: 'Relay writes bridge unavailable' };
+    } catch (e) {
+      r = { ok: false, outcome: 'send-failed', error: (e && e.message) || String(e) };
+    }
+    _rcInFlight.delete(wrId);
+    const o = relayCommentOutcome(r, wrId);
+    toast.show(o.level, o.text, 4000);
+    if (st) st.textContent = o.text;
+    if (o.clear) txt.value = '';
+    refresh();
+    // The pane may have re-rendered during the send; re-enable the card on screen.
+    if (_rcCurrent && _rcCurrent.wrId === wrId && _rcCurrent.refresh !== refresh) _rcCurrent.refresh();
+  });
+  refresh();
+}
+
 // ── History tab "📋 Open" helpers (pure) ────────────────────────────────────
 // Attribute-safe escaper (esc() below does not escape quotes).
 function escAttr(s) {
@@ -2523,11 +2619,13 @@ function renderRepairPane(unit){
   // Escalation card mount (filled by _wireEscalation; stays hidden unless AAP
   // reports the feature enabled and returns teams for this unit's fleet).
   var escalateHtml=(unit.workRequestId&&escalationAaid(unit))?'<div class="dp-escalate-wrap" id="dp-escalate-wrap" hidden></div>':'';
+  // Internal Relay comment compose (only for an open Relay WR; wired by _wireRelayComment).
+  var relayCommentHtml=relayCommentComposeHtml(unit);
 
   return '<div class="dp-pane active" id="dp-pane-repair">'+
     // Dealer case stage sits at the top so it's visible without scrolling.
     (stageHtml?'<div class="dp-section-title">Dealer Case Stage</div>'+stageHtml:'')+
-    '<div class="dp-section-title">Work Request</div>'+woCard+escalateHtml+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+escalateHtml+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+relayCommentHtml+offsiteHtml+
   '</div>';
 }
 
@@ -2985,6 +3083,7 @@ function _renderUnit(unit) {
 
   // ── repair tab: WR escalation card ─────────────────────────────────────────
   _wireEscalation(unit);
+  _wireRelayComment(unit);
 
   // ── history tab: 12-month repair intelligence report + controls ───────────
   _wireRepairIntel(unit);
@@ -3584,6 +3683,11 @@ function _escContext(wrId,aaid){
   },function(e){drop();throw e;});
   _escCtxCache.set(wrId,entry);
   return entry.p;
+}
+
+function _wireRelayComment(unit){
+  var w=document.getElementById('dp-relay-comment-wrap');
+  if(w)wireRelayComment(w,unit);
 }
 
 function _wireEscalation(unit){
