@@ -12,6 +12,7 @@
 
 import bus                        from '../bus.js';
 import { fleet as fleetBridge, settings as settingsBridge } from '../bridge.js';
+import { mount as mountFleetTrust } from './fleet-trust-indicator.js';
 
 let _suppressFilterEvents = false;
 
@@ -120,6 +121,7 @@ export function init(container) {
       
       <!-- Right side -->
       <div class="tb-right">
+        <button type="button" class="tb-fresh tb-fresh--grey" id="tb-fresh" title="Fleet data freshness — click to refresh">Fleet data …</button><span class="tb-auth tb-auth--grey" id="tb-auth" role="status">Auth …</span>
         <span class="tb-ai-status" id="tb-ai-status" title="AI settings — click to configure" style="cursor:pointer">
           <span class="tb-kpi-dot tb-kpi-dot--unknown" id="kpi-ai-dot"></span>
           <span id="kpi-ai-label">AI …</span>
@@ -147,6 +149,7 @@ export function init(container) {
         <div class="tb-window-controls"><button class="tb-win-btn" id="tb-win-minimize" title="Minimize">&#x2500;</button><button class="tb-win-btn" id="tb-win-maximize" title="Maximize">&#x25A1;</button><button class="tb-win-btn tb-win-close" id="tb-win-close" title="Close">&#x2715;</button></div>
       </div>
     </nav>
+    <div id="tb-auth-banner" class="tb-auth-banner" role="alert" hidden></div>
 
     <!-- ══ FILTER BAR (Dashboard only) ══ -->
     <div id="tb-filterbar">
@@ -801,6 +804,8 @@ export function init(container) {
     }, 50);
   });
 
+  // ── Fleet trust indicators (freshness chip, auth badge, step-up banner) ──
+  try { mountFleetTrust({ fresh: el.querySelector('#tb-fresh'), auth: el.querySelector('#tb-auth'), banner: el.querySelector('#tb-auth-banner') }); } catch (_) {}
 }
 
 // ── Baseball Card modal ────────────────────────────────────────────────────────
