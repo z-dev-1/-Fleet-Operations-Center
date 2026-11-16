@@ -10,9 +10,10 @@
  *   POST /api/v1/serviceaggregates/search        bulk search (paginated list)
  *   GET  /api/v1/serviceaggregates/{serviceId}   full service + comments + estimates
  *   GET  /api/v1/assets/{aaid}                    full asset (VIN, model, odometer, GPS)
- *   GET  /api/v1/servicemoves/asset/{aaid}        move history
- *   GET  /api/v1/maintenanceschedules/asset/{aaid} PM schedules
- *   GET  /api/v1/dvirs/asset/{aaid}               DVIR records
+ *   GET  /api/v1/servicemoves/{serviceAggregateId}   moves for one service (keyed by service id)
+ *   GET  /api/v1/assets/{aaid}/maintenance           PM status per type (last/next due)
+ *   GET  /api/v1/assets/{aaid}/serviceEvents         PM event history
+ *   GET  /api/v2/dvir/{aaid}?startDate&endDate&openIssuesOnly  DVIR components/items
  *   GET  /api/v1/avmCodes/                         all L1/L2/L3 codes + reasons
  *   GET  /api/v1/user/details                      current user info
  *
@@ -486,19 +487,22 @@ function getAsset(aaid) {
   return apiGet('/api/v1/assets/' + encodeURIComponent(aaid));
 }
 
-// Endpoint 4: service move history.
-function getServiceMoves(aaid) {
-  return apiGet('/api/v1/servicemoves/asset/' + encodeURIComponent(aaid));
+// Endpoint 4: service move history, keyed by service id (serviceAggregateId), verified live.
+function getServiceMoves(serviceId) {
+  return apiGet('/api/v1/servicemoves/' + encodeURIComponent(serviceId));
 }
 
-// Endpoint 5: PM schedules.
+// Endpoint 5: PM status per type (last/next due). The PM event history lives
+// at /api/v1/assets/{aaid}/serviceEvents.
 function getMaintenanceSchedules(aaid) {
-  return apiGet('/api/v1/maintenanceschedules/asset/' + encodeURIComponent(aaid));
+  return apiGet('/api/v1/assets/' + encodeURIComponent(aaid) + '/maintenance');
 }
 
-// Endpoint 6: DVIR records.
-function getDvirs(aaid) {
-  return apiGet('/api/v1/dvirs/asset/' + encodeURIComponent(aaid));
+// Endpoint 6: DVIR components/items (v2), optional date window.
+function getDvirs(aaid, { startDate, endDate } = {}) {
+  return apiGet('/api/v2/dvir/' + encodeURIComponent(aaid) + '?openIssuesOnly=false'
+    + (startDate ? '&startDate=' + encodeURIComponent(startDate) : '')
+    + (endDate ? '&endDate=' + encodeURIComponent(endDate) : ''));
 }
 
 // Endpoint 7: all AVM codes (L1/L2/L3 + reasons). Reference data — cache-worthy.

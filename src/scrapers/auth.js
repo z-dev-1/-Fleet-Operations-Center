@@ -314,7 +314,7 @@ async function injectCookies(targetSession, opts) {
 // ACME agent reliably mints to disk at:
 //   C:\ProgramData\Amazon\ACME\PostureToken\posture_token.jwt
 // (confirmed: valid RS256 JWT, device_id + com.amazon.acme.compliance claims,
-// ~4h TTL, refreshed every ~10min by PostureTokenCacheJob). So we read that
+// ~15 min TTL (exp - iat = 15 min, measured 2026-11-15), refreshed every ~10min by PostureTokenCacheJob). So we read that
 // token straight from disk and SET it as the amazon_enterprise_access cookie
 // directly into the app's Electron session — bypassing the broken extension
 // entirely. This is what finally "attaches the AEA cookie to the app" without
