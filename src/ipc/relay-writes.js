@@ -7,9 +7,12 @@
  *   relayWrites:approve (id)      -> send the stored payload once
  *   relayWrites:reject  (id)      -> never sent
  *   relayWrites:respond (id, ok)  -> answer a live 'relayWrites:approval-request' prompt
- *   relay:add-comment ({ workRequestId | serviceUrl, text, unit })
+ *   relay:add-comment ({ workRequestId | serviceUrl, text, unit, aiDrafted })
  *                                 -> internal Relay WR comment via
  *                                    aap_create_wr.addConversationNote (gated, interactive)
+ *   relay:draft-comment ({ workRequestId | serviceUrl, unit })
+ *                                 -> { ok, aiDrafted, draft, noUpdate, dropped, droppedCount }
+ *                                    AI gap draft (writes/relay-comment-draft); never sends
  *
  * Main -> renderer: 'relayWrites:approval-request' { id, kind, preview, aiDrafted },
  * 'relayWrites:updated' { items }.
@@ -51,7 +54,18 @@ function registerRelayWritesIPC(ctx) {
       origin: 'unit-detail',
       unit: String(payload.unit || '').slice(0, 40),
       interactive: true,
-      aiDrafted: false,
+      aiDrafted: payload.aiDrafted === true,
+    });
+  });
+  // AI draft for the compose box. Returns text only; nothing is sent from here
+  // (the user edits it and Send goes through relay:add-comment above).
+  handle('relay:draft-comment', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    const m = WR_UUID_RE.exec(String(payload.workRequestId || '')) || WR_UUID_RE.exec(String(payload.serviceUrl || ''));
+    if (!m) throw new ConfigError('workRequestId must be a Relay WR id', 'workRequestId');
+    requireObject(payload.unit, 'unit');
+    return require('../writes/relay-comment-draft').draftForUnit({
+      workRequestId: m[0], unit: payload.unit, lastData: ctx && ctx.lastData,
     });
   });
 

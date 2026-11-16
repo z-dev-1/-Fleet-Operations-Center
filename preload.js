@@ -195,7 +195,8 @@ expose('relayWrites', {
   respond:   (id, approved) => ipcRenderer.invoke('relayWrites:respond', id, approved === true),
   onRequest: (cb)           => on('relayWrites:approval-request', cb),
   onUpdated: (cb)           => on('relayWrites:updated', cb),
-  addComment: (workRequestId, text, unit) => ipcRenderer.invoke('relay:add-comment', { workRequestId, text, unit }),
+  addComment: (workRequestId, text, unit, opts) => ipcRenderer.invoke('relay:add-comment', { workRequestId, text, unit, aiDrafted: !!(opts && opts.aiDrafted) }),
+  draftComment: (workRequestId, unit) => ipcRenderer.invoke('relay:draft-comment', { workRequestId, unit }),
 });
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
