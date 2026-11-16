@@ -404,6 +404,44 @@ export function relayCommentOutcome(r, wrId) {
   return { level: 'error', clear: false, text: 'Relay comment failed: ' + ((r && r.error) || 'unknown') };
 }
 
+// AI draft (window.relayWrites.draftComment -> relay:draft-comment). It only fills the
+// textarea; Send (above) is still the only way out, through the approval gate.
+const RELAY_DRAFT_LABEL = 'Draft with AI';
+const RELAY_DRAFT_BUSY_HTML = '<span class="dp-ai-spinner" aria-hidden="true">\u25CC</span> Drafting\u2026';
+const RELAY_DRAFT_FIELDS = ['equipmentId', 'workRequestId', 'serviceUrl', 'vendor', 'subVendor', 'savedRepairStatus',
+  'serviceState', 'subState', 'lifecycleReason', 'issueSummary', 'issueDetails', 'repairTimeline', 'savedNotes',
+  'fullConversation', 'asistNotes', 'created', 'delayReasonCodes', 'offsiteStage', 'offsiteStageDetail', 'escalations',
+  'estimatePendingCost', 'dealerName', 'vendorWorkOrderId', 'salesforceCase', 'insights'];
+const _rdInFlight = new Set();         // WR ids with an AI draft awaiting its result
+
+// The plain string fields sent over IPC (main re-validates and caps them).
+export function relayDraftUnit(unit) {
+  const u = unit || {};
+  const out = {};
+  for (const k of RELAY_DRAFT_FIELDS) if (typeof u[k] === 'string') out[k] = u[k];
+  return out;
+}
+
+export function relayDraftStatus(r) {
+  if (!r || !r.ok) {
+    const code = (r && r.code) || '';
+    if (code === 'busy') return { level: 'info', insert: false, text: 'An AI draft for this WR is already running.' };
+    if (code === 'ai-timeout') return { level: 'error', insert: false, text: 'AI draft timed out. Try again.' };
+    if (code === 'ai-empty') return { level: 'error', insert: false, text: 'AI returned no draft. Try again.' };
+    if (code === 'wr-mismatch') return { level: 'error', insert: false, text: 'AI draft unavailable: the WR does not match this unit.' };
+    if (code === 'no-bridge') return { level: 'error', insert: false, text: 'AI draft failed: Relay writes bridge unavailable.' };
+    return { level: 'error', insert: false, text: 'AI draft failed' + ((r && r.error) ? ': ' + r.error : '.') };
+  }
+  const n = Number(r.droppedCount) || 0;
+  if (r.noUpdate) return { level: 'info', insert: false, text: 'AI found nothing new to add beyond the Relay conversation.' };
+  if (!String(r.draft || '').trim()) {
+    return { level: 'info', insert: false, text: 'AI draft not inserted: the evidence did not support its ' + n + ' line(s).' };
+  }
+  return { level: 'success', insert: true,
+    text: 'AI draft inserted. Review and edit it, then Send to Relay (you approve before it is sent).' +
+      (n ? ' Removed ' + n + ' line(s) the evidence did not support.' : '') };
+}
+
 export function relayCommentComposeHtml(unit) {
   const t = relayCommentTarget(unit);
   if (!t) return '';
@@ -415,6 +453,7 @@ export function relayCommentComposeHtml(unit) {
       '<textarea id="dp-relay-comment-text" class="dp-escalate__comment" maxlength="' + RELAY_COMMENT_MAX + '" rows="3" aria-label="Internal Relay comment" placeholder="Internal comment for the Relay WR"></textarea>' +
       '<div class="dp-escalate__row">' +
         '<span class="dp-escalate__count" id="dp-relay-comment-count">0/' + RELAY_COMMENT_MAX + '</span>' +
+        '<button type="button" id="dp-relay-comment-draft" class="dp-escalate__btn" title="AI drafts only the fleet-side updates not already in the Relay conversation. You edit it, then Send asks for approval.">' + RELAY_DRAFT_LABEL + '</button>' +
         '<button type="button" id="dp-relay-comment-send" class="dp-escalate__btn" disabled>Send to Relay</button>' +
       '</div>' +
       '<div class="dp-escalate__none" id="dp-relay-comment-status" role="status" aria-live="polite"></div>' +
@@ -430,28 +469,79 @@ export function wireRelayComment(root, unit) {
   const cnt = root.querySelector('#dp-relay-comment-count');
   const st = root.querySelector('#dp-relay-comment-status');
   if (!txt || !btn) return;
+  const dbtn = root.querySelector('#dp-relay-comment-draft');
   const wrId = t.workRequestId;
+  let aiOrigin = false;                // textarea text came from an AI draft
+  let lastDraft = '';
   const refresh = () => {
     const n = String(txt.value || '').length;
     if (cnt) {
       cnt.textContent = n + '/' + RELAY_COMMENT_MAX;
       cnt.classList.toggle('dp-escalate__count--over', n > RELAY_COMMENT_MAX);
     }
-    btn.disabled = _rcInFlight.has(wrId) || !validateRelayComment(txt.value).ok;
+    btn.disabled = _rcInFlight.has(wrId) || _rdInFlight.has(wrId) || !validateRelayComment(txt.value).ok;
+    if (dbtn) dbtn.disabled = _rcInFlight.has(wrId) || _rdInFlight.has(wrId);
   };
   _rcCurrent = { wrId, refresh };
   if (_rcInFlight.has(wrId) && st) st.textContent = 'Waiting for your approval…';
+  txt.addEventListener('input', () => { if (!String(txt.value || '').trim()) { aiOrigin = false; lastDraft = ''; } });
   txt.addEventListener('input', refresh);
+  if (dbtn) {
+    dbtn.addEventListener('click', async () => {
+      if (_rdInFlight.has(wrId) || _rcInFlight.has(wrId)) return;
+      const cur = String(txt.value || '').trim();
+      if (cur && cur !== lastDraft.trim()) {
+        const ask = typeof window !== 'undefined' && window && typeof window.confirm === 'function' ? window.confirm : null;
+        if (!ask || !ask('Replace your text with the AI draft?')) return;
+      }
+      _rdInFlight.add(wrId);
+      dbtn.innerHTML = RELAY_DRAFT_BUSY_HTML;
+      if (dbtn.setAttribute) dbtn.setAttribute('aria-busy', 'true');
+      txt.readOnly = true;
+      refresh();
+      if (st) st.textContent = 'Drafting with AI…';
+      let r;
+      try {
+        const bridge = (typeof window !== 'undefined' && window && window.relayWrites) || null;
+        r = (bridge && typeof bridge.draftComment === 'function')
+          ? await bridge.draftComment(wrId, relayDraftUnit(unit))
+          : { ok: false, code: 'no-bridge' };
+      } catch (e) {
+        r = { ok: false, code: 'ai-failed', error: (e && e.message) || String(e) };
+      }
+      _rdInFlight.delete(wrId);
+      dbtn.innerHTML = RELAY_DRAFT_LABEL;
+      if (dbtn.removeAttribute) dbtn.removeAttribute('aria-busy');
+      txt.readOnly = false;
+      const o = relayDraftStatus(r);
+      if (o.insert && txt.isConnected === false) {
+        toast.show('info', 'AI draft finished after the panel refreshed; click Draft with AI again.', 4000);
+      } else {
+        if (o.insert) {
+          txt.value = String(r.draft).slice(0, RELAY_COMMENT_MAX);
+          aiOrigin = true;
+          lastDraft = txt.value;
+        }
+        toast.show(o.level, o.text, 4000);
+        if (st) st.textContent = o.text;
+      }
+      refresh();
+      if (o.insert && txt.isConnected !== false && typeof txt.focus === 'function') txt.focus();
+      if (_rcCurrent && _rcCurrent.wrId === wrId && _rcCurrent.refresh !== refresh) _rcCurrent.refresh();
+    });
+  }
   btn.addEventListener('click', async () => {
-    if (_rcInFlight.has(wrId) || !validateRelayComment(txt.value).ok) return;
+    if (_rcInFlight.has(wrId) || _rdInFlight.has(wrId) || !validateRelayComment(txt.value).ok) return;
     _rcInFlight.add(wrId);
     refresh();
     if (st) st.textContent = 'Waiting for your approval…';
     let r;
     try {
       const bridge = (typeof window !== 'undefined' && window && window.relayWrites) || null;
+      const args = [wrId, String(txt.value).trim(), String((unit && unit.equipmentId) || '')];
+      if (aiOrigin) args.push({ aiDrafted: true });
       r = (bridge && typeof bridge.addComment === 'function')
-        ? await bridge.addComment(wrId, String(txt.value).trim(), String((unit && unit.equipmentId) || ''))
+        ? await bridge.addComment(...args)
         : { ok: false, error: 'Relay writes bridge unavailable' };
     } catch (e) {
       r = { ok: false, outcome: 'send-failed', error: (e && e.message) || String(e) };
@@ -460,7 +550,7 @@ export function wireRelayComment(root, unit) {
     const o = relayCommentOutcome(r, wrId);
     toast.show(o.level, o.text, 4000);
     if (st) st.textContent = o.text;
-    if (o.clear) txt.value = '';
+    if (o.clear) { txt.value = ''; aiOrigin = false; lastDraft = ''; }
     refresh();
     // The pane may have re-rendered during the send; re-enable the card on screen.
     if (_rcCurrent && _rcCurrent.wrId === wrId && _rcCurrent.refresh !== refresh) _rcCurrent.refresh();
