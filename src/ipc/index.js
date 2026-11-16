@@ -46,6 +46,7 @@ const { registerAssistantIPC }     = require('./assistant');
 const { registerTelemetryIPC }     = require('./telemetry');
 const { registerWorkersIPC }       = require('./workers');
 const { registerHealthIPC }        = require('./health');
+const { registerFleetFreshnessIPC } = require('./fleet-freshness');
 const logger = require('../utils/logger')('ipc');
 
 function registerAllIPC(ctx) {
@@ -88,6 +89,7 @@ function registerAllIPC(ctx) {
   registerTelemetryIPC(ctx);
   registerWorkersIPC(ctx);
   registerHealthIPC(ctx);
+  registerFleetFreshnessIPC(ctx);
   // Meetings tab (zoom.enabled, default OFF): inert DISABLED handlers when off.
   try { require('./zoom-meet').registerZoomMeetIPC(ctx); } catch (e) { logger.warn('Zoom Meetings IPC registration failed: ' + e.message); }
   // AAP Root Cause Analysis form via the Relay template API (History-tab RCA button).

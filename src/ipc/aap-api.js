@@ -329,6 +329,7 @@ function registerAapApiIPC(ctx) {
       // Persist + push through the SAME path the scrape uses.
       store.save('fleetData', outPayload);
       if (ctx) { ctx.lastData = outPayload; if (ctx.pushData) ctx.pushData(outPayload); }
+      try { require('../health/fleet-freshness').recordBuildOk({ count: rows.length }); } catch (_) {}
       logger.info('[load-via-api] pushed ' + rows.length + ' units ('
         + ds.unavailableCount + ' unavailable) to the renderer');
       return { ok: true, count: rows.length, unavailableCount: ds.unavailableCount };
@@ -392,6 +393,7 @@ function registerAapApiIPC(ctx) {
           const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, syncedAt: now, scrapedAt: now, stale: false, source: 'aap-api' };
           store.save('fleetData', out);
           if (ctx) { ctx.lastData = out; if (ctx.pushData) ctx.pushData(out); }
+          try { require('../health/fleet-freshness').recordBuildOk({ count: rows.length }); } catch (_) {}
         } catch (e) {
           logger.warn('[data-source] API load failed, falling back to scrape: ' + e.message);
           if (ctx && ctx.triggerRescan) ctx.triggerRescan(true);

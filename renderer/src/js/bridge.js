@@ -107,6 +107,9 @@ export function init() {
     bus.emit('fleet:status', msg);
   });
 
+  // Fleet data freshness push: { snapshot, evaluation } (main fleet-freshness record)
+  if (window.fleet.onFreshness) window.fleet.onFreshness((p) => bus.emit('fleet:freshness', p));
+
   window.fleet.onError((err) => {
     state.update('sync', { lastError: err });
     bus.emit('fleet:error', err);
@@ -356,6 +359,7 @@ export const fleet = {
   requestSync: ()  => window.fleet.requestSync(),
   forceSync:   ()  => window.fleet.forceSync(),
   getVersion:  ()  => window.fleet.getVersion(),
+  getFreshness: () => (window.fleet && window.fleet.getFreshness ? window.fleet.getFreshness() : Promise.resolve(null)),
 };
 
 // ── Settings ───────────────────────────────────────────────────────────────

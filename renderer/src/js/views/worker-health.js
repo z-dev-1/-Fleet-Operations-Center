@@ -13,7 +13,7 @@
  */
 import {
   esc, truncate, relTime, dur, workerStatus, authStatus, laneStatus, aiOverall, akiLaneStatus,
-  unavailableStatus, canReEnable, createVisiblePoller, jobsStatus,
+  unavailableStatus, canReEnable, createVisiblePoller, jobsStatus, fleetDataStatus, fleetReasonText,
 } from './worker-health-logic.js';
 import bus from '../bus.js';
 
@@ -102,6 +102,22 @@ function _workersHtml(sec, now) {
 }
 
 // ── Cards ────────────────────────────────────────────────────────────────────
+// Fleet data freshness (health/fleet-freshness via the snapshot's fleet section).
+function _fleetCard(f) {
+  const now = Date.now();
+  const a = f.aap || null;
+  const reasons = Array.isArray(f.reasons) ? f.reasons : [];
+  return _kv([
+    ['Status', _pill(fleetDataStatus(f))],
+    ['Last good', f.lastOkAt == null ? '—' : esc(relTime(f.lastOkAt, now))],
+    ['Interval', esc(dur(f.intervalMs))],
+    ['In flight', f.buildInFlight ? 'yes · ' + esc(dur(f.inFlightMs)) : 'no'],
+    ['Superseded', _v(f.supersededCount)],
+    ['AAP timeouts', a ? _v(a.consecutiveTimeouts) + ' / ' + _v(a.timeouts) + ' <span class="wh-reason">consecutive / total</span>' : '—'],
+    ['Reasons', reasons.length ? reasons.map((r) => esc(fleetReasonText(r, f))).join('; ') : '—'],
+  ]);
+}
+
 function _aiCard(a) {
   const l = a.lanes || {};
   const q = a.queue || {};
@@ -273,6 +289,7 @@ function _render() {
   const now = Date.now();
   body.innerHTML = _workersHtml(d.workers, now) +
     '<div class="wh-grid">' +
+    (d.fleet ? _card('fleet', 'Fleet data', d.fleet, _fleetCard) : '') +
     _card('ai', 'AI', d.ai, _aiCard) +
     _card('auth', 'Auth health', d.auth, _authCard) +
     _card('slack', 'Slack poller', d.slack, _slackCard) +

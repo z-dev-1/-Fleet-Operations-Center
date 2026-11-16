@@ -189,6 +189,7 @@ const REGISTRY = {
   aiMemory:                () => path.join(P.dataDir, 'ai_memory.json'),
   aiEvidenceCache:         () => path.join(P.dataDir, 'ai_evidence_cache.json'), // Phase 6: dedup cache for processed attachments/URLs (compact extraction only)
   wrCommitOnce:            () => path.join(P.dataDir, 'wr_commit_once.json'), // idempotency guard for operator-consented one-shot WR commits
+  fleetFreshness:          () => path.join(P.dataDir, 'fleet_freshness.json'), // last successful fleet build { lastOkAt, lastOkCount } (health/fleet-freshness.js)
   // Unified AI Core durable action receipts (2026-10, spec §19) — one durable
   // record per executed production action: type, entity, requester, approver,
   // executing instance, fencing token, timings, source read-back, verified

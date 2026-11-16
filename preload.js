@@ -100,6 +100,9 @@ expose('fleet', {
   requestSync:  ()  => ipcRenderer.send('fleet:request-sync'),
   forceSync:    ()  => ipcRenderer.invoke('fleet:force-scan'),
   getVersion:   ()  => ipcRenderer.invoke('app:version'),
+  // Fleet data freshness (last successful build): pull + push { snapshot, evaluation }
+  getFreshness: () => ipcRenderer.invoke('fleet:get-freshness'),
+  onFreshness:  (cb) => on('fleet:freshness', cb),
 });
 
 

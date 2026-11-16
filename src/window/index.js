@@ -287,6 +287,17 @@ function initWindows(ctx) {
   // hoisted: single-flight guard for _loadFleetViaApiStartup (no concurrent
   // builds; one coalesced trailing refresh; a build stuck >10 min is superseded)
   const _apiLoadGuard = require('./api-load-guard').createApiLoadGuard();
+  // Fleet data freshness record (last SUCCESSFUL build; payload.syncedAt is
+  // bumped by background re-pushes). Pushed to the renderer as fleet:freshness.
+  const _fleetFreshness = require('../health/fleet-freshness');
+  try {
+    _fleetFreshness.init({
+      store,
+      getGuardSnapshot: () => _apiLoadGuard.snapshot(),
+      getAapStats: () => { try { return require('../scrapers/aap_api').getCallStats(); } catch (_) { return null; } },
+    });
+    _fleetFreshness.subscribe((s) => { try { send('fleet:freshness', s); } catch (_) {} });
+  } catch (_) {}
   let _pmFillRunning    = false;     // hoisted: guards the background PM/location fill
   let _lastPmFillAt     = 0;         // hoisted: throttles the PM/location fill to once/hour
   const RESCAN_INTERVAL_MS = 5 * 60 * 1000; // hoisted: _showApp reads it synchronously in API mode
@@ -1078,6 +1089,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
       if (_start.superseded) {
         logger.warn('[data-source] API load (' + (reason || 'startup') + ') superseding a build stuck for ' + Math.round(_start.ageMs / 1000) + 's');
         try { require('../scrapers/aap_api').dispose(); } catch (_) {}
+        try { _fleetFreshness.recordSuperseded({ ageMs: _start.ageMs }); } catch (_) {}
       }
       try {
         // Stage 11: cluster live-pull gate. This is the single chokepoint every
@@ -1108,6 +1120,14 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         const ds  = await api.buildFleetDataset({ withComments: false });
         if (!_apiLoadGuard.isCurrent(_loadToken)) {
           logger.warn('[data-source] API load (' + (reason || 'startup') + ') finished after being superseded — result dropped');
+          return;
+        }
+        // EMPTY-BUILD GUARD: a 0-unit build never replaces a non-empty saved
+        // fleet (it would wipe the carry-forward state the rebuild cannot redo).
+        if (_fleetFreshness.isEmptyBuildOverGood(ds && ds.rows, (store.load('fleetData', null) || {}).rows)) {
+          logger.warn('[data-source] API load (' + (reason || 'startup') + ') returned 0 units — keeping the last good fleet');
+          try { _fleetFreshness.recordBuildFailed({ code: 'EMPTY_BUILD', message: 'AAP returned 0 units; kept the last good fleet' }); } catch (_) {}
+          pushError('Fleet refresh returned 0 units — keeping the last good data');
           return;
         }
         let rows  = ds.rows || [];
@@ -1199,6 +1219,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         store.save('fleetData', payload);
         if (ctx) ctx.lastData = payload;
         pushData(payload);   // TABLE PAINTS NOW — instant, no Uptake wait.
+        try { _fleetFreshness.recordBuildOk({ count: rows.length }); } catch (_) {}
         logger.info('[data-source] API load: pushed ' + rows.length + ' units (' + ds.unavailableCount + ' unavailable)');
         pushStatus('\u2705 ' + rows.length + ' units \u2014 ' + ds.unavailableCount + ' unavailable (API)');
 
@@ -1236,6 +1257,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           logger.warn('[data-source] superseded API load (' + (reason || 'startup') + ') failed late: ' + (e && e.message));
           return;
         }
+        try { _fleetFreshness.recordBuildFailed({ code: (e && e.code) || 'ERROR', message: e && e.message }); } catch (_) {}
         // A server-REJECTED AAP session (bounced to the SSO login wall) is the
         // one failure the timestamp-based checkMwinit() can't see — the cookie
         // file reads "valid" by expiry while AAP rejects it (almost always a

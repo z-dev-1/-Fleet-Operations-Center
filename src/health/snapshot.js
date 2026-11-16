@@ -436,13 +436,66 @@ function _resourcesSection(deps) {
   };
 }
 
+// Fleet data freshness (health/fleet-freshness): present only when the module
+// is injected or already loaded, so the legacy key set is unchanged otherwise.
+const MAX_FLEET_REASONS = 8;
+function _fleetSection(ff, now) {
+  const s = ff.getSnapshot(now) || {};
+  const ev = ff.evaluate(now) || {};
+  const a = s.aap && typeof s.aap === 'object' ? s.aap : null;
+  return {
+    level: _str(ev.level, 20),
+    health: _str(ev.health, 20),
+    reasons: Array.isArray(ev.reasons) ? ev.reasons.slice(0, MAX_FLEET_REASONS).map((r) => _clip(r, 40)) : [],
+    ageMs: _num(ev.ageMs),
+    intervalMs: _num(ev.intervalMs),
+    lastOkAt: _ts(s.lastOkAt),
+    buildInFlight: !!s.buildInFlight,
+    inFlightMs: _num(ev.inFlightMs),
+    supersededCount: _num(s.supersededCount),
+    lastSupersededAt: _ts(s.lastSupersededAt),
+    aap: a ? { timeouts: _num(a.timeouts), consecutiveTimeouts: _num(a.consecutiveTimeouts), lastTimeoutAt: _ts(a.lastTimeoutAt) } : null,
+  };
+}
+
+// Reason codes -> short text, shared wording with worker-health-logic.js.
+function _fleetReasonText(fleet) {
+  const out = [];
+  const add = (t) => { if (t && !out.includes(t)) out.push(t); };
+  for (const r of fleet.reasons || []) {
+    if (r === 'aap-timeouts') add('AAP calls timing out');
+    else if (r === 'superseded' || r === 'wedged') add('fleet build wedged/superseded');
+    else if (r === 'age>3x' || r === 'age>2x') add('no successful fleet push in ' + Math.round((fleet.ageMs || 0) / 60000) + 'm');
+    else if (r === 'in-flight>5m') add('fleet build in flight for ' + Math.round((fleet.inFlightMs || 0) / 60000) + 'm');
+  }
+  return out.join('; ');
+}
+
+// The apiFleetRefresh tick never rejects, so the supervisor shows it healthy
+// even when every AAP call times out. Overlay the reported state only.
+const OVERLAY_STATES = ['healthy', 'busy', 'waiting'];
+function _overlayFleetWorker(workers, fleet) {
+  if (!fleet || fleet.status !== 'ok' || (fleet.health !== 'degraded' && fleet.health !== 'unhealthy')) return;
+  if (!workers || workers.status !== 'ok' || !Array.isArray(workers.list)) return;
+  const row = workers.list.find((w) => w && w.name === 'apiFleetRefresh');
+  if (!row || !OVERLAY_STATES.includes(row.state)) return;
+  const old = row.state;
+  row.state = 'degraded';
+  row.degradedReason = _clip(_fleetReasonText(fleet) || ('fleet data ' + fleet.health), 120);
+  const bs = workers.summary && workers.summary.byState;
+  if (bs && typeof bs === 'object') {
+    if (typeof bs[old] === 'number') bs[old] = Math.max(0, bs[old] - 1);
+    bs.degraded = (typeof bs.degraded === 'number' ? bs.degraded : 0) + 1;
+  }
+}
+
 // ── Public ───────────────────────────────────────────────────────────────────
 function buildSnapshot(deps) {
   deps = deps || {};
   const now = typeof deps.now === 'function' ? deps.now() : Date.now();
   let log = deps.logger;
   if (!log) { try { log = require('../utils/logger')('health'); } catch (_) { log = { debug() {}, info() {}, warn() {} }; } }
-  return {
+  const out = {
     ok: true,
     at: now,
     workers: _section('workers', () => _workersSection(deps), log),
@@ -453,6 +506,12 @@ function buildSnapshot(deps) {
     jobs: _section('jobs', () => _jobsSection(deps, now), log),
     resources: _section('resources', () => _resourcesSection(deps), log),
   };
+  const ff = _mod(deps, 'fleetFreshness', '../health/fleet-freshness');
+  if (ff) {
+    out.fleet = _section('fleet', () => _fleetSection(ff, now), log);
+    try { _overlayFleetWorker(out.workers, out.fleet); } catch (_) {}
+  }
+  return out;
 }
 
 function _resetForTests() {

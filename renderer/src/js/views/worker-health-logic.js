@@ -74,6 +74,8 @@ export function workerStatus(w, now = Date.now()) {
       return _st('waiting', on ? 'waiting on ' + on : 'waiting');
     }
     case 'degraded': {
+      // Set by health/snapshot.js when fleet data health overlays apiFleetRefresh.
+      if (typeof w.degradedReason === 'string' && w.degradedReason) return _st('degraded', w.degradedReason);
       if (w.currentJob && w.currentJob.timedOut) return _st('degraded', 'tick timed out');
       const n = Number(w.consecutiveFailures) || 0;
       return _st('degraded', n + ' consecutive failure' + (n === 1 ? '' : 's'));
@@ -154,6 +156,29 @@ export function jobsStatus(sec) {
   const f24 = Number(tot.failed24h) || 0;
   if (f24 > 0) return _st('degraded', f24 + ' failed in 24h');
   return _st('healthy');
+}
+
+/** First reason code of a fleet section -> text (same wording as the snapshot overlay). */
+export function fleetReasonText(r, sec) {
+  const s = sec || {};
+  if (r === 'aap-timeouts') return 'AAP calls timing out';
+  if (r === 'superseded' || r === 'wedged') return 'fleet build wedged/superseded';
+  if (r === 'age>3x' || r === 'age>2x') return 'no successful fleet push in ' + Math.round((Number(s.ageMs) || 0) / 60000) + 'm';
+  if (r === 'in-flight>5m') return 'fleet build in flight for ' + Math.round((Number(s.inFlightMs) || 0) / 60000) + 'm';
+  if (r === 'no-success-yet') return 'no successful fleet build yet';
+  if (r === 'aging') return 'older than one refresh interval';
+  if (r === 'last-build-failed') return 'last build failed';
+  return r ? String(r) : '';
+}
+
+/** Fleet data (health/fleet-freshness) section pill. */
+export function fleetDataStatus(sec) {
+  if (!sec || sec.status !== 'ok') return unavailableStatus(sec);
+  const first = Array.isArray(sec.reasons) && sec.reasons.length ? fleetReasonText(sec.reasons[0], sec) : '';
+  if (sec.health === 'unhealthy') return _st('failed', first);
+  if (sec.health === 'degraded') return _st('degraded', first);
+  if (sec.health === 'healthy') return _st('healthy');
+  return _st('unknown');
 }
 
 export function canReEnable(w) {

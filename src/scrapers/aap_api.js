@@ -50,6 +50,23 @@ function _reportAuth(o) {
 function _setProviderForTest(p) { provider = p || require('./browser_provider'); }
 function _setAuthReporterForTest(ar) { _authReporter = ar || null; }
 
+// AAP call counters (read by src/health/fleet-freshness.js). Counted only in
+// the _request / evaluateInPage lock callbacks; the timeout logic is unchanged.
+let _callStats = { timeouts: 0, consecutiveTimeouts: 0, lastTimeoutAt: null, lastOkAt: null };
+function _noteTimeout() {
+  _callStats.timeouts++;
+  _callStats.consecutiveTimeouts++;
+  _callStats.lastTimeoutAt = Date.now();
+}
+function _noteCallOk() {
+  _callStats.consecutiveTimeouts = 0;
+  _callStats.lastOkAt = Date.now();
+}
+function getCallStats() { return Object.assign({}, _callStats); }
+function _resetCallStatsForTest() {
+  _callStats = { timeouts: 0, consecutiveTimeouts: 0, lastTimeoutAt: null, lastOkAt: null };
+}
+
 const AAP_ORIGIN = 'https://aap-na.corp.amazon.com';
 // A lightweight AAP page that authenticates + fires token-bearing XHRs on load.
 // Reuse the WR page the long-dwell fetch already proved mints the token.
@@ -250,30 +267,37 @@ function _requestScript(method, url, bodyLiteral) {
 
 async function _request(method, path, body) {
   return _withLock(async () => {
-    const page = await _ensureWindow();
-    const url = path.startsWith('http') ? path : (AAP_ORIGIN + path);
-    const bodyLiteral = body != null ? JSON.stringify(JSON.stringify(body)) : 'null';
-    const script = _requestScript(method, url, bodyLiteral);
-    const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
-    _scheduleTeardown();
-    if (!r || !r.ok) {
-      // Surface the server's error body — AAP returns a JSON error object on 4xx
-      // (validation details). We now capture the FULL raw text on error, so
-      // prefer that (it carries errors[]/cause detail a top-level message hides).
-      let detail = (r && r.text) || '';
-      if (!detail && r && r.json) { try { detail = JSON.stringify(r.json); } catch (_) {} }
-      if (!detail && r && r.error) detail = r.error;
-      if (!detail && r && r.timeout) detail = 'request timed out';
-      if (!detail) detail = 'HTTP ' + (r && r.status);
-      // A 401/403 or an SSO redirect body means the session lapsed mid-call.
-      if (r && (r.status === 401 || r.status === 403)) {
-        _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
-        throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
+    try {
+      const page = await _ensureWindow();
+      const url = path.startsWith('http') ? path : (AAP_ORIGIN + path);
+      const bodyLiteral = body != null ? JSON.stringify(JSON.stringify(body)) : 'null';
+      const script = _requestScript(method, url, bodyLiteral);
+      const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
+      _scheduleTeardown();
+      if (!r || !r.ok) {
+        // Surface the server's error body — AAP returns a JSON error object on 4xx
+        // (validation details). We now capture the FULL raw text on error, so
+        // prefer that (it carries errors[]/cause detail a top-level message hides).
+        let detail = (r && r.text) || '';
+        if (!detail && r && r.json) { try { detail = JSON.stringify(r.json); } catch (_) {} }
+        if (!detail && r && r.error) detail = r.error;
+        if (!detail && r && r.timeout) detail = 'request timed out';
+        if (!detail) detail = 'HTTP ' + (r && r.status);
+        // A 401/403 or an SSO redirect body means the session lapsed mid-call.
+        if (r && (r.status === 401 || r.status === 403)) {
+          _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
+          throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
+        }
+        if (r && r.timeout) _noteTimeout();
+        throw Object.assign(new Error('AAP API ' + (r && r.status) + ': ' + detail), { code: 'AAP_API_ERROR', status: r && r.status });
       }
-      throw Object.assign(new Error('AAP API ' + (r && r.status) + ': ' + detail), { code: 'AAP_API_ERROR', status: r && r.status });
+      _reportAuth({ ok: true, source: 'aap-api' });
+      _noteCallOk();
+      return r.json;
+    } catch (e) {
+      if (e && e.code === 'AAP_API_TIMEOUT') _noteTimeout();
+      throw e;
     }
-    _reportAuth({ ok: true, source: 'aap-api' });
-    return r.json;
   });
 }
 
@@ -288,10 +312,15 @@ async function _request(method, path, body) {
  */
 async function evaluateInPage(script) {
   return _withLock(async () => {
-    const page = await _ensureWindow();
-    const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
-    _scheduleTeardown();
-    return r;
+    try {
+      const page = await _ensureWindow();
+      const r = await _evalWithTimeout(page, script, EVAL_REQUEST_MS);
+      _scheduleTeardown();
+      return r;
+    } catch (e) {
+      if (e && e.code === 'AAP_API_TIMEOUT') _noteTimeout();
+      throw e;
+    }
   });
 }
 
@@ -2966,4 +2995,6 @@ module.exports = {
   dispose,
   _setProviderForTest,          // test seam: inject a fake browser_provider (inert unless called)
   _setAuthReporterForTest,      // test seam: inject a fake auth-report (inert unless called)
+  getCallStats,                 // AAP call counters (timeouts, consecutiveTimeouts) for fleet freshness
+  _resetCallStatsForTest,       // test seam: zero the call counters
 };
