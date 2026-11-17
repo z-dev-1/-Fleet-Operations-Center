@@ -1,5 +1,7 @@
 /**
- * fleet-trust-indicator.js — wires the toolbar trust indicators to the DOM.
+ * fleet-trust-indicator.js — wires the fleet trust indicators to the DOM.
+ * Mounted in the bottom status bar (status-bar.js), which also makes the auth
+ * badge open the Auth Health overlay (auth-health-panel.js).
  *
  *   #tb-fresh        fleet-data freshness chip (click = existing manual refresh,
  *                    fleet.forceSync -> fleet:force-scan)

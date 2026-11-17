@@ -10210,7 +10210,7 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 }
 .tb-fresh { cursor: pointer; font-family: inherit; }
 .tb-fresh[disabled] { opacity: .55; cursor: progress; }
-.tb-auth { cursor: default; }
+.tb-auth { cursor: pointer; font-family: inherit; }
 .tb-fresh__dot, .tb-auth__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .tb-fresh--green, .tb-auth--green { color: var(--grn); border-color: var(--grn); }
 .tb-fresh--amber, .tb-auth--amber { color: var(--org); border-color: var(--org); }
@@ -10220,7 +10220,7 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 6px 16px; font-size: 12px;
   background: var(--redd, rgba(255,123,114,.08)); color: var(--red);
-  border-bottom: 1px solid var(--red);
+  border-top: 1px solid var(--red);
 }
 .tb-auth-banner[hidden] { display: none; }
 .tb-auth-banner__reason { font-weight: 600; }
@@ -10230,3 +10230,16 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
   border-radius: 6px; border: 1px solid var(--red); background: transparent; color: var(--red); cursor: pointer;
 }
 .tb-auth-banner__btn[disabled] { opacity: .55; cursor: progress; }
+/* Bottom status bar placement: the bar (.sb-main, re-rendered every second)
+   sits beside a stable .sb-trust host with the same 26px strip styling. */
+.sb-row { display: flex; align-items: stretch; }
+.sb-main { flex: 1; min-width: 0; }
+.sb-trust {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  height: 26px; padding: 0 12px 0 4px;
+  background: var(--nx-bg2); border-top: 1px solid var(--nx-border);
+  -webkit-app-region: no-drag;
+}
+.sb-trust .tb-fresh, .sb-trust .tb-auth { font-size: 10px; padding: 2px 7px; border-radius: 9px; }
+.sb-trust .tb-fresh__dot, .sb-trust .tb-auth__dot { width: 5px; height: 5px; }
+.sb-trust .tb-fresh:hover:not([disabled]), .sb-trust .tb-auth:hover { background: var(--el, rgba(255,255,255,.06)); }

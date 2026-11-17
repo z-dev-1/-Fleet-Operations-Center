@@ -20,12 +20,28 @@ import bus   from '../bus.js';
 import state from '../state.js';
 import { fleet as fleetBridge } from '../bridge.js';
 import { absorbFleetSlice, emptyFleet, renderHtml } from './status-bar-logic.js';
+import { mount as mountFleetTrust } from './fleet-trust-indicator.js';
+import { open as openAuthHealthPanel } from './auth-health-panel.js';
 
 // Re-export the pure helpers so existing importers/tests can reach them here too.
 export { esc, deriveStatus, timeSince, renderHtml } from './status-bar-logic.js';
 
+// Stable shell: the bar itself is re-rendered every second into .sb-main, so the
+// fleet trust indicators (freshness chip, auth pill, step-up banner) live in
+// sibling hosts that are never rewritten.
+const SHELL_HTML =
+  '<div id="tb-auth-banner" class="tb-auth-banner" role="alert" hidden></div>' +
+  '<div class="sb-row">' +
+    '<div class="sb-main"></div>' +
+    '<div class="sb-trust">' +
+      '<button type="button" class="tb-fresh tb-fresh--grey" id="tb-fresh" title="Fleet data freshness — click to refresh">Fleet data …</button>' +
+      '<button type="button" class="tb-auth tb-auth--grey" id="tb-auth" aria-haspopup="dialog">Auth …</button>' +
+    '</div>' +
+  '</div>';
+
 // ── DOM + display state ─────────────────────────────────────────────────────
 let _el = null;
+let _barEl = null;
 let _version = '';           // resolved from the app, not hard-coded
 let _aiConnected = false;
 let _aiLabel = 'Disconnected'; // 'Orcha + Claude' | 'Orcha' | 'Claude' | 'Disconnected'
@@ -43,8 +59,8 @@ let _fleet = emptyFleet();
 // The exact markup lives in the pure renderHtml() (status-bar-logic.js) so the
 // rendered output is unit-testable without a DOM. This wiring only injects it.
 function _render() {
-  if (!_el) return;
-  _el.innerHTML = renderHtml({
+  if (!_barEl) return;
+  _barEl.innerHTML = renderHtml({
     fleet: _fleet,
     now: Date.now(),
     aiConnected: _aiConnected,
@@ -64,10 +80,19 @@ export function init(container) {
   } else {
     _el = container;
   }
+  _el.innerHTML = SHELL_HTML;
+  _barEl = _el.querySelector('.sb-main');
 
   // Seed from current state so we don't flash "connecting" if data already exists.
   _fleet = absorbFleetSlice(_fleet, state.slice('fleet'));
   _render();
+
+  // ── Fleet trust indicators (freshness chip, auth pill, step-up banner) ──
+  // The freshness chip keeps its own click (manual refresh); only the auth
+  // pill opens the Auth Health overlay. Opening it never runs mwinit.
+  const authEl = _el.querySelector('#tb-auth');
+  try { mountFleetTrust({ fresh: _el.querySelector('#tb-fresh'), auth: authEl, banner: _el.querySelector('#tb-auth-banner') }); } catch (_) {}
+  if (authEl) authEl.addEventListener('click', () => { try { openAuthHealthPanel(); } catch (_) {} });
 
   // Resolve the REAL app version dynamically (no hard-coded value).
   try {
