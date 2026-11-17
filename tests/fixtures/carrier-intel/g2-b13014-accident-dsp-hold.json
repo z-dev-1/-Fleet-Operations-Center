@@ -1,0 +1,479 @@
+{
+  "id": "G2",
+  "unit": "B13014",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "snapshotAt": "2026-11-17T17:48:19.602Z",
+  "today": "2026-11-17",
+  "source": "%APPDATA%/fleet-ops-app/fleet_data.json (read-only copy, aliases/emails/addresses/bridge PINs masked)",
+  "downCause": "accident (DSP-managed; blocker = insurance adjuster)",
+  "matchedFields": [
+    "_factEtc.state=none, negated (ETC: N/A / No ETC available)",
+    "lifecycleReason=Accident",
+    "tow refs amz-dr67qazvrtau54, amz-7cvf6f2rds7r3w; FleetNet 00176990",
+    "workDuration 65d",
+    "pmOverdue=PM A 206d; Lift 16d (faithful to AAP)",
+    "no Relay history beyond CREATE (createOnly), so no ETC slips and no tech arrival"
+  ],
+  "knownMismatches": [
+    "M4 dealerName/subVendor = DSP_ENTERED (expected empty)"
+  ],
+  "row": {
+    "equipmentId": "B13014",
+    "assetType": "boxTruck",
+    "bodyType": "Box Truck",
+    "domicileSite": "ROC5",
+    "operator": "AUVTE",
+    "lifecycleState": "Unavailable",
+    "lifecycleReason": "Accident",
+    "serviceState": "Scheduled",
+    "subState": "Created",
+    "vendor": "DSP_ENTERED",
+    "suppliers": "DSP_ENTERED",
+    "serviceCategory": "UNPLANNED",
+    "urgent": "",
+    "workDuration": "65d 4h 31m",
+    "issueSummary": "Front-end accident damage; driver-side hood fell off during operation.",
+    "created": "2026-09-13T13:15:53.859Z",
+    "delayReasonCodes": "",
+    "escalations": "",
+    "savedRepairStatus": "Awaiting estimate",
+    "dealerName": "DSP_ENTERED",
+    "subVendor": "DSP_ENTERED",
+    "cause": "",
+    "correction": "",
+    "totalCost": "",
+    "partNumbers": "",
+    "orderNumbers": "",
+    "roNumbers": "",
+    "towRefs": "amz-dr67qazvrtau54; amz-7cvf6f2rds7r3w",
+    "repairEtc": "",
+    "repairEtcSource": "",
+    "partsEta": "",
+    "partsStatus": "",
+    "etcMissCount": 0,
+    "etcMissed": false,
+    "etcReason": "",
+    "partsMissCount": 0,
+    "etcSlipCount": 0,
+    "estimateApprovedAmount": "",
+    "estimateStatus": "",
+    "estimateVersion": "",
+    "estimateRejectReason": "",
+    "vendorDelayReason": "",
+    "leadTime": "",
+    "pmOverdue": "PM A 206d; Lift 16d",
+    "pmADue": "Apr 24, 2026",
+    "pmBDue": "Dec 7, 2026",
+    "dotDue": "Dec 5, 2026",
+    "quarterlyLiftDue": "Oct 2026",
+    "pmB": "Dec 7",
+    "pmX": "--",
+    "dot": "Dec 5",
+    "quarterlyLift": "overdue",
+    "pmSchedule": [
+      {
+        "type": "PM_A",
+        "label": "PM A",
+        "nextDueIso": "2026-04-24",
+        "displayFormat": "DATE",
+        "overdueDays": 206,
+        "interval": null,
+        "lastCompletedIso": "2025-12-05",
+        "lastVendor": "Amerit",
+        "status": "Completed",
+        "usagePct": 123
+      },
+      {
+        "type": "QUARTERLY_LIFT",
+        "label": "Quarterly Lift",
+        "nextDueIso": "2026-10-31",
+        "displayFormat": "MONTH_AND_YEAR",
+        "overdueDays": 16,
+        "interval": null,
+        "lastCompletedIso": "2026-07-02",
+        "lastVendor": "KOONER",
+        "status": "Completed",
+        "usagePct": null
+      },
+      {
+        "type": "DOT",
+        "label": "DOT",
+        "nextDueIso": "2026-12-05",
+        "displayFormat": "DATE",
+        "overdueDays": null,
+        "interval": null,
+        "lastCompletedIso": "2025-12-05",
+        "lastVendor": "Amerit",
+        "status": "Completed",
+        "usagePct": null
+      },
+      {
+        "type": "PM_B",
+        "label": "PM B",
+        "nextDueIso": "2026-12-07",
+        "displayFormat": "DATE",
+        "overdueDays": null,
+        "interval": null,
+        "lastCompletedIso": "2026-07-10",
+        "lastVendor": "KOONER",
+        "status": "Completed",
+        "usagePct": 115
+      },
+      {
+        "type": "WASH",
+        "label": "Wash",
+        "nextDueIso": null,
+        "displayFormat": "DATE",
+        "overdueDays": null,
+        "interval": null,
+        "lastCompletedIso": null,
+        "lastVendor": null,
+        "status": "Not scheduled",
+        "usagePct": null
+      },
+      {
+        "type": "R360_HANDOFF_INSPECTION",
+        "label": "R360 Handoff Inspection",
+        "nextDueIso": null,
+        "displayFormat": "DATE",
+        "overdueDays": null,
+        "interval": null,
+        "lastCompletedIso": null,
+        "lastVendor": null,
+        "status": "Not scheduled",
+        "usagePct": null
+      }
+    ],
+    "extractedAt": "2026-11-17T17:27:24.661Z",
+    "_factsOn": true,
+    "_factEtc": {
+      "date": null,
+      "kind": "repairCompletion",
+      "state": "none",
+      "explicitMissDate": null,
+      "source": "relaygarage/fas",
+      "statedAt": "2026-10-14T23:49:35.303Z",
+      "snippet": "",
+      "negated": true,
+      "reason": null
+    },
+    "_factPartsWhy": "",
+    "_factEstimateWhy": "",
+    "_factFilled": {
+      "dealerName": "DSP_ENTERED"
+    },
+    "repairTimeline": "09/13 - Work order created. Unit in Accident status at AUVTE01 following front-end collision; driver-side hood lost. DSP carrier inspection and repair vendor assignment pending. MCS Accidents team notified. No ETC available.\n09/14-09/26 - [no update logged]\n09/27 - Escalation submitted to DSP carrier requesting status update. No response logged.\n09/28-10/10 - [no update logged]\n10/11 - Second escalation submitted to DSP carrier. Unit confirmed still in Accident status at carrier domicile. Repair vendor and ETC remain pending.\n10/13 - FLEETNET tow arranged to relocate unit from AUVTE01 to ROC5. Tow order 00176990 / amz-dr67qazvrtau54 initiated. FNA ticket amz-7cvf6f2rds7r3w opened to track transfer. Repair vendor assignment pending confirmed unit arrival at ROC5.\n10/14 - FAS confirmed unit in transit to ROC5 via FLEETNET tow. Repair vendor assignment pending arrival confirmation. No ETC available.\n10/15-10/17 - [no update logged]\n10/18 - Unit relocation from AUVTE01 to ROC5 confirmed per FNA tow ticket 00193584. MCS Accidents team alerted DSP carrier and FAS to proceed with DSP-managed accident repair coordination.\n10/20 - DSP carrier confirmed insurance claim filed with insurer; adjuster visit to ROC5 pending to scope damages and develop repair estimate. FAS directed unit to be towed to body shop for estimate.\n10/21-10/24 - [no update logged]\n10/25 - MCS Accidents team re-escalated to DSP carrier requesting status update on insurance adjuster review and estimate.\n10/26 - Carrier confirmed insurer has all claim details; adjuster scheduling still pending. Carrier pressing insurer for completion timeline. No ETC available.\n10/26 Repair stage: Awaiting insurance adjuster to be scheduled to provide an estimate (per [carrier contact] [carrier domain] email 10/26) [em:0c5e1533]\n10/27-10/28 - [no update logged]\n10/29 - Follow-up submitted to carrier and FAS requesting repair update. No response received.\n10/30-11/02 - [no update logged]\n11/03 - Escalation to FAS confirmed unit at ROC5, 51 days down. Insurance adjuster has not yet been scheduled; adjuster visit remains the sole blocker before repair vendor can be assigned. No confirmed response from insurer since 10/26. DOT due 12/5 noted as upcoming milestone per coordinator status note.\n11/04-11/07 - [no update logged]\n11/08 - Carrier advised adjuster has been working to obtain accident report for payment coordination with opposing insurer. Carrier stated intent to move unit to local vendor to begin repairs with payment to be resolved after; carrier directed internal contacts to coordinate body shop tow and report status.\n11/09-11/11 - [no update logged]\n11/12 - FAS confirmed direction to carrier to tow unit to body shop for estimate. Adjuster has not provided further response. Unit confirmed still at ROC5; body shop tow not yet executed.\n11/13-11/16 - [no update logged]\n11/17 - Follow-up submitted to DSP carrier requesting repair coordination status update. Response pending. No ETR available.",
+    "fullConversation": "Conversation\n09/13 - fasuser5: pending DSP carrier to further inspect unit's damages and schedule a repair vendor as needed and providing MCS Accidents team with further follow up as needed. FAS: FAS User, Carrier yard AUVET01\n09/27 - fasuser5: 9/27: re-escalated to DSP carrier via e-mail for a status update concerning B13014 that is accident status and tracking at carrier's domicile, noted as accident status thus far.\n10/11 - fasuser1: 10/11 : re-escalated to DSP carrier via e-mail for a status update concerning B13014 that is accident status and tracking at carrier's domicile, noted as accident status thus far.\n\nRG: https://aap-na.corp.amazon.com/v2/service/799585e3-2082-4f41-9ca1-cb71a2d3a2aa?\nVendor: TBD by Carrier\nETC: N/A\n\nFAS: FAS User\nDom: AUVTE01\nAAP: u/acc\n10/13 - fasuser5: Fleetnet per 00176990|amz-dr67qazvrtau54, is still working on towing carrier's box truck B13014 from AUVTE01 (former domicile) to new domicile ROC5. AUVTE01: [ADDRESS Redacted] to ROC5: [ADDRESS Redacted] as requested with respect to box truck B13014.\n10/13 - fasuser5: see FNA ticket/rg event amz-7cvf6f2rds7r3w (towing in process from AUVTE01 to ROC5)\n10/14 - fasuser3: 10/14 reached out to FAS for updates \nPER FAS \nUnit has been in accident status for 31 days (front-end damage, driver-side hood fell off). As of 10/13, a FLEETNET tow was arranged (tow order amz-dr67qazvrtau54 / 00176990) to move the unit from AUVTE01 to ROC5. FNA ticket amz-7cvf6f2rds7r3w is open to track the transfer.\nRepair vendor assignment is pending confirmed unit arrival at ROC5. No ETC available at this time. I'll follow up once arrival is confirmed and a vendor is assigned.\n10/18 - fasuser5: MCS Accidents team since confirmed with FNA per wo/ticket 00193584 (towing)  that AUVTE- B13014 was relocated to ROC5 from AUVTE01 and now MCS will alert DSP carrier/fas to proceed with DSP Managed accident concerning repairs going forward.\n10/20 - fasuser5: Per DSP Carrier [email]: We’ve sent the accident info to our insurance company so we can get an adjuster to ROC5 and determine next steps from there.\n10/20 - fasuser5: per FAS FAS User: We Just send it to a body-shop\n10/21 - fasuser5: according to DSP carrier: \n[carrier contact] [email]:Insurance claim has been filed. Pending Adjustor review and estimate.\n10/25 - fasuser5: MCS Accidents team: re-scalated to DSP carrier/partner for status update concerning an insurance claim/adjustor review concerning an estimate (either pending or since received).\n10/26 - fasuser5: per carrier: Insurance company has all the details. They need to schedule an adjuster to provide an estimate and then we’ll move the vehicle for repair. I’ve asked for completion timing pending a response.\n10/29 - fasuser4: 10/29 sent email to Carrier and FAs for an update on units repairs, waiting for reponse\n11/03 - fasuser5: 11/3: escalated to FAS FAS User for an update on progress made or lack thereof ... per FAS: B13014 is at 51 days down — here's where things stand ...\nUnit is at ROC5 in Accident status. The DSP carrier filed the insurance claim and the insurer has all claim details, but an adjuster still hasn't been scheduled to write the repair estimate. As of 10/26, the carrier was pressing the insurer for a completion timeline. Last follow-up to both the carrier and FAS went out 10/29 with no response logged since.\nThe unit is sitting in a hold pattern waiting on the adjuster visit before any repair vendor can be assigned or work scoped. That's the single blocker right now.\nDOT is due 12/05 and PM-B is due 12/07 — both still inside window but worth watching given the repair timeline is open-ended.\n11/08 - fasuser5: pending further updates from carrier/fas come 11/11/2026 - concerning AUVTE's box truck B13014\n11/08 - fasuser5: The adjuster has been working to obtain the accident report so he can address payment with the other party's insurance adjuster.  If we pay first, it goes again my insurance premium and we have to subrogate to get our money back.  I've been trying to avoid that as I'd prefer not to assume that financial risk.  \n\nWe're just going to move it to a local vendor and start the work.  We'll resolve payment after.   \n\n[names], please coordinate the repair and let me know status.  I'll share with the adjuster.\n11/12 - fasuser5: 11/12: per fas: I told carrier to tow to a body shop for an est minimum; however, the Adjuster still hasn't provided us with any further response.\nMCS verified that carrier's box truck is still at domicile: ROC5\n11/17 - fasuser4: 11/17 reached out to DSP Carrier via email on an follow up on repairs for the unit",
+    "relayFacts": {
+      "v": 2,
+      "at": "2026-11-17T17:27:24.661Z",
+      "wr": "wr-b13014",
+      "wrCreatedAt": "2026-09-13T13:15:53.859Z",
+      "counts": {
+        "comments": 18,
+        "notes": 0,
+        "pages": 0,
+        "rejected": 0,
+        "truncated": 0
+      },
+      "partial": false,
+      "facts": [
+        {
+          "id": "f_72b6423d",
+          "kind": "altId",
+          "value": "amz-5psu2ufn9yzwh4",
+          "source": "relay",
+          "at": null,
+          "author": null,
+          "side": "system",
+          "snippet": "alternateUniqueId: amz-5psu2ufn9yzwh4",
+          "via": "structured",
+          "raw": "amz-5psu2ufn9yzwh4"
+        },
+        {
+          "id": "f_051d2daf",
+          "kind": "etcMention",
+          "value": null,
+          "source": "relaygarage/fas",
+          "at": "2026-10-11T20:25:43.790Z",
+          "author": "fasuser1",
+          "side": "amazon",
+          "snippet": "vice/799585e3-2082-4f41-9ca1-cb71a2d3a2aa? Vendor: TBD by Carrier ETC: N/A FAS: FAS User Dom: AUVTE01 AAP: u/acc",
+          "raw": "ETC: N/A",
+          "etcKind": "repairCompletion",
+          "negated": true,
+          "pos": 288
+        },
+        {
+          "id": "f_294028a7",
+          "kind": "fleetnet",
+          "value": "00176990",
+          "source": "relaygarage/fas",
+          "at": "2026-10-13T18:14:05.151Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "snippet": "Fleetnet per 00176990|amz-dr67qazvrtau54, is still working on towing carrier's box truck B13014 from AUVTE01 (former domicile) to new domici",
+          "raw": "00176990"
+        },
+        {
+          "id": "f_511a6d2c",
+          "kind": "tow",
+          "value": "amz-dr67qazvrtau54",
+          "source": "relaygarage/fas",
+          "at": "2026-10-13T18:14:05.151Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "snippet": "Fleetnet per 00176990|amz-dr67qazvrtau54, is still working on towing carrier's box truck B13014 from AUVTE01 (former domicile) to new domici",
+          "raw": "amz-dr67qazvrtau54"
+        },
+        {
+          "id": "f_e5891102",
+          "kind": "tow",
+          "value": "amz-7cvf6f2rds7r3w",
+          "source": "relaygarage/fas",
+          "at": "2026-10-13T19:48:16.302Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "snippet": "see FNA ticket/rg event amz-7cvf6f2rds7r3w (towing in process from AUVTE01 to ROC5)",
+          "raw": "amz-7cvf6f2rds7r3w",
+          "towRequested": true
+        },
+        {
+          "id": "f_679a92ec",
+          "kind": "etcMention",
+          "value": null,
+          "source": "relaygarage/fas",
+          "at": "2026-10-14T23:49:35.303Z",
+          "author": "fasuser3",
+          "side": "amazon",
+          "snippet": "air vendor assignment is pending confirmed unit arrival at ROC5. No ETC available at this time. I'll follow up once arrival is confirmed and",
+          "raw": "ETC",
+          "etcKind": "repairCompletion",
+          "negated": true,
+          "pos": 393
+        },
+        {
+          "id": "f_642339ed",
+          "kind": "tow",
+          "value": "amz-dr67qazvrtau54",
+          "source": "relaygarage/fas",
+          "at": "2026-10-14T23:49:35.303Z",
+          "author": "fasuser3",
+          "side": "amazon",
+          "snippet": "ll off). As of 10/13, a FLEETNET tow was arranged (tow order amz-dr67qazvrtau54 / 00176990) to move the unit from AUVTE01 to ROC5. FNA ticke",
+          "raw": "amz-dr67qazvrtau54",
+          "towRequested": true
+        },
+        {
+          "id": "f_42c474b6",
+          "kind": "tow",
+          "value": "amz-7cvf6f2rds7r3w",
+          "source": "relaygarage/fas",
+          "at": "2026-10-14T23:49:35.303Z",
+          "author": "fasuser3",
+          "side": "amazon",
+          "snippet": "00176990) to move the unit from AUVTE01 to ROC5. FNA ticket amz-7cvf6f2rds7r3w is open to track the transfer. Repair vendor assignment is p",
+          "raw": "amz-7cvf6f2rds7r3w",
+          "towRequested": true
+        }
+      ],
+      "events": [
+        {
+          "at": "2026-09-13T13:15:53.605Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-09-27T19:06:13.778Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-11T20:25:43.790Z",
+          "author": "fasuser1",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-13T18:14:05.151Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-13T19:48:16.302Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-14T23:49:35.303Z",
+          "author": "fasuser3",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-18T19:37:49.935Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-20T19:39:10.080Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-20T20:07:43.689Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-21T13:08:21.172Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-25T16:27:18.223Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-26T14:04:59.285Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-10-29T19:08:52.061Z",
+          "author": "fasuser4",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-11-03T16:50:24.546Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-11-08T16:58:51.534Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        },
+        {
+          "at": "2026-11-08T17:24:02.401Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-11-12T20:59:01.058Z",
+          "author": "fasuser5",
+          "side": "amazon",
+          "role": null,
+          "internal": true,
+          "via": "comment"
+        },
+        {
+          "at": "2026-11-17T16:38:08.206Z",
+          "author": "fasuser4",
+          "side": "amazon",
+          "role": null,
+          "internal": false,
+          "via": "comment"
+        }
+      ],
+      "historyTrend": {
+        "v": 1,
+        "n": 1,
+        "firstAt": "2026-09-13T13:15:53.859Z",
+        "lastAt": "2026-09-13T13:15:53.859Z",
+        "createOnly": true,
+        "etc": {
+          "available": false,
+          "revisions": [],
+          "slipCount": 0,
+          "pullInCount": 0,
+          "seq": [],
+          "firstIso": null,
+          "currentIso": null,
+          "totalSlipMs": 0
+        },
+        "estimate": {
+          "revisions": [],
+          "decisions": [],
+          "rejectCount": 0,
+          "approveCount": 0
+        },
+        "vendor": {
+          "changes": [
+            {
+              "field": "Vendor",
+              "from": null,
+              "to": "DSP_ENTERED",
+              "op": "CREATE",
+              "at": "2026-09-13T13:15:53.859Z",
+              "by": "fasuser5",
+              "source": "relaygarage/fas",
+              "side": "amazon",
+              "snippet": "Vendor: (none) -> DSP_ENTERED"
+            }
+          ],
+          "current": "DSP_ENTERED"
+        },
+        "states": [
+          {
+            "entity": "wr",
+            "state": "SCHEDULED",
+            "enteredAt": "2026-09-13T13:15:53.859Z",
+            "leftAt": null,
+            "ms": 5631090802
+          }
+        ]
+      }
+    },
+    "workRequestId": "wr-b13014",
+    "relayFactsWr": "wr-b13014"
+  }
+}

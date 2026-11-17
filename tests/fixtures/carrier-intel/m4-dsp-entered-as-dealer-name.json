@@ -1,0 +1,42 @@
+{
+  "id": "M4",
+  "units": ["B13014", "B62064"],
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "DSP_ENTERED",
+  "today": "2026-11-17",
+  "note": "dealerModel adds row.suppliers as a 'fleetdata' dealer candidate through _supplierName (wo-facts.js), which rejects bare OEM enums but not the Relay placeholder 'DSP_ENTERED'. Both AUVTE DSP-entered units get dealerName and subVendor 'DSP_ENTERED' (row._factFilled.dealerName = 'DSP_ENTERED'). No dealer is named anywhere in their conversations ('Vendor: TBD by Carrier').",
+  "input": {
+    "row": {
+      "equipmentId": "B13014",
+      "operator": "AUVTE",
+      "domicileSite": "ROC5",
+      "lifecycleState": "Unavailable",
+      "lifecycleReason": "Accident",
+      "subState": "Created",
+      "vendor": "DSP_ENTERED",
+      "suppliers": "DSP_ENTERED",
+      "dealerName": "",
+      "workRequestId": "wr-b13014",
+      "created": "2026-09-13T13:15:53.859Z",
+      "relayFacts": {
+        "v": 1,
+        "at": "2026-11-17T17:27:24.661Z",
+        "wr": "wr-b13014",
+        "estimateId": null,
+        "wrCreatedAt": "2026-09-13T13:15:53.859Z",
+        "facts": [
+          { "id": "f1", "kind": "etcMention", "value": null, "source": "relaygarage/fas", "at": "2026-10-11T20:25:43.790Z", "author": "fasuser3", "side": "amazon", "snippet": "Vendor: TBD by Carrier ETC: N/A FAS: FAS User Dom: AUVTE01", "raw": "ETC: N/A", "etcKind": "repairCompletion", "negated": true, "pos": 288 }
+        ],
+        "events": [],
+        "dealer": null,
+        "counts": { "comments": 18, "notes": 0, "pages": 0, "rejected": 0, "truncated": 0 },
+        "partial": false
+      }
+    },
+    "flags": { "enabled": true, "aiOutput": true }
+  },
+  "observed": { "dealerName": "DSP_ENTERED", "subVendor": "DSP_ENTERED", "_factFilled.dealerName": "DSP_ENTERED" },
+  "expected": { "dealerName": "", "subVendor": "", "_factFilled.dealerName": null },
+  "placeholdersToReject": ["DSP_ENTERED", "UNASSIGNED"]
+}

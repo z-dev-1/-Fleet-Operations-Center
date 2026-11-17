@@ -1,0 +1,47 @@
+{
+  "id": "M3",
+  "unit": "B62059",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "COX",
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:25.000Z",
+  "note": "COX 'no eta' under a 'Selected Reason: CC - Parts Ordered.' template is a parts-ETA negation, but _negKind (wo-extract-dates.js) only looks 20 chars either side for 'part(s)' and otherwise defaults to techOnsite. On the live AUVTE COX units 17 of 25 'no eta' negations are techOnsite, all logged after COX had already recorded 'Actual technician arrival date time' (here 2026-11-04T04:22:22Z). Only comments that repeat 'parts ordered' right before 'no eta' land on partsArrival.",
+  "input": {
+    "opts": { "vendor": "COX" },
+    "serviceDetail": {
+      "id": "svc-b62059",
+      "workRequest": {
+        "id": "wr-b62059",
+        "createdBy": "fasuser1",
+        "createdDateTime": "2026-11-03T19:49:42.684Z",
+        "comments": [
+          { "timestamp": "2026-11-06T07:53:26.149Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: no eta. havent gotten a response.", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-10T08:44:04.170Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: hood shocks. no eta", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-11T21:34:45.830Z", "createdBy": "COX", "text": "hood shocks. no eta", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-16T07:49:10.488Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: needs good shocks. parts ordered. no eta", "internalOnly": false, "externalConsumers": [] }
+        ]
+      },
+      "workOrders": []
+    },
+    "history": [
+      {
+        "serviceEntityId": "wo-b62059",
+        "eventDateTime": "2026-11-04T04:22:46.453Z",
+        "requester": "COX",
+        "operation": "EDIT",
+        "message": "Work order edited",
+        "status": "SUCCESS",
+        "serviceChangeDetails": [
+          { "field": "Actual technician arrival date time", "description": "actual technician arrival date time", "oldValue": null, "newValue": "2026-11-04T04:22:22Z", "displayType": "DATE_TIME" },
+          { "field": "State", "description": "state", "oldValue": "PENDING", "newValue": "WORK_IN_PROGRESS", "displayType": "ENUM_TEXT" }
+        ]
+      }
+    ]
+  },
+  "observed": { "negationKinds": ["techOnsite", "techOnsite", "techOnsite", "partsArrival"] },
+  "expected": {
+    "negationKinds": ["partsArrival", "partsArrival", "partsArrival", "partsArrival"],
+    "rule": "A COX 'no eta' in a 'CC - Parts Ordered' comment, or any 'no eta' after the WO has an actual technician arrival, is a parts-ETA negation."
+  }
+}

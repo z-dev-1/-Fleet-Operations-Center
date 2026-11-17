@@ -1,0 +1,30 @@
+{
+  "id": "M8",
+  "unit": "B12267",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "COX",
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:24.000Z",
+  "note": "After the 11/12 parts arrived, COX ordered a second part (exhaust temp sensor) on 11/13 with 'called vendor and ordered. will be in Monday', then on 11/16 'parts are expected Monday' and 'part will be in, in the morning'. None of these produce a parts ETC mention: the partsArrival keywords need 'parts will be in' / 'parts ETA' next to a date, and 'will be in Monday' has no 'parts' and 'in the morning' is not a supported relative form. The row keeps partsEta '2026-11-12' (5 days past). On the live row partsStatus 'ordered' comes only from the 11/04 'parts have been ordered' comment; 'called vendor and ordered' (11/13) is the M1 pattern and is not extracted, so with these four comments alone partsStatus is ''.",
+  "input": {
+    "opts": { "vendor": "COX" },
+    "serviceDetail": {
+      "id": "svc-b12267",
+      "workRequest": { "id": "wr-b12267", "createdBy": "fasuser1", "createdDateTime": "2026-11-03T00:11:33.904Z", "comments": [
+        { "timestamp": "2026-11-11T21:31:28.545Z", "createdBy": "COX", "text": "Parts will be in on Thursday 11/12", "internalOnly": false, "externalConsumers": [] },
+        { "timestamp": "2026-11-13T21:59:49.915Z", "createdBy": "COX", "text": "good evening. everything is out and ready to be put together. the exhaust temp sensor is seized inside the hot side of turbo. will not remove without destroying sensor. called vendor and ordered. will be in Monday. will provide an updated estimate.", "internalOnly": false, "externalConsumers": [] },
+        { "timestamp": "2026-11-16T13:45:06.094Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: parts are expected Monday.", "internalOnly": false, "externalConsumers": [] },
+        { "timestamp": "2026-11-17T04:04:24.902Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: need the oil return gasket and everything is good to go. talked to vendor today, and part will be in, in the morning to complete.", "internalOnly": false, "externalConsumers": [] }
+      ] },
+      "workOrders": []
+    }
+  },
+  "observed": { "partsEta": "2026-11-12", "partsArrivalDates": ["2026-11-12"], "partsStatus": "" },
+  "expected": {
+    "partsEta": "2026-11-16",
+    "partsArrivalDatesInclude": ["2026-11-12", "2026-11-16"],
+    "partsStatus": "ordered",
+    "note": "Minimum fix: the 11/13 'ordered. will be in Monday' statement yields partsArrival 2026-11-16 and supersedes 11/12. 'in the morning' (11/16 23:04 ET -> 11/17) is a stretch goal; if unsupported it must stay unparsed rather than guessed."
+  }
+}

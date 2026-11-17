@@ -1,0 +1,147 @@
+{
+  "id": "M9",
+  "units": [
+    "B12259",
+    "B13127",
+    "B12268",
+    "B12343"
+  ],
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "today": "2026-11-17",
+  "snapshotAt": "2026-11-17T18:26:59.924Z",
+  "note": "pmOverdue (wo-facts.js _pmOverdue) is built only from row.pmSchedule. pmSchedule is present on 9 of 29 AUVTE rows (the 7 down units + B12271, B12275). The other rows still carry the raw pm*Due dates and the pills, so two Active AUVTE units with an expired DOT (B12259 due Nov 10, B13127 due Nov 11) and two with an overdue PM B (B12268 Nov 7, B12343 Nov 15) show pmOverdue empty. Which loader writes pm*Due without pmSchedule was not confirmed (aap_api.js:1116 and :1330 only add pmSchedule when the extract flag is on and maintenanceScheduleStatuses is present).",
+  "input": {
+    "rows": [
+      {
+        "equipmentId": "B12259",
+        "operator": "AUVTE",
+        "domicileSite": "ROC5",
+        "lifecycleState": "Active",
+        "pmB": "Mar 14",
+        "pmX": "Mar 1",
+        "dot": "overdue",
+        "quarterlyLift": "overdue",
+        "pmBDue": "Mar 14, 2027",
+        "pmXDue": "Mar 2027",
+        "dotDue": "Nov 10, 2026",
+        "quarterlyLiftDue": "Nov 2026",
+        "pmADue": "(absent)",
+        "washDue": "(absent)",
+        "pmSchedule": "(absent)",
+        "pmOverdue": ""
+      },
+      {
+        "equipmentId": "B13127",
+        "operator": "AUVTE",
+        "domicileSite": "ROC5",
+        "lifecycleState": "Active",
+        "pmB": "Dec 27",
+        "pmX": "--",
+        "dot": "overdue",
+        "quarterlyLift": "Dec 1",
+        "pmBDue": "Dec 27, 2026",
+        "pmXDue": "(absent)",
+        "dotDue": "Nov 11, 2026",
+        "quarterlyLiftDue": "Dec 2026",
+        "pmADue": "(absent)",
+        "washDue": "(absent)",
+        "pmSchedule": "(absent)",
+        "pmOverdue": ""
+      },
+      {
+        "equipmentId": "B12268",
+        "operator": "AUVTE",
+        "domicileSite": "ROC5",
+        "lifecycleState": "Active",
+        "pmB": "overdue",
+        "pmX": "Feb 1",
+        "dot": "Feb 5",
+        "quarterlyLift": "Dec 1",
+        "pmBDue": "Nov 7, 2026",
+        "pmXDue": "Feb 2027",
+        "dotDue": "Feb 5, 2027",
+        "quarterlyLiftDue": "Dec 2026",
+        "pmADue": "(absent)",
+        "washDue": "(absent)",
+        "pmSchedule": "(absent)",
+        "pmOverdue": ""
+      },
+      {
+        "equipmentId": "B12343",
+        "operator": "AUVTE",
+        "domicileSite": "ROC5",
+        "lifecycleState": "Active",
+        "pmB": "overdue",
+        "pmX": "Feb 1",
+        "dot": "Oct 12",
+        "quarterlyLift": "Dec 1",
+        "pmBDue": "Nov 15, 2026",
+        "pmXDue": "Feb 2027",
+        "dotDue": "Oct 12, 2027",
+        "quarterlyLiftDue": "Dec 2026",
+        "pmADue": "(absent)",
+        "washDue": "(absent)",
+        "pmSchedule": "(absent)",
+        "pmOverdue": ""
+      }
+    ]
+  },
+  "observed": {
+    "B12259": {
+      "pmOverdue": "",
+      "pmSchedule": "(absent)"
+    },
+    "B13127": {
+      "pmOverdue": "",
+      "pmSchedule": "(absent)"
+    },
+    "B12268": {
+      "pmOverdue": "",
+      "pmSchedule": "(absent)"
+    },
+    "B12343": {
+      "pmOverdue": "",
+      "pmSchedule": "(absent)"
+    }
+  },
+  "expected": {
+    "B12259": {
+      "overdue": [
+        {
+          "type": "DOT",
+          "due": "2026-11-10",
+          "overdueDays": 7
+        }
+      ]
+    },
+    "B13127": {
+      "overdue": [
+        {
+          "type": "DOT",
+          "due": "2026-11-11",
+          "overdueDays": 6
+        }
+      ]
+    },
+    "B12268": {
+      "overdue": [
+        {
+          "type": "PM_B",
+          "due": "2026-11-07",
+          "overdueDays": 10
+        }
+      ]
+    },
+    "B12343": {
+      "overdue": [
+        {
+          "type": "PM_B",
+          "due": "2026-11-15",
+          "overdueDays": 2
+        }
+      ]
+    },
+    "rule": "When pmSchedule is absent, derive overdue days from the raw DATE-format pm*Due fields (end of due day, America/New_York, same rule as aap_api_mapper _pmScheduleEntry). MONTH_AND_YEAR fields (pmXDue, quarterlyLiftDue) are overdue only after the last day of that month."
+  }
+}

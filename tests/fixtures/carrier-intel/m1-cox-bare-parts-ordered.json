@@ -1,0 +1,32 @@
+{
+  "id": "M1",
+  "unit": "B12263",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "COX",
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:23.000Z",
+  "note": "COX writes 'parts ordered' (no auxiliary verb) and the CC template 'Selected Reason: CC - Parts Ordered.'. PART_STATUS 'ordered' (wo-extract.js) only matches 'was|been|is ordered' or 'on order', so partsStatus stays '' on 3 of 4 AUVTE COX units (B12195, B12263, B62059) although every vendor comment says parts are ordered. Wording copied from the live row (fleet_data.json 2026-11-17); FAS aliases masked.",
+  "input": {
+    "opts": { "vendor": "COX" },
+    "serviceDetail": {
+      "id": "svc-b12263",
+      "workRequest": {
+        "id": "wr-b12263",
+        "createdBy": "fasuser1",
+        "createdDateTime": "2026-11-03T23:39:33.364Z",
+        "comments": [
+          { "timestamp": "2026-11-05T02:47:23.838Z", "createdBy": "COX", "text": "parts ordered", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-05T12:29:04.989Z", "createdBy": "COX", "text": "crank case cover and seal - parts ordered", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-06T08:12:09.217Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: no eta. no response received", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-16T07:50:32.797Z", "createdBy": "COX", "text": "Service appointment updated to Cannot Complete (CC).\nSelected Reason: CC - Parts Ordered.\nTechnician Notes: needs crankcase cover and seal. parts ordered. no eta", "internalOnly": false, "externalConsumers": [] }
+        ]
+      },
+      "workOrders": [
+        { "id": "wo-b12263", "reasonCodes": ["PARTS_ON_BACK_ORDER"], "vendorModifiedTimestamp": "2026-11-17T12:15:42.562Z", "lineItems": [], "comments": [] }
+      ]
+    }
+  },
+  "observed": { "partsStatus": "", "partStatusFacts": 0 },
+  "expected": { "partsStatus": "ordered", "partStatusFactsAtLeast": 1 }
+}

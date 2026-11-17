@@ -1,0 +1,22 @@
+{
+  "id": "M10",
+  "units": ["B12029", "B12257", "B12259", "B62020", "B12195"],
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "today": "2026-11-17",
+  "note": "_formatPmDate (src/scrapers/relay.js) reads a month-only due ('Nov 2026', AAP dueDateDisplayFormat MONTH_AND_YEAR) as the 1st of the month. AAP's own nextDueDate for MONTH_AND_YEAR items is the last day of the month (pmSchedule on the live rows: 'Dec 2026' -> nextDueIso 2026-12-31, 'Jan 2027' -> 2027-01-31, 'Oct 2026' -> 2026-10-31). So four Active AUVTE units show an 'overdue' pill for an item that is due by 11/30 (Quarterly Lift on B12029, B12257, B12259; PM X on B62020), and B12195 shows its Lift pill as 'Dec 1' while AAP says due by 2026-12-31. The Oct 2026 Lift pills on B13014 and B62064 are correctly overdue (16 days).",
+  "input": {
+    "today": "2026-11-17",
+    "raw": [
+      { "unit": "B12029", "field": "quarterlyLiftDue", "value": "Nov 2026" },
+      { "unit": "B12257", "field": "quarterlyLiftDue", "value": "Nov 2026" },
+      { "unit": "B12259", "field": "quarterlyLiftDue", "value": "Nov 2026" },
+      { "unit": "B62020", "field": "pmXDue", "value": "Nov 2026" },
+      { "unit": "B12195", "field": "quarterlyLiftDue", "value": "Dec 2026", "pmScheduleNextDueIso": "2026-12-31" },
+      { "unit": "B13014", "field": "quarterlyLiftDue", "value": "Oct 2026", "pmScheduleNextDueIso": "2026-10-31" }
+    ]
+  },
+  "observed": { "B12029": "overdue", "B12257": "overdue", "B12259": "overdue", "B62020": "overdue", "B12195": "Dec 1", "B13014": "overdue" },
+  "expected": { "B12029": "Nov 30", "B12257": "Nov 30", "B12259": "Nov 30", "B62020": "Nov 30", "B12195": "Dec 31", "B13014": "overdue" },
+  "assistantRule": "Until the pill is fixed, the assistant reads month-only dues as end of month and never reports a 'Nov 2026' item as overdue before 2026-12-01."
+}

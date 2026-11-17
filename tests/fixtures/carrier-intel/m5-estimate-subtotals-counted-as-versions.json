@@ -1,0 +1,47 @@
+{
+  "id": "M5",
+  "unit": "B12267",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "COX",
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:24.000Z",
+  "note": "One Relay history log (2026-11-12T19:29:12.725Z) carries four 'Estimate' COST details: 7733.78 + 2625.00 + 618.70 = 10977.48. extractRelay emits one 'submitted' estimate fact per detail and estimateModel makes each distinct amount a version, so the row shows estimateVersion 4 for what the conversation shows as one estimate ($10,977.48: rejected 'Question/Concern' at 20:15, approved at 22:28). The raw history log was not in fleet_data.json; this log is rebuilt from relayFacts.historyTrend.estimate (same amounts, same timestamp). Whether the three smaller details are labor/parts/tax subtotals or line groups was not confirmed against Relay (no live GET).",
+  "input": {
+    "opts": { "vendor": "COX" },
+    "serviceDetail": {
+      "id": "svc-b12267",
+      "workRequest": { "id": "wr-b12267", "createdBy": "fasuser1", "createdDateTime": "2026-11-03T00:11:33.904Z", "comments": [] },
+      "workOrders": [
+        { "id": "wo-b12267", "vendorModifiedTimestamp": "2026-11-17T14:04:26.161Z", "estimate": { "totalCost": 10977.48, "state": "APPROVED", "estimateUpdatedAt": "2026-11-17T14:04:26.161Z" }, "lineItems": [], "comments": [] }
+      ]
+    },
+    "history": [
+      {
+        "serviceEntityId": "wo-b12267", "eventDateTime": "2026-11-12T19:29:12.725Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS",
+        "serviceChangeDetails": [
+          { "field": "Estimate", "description": "estimate", "oldValue": null, "newValue": "7733.78", "displayType": "COST" },
+          { "field": "Estimate", "description": "estimate", "oldValue": null, "newValue": "2625.0", "displayType": "COST" },
+          { "field": "Estimate", "description": "estimate", "oldValue": null, "newValue": "618.7", "displayType": "COST" },
+          { "field": "Estimate", "description": "estimate", "oldValue": null, "newValue": "10977.48", "displayType": "COST" },
+          { "field": "State", "description": "state", "oldValue": "WORK_IN_PROGRESS", "newValue": "ESTIMATE_PENDING_APPROVAL", "displayType": "ENUM_TEXT" }
+        ]
+      },
+      {
+        "serviceEntityId": "wo-b12267", "eventDateTime": "2026-11-12T20:15:55.002Z", "requester": "fasuser2", "operation": "SUBMIT_DECISION", "message": "Work order edited", "status": "SUCCESS",
+        "serviceChangeDetails": [
+          { "field": "State", "description": "state", "oldValue": "ESTIMATE_PENDING_APPROVAL", "newValue": "ESTIMATE_REJECTED", "displayType": "ENUM_TEXT" },
+          { "field": "Estimate rejection reason", "description": "estimate rejection reason", "oldValue": null, "newValue": "Question/Concern", "displayType": "PLAIN_TEXT" }
+        ]
+      },
+      {
+        "serviceEntityId": "wo-b12267", "eventDateTime": "2026-11-12T22:28:50.993Z", "requester": "fasuser3", "operation": "SUBMIT_DECISION", "message": "Work order edited", "status": "SUCCESS",
+        "serviceChangeDetails": [
+          { "field": "State", "description": "state", "oldValue": "ESTIMATE_PENDING_APPROVAL", "newValue": "ESTIMATE_APPROVED", "displayType": "ENUM_TEXT" }
+        ]
+      }
+    ]
+  },
+  "observed": { "estimateVersion": 4, "versionAmounts": [7733.78, 2625, 618.7, 10977.48], "estimateStatus": "approved", "estimateApprovedAmount": 10977.48 },
+  "expected": { "estimateVersion": 1, "versionAmounts": [10977.48], "estimateStatus": "approved", "estimateApprovedAmount": 10977.48, "rejectedThenApproved": true }
+}

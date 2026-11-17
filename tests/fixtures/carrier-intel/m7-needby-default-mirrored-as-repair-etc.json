@@ -1,0 +1,22 @@
+{
+  "id": "M7",
+  "units": ["B12258", "IND260511"],
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:22.000Z",
+  "note": "The structured workOrders[].expectedCompletionDateTime on B12258 (KWNE) is 2026-10-27T19:50:40.200Z, about 4 hours after WR creation and 5 minutes before the WR needByDateTime (2026-10-27T19:55:17.852Z). It is a default, never a vendor statement: KWNE gave no ETC in the conversation and the Relay history has no 'Expected completion date time' revision. Path B correctly counts it as state 'none', but rowMirrors still writes repairEtc '2026-10-27' (repairEtcSource 'relaygarage'), so any reader of repairEtc sees a 21-day-old 'ETC'. IND260511 (UNNE|COX, supplement) shows the same pattern: repairEtc '2026-10-07', counted none.",
+  "input": {
+    "opts": { "vendor": "KWNE" },
+    "serviceDetail": {
+      "id": "svc-b12258",
+      "workRequest": { "id": "wr-b12258", "createdBy": "fasuser1", "createdDateTime": "2026-10-27T15:54:17.622Z", "needByDateTime": "2026-10-27T19:55:17.852Z", "comments": [
+        { "timestamp": "2026-11-02T11:21:24.658Z", "createdBy": "fasuser2", "text": "@KWNE Please provide an update on repairs or ETC", "internalOnly": false, "externalConsumers": [] },
+        { "timestamp": "2026-11-13T18:20:20.710Z", "createdBy": "KWNE", "text": "we have received parts and are working on now", "internalOnly": false, "externalConsumers": [] }
+      ] },
+      "workOrders": [
+        { "id": "wo-b12258", "vendorModifiedTimestamp": "2026-11-13T18:20:20.837Z", "expectedCompletionDateTime": "2026-10-27T19:50:40.200Z", "lineItems": [], "comments": [] }
+      ]
+    }
+  },
+  "observed": { "repairEtc": "2026-10-27", "repairEtcSource": "relaygarage", "_factEtc.state": "none" },
+  "expected": { "repairEtc": "", "repairEtcSource": "", "_factEtc.state": "none", "rule": "Do not mirror a structured repair ETC that is in the past, was never restated by the vendor, and equals the WR need-by default (within a few minutes)." }
+}

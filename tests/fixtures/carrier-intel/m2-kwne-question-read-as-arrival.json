@@ -1,0 +1,39 @@
+{
+  "id": "M2",
+  "unit": "B12258",
+  "scac": "AUVTE",
+  "domicile": "ROC5",
+  "vendor": "KWNE",
+  "today": "2026-11-17",
+  "now": "2026-11-17T17:27:22.000Z",
+  "note": "A FAS question ('Have the correct pins ... arrived to the shop for repairs?') is extracted as partStatus 'arrived'. The '?' guard in PART_STATUS 'arrived' only looks 20 chars ahead and the '?' is 24 chars after 'arrived'. The vendor's real confirmation ('we have received parts') is missed by both PART_STATUS ('received the parts' only) and MET_MARKER_RE ('parts received' word order only), so the 11/12 partsArrival entry ('by thurs') stays open and the row mirrors partsEta '2026-11-12' next to partsStatus 'arrived'.",
+  "input": {
+    "opts": { "vendor": "KWNE" },
+    "serviceDetail": {
+      "id": "svc-b12258",
+      "workRequest": {
+        "id": "wr-b12258",
+        "createdBy": "fasuser1",
+        "createdDateTime": "2026-10-27T15:54:17.622Z",
+        "comments": [
+          { "timestamp": "2026-11-10T20:41:39.515Z", "createdBy": "KWNE", "text": "still waiting on correct pins for harness- hoping for them to be here by thurs", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-13T17:09:33.751Z", "createdBy": "fasuser2", "text": "@KWNE, Have the correct pins for the harness arrived to the shop for repairs? Thank you", "internalOnly": false, "externalConsumers": [] },
+          { "timestamp": "2026-11-13T18:20:20.710Z", "createdBy": "KWNE", "text": "we have received parts and are working on now", "internalOnly": false, "externalConsumers": [] }
+        ]
+      },
+      "workOrders": []
+    }
+  },
+  "observed": {
+    "partStatus": [{ "value": "arrived", "author": "fasuser2", "at": "2026-11-13T17:09:33.751Z" }],
+    "partsEta": "2026-11-12",
+    "partsStatus": "arrived"
+  },
+  "expected": {
+    "partStatus": [{ "value": "arrived", "author": "KWNE", "at": "2026-11-13T18:20:20.710Z" }],
+    "noPartStatusFromAuthor": "fasuser2",
+    "partsEta": "",
+    "partsEtaMetAt": "2026-11-13",
+    "partsStatus": "arrived"
+  }
+}

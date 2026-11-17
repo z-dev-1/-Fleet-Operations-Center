@@ -1,0 +1,32 @@
+{
+  "id": "M6",
+  "units": ["B12195", "B13340"],
+  "today": "2026-11-17",
+  "note": "historyTrend (wo-history.js) counts every 'Expected completion date time' revision whose new timestamp is later than the old one as a slip, including same-calendar-day re-times and scheduling edits seconds apart. COX re-stamps the ETC every morning (~12:15-12:55Z), so AUVTE COX units show etcSlipCount 8/11/13/10 while the ETC calendar date moved later 5/9/11/9 times. B13340 (HBD1|AKJJI, supplement) gets slipCount 2 from dispatcher edits within 10 seconds of WO creation, with every value on 11/17. The timestamps are real; the label 'slipped N times' overstates. Revisions copied from relayFacts.historyTrend.etc.revisions on the live rows.",
+  "input": {
+    "B12195": [
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-07T21:04:24.076Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-09T22:00:00Z", "newValue": "2026-11-09T04:08:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-09T12:28:25.417Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-09T04:08:00Z", "newValue": "2026-11-10T07:13:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-10T12:47:31.803Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-10T07:13:00Z", "newValue": "2026-11-11T06:03:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-11T12:51:36.043Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-11T06:03:00Z", "newValue": "2026-11-12T06:09:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-12T12:32:09.748Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-12T06:09:00Z", "newValue": "2026-11-13T04:09:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-13T12:55:00.458Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-13T04:09:00Z", "newValue": "2026-11-16T06:15:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-16T01:14:59.289Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-16T06:15:00Z", "newValue": "2026-11-16T18:54:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-16T12:22:00.439Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-16T18:54:00Z", "newValue": "2026-11-17T07:00:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b12195", "eventDateTime": "2026-11-17T12:13:47.615Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T07:00:00Z", "newValue": "2026-11-18T04:03:00Z", "displayType": "DATE_TIME" }] }
+    ],
+    "B13340": [
+      { "serviceEntityId": "wo-b13340", "eventDateTime": "2026-11-17T15:47:13.730Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T19:42:00Z", "newValue": "2026-11-17T14:04:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b13340", "eventDateTime": "2026-11-17T15:47:15.421Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T14:04:00Z", "newValue": "2026-11-17T07:45:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b13340", "eventDateTime": "2026-11-17T15:47:16.838Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T07:45:00Z", "newValue": "2026-11-17T07:20:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b13340", "eventDateTime": "2026-11-17T15:47:18.312Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T07:20:00Z", "newValue": "2026-11-17T08:29:00Z", "displayType": "DATE_TIME" }] },
+      { "serviceEntityId": "wo-b13340", "eventDateTime": "2026-11-17T15:47:20.359Z", "requester": "COX", "operation": "EDIT", "message": "Work order edited", "status": "SUCCESS", "serviceChangeDetails": [{ "field": "Expected completion date time", "oldValue": "2026-11-17T08:29:00Z", "newValue": "2026-11-17T16:06:00Z", "displayType": "DATE_TIME" }] }
+    ]
+  },
+  "observed": { "B12195": { "slipCount": 8, "pullInCount": 1 }, "B13340": { "slipCount": 2, "pullInCount": 3 } },
+  "expected": {
+    "B12195": { "slipCount": 8, "daySlipCount": 5, "dayPullInCount": 1, "sameDayRetimes": 3 },
+    "B13340": { "slipCount": 2, "daySlipCount": 0, "dayPullInCount": 0, "sameDayRetimes": 5 },
+    "rule": "Keep slipCount as the raw count; add a calendar-day count (America/New_York) that the assistant and DBR cite as 'ETC date moved later N times'."
+  }
+}
