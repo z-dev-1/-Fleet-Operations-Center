@@ -350,8 +350,8 @@ function registerSlackIPC(ctx) {
   // first mapped operator by default, or a specific one if provided.
   handle('slack:send-briefing-test', async (_e, data) => {
     const cb = require('../../src/scrapers/carrier_briefing');
-    const { sendToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
-    const deps = { sendToChannel, openConversation, checkLiveAuth };
+    const { sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
+    const deps = { sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth };
     let operator = data && data.operator ? String(data.operator).trim() : '';
     if (!operator) {
       const chans = cb.getConfig && require('../../src/scrapers/pm_alert_reply').getOperatorChannels();
@@ -366,8 +366,8 @@ function registerSlackIPC(ctx) {
   // force) — posts to the live carrier channels. Used by a "Run now" button.
   handle('slack:run-briefing-now', async () => {
     const cb = require('../../src/scrapers/carrier_briefing');
-    const { sendToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
-    return cb.runDailyBriefing({ sendToChannel, openConversation, checkLiveAuth }, { force: true }, (m) => logger.info(m));
+    const { sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth } = require('../../src/scrapers/slack_send');
+    return cb.runDailyBriefing({ sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth }, { force: true }, (m) => logger.info(m));
   });
 
   // Resolve a Slack user id -> display name (cached). Used by the Operator

@@ -485,6 +485,34 @@ async function sendToChannel(channelId, message, threadTs, opts) {
   return { ok: true, ts: result.ts };
 }
 
+// FEATURE (2026-11-17): Block Kit post for the Daily Carrier Briefing. Static
+// layout only (xoxc- user token: no interactive components; URL buttons OK).
+// `text` is the required notification/accessibility fallback. The transport
+// form-encodes every param, so `blocks` is sent as a JSON string. Unfurling is
+// always off. sendToChannel's text-only callers are unaffected.
+const SLACK_MAX_BLOCKS = 50;
+const SLACK_MAX_BLOCKS_JSON = 40000;
+async function sendBlocksToChannel(channelId, blocks, text, opts) {
+  if (!channelId) throw new Error('channelId required');
+  if (!text || !String(text).trim()) throw new Error('fallback text required');
+  if (!Array.isArray(blocks) || !blocks.length) throw new Error('blocks must be a non-empty array');
+  if (blocks.length > SLACK_MAX_BLOCKS) throw new Error('too many blocks (' + blocks.length + ' > ' + SLACK_MAX_BLOCKS + ')');
+  const blocksJson = JSON.stringify(blocks);
+  if (blocksJson.length > SLACK_MAX_BLOCKS_JSON) throw new Error('blocks too large (' + blocksJson.length + ' chars)');
+  const payload = {
+    channel:      channelId,
+    text:         String(text),
+    blocks:       blocksJson,
+    unfurl_links: 'false',
+    unfurl_media: 'false',
+  };
+  if (opts && opts.threadTs) payload.thread_ts = opts.threadTs;
+  const result = await slackWebApi('chat.postMessage', payload);
+  if (!result.ok) throw new Error(`Slack API error: ${result.error}`);
+  logger.info('[Slack] Blocks message sent to channel', channelId, '(' + blocks.length + ' blocks)');
+  return { ok: true, ts: result.ts };
+}
+
 
 function slackSaveConfig(data) {
   const existing = getConfig() || {};
@@ -1344,6 +1372,6 @@ function _resetForTests() {
   _imPeerCache.clear();
 }
 
-module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, getFileInfo, downloadFileBounded, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
+module.exports = { isAuthenticated, checkLiveAuth, logout, sendSlackMessage, sendToChannel, sendBlocksToChannel, slackSaveConfig, getConfig, getChannels, readMessages, readThreadReplies, readDMs, listOpenDMs, findChannelByName, processAutoReplies, searchDirectory, openConversation, checkChannelMembership, resolveUserName, fetchUserProfile, downloadFileContent, downloadFileBuffer, getFileInfo, downloadFileBounded, uploadFileToChannel, SELF_REPLY_MARKER, getLaneStats, _setRawRequestForTests, _resetForTests };
 // Test-only handles (never used by src/): slackWebApi is otherwise module-private.
 module.exports.__test__ = { resetSpeedup: _resetSpeedupForTests, slackWebApi };

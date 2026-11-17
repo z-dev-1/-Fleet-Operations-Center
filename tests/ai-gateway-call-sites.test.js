@@ -140,7 +140,7 @@ describe.each(MODES)('rca/autofill _aiFill (%s)', (_name, flags) => {
 });
 
 describe.each(MODES)('carrier_briefing.sendOperatorBriefing (%s)', (_name, flags) => {
-  it('hanging relay.ask -> 2 x 30 s attempts, then the deterministic fallback is posted', async () => {
+  it('hanging relay.ask -> 2 x 30 s attempts, then the Block Kit briefing posts with the seasonal fallback tip', async () => {
     T.setGatewayFlags(flags);
     const store = require('../src/store');
     store.save('operatorChannels', { operators: [{ operator: 'GWOP', channelId: 'C_GW', ownerId: 'U_GW' }] });
@@ -152,22 +152,28 @@ describe.each(MODES)('carrier_briefing.sendOperatorBriefing (%s)', (_name, flags
     const ask = hanging();
     vi.spyOn(relay, 'ask').mockImplementation(ask);
     const sendToChannel = vi.fn(async () => ({ ts: '1.1' }));
+    const sendBlocksToChannel = vi.fn(async () => ({ ts: '1.2' }));
     vi.useFakeTimers();
-    const s = track(cb.sendOperatorBriefing('GWOP', { sendToChannel }, { force: true }, () => {}));
+    const s = track(cb.sendOperatorBriefing('GWOP', { sendToChannel, sendBlocksToChannel }, { force: true }, () => {}));
     await vi.advanceTimersByTimeAsync(29999);
     expect(ask).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1 + 1500);
     expect(ask).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(29999);
-    expect(sendToChannel).not.toHaveBeenCalled();
+    expect(sendBlocksToChannel).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(s.done).toBe(true);
     expect(s.value).toMatchObject({ sent: true, aiWritten: false, channelId: 'C_GW' });
-    expect(sendToChannel).toHaveBeenCalledTimes(1);
-    const [ch, msg] = sendToChannel.mock.calls[0];
+    expect(sendToChannel).not.toHaveBeenCalled();
+    expect(sendBlocksToChannel).toHaveBeenCalledTimes(1);
+    const [ch, blocks, msg, o] = sendBlocksToChannel.mock.calls[0];
     expect(ch).toBe('C_GW');
-    expect(msg.startsWith('<@U_GW> :sunny: Good morning — GWOP fleet snapshot:')).toBe(true);
-    expect(msg).toContain(':truck: Have a safe day out there.');
+    expect(blocks[0].text.text).toBe('🚛 Daily Fleet Briefing — GWOP');
+    expect(msg.startsWith('<@U_GW>')).toBe(true);
+    expect(o).toEqual({ unfurl: false });
+    const tipBlock = blocks.find((b) => b.type === 'context' && /^💡 /.test(b.elements[0].text));
+    expect(tipBlock).toBeTruthy();
+    expect(tipBlock.elements[0].text.length).toBeGreaterThan(20);
     expect(ask.seen.map((o) => o.source)).toEqual(['carrier_briefing', 'carrier_briefing']);
     if (flags.abortOnTimeout) expect(ask.seen.every((o) => o.signal.aborted)).toBe(true);
     else expect(ask.seen.every((o) => o.signal === undefined)).toBe(true);

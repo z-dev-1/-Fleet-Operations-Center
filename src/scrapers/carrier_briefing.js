@@ -10,8 +10,12 @@
  *  - Fully settings-configurable: enable toggle, send time + timezone, which
  *    snapshot fields are included, risk threshold, safety-tip on/off. Nothing
  *    is hardcoded for a single operator.
- *  - The AI writes the WHOLE message start to finish — no greeting/closing
- *    templates. We only hand it grounded FACTS; it decides all wording.
+ *  - Block Kit redesign (2026-11-17, user-approved layout): the message is a
+ *    deterministic Block Kit layout (carrier_briefing_blocks.js) posted via
+ *    slack_send.sendBlocksToChannel; the AI writes only the safety tip. Unit
+ *    IDs are plain text (no Relay/AAP links); names, $ and URLs are stripped.
+ *    (Historical: the AI used to write the WHOLE message — buildBriefingPrompt
+ *    is kept exported but no longer used for sending.)
  *  - Grounding (never invent): fleet units from fleetData; domicile addresses
  *    from the Contact Book (type === 'domicile'); operator->channel/owner from
  *    operatorChannels. If an address/field isn't on file, it is omitted — never
@@ -33,6 +37,9 @@
 const store = require('../store');
 const logger = require('../utils/logger').createLogger('carrier_briefing');
 const { getOperatorChannels, resolveOperatorEntry } = require('./pm_alert_reply');
+// Block Kit redesign (2026-11-17): the layout is now deterministic Block Kit
+// (carrier_briefing_blocks.js); the AI writes only the safety tip.
+const { buildBriefingBlocks, buildBriefingText, PM_TYPES, PM_WINDOW_DAYS } = require('./carrier_briefing_blocks');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG = {
@@ -103,6 +110,21 @@ function nowInZone(timezone, when) {
   }
 }
 
+// "Tue, Nov 17" in the configured tz (briefing context line).
+function _dateLabel(timezone, when) {
+  const d = when || new Date();
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short', month: 'short', day: 'numeric' }).format(d); }
+  catch (_) { return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(d); }
+}
+
+// "9:46 AM" for an ISO timestamp in the tz; "" when missing/invalid.
+function _timeLabel(iso, timezone) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour: 'numeric', minute: '2-digit' }).format(new Date(t)); }
+  catch (_) { return new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(new Date(t)); }
+}
+
 // Month-based season label (northern hemisphere) to steer the safety tip.
 function _seasonFor(dateStr) {
   const m = parseInt(String(dateStr).slice(5, 7), 10);
@@ -164,6 +186,12 @@ function gatherOperatorFacts(operator, cfg) {
   // — so the AI/reasoning layer still sees everything.
   let _redact; try { _redact = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redact = (x) => x; }
 
+  // Block Kit fields: also drop any URL (no internal Relay/AAP links reach the
+  // carrier) before the name/$ redaction.
+  const _carrierText = (s) => _redact(String(s || '').replace(_URL_RE, ' ')).replace(/\s{2,}/g, ' ').trim();
+  const todayIso = nowInZone(cfg.timezone).date;
+  const nowMs = Date.now();
+
   const down = rows.filter(_isDown).map((r) => {
     const code = domicileCode(r);
     const loc = addrMap[code] || '';
@@ -172,6 +200,11 @@ function gatherOperatorFacts(operator, cfg) {
     // Canonical record (reconciled status/situation/next-step/stale). null for
     // units not yet reconciled — the raw reason/timeline below then stand alone.
     const canon = _canon ? _canon.getCanonical(r) : null;
+    const issueSummary = _redact(_issueSummary(r, reason, latestUpdate));
+    const canonNextStep = canon ? String(canon.nextStep || '').trim() : '';
+    const canonStatusKey = canon ? String(canon.status || '').trim() : '';
+    const daysDown = _daysDown(r, nowMs);
+    const actionSrc = [canonNextStep, reason, issueSummary, latestUpdate].map(_carrierText).find((t) => t && PARTNER_ACTION_RE.test(t)) || '';
     return {
       unit: String(r.equipmentId || '').trim(),
       reason,
@@ -179,7 +212,7 @@ function gatherOperatorFacts(operator, cfg) {
       // AI-written issue summary, then the raw relay Issue Details. De-duped so
       // it is NOT just a copy of the short lifecycle reason or the latest
       // timeline update already shown. "" when nothing distinct is on file.
-      issueSummary: _redact(_issueSummary(r, reason, latestUpdate)),
+      issueSummary,
       // Latest repair-timeline entry (the day-by-day narrative; last line is
       // the most recent update). Falls back to the saved issue summary when no
       // timeline exists yet. "" when neither is on file (never guessed).
@@ -188,11 +221,29 @@ function gatherOperatorFacts(operator, cfg) {
       location: loc, // "" when no Contact Book address on file (never guessed)
       // Canonical state fields — "" / false when no record yet (never guessed).
       canonStatus: canon ? (_canon.statusLabel(canon.status)) : '',
-      canonNextStep: canon ? String(canon.nextStep || '').trim() : '',
+      canonNextStep,
       canonStale: !!(canon && canon.stale),
       canonWaitingOn: canon ? String(canon.waitingOn || '').trim() : '',
+      // Block Kit row fields (all carrier-redacted; "" / null when not on file).
+      canonStatusKey,
+      daysDown,
+      vendor: _carrierText(r.subVendor || r.vendor),
+      issue: _clip(_carrierText(issueSummary || reason || latestUpdate), 140),
+      estimateLabel: _estimateLabel(r),
+      etcIso: _toIsoDate(r.repairEtc),
+      etcState: String((r._factEtc && r._factEtc.state) || ''),
+      nextStep: _clip(_carrierText(canonNextStep), 140),
+      severity: _severity(r, daysDown, canonStatusKey, reason, threshold),
+      needsAction: !!actionSrc,
+      actionText: _clip(actionSrc, 160),
     };
   }).filter((d) => d.unit);
+
+  // PM / DOT due (PM-B, DOT, PM-X, Quarterly Lift) across ALL operator rows,
+  // from the asset-API fields pmDueFields already put on the rows. Rows with no
+  // PM data are skipped.
+  const pmDue = rows.map((r) => ({ unit: String(r.equipmentId || '').trim(), items: _pmItems(r, todayIso) }))
+    .filter((u) => u.unit && u.items.length);
 
   // Flagged (elevated-risk) units — now a LIST (unit + score + why), not just a
   // count, so the briefing can name which units and the risk reason.
@@ -228,7 +279,113 @@ function gatherOperatorFacts(operator, cfg) {
     activeCount,
     domiciles,
     riskThreshold: threshold,
+    pmDue,
+    syncedAt: _syncedAt(),
   };
+}
+
+// ── Block Kit fact helpers ────────────────────────────────────────────────────
+const _URL_RE = /<?\bhttps?:\/\/[^\s>]+>?/gi;
+
+// Partner-held blockers (impound/storage fees, confirm accident vendor, …).
+const PARTNER_ACTION_RE = /impound|storage fee|release fee|tow(?:ing)? (?:yard )?fee|accident vendor|confirm (?:the )?(?:accident|insurance|vendor|tow)|(?:carrier|dsp|partner|operator|owner) (?:to|needs? to|must) (?:confirm|approve|pay|provide|pick|release|authori[sz]e)|awaiting (?:carrier|dsp|partner|operator)/i;
+
+function _clip(s, n) {
+  const t = String(s || '').trim();
+  return t.length > n ? t.slice(0, n - 1).trimEnd() + '…' : t;
+}
+
+function _syncedAt() {
+  try { const fd = store.load('fleetData', {}) || {}; return fd.syncedAt || ''; } catch (_) { return ''; }
+}
+
+// Whole days down from the WR/down start (`created`), else "Nd …" workDuration.
+function _daysDown(r, nowMs) {
+  const t = Date.parse(r.created || '');
+  if (Number.isFinite(t) && t <= nowMs) return Math.floor((nowMs - t) / 864e5);
+  const m = String(r.workDuration || '').match(/^(\d+)d/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Estimate STATUS only — never the dollar figure.
+function _estimateLabel(r) {
+  const st = String(r.estimateStatus || '').toLowerCase();
+  if (st === 'approved') return 'Estimate approved';
+  if (st === 'submitted') return 'Estimate pending approval';
+  if (st === 'rejected' || st === 'temp-reject') return 'Estimate under revision';
+  if (String(r.estimatePendingCost || '').trim()) return 'Estimate pending approval';
+  if (String(r.totalCost || '').trim()) return 'Estimate approved';
+  return '';
+}
+
+function _toIsoDate(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
+  const t = Date.parse(s);
+  if (!Number.isFinite(t)) return '';
+  const d = new Date(t);
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+// 🔴 red: >14d down, urgent, or risk >= threshold; 🟡 yellow: parts wait; ⚪ white.
+function _severity(r, daysDown, canonStatusKey, reason, threshold) {
+  const risk = (r.riskScore === undefined || r.riskScore === null || r.riskScore === '') ? NaN : Number(r.riskScore);
+  if ((daysDown != null && daysDown > 14) || /^yes$/i.test(String(r.urgent || '').trim()) ||
+      (Number.isFinite(risk) && risk >= threshold)) return 'red';
+  if (canonStatusKey === 'awaiting_parts' || /wait|order|back ?order|ship|eta/i.test(String(r.partsStatus || '')) ||
+      /\bparts?\b/i.test(String(reason || ''))) return 'yellow';
+  return 'white';
+}
+
+const _PM_RAW_KEYS = { PM_B: 'pmBDue', DOT: 'dotDue', PM_X: 'pmXDue', QUARTERLY_LIFT: 'quarterlyLiftDue' };
+const _MON = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+const _MON_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const _pad2 = (n) => String(n).padStart(2, '0');
+function _lastDayIso(y, mo) { return y + '-' + _pad2(mo + 1) + '-' + _pad2(new Date(Date.UTC(y, mo + 1, 0)).getUTCDate()); }
+
+// "Mon D, YYYY" -> that date; "Mon YYYY" (month-only) -> last day of month.
+function _pmRawToIso(raw) {
+  const s = String(raw || '').trim();
+  let m = s.match(/^([A-Za-z]{3})[a-z]*\.? (\d{1,2}), (\d{4})$/);
+  if (m && _MON[m[1].toLowerCase()] != null) return { iso: m[3] + '-' + _pad2(_MON[m[1].toLowerCase()] + 1) + '-' + _pad2(Number(m[2])), monthOnly: false };
+  m = s.match(/^([A-Za-z]{3})[a-z]*\.? (\d{4})$/);
+  if (m && _MON[m[1].toLowerCase()] != null) return { iso: _lastDayIso(Number(m[2]), _MON[m[1].toLowerCase()]), monthOnly: true };
+  return null;
+}
+
+function _isoDayDiff(a, b) {
+  const p = (x) => { const m = String(x).match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  return Math.round((p(a) - p(b)) / 864e5);
+}
+
+function _pmItems(r, todayIso) {
+  const found = {};
+  if (Array.isArray(r.pmSchedule)) {
+    for (const e of r.pmSchedule) {
+      const type = String((e && e.type) || '').toUpperCase();
+      if (!PM_TYPES.includes(type) || found[type]) continue;
+      const m = String(e.nextDueIso || '').match(/^(\d{4})-(\d{2})-\d{2}/);
+      if (!m) continue;
+      const monthOnly = String(e.displayFormat || '').toUpperCase() === 'MONTH_AND_YEAR';
+      found[type] = { iso: monthOnly ? _lastDayIso(+m[1], +m[2] - 1) : e.nextDueIso.slice(0, 10), monthOnly };
+    }
+  }
+  for (const type of PM_TYPES) {
+    if (!found[type]) { const p = _pmRawToIso(r[_PM_RAW_KEYS[type]]); if (p) found[type] = p; }
+  }
+  const items = [];
+  for (const type of PM_TYPES) {
+    const f = found[type];
+    if (!f) continue;
+    const days = _isoDayDiff(f.iso, todayIso);
+    if (!Number.isFinite(days) || days > PM_WINDOW_DAYS) continue;
+    const mo = Number(f.iso.slice(5, 7)) - 1;
+    items.push({ type, dueIso: f.iso, dueLabel: f.monthOnly ? _MON_NAMES[mo] + ' ' + f.iso.slice(0, 4) : _MON_NAMES[mo] + ' ' + Number(f.iso.slice(8, 10)), days });
+  }
+  return items;
 }
 
 // Most recent repair-timeline line for a unit (timeline is appended oldest ->
@@ -375,43 +532,62 @@ async function _askAI(prompt, log) {
   return '';
 }
 
-// Deterministic LAST-RESORT message (only if every AI attempt fails) so the
-// carrier is still greeted rather than getting nothing.
-function _fallbackMessage(facts, cfg, ownerTag) {
-  const parts = [];
-  if (ownerTag) parts.push(ownerTag + ' :sunny: Good morning — ' + facts.operator + ' fleet snapshot:');
-  else parts.push(':sunny: Good morning — ' + facts.operator + ' fleet snapshot:');
-  if (cfg.includeDown) {
-    if (facts.downCount) {
-      parts.push(':red_circle: ' + facts.downCount + ' unit(s) down:');
-      facts.down.forEach((d) => {
-        let line = '• ' + d.unit + (d.reason ? ' — ' + d.reason : '') + (d.domicile ? ' · ' + d.domicile : '');
-        if (d.canonStatus) line += '\n   Status: ' + d.canonStatus + (d.canonStale ? ' (no recent update)' : '');
-        if (d.canonNextStep) line += '\n   Next step: ' + d.canonNextStep;
-        if (d.issueSummary) line += '\n   Issue: ' + d.issueSummary;
-        if (d.latestUpdate) line += '\n   Latest: ' + d.latestUpdate;
-        parts.push(line);
-      });
-    } else {
-      parts.push(':green_circle: All units active — nothing down.');
-    }
+// Safety tip (the only AI-written part of the Block Kit briefing). Short,
+// plain text, no names/prices/internal names, no repeats of recent tips.
+function buildTipPrompt(season, recentTips) {
+  const lines = [];
+  lines.push('Write ONE practical, specific safety tip of the day for a trucking carrier partner, relevant to ' + season + ' driving/fleet operations.');
+  lines.push('Rules: at most 160 characters, plain text, one line, no greeting, no emojis, no quotes.');
+  lines.push('MUST NOT mention "Z", "Zila", "FAS", any personal name, or any price/dollar amount.');
+  const recent = Array.isArray(recentTips) ? recentTips.filter(Boolean) : [];
+  if (recent.length) {
+    lines.push('Do NOT repeat any of these recent tips (choose a different topic):');
+    recent.forEach((t) => lines.push('    - ' + t));
   }
-  if (cfg.includeFlagged) {
-    if (facts.flaggedCount) {
-      parts.push(':large_yellow_circle: ' + facts.flaggedCount + ' flagged this week (risk >= ' + facts.riskThreshold + ') — ensure pre-trip inspections before dispatch:');
-      facts.flagged.forEach((f) => {
-        parts.push('• ' + f.unit + ' (risk ' + f.score + ')' + (f.reason ? ' — ' + f.reason : ''));
-      });
-    } else {
-      parts.push(':large_yellow_circle: 0 flagged this week (risk >= ' + facts.riskThreshold + ').');
-    }
-  }
-  if (cfg.includeActive) parts.push(':green_circle: ' + facts.activeCount + ' active units.');
-  if (cfg.includeDomiciles && facts.domiciles.length) {
-    parts.push(':round_pushpin: Domiciles: ' + facts.domiciles.map((d) => d.location ? (d.code + ' (' + d.location + ')') : d.code).join(', '));
-  }
-  parts.push(':truck: Have a safe day out there.');
-  return parts.join('\n');
+  return lines.join('\n');
+}
+
+// Deterministic tip when the AI is unavailable: 4 per season, by day of month.
+const _SEASON_TIPS = {
+  winter: [
+    'Check tire pressure before every cold-morning departure; it drops about 1 PSI per 10°F.',
+    'Clear all snow and ice from the trailer roof before leaving the yard.',
+    'Double your following distance on bridges and overpasses; they freeze first.',
+    'Keep fuel above half a tank in freezing weather to prevent gel-up and condensation.',
+  ],
+  spring: [
+    'Watch for potholes after the thaw and report any steering pull right away.',
+    'Slow down in heavy spring rain; hydroplaning can start around 35 mph on worn tires.',
+    'Walk around the unit before each trip and check lights, mud flaps, and tire tread.',
+    'Expect more road work this season; slow down early and give crews extra room.',
+  ],
+  summer: [
+    'Check coolant level and hoses on pre-trip; summer heat is hard on cooling systems.',
+    'Check tire pressure cold, before the run; hot tires read high.',
+    'Stay hydrated on long runs; fatigue from heat slows reaction time.',
+    'Give extra room around tourist and RV traffic on summer highways.',
+  ],
+  fall: [
+    'Wet leaves can be as slick as ice; brake early on leaf-covered roads.',
+    'Low sun at dawn and dusk causes glare; keep the windshield clean inside and out.',
+    'Watch for deer at dawn and dusk; brake firmly and do not swerve.',
+    'Test heaters, defrosters, and wipers now, before the first cold snap.',
+  ],
+};
+function _seasonalTip(dateStr) {
+  const list = _SEASON_TIPS[_seasonFor(dateStr)] || _SEASON_TIPS.fall;
+  const day = parseInt(String(dateStr).slice(8, 10), 10) || 0;
+  return list[day % list.length];
+}
+
+// Ask the AI for the tip (same 2×30 s retry). Returns { tip, aiWritten }.
+async function _getTip(dateStr, log) {
+  let _redact; try { _redact = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redact = (x) => x; }
+  const raw = await _askAI(buildTipPrompt(_seasonFor(dateStr), _recentTips()), log);
+  const first = String(raw || '').split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+  const tip = _clip(_redact(first.replace(_URL_RE, ' ').replace(/^["'“”*\-•\s]+|["'“”*\s]+$/g, '')).trim(), 200);
+  if (tip) return { tip, aiWritten: true };
+  return { tip: _seasonalTip(dateStr), aiWritten: false };
 }
 
 // ── Safety-tip no-repeat history ──────────────────────────────────────────────
@@ -437,6 +613,20 @@ function _rememberTip(message) {
   } catch (_) { /* non-fatal */ }
 }
 
+// Blocks sender for a deps object. deps.sendBlocksToChannel wins. Callers that
+// can't add it (src/ipc/ai.js is off-limits under the email-intel NFR-8 guard)
+// but pass the REAL slack_send.sendToChannel get the real
+// slack_send.sendBlocksToChannel. Anything else (mocks, custom senders) gets
+// null, so the briefing goes out text-only through deps.sendToChannel.
+function _blocksSender(deps) {
+  if (typeof deps.sendBlocksToChannel === 'function') return deps.sendBlocksToChannel;
+  try {
+    const ss = require('./slack_send');
+    if (deps.sendToChannel && deps.sendToChannel === ss.sendToChannel && typeof ss.sendBlocksToChannel === 'function') return ss.sendBlocksToChannel;
+  } catch (_) { /* slack_send unavailable — text-only */ }
+  return null;
+}
+
 // ── Send one operator's briefing ──────────────────────────────────────────────
 // deps: { sendToChannel, openConversation, checkLiveAuth }
 // opts: { testToSelf?: boolean, force?: boolean } — testToSelf posts to the
@@ -447,6 +637,7 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
   deps = deps || {};
   opts = opts || {};
   const { sendToChannel, openConversation, checkLiveAuth } = deps;
+  const sendBlocksToChannel = _blocksSender(deps);
   const cfg = getConfig();
 
   const entry = resolveOperatorEntry(operator);
@@ -489,24 +680,45 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
   }
 
   const ownerTag = entry.ownerId ? '<@' + entry.ownerId + '>' : '';
-  const prompt = buildBriefingPrompt(facts, cfg, ownerTag, today);
 
-  let message = await _askAI(prompt, doLog);
-  let aiWritten = !!message;
-  if (!message) {
-    doLog('[CarrierBriefing] ' + operator + ': all AI attempts failed — using deterministic fallback');
-    message = _fallbackMessage(facts, cfg, ownerTag);
+  // Safety tip: the only AI-written part (deterministic seasonal tip if the AI fails).
+  let tip = '';
+  let aiWritten = false;
+  if (cfg.tipEnabled) {
+    const t = await _getTip(today, doLog);
+    tip = t.tip;
+    aiWritten = t.aiWritten;
+    if (!aiWritten) doLog('[CarrierBriefing] ' + operator + ': AI tip unavailable — using seasonal tip');
   }
-  // Safety net: ensure the owner is actually tagged even if the AI omitted it.
-  if (ownerTag && message.indexOf(ownerTag) === -1) message = ownerTag + ' ' + message;
-  // For a self-test, prefix a clear marker so it isn't mistaken for a live post.
-  if (opts.testToSelf) {
-    message = ':test_tube: *Daily Carrier Briefing — TEST preview for ' + facts.operator +
-      '* (this would post to <#' + entry.channelId + '>)\n\n' + message;
-  }
+
+  // "Questions? Message Z" URL button (Slack profile/DM link). Omitted when the
+  // Slack user id can't be read.
+  let contactUrl = '';
+  try {
+    const auth = typeof checkLiveAuth === 'function' ? await checkLiveAuth() : null;
+    if (auth && auth.userId && /^[A-Z0-9]+$/i.test(String(auth.userId))) {
+      contactUrl = 'https://amazon.enterprise.slack.com/team/' + auth.userId;
+    }
+  } catch (_) { contactUrl = ''; }
+
+  const ctx = {
+    todayIso: today,
+    dateLabel: _dateLabel(tz),
+    updatedLabel: _timeLabel(facts.syncedAt, tz),
+    ownerTag,
+    tip,
+    contactUrl,
+    testPreviewChannelId: opts.testToSelf ? entry.channelId : '',
+    includeDown: cfg.includeDown,
+    includeDomiciles: cfg.includeDomiciles,
+  };
+  const blocks = buildBriefingBlocks(facts, ctx);
+  const message = buildBriefingText(facts, ctx);
 
   try {
-    await sendToChannel(destChannel, message); // top-level (no thread_ts)
+    // top-level (no thread_ts); text-only fallback for callers without the blocks helper.
+    if (typeof sendBlocksToChannel === 'function') await sendBlocksToChannel(destChannel, blocks, message, { unfurl: false });
+    else await sendToChannel(destChannel, message);
   } catch (e) {
     doLog('[CarrierBriefing] ' + operator + ': send failed (' + e.message + ')');
     return { sent: false, reason: 'send-failed', error: e.message };
@@ -525,11 +737,11 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
     }
     l.lastRunAt = new Date().toISOString();
     _saveLog(l);
-    if (aiWritten) _rememberTip(message);
+    if (aiWritten) _rememberTip(tip);
   }
 
   doLog('[CarrierBriefing] ' + operator + ': ' + (opts.testToSelf ? 'TEST ' : '') + 'posted to ' +
-    (opts.testToSelf ? 'self-DM' : entry.channelId) + ' (' + (aiWritten ? 'AI' : 'fallback') + ')');
+    (opts.testToSelf ? 'self-DM' : entry.channelId) + ' (' + blocks.length + ' blocks, tip ' + (aiWritten ? 'AI' : 'fallback') + ')');
   return { sent: true, operator, channelId: entry.channelId, aiWritten, testToSelf: !!opts.testToSelf };
 }
 
@@ -575,8 +787,8 @@ let _timer = null;
 let _firingFor = null; // guards against overlapping runs within the same minute
 
 function _slackDeps() {
-  const { sendToChannel, openConversation, checkLiveAuth } = require('./slack_send');
-  return { sendToChannel, openConversation, checkLiveAuth };
+  const { sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth } = require('./slack_send');
+  return { sendToChannel, sendBlocksToChannel, openConversation, checkLiveAuth };
 }
 
 async function _tick() {
@@ -648,6 +860,10 @@ module.exports = {
   nowInZone,
   gatherOperatorFacts,
   buildBriefingPrompt,
+  buildTipPrompt,
+  buildBriefingBlocks,
+  buildBriefingText,
+  PARTNER_ACTION_RE,
   sendOperatorBriefing,
   runDailyBriefing,
   startScheduler,
