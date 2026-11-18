@@ -1131,6 +1131,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           return;
         }
         let rows  = ds.rows || [];
+        try { require('../diag/amz_probe').maybeRunAmzProbe(); } catch (_) {} // TEMP diag, FLEET_AMZ_PROBE=1 only
 
         // Enrich from the CACHED Uptake units immediately (never block the table
         // on a live Uptake refresh). Uptake data is layered by equipmentId.
