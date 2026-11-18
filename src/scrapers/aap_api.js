@@ -390,6 +390,78 @@ async function _validateAssetFleetIds(ids) {
   return { used, dropped };
 }
 
+// Max getAsset lookups per refresh for fleet discovery.
+const FLEET_DISCOVERY_CAP = 25;
+
+// Append newly discovered asset fleet ids to settings.assetFleetIds through the
+// store's read-modify-write (other settings keys untouched). When the setting
+// is not set yet, the defaults are written first so they stay in the list.
+function _persistDiscoveredFleetIds(newIds) {
+  try {
+    require('../store').update('settings', (s) => {
+      const cur = (s && typeof s === 'object') ? s : {};
+      const base = (Array.isArray(cur.assetFleetIds) && cur.assetFleetIds.length)
+        ? cur.assetFleetIds : DEFAULT_ASSET_FLEET_IDS.slice();
+      const out = base.slice();
+      for (const id of newIds) if (!out.includes(id)) out.push(id);
+      return Object.assign({}, cur, { assetFleetIds: out });
+    }, {});
+    logger.info('buildFleetDataset: saved discovered asset fleet ids to settings.assetFleetIds [' + newIds.join(',') + ']');
+  } catch (e) {
+    logger.warn('buildFleetDataset: could not save discovered asset fleet ids (' + e.message + ') — they will be rediscovered next refresh');
+  }
+}
+
+// Fleet discovery (additive, never throws). AAIDs that have an in-scope WO
+// (woByAaid) but are missing from the asset search (assetByAaid) are looked up
+// with getAsset (bounded by `cap`) to read asset.fleetId. New fleet ids are
+// validated with getFleet; if any pass, ONE more asset pass runs with the union
+// and only assets not already present are added to assetByAaid (mutated in
+// place). On a second-pass error the first-pass fleet is kept unchanged. The
+// new ids are saved to settings only after the second pass succeeds.
+async function _discoverAssetFleets({ woByAaid, assetByAaid, assetFleetIds, assetPass, cap }) {
+  const limit = (cap != null) ? cap : FLEET_DISCOVERY_CAP;
+  const missing = [...woByAaid.keys()].filter((aaid) => !assetByAaid.has(aaid));
+  if (!missing.length) return { missing: 0, discovered: [], kept: [], added: 0 };
+  const lookups = missing.slice(0, limit);
+  if (missing.length > lookups.length) {
+    logger.warn('buildFleetDataset: fleet discovery capped at ' + limit + ' getAsset lookups; skipped ' + (missing.length - lookups.length) + ' missing AAIDs');
+  }
+  const known = new Set(assetFleetIds);
+  const discovered = [];
+  for (const aaid of lookups) {
+    try {
+      const a = await getAsset(aaid);
+      const fid = a && String((a.asset || a).fleetId || '').trim();
+      if (fid && !known.has(fid)) { known.add(fid); discovered.push(fid); }
+    } catch (e) {
+      logger.warn('buildFleetDataset: fleet discovery getAsset(' + aaid + ') failed: ' + (e && e.message));
+      if (e && e.code === 'MIDWAY_SESSION_INVALID') break; // session gone: further lookups would fail too
+    }
+  }
+  const kept = [];
+  for (const fid of discovered) {
+    try { await getFleet(fid); kept.push(fid); }
+    catch (e) { logger.warn('buildFleetDataset: fleet discovery dropping fleet id ' + fid + ' (getFleet failed: ' + (e && e.message) + ')'); }
+  }
+  let added = 0;
+  if (kept.length) {
+    try {
+      const more = await assetPass(assetFleetIds.concat(kept), { calls: 0 });
+      for (const [aaid, a] of more) {
+        if (!assetByAaid.has(aaid)) { assetByAaid.set(aaid, a); added++; }
+      }
+      _persistDiscoveredFleetIds(kept);
+    } catch (e) {
+      logger.warn('buildFleetDataset: fleet discovery asset pass failed (' + (e && e.message) + ') — keeping the first-pass fleet');
+    }
+  }
+  logger.info('buildFleetDataset: fleet discovery — missing AAIDs ' + missing.length + ' (looked up ' + lookups.length + ')'
+    + ', new fleet ids ' + discovered.length + ', validated ' + kept.length + ' [' + kept.join(',') + ']'
+    + ', assets added ' + added);
+  return { missing: missing.length, discovered, kept, added };
+}
+
 function searchServices(searchRequest, opts) {
   return apiPost('/api/v1/serviceaggregates/search', _searchBody(searchRequest, opts && opts.filters));
 }
@@ -1041,12 +1113,6 @@ async function buildFleetDataset(opts = {}) {
   }
   logger.info('buildFleetDataset: asset search returned ' + assetByAaid.size + ' assets (' + assetFleetIds.length + ' fleet ids)');
 
-  // Optionally narrow to UNAVAILABLE assets only.
-  const assetEntries = [...assetByAaid.values()].filter((a) => {
-    if (opts.unavailableOnly) return String(a.asset && a.asset.lifecycleState).toUpperCase() === 'UNAVAILABLE';
-    return true;
-  });
-
   // 2) WORK ORDERS — fetch WOs for the same filter, index by aaid, choosing the
   //    CURRENT OPEN WO per unit. A unit accumulates many historical WOs; picking
   //    "most recently modified" can land on a CLOSED one (and its serviceId gives
@@ -1076,6 +1142,18 @@ async function buildFleetDataset(opts = {}) {
     if (!w.aaid) continue;
     if (woBetter(w, woByAaid.get(w.aaid))) woByAaid.set(w.aaid, w);
   }
+
+  // FLEET DISCOVERY — additive. An in-scope WO whose asset did not come back
+  // from the asset search belongs to a fleet the list doesn't know (AMZ503669
+  // case). Learn that fleet: getAsset -> fleetId, getFleet validation, ONE more
+  // asset pass with the union, merge new assets, persist the new ids.
+  await _discoverAssetFleets({ woByAaid, assetByAaid, assetFleetIds, assetPass, cap: opts.fleetDiscoveryCap });
+
+  // Optionally narrow to UNAVAILABLE assets only.
+  const assetEntries = [...assetByAaid.values()].filter((a) => {
+    if (opts.unavailableOnly) return String(a.asset && a.asset.lifecycleState).toUpperCase() === 'UNAVAILABLE';
+    return true;
+  });
 
   // U/P COLUMN — open WORK-REQUEST counts per asset, by category. The asset
   // record carries NO open-WR count fields (confirmed via getAsset + asset

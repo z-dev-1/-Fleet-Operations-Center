@@ -331,6 +331,115 @@ describe('buildFleetDataset fleet scope (Managed Domiciles, not a fleetIds allow
   });
 });
 
+describe('buildFleetDataset fleet discovery (in-scope WO, asset missing from the search)', () => {
+  const NEW_FLEET = '11111111-2222-4333-8444-555555555555';
+  const store = require('../src/store');
+  const isGetFleet = (r) => r.method === 'GET' && r.path.startsWith('/api/v1/fleet/');
+  const fleetOf = (r) => decodeURIComponent(r.path.slice('/api/v1/fleet/'.length));
+  const assetGetRe = /^\/api\/v1\/assets\/([^/?]+)$/;
+  const isGetAsset = (r) => r.method === 'GET' && assetGetRe.test(r.path);
+  const aaidOf = (r) => decodeURIComponent(assetGetRe.exec(r.path)[1]);
+  const withNew = (r) => (r.body.fleetIds || []).includes(NEW_FLEET);
+  const AMZ_ASSET = mkAsset({ aaid: 'aaid-amz', unit: 'AMZ503669', state: 'ORDERED', reason: 'PENDING_DELIVERY', assetType: 'tractor' });
+  const AMZ_WO = mkWo({ id: 'svc-amz-open', aaid: 'aaid-amz', unit: 'AMZ503669', vendor: 'TA', status: 'WORK_ORDER_ASSIGNED', state: 'ORDERED', reason: 'PENDING_DELIVERY' });
+  // First pass (known fleets) misses AMZ503669; a pass that includes NEW_FLEET returns it.
+  // over(r) may answer first; getAsset('aaid-amz') reports NEW_FLEET.
+  const discoveryPage = (over = () => null, extraWos = []) => {
+    const base = mkRouter(fleetSpec({ unplanned: [FLEET.unplannedWos.concat([AMZ_WO], extraWos)] }));
+    const page = mkRoutedPage((r) => {
+      const o = over(r);
+      if (o) return o;
+      if (isAssetSearch(r) && withNew(r)) {
+        return ok({ assets: assetKey(r) === 'domicileSite' && r.body.from === 0 ? FLEET.assets.concat([AMZ_ASSET]) : [] });
+      }
+      if (isGetAsset(r) && aaidOf(r) === 'aaid-amz') return ok({ asset: { aaid: 'aaid-amz', displayName: 'AMZ503669', fleetId: NEW_FLEET } });
+      return base(r);
+    });
+    aap._setProviderForTest(mkProvider([page]));
+    return page;
+  };
+  let prevSettings;
+  beforeEach(() => { prevSettings = store.load('settings', {}); });
+  afterEach(() => { store.save('settings', prevSettings); });
+
+  it('looks up only the missing AAID, validates its fleet, runs one more pass, and the unit joins the fleet with its open WR', async () => {
+    const page = discoveryPage();
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(page.requests.filter(isGetAsset).map(aaidOf)).toEqual(['aaid-amz']);   // never for AAIDs already returned
+    expect(page.requests.filter(isGetFleet).map(fleetOf)).toContain(NEW_FLEET);
+    const assetReqs = page.requests.filter(isAssetSearch);
+    expect(assetReqs.filter((r) => !withNew(r)).map(assetKey)).toEqual(['domicileSite', 'operator']);
+    const second = assetReqs.filter(withNew);
+    expect(second.map(assetKey)).toEqual(['domicileSite', 'operator']);
+    for (const r of second) {
+      expect([...r.body.fleetIds].sort()).toEqual([...aap.DEFAULT_ASSET_FLEET_IDS, NEW_FLEET].sort());
+      expect(r.body.boundingBox).toBe(null);
+      expect(r.body.fieldFilters).toEqual([{ key: assetKey(r), values: ['TST1'] }]);
+      expect(r.body.lifecycleStates.map((l) => l.state)).toEqual(['ACTIVE', 'UNAVAILABLE', 'ORDERED']);
+    }
+    expect(ds.count).toBe(7);                                              // 6 + AMZ503669, no duplicates
+    expect(new Set(ds.rows.map((r) => r.assetId)).size).toBe(7);
+    const u = byUnit(ds);
+    expect(u.AMZ503669).toMatchObject({ lifecycleState: 'Ordered', workRequestId: 'svc-amz-open',
+      serviceUrl: 'https://aap-na.corp.amazon.com/v2/service/svc-amz-open' });
+    expect(u.T1001.workRequestId).toBe('svc-u1');
+  });
+  it('a discovered fleet id that fails getFleet is dropped: no second pass, the fleet still builds', async () => {
+    const page = discoveryPage((r) => (isGetFleet(r) && fleetOf(r) === NEW_FLEET ? fail(404) : null));
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(page.requests.filter(isGetAsset).map(aaidOf)).toEqual(['aaid-amz']);
+    expect(page.requests.filter(isAssetSearch)).toHaveLength(2);
+    expect(page.requests.filter(isAssetSearch).some(withNew)).toBe(false);
+    expect(ds.count).toBe(6);
+    expect(store.load('settings', {}).assetFleetIds).toEqual(prevSettings.assetFleetIds);
+  });
+  it('a second-pass error keeps the first-pass fleet and saves nothing', async () => {
+    const page = discoveryPage((r) => (isAssetSearch(r) && withNew(r) ? fail(500) : null));
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(page.requests.filter(isAssetSearch).filter(withNew).length).toBeGreaterThan(0);
+    expect(ds.count).toBe(6);
+    expect(byUnit(ds).AMZ503669).toBeUndefined();
+    expect(store.load('settings', {}).assetFleetIds).toEqual(prevSettings.assetFleetIds);
+  });
+  it('caps getAsset lookups at 25 per refresh; a failing lookup is skipped', async () => {
+    const extra = Array.from({ length: 30 }, (_, k) => mkWo({ id: 'svc-x' + k, aaid: 'aaid-x' + k, unit: 'X' + k }));
+    const page = discoveryPage((r) => (isGetAsset(r) && aaidOf(r) === 'aaid-x0' ? fail(500) : null), extra);
+    const ds = await aap.buildFleetDataset(BASE);
+    const looked = page.requests.filter(isGetAsset).map(aaidOf);
+    expect(looked).toHaveLength(25);
+    expect(looked[0]).toBe('aaid-amz');
+    expect(looked).toContain('aaid-x0');
+    expect(ds.count).toBe(7);
+  });
+  it('appends the discovered id to settings.assetFleetIds without touching other settings; the next refresh uses it directly', async () => {
+    store.save('settings', Object.assign({}, prevSettings, { keepMe: 'x', domiciles: ['TST1'], assetFleetIds: aap.ASSET_FALLBACK_FLEET_IDS.slice() }));
+    discoveryPage();
+    await aap.buildFleetDataset(BASE);
+    const s = store.load('settings', {});
+    expect(s.keepMe).toBe('x');
+    expect(s.domiciles).toEqual(['TST1']);
+    expect(s.assetFleetIds).toEqual(aap.ASSET_FALLBACK_FLEET_IDS.concat([NEW_FLEET]));
+    aap.dispose();
+    const page2 = discoveryPage();
+    const ds2 = await aap.buildFleetDataset(BASE);
+    expect(page2.requests.filter(isGetAsset)).toHaveLength(0);              // no rediscovery
+    const reqs = page2.requests.filter(isAssetSearch);
+    expect(reqs).toHaveLength(2);
+    expect(reqs.every(withNew)).toBe(true);
+    expect(ds2.count).toBe(7);
+  });
+  it('with no settings.assetFleetIds yet, the defaults are written plus the discovered id', async () => {
+    const s0 = Object.assign({}, prevSettings, { keepMe: 'y' });
+    delete s0.assetFleetIds;
+    store.save('settings', s0);
+    discoveryPage();
+    await aap.buildFleetDataset(BASE);
+    const s = store.load('settings', {});
+    expect(s.keepMe).toBe('y');
+    expect(s.assetFleetIds).toEqual(aap.DEFAULT_ASSET_FLEET_IDS.concat([NEW_FLEET]));
+  });
+});
+
 describe('buildFleetDataset partial failures keep rows', () => {
   it('a PLANNED pass HTTP 500 still resolves all rows with openPlanned 0', async () => {
     useRouter(fleetSpec({ planned: fail(500) }));
