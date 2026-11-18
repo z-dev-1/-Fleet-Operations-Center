@@ -341,29 +341,23 @@ function _searchBody(searchRequest, filters) {
   try { base = require('./aap_longdwell').DEFAULT_SEARCH_REQUEST; } catch (_) { base = {}; }
   return Object.assign({}, base, searchRequest || {}, require('./aap_search_filters').cleanSearchFilters(filters));
 }
-// FLEET SCOPE (2026-11-18): the fleet is scoped by the user's Managed
-// Domiciles (domicileSite/operator), not by AAP fleet UUID. The default bodies
-// in aap_longdwell.js pin a fixed fleetIds list (asset search: 8 UUIDs; WO
-// search: 9), which dropped in-scope units in any other fleet. Confirmed case:
-// AMZ503669 (SAPB / ABE40) lives in fleet 817ca098-…, on neither list.
-// This is the union of BOTH default lists plus 817ca098-…. It is used where a
-// non-empty fleetIds is still required: (1) every fleet-build / per-unit WO
-// search (the WO endpoint 500s on fleetIds:null — see repair-intel/fetch.js),
-// and (2) the asset-search fallback in buildFleetDataset if AAP rejects the
-// domicile-only body. It should eventually be replaced by domicile-only
-// scoping everywhere; add a UUID here if another fleet's units go missing.
-const SCOPE_FLEET_IDS = [
+// KNOWN-GOOD asset-search fleet ids: exactly the 8 UUIDs pinned in
+// DEFAULT_ASSET_SEARCH_REQUEST.fleetIds (aap_longdwell.js) before the
+// 2026-11-18 fleet-scope change. buildFleetDataset falls back to this list when
+// the no-fleet-id asset body is rejected. Never add a guessed id here: AAP
+// rejects the WHOLE search (404 FleetNotFoundException) if any id is unknown.
+// 817ca098-… is an AAP page/view id (the /v2/page/<id> URL), not a fleet id.
+// 9bf5bae8-… (WO list only) is left out: nothing shows it is valid on the asset endpoint.
+const ASSET_FALLBACK_FLEET_IDS = Object.freeze([
   '0bb2e249-fd34-437f-83af-d1d69150558b',
   '0f454f75-1e45-475f-8d8b-2334ade1f6f1',
   '5c19cdf7-ce2f-4593-a37a-3fe5d506e120',
   '7de393df-74e1-45af-9650-560ba008bc65',
-  '817ca098-8441-4329-a71e-6768f9d7e6c5',
-  '9bf5bae8-f536-4157-8b23-f5632ced5e1d',
   'b84ddc20-589c-4330-af67-3d38f89e28af',
   'b9e02fc4-2b9f-4a70-ac7c-76b30a33bcbe',
   'ba97eda1-cb03-446e-a907-474084194777',
   'daa83ad7-5d8f-43a4-ba9c-76c643e45e1e',
-];
+]);
 
 function searchServices(searchRequest, opts) {
   return apiPost('/api/v1/serviceaggregates/search', _searchBody(searchRequest, opts && opts.filters));
@@ -946,15 +940,17 @@ async function buildFleetDataset(opts = {}) {
     // Location fields so EVERY unit shows a "Last Geofence" (geoFences are
     // confirmed valid search fields — DEFAULT_ASSET_SEARCH_REQUEST requests them).
     'geoFences', 'yardBuildingID', 'latestLocationTimestamp', 'geoPoint'];
-  // FLEET SCOPE: the domicileSite/operator fieldFilters define the fleet, so
-  // the asset search sends fleetIds: [] instead of the 8-UUID pin from
-  // DEFAULT_ASSET_SEARCH_REQUEST (which dropped AMZ503669, fleet 817ca098-…).
-  // [] rather than omitting the key: the merged body always carries the
-  // default's key, and the other "no filter" dimensions in this body are [].
-  // LIVE ACCEPTANCE PENDING: not yet confirmed against the live v2 endpoint.
-  // If AAP rejects the [] body on the first request (HTTP error) or it returns
-  // zero assets for a non-empty domicile list, the pass is re-run once with
-  // SCOPE_FLEET_IDS (a superset of the old 8), so the existing fleet never shrinks.
+  // FLEET SCOPE: the domicileSite/operator fieldFilters define the fleet. The
+  // asset search is tried in this order and the live endpoint decides:
+  //   1. 'no-fleet-ids'  — fleetIds key omitted (undefined is dropped by
+  //      JSON.stringify), so units in any AAP fleet in the domiciles load.
+  //   2. 'original-8'    — ASSET_FALLBACK_FLEET_IDS, the known-good pre-11/18 pin.
+  // fleetIds: [] is NOT tried: live logs (2026-11-18) show AAP answers it with
+  // HTTP 400 "at least one fleet id is required". An AAP_API_ERROR (any 4xx/5xx,
+  // e.g. 404 FleetNotFoundException) or 0 assets on attempt 1 moves on to
+  // attempt 2. Auth errors and page hangs (AAP_API_TIMEOUT) throw at once. If
+  // every attempt fails, or the last one returns 0 assets for a non-empty
+  // domicile list, the build THROWS, so callers keep the last-good fleet.
   const assetPass = async (fleetIds, st) => {
     const byAaid = new Map();    // aaid -> asset summary record
     for (const key of ['domicileSite', 'operator']) {
@@ -987,19 +983,33 @@ async function buildFleetDataset(opts = {}) {
     }
     return byAaid;
   };
+  const assetAttempts = [
+    { label: 'no-fleet-ids', fleetIds: undefined },
+    { label: 'original-8', fleetIds: ASSET_FALLBACK_FLEET_IDS.slice() },
+  ];
   let assetByAaid = null;
-  const scopeSt = { calls: 0 };
-  try {
-    assetByAaid = await assetPass([], scopeSt);
-  } catch (e) {
-    // Only a rejection of the very first request means "the endpoint does not
-    // accept this body"; later failures / timeouts / auth keep failing the build.
-    if (scopeSt.calls > 0 || !e || e.code !== 'AAP_API_ERROR') throw e;
-    logger.warn('buildFleetDataset: domicile-only asset search rejected (' + e.message + ') — retrying with SCOPE_FLEET_IDS');
-  }
-  if (!assetByAaid || (!assetByAaid.size && filterVals.length)) {
-    if (assetByAaid) logger.warn('buildFleetDataset: domicile-only asset search returned 0 assets — retrying with SCOPE_FLEET_IDS');
-    assetByAaid = await assetPass(SCOPE_FLEET_IDS.slice(), { calls: 0 });
+  for (let i = 0; i < assetAttempts.length; i++) {
+    const att = assetAttempts[i];
+    const isLast = i === assetAttempts.length - 1;
+    let got = null;
+    try {
+      got = await assetPass(att.fleetIds, { calls: 0 });
+    } catch (e) {
+      if (isLast || !e || e.code !== 'AAP_API_ERROR') throw e;
+      logger.warn('buildFleetDataset: asset search attempt "' + att.label + '" failed (' + e.message + ') — trying "' + assetAttempts[i + 1].label + '"');
+      continue;
+    }
+    if (!got.size && filterVals.length) {
+      if (isLast) {
+        throw Object.assign(new Error('AAP asset search returned 0 units for the Managed Domiciles (attempt "' + att.label + '") — keeping the last good fleet'),
+          { code: 'AAP_ASSET_SEARCH_EMPTY' });
+      }
+      logger.warn('buildFleetDataset: asset search attempt "' + att.label + '" returned 0 assets — trying "' + assetAttempts[i + 1].label + '"');
+      continue;
+    }
+    logger.info('buildFleetDataset: asset search attempt "' + att.label + '" succeeded — ' + got.size + ' assets');
+    assetByAaid = got;
+    break;
   }
 
   // Optionally narrow to UNAVAILABLE assets only.
@@ -1030,9 +1040,7 @@ async function buildFleetDataset(opts = {}) {
     if (co !== po) return co;            // an open WO always beats a non-open one
     return woTs(cand) > woTs(prev);      // otherwise newest wins
   };
-  // fleetIds: widened to SCOPE_FLEET_IDS so WOs / U-P counts / planned WOs
-  // attach to units outside the 9-UUID default (the WO endpoint 500s on null).
-  const woReq = Object.assign({ fleetIds: SCOPE_FLEET_IDS.slice() }, opts.searchRequest || {});
+  const woReq = Object.assign({}, opts.searchRequest || {});
   if (filterVals.length) woReq.assetDomicileSites = filterVals; // WO search accepts site+operator tokens here
   const woList = await searchAllPages(woReq, { maxPages: opts.maxPages || 50 });
   for (const w of woList) {
@@ -1280,8 +1288,7 @@ async function findOpenWO(unitNumber) {
   // ATTEMPT 1 — fast path: query by equipmentId, clear ONLY the status filter.
   // Works for the common case (unit's program/lifecycle/fleet match the default
   // body). `{ equipmentIds:[u], statuses:[] }` returned all WOs live.
-  // fleetIds widened to SCOPE_FLEET_IDS (units in fleets outside the default 9).
-  let res = await searchServices({ equipmentIds: [u], statuses: [], fleetIds: SCOPE_FLEET_IDS.slice(), page: 1 });
+  let res = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
   let hit = pickOpen((res && res.serviceAggregates) || []);
   if (hit) return hit;
 
@@ -1331,7 +1338,7 @@ async function refreshUnit(unitNumber) {
   let plannedPassOk = false;
   const _wid = (w) => (w && (w.workRequestId || w.id)) || '';
   try {
-    const r1 = await searchServices({ equipmentIds: [u], statuses: [], fleetIds: SCOPE_FLEET_IDS.slice(), page: 1 });
+    const r1 = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
     unplannedWOs = (r1 && r1.serviceAggregates) || [];
     allWOs = unplannedWOs;
     // If the restrictive body hid them, widen (same two-tier logic as findOpenWO).
@@ -1556,7 +1563,7 @@ async function getWorkOrderDetailViaApi(equipmentId) {
   // Resolve the unit's current open WO (two-tier widen, same as findOpenWO).
   let wo = null;
   try {
-    let r1 = await searchServices({ equipmentIds: [u.toUpperCase()], statuses: [], fleetIds: SCOPE_FLEET_IDS.slice(), page: 1 });
+    let r1 = await searchServices({ equipmentIds: [u.toUpperCase()], statuses: [], page: 1 });
     let list = (r1 && r1.serviceAggregates) || [];
     if (!list.length) {
       const r2 = await searchServices({ equipmentIds: [u.toUpperCase()], statuses: [], category: null, lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1 });
@@ -3111,7 +3118,7 @@ module.exports = {
   searchServices,
   _searchBody,                  // exported: search body = defaults + request + cleaned filters (tests)
   searchAssets,
-  SCOPE_FLEET_IDS,              // exported: widened fleetIds for WO searches / asset fallback (tests)
+  ASSET_FALLBACK_FLEET_IDS,     // exported: known-good asset-search fleetIds fallback (tests)
   getFleet,
   buildTrackerRows,
   buildFleetDataset,
