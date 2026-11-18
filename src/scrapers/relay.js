@@ -1521,8 +1521,11 @@ function _formatPmDate(raw) {
   if (m) {
     d = new Date(m[1] + ' ' + m[2] + ', ' + m[3]);
   } else {
-    m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{4})$/);                 // "Feb 2027" (no day -> assume 1st)
-    if (m) d = new Date(m[1] + ' 1, ' + m[2]);
+    m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{4})$/);                 // "Feb 2027" (AAP MONTH_AND_YEAR due = last day of month)
+    if (m) {
+      const first = new Date(m[1] + ' 1, ' + m[2]);
+      if (!isNaN(first.getTime())) d = new Date(first.getFullYear(), first.getMonth() + 1, 0);
+    }
   }
   if (!d || isNaN(d.getTime())) return '--';
 

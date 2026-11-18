@@ -234,6 +234,22 @@ describe('M9 pmOverdue without pmSchedule (AC-9)', () => {
   }
 });
 
+describe('M10 month-only PM due = last day of month (AC-10)', () => {
+  it('m10: Nov 30 for the Nov-2026 dues, Dec 31 for Dec 2026, overdue for the Oct-2026 Lift', () => {
+    const fx = load('m10-month-only-pm-due-read-as-first-of-month.json');
+    const os = require('os');
+    require('../src/config/paths').setDataDir(fs.mkdtempSync(path.join(os.tmpdir(), 'ci-m10-')));
+    const relay = require('../src/scrapers/relay');
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-17T17:00:00Z'));
+      for (const x of fx.input.raw) expect([x.unit, relay.formatPmDate(x.value)]).toEqual([x.unit, fx.expected[x.unit]]);
+      expect(relay.formatPmDate('Nov 30, 2026')).toBe('Nov 30');
+      expect(relay.formatPmDate('Nov 16, 2026')).toBe('overdue');
+    } finally { vi.useRealTimers(); }
+  });
+});
+
 describe('golden rows no longer reproduce M1 / M3 / M4', () => {
   // Rebuild the WR comments from the stored conversation ('MM/DD - Author: text').
   const commentsOf = (conv) => String(conv).replace(/^Conversation\n/, '').split(/\n(?=\d{2}\/\d{2} - )/).map((s, i) => {
