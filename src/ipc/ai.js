@@ -353,6 +353,31 @@ async function processOrchaAction(userMsg, opts = {}) {
     const notesStore = store.load('notesStore', {});
     const unavail = rows.filter(r => (r.lifecycleState || '').toLowerCase().includes('unavail'));
 
+    // CARRIER_INTEL pre-router (settings.ai.carrierIntel / FLEET_AI_CARRIER_INTEL, default ON):
+    // SCAC-level analytical questions on Z's own surfaces, never a context turn. Read-only:
+    // returns before the action loop, so no AI-proposed action can run.
+    let _ciOn = false;
+    try { _ciOn = require('../config/perf-flags').loadCarrierIntel().enabled === true; } catch (_) {}
+    let _ci = null;
+    if (_ciOn && !_uc && _dbrSrcOk) {
+      try { _ci = require('../carrier-intel'); } catch (_) { logger.warn('[carrier-intel] load-failed'); }   // load failure → today's path
+    }
+    if (_ci) {
+      let _ciHit = null;
+      try { _ciHit = _ci.detect(userMsg, { rows, history: chatHistory }); } catch (e) { logger.warn('[carrier-intel] detect-failed'); }
+      if (_ciHit) {
+        let _r;
+        try {
+          _r = await _ci.run({ hit: _ciHit, userMsg: _ciHit.userMsg || userMsg, source: opts.source, signal: opts.signal, requestId: opts.requestId }, { fd });
+        } catch (e) { return { ok: false, text: 'Error:' + e.message, action: 'chat' }; }   // abort only (run never throws otherwise)
+        chatHistory.push({ role: 'user', text: userMsg, ts: Date.now() });
+        chatHistory.push({ role: 'ai', text: _r.text, ts: Date.now() });
+        store.save('chatHistory', chatHistory);
+        logger.info('[ai:orcha-action] carrier intel answered (scac=' + _r.scac + ' units=' + _r.units + ' mode=' + _r.mode + ' removed=' + _r.removed + ' followUp=' + !!_ciHit.followUp + ' ms=' + _r.ms + ')');
+        return { ok: true, text: _r.surface === 'fab' ? _r.text : _toSlackFormat(_r.text), action: 'carrier-intel', carrierIntel: true };
+      }
+    }
+
     // DBR_LOOKUP pre-router (flag on, Z's own surfaces, not a context turn):
     // "dbr for AUVTE" answers from live fleet data + QuickSight with no intent AI call.
     if (_dbrOn && !_uc && _dbrSrcOk) {

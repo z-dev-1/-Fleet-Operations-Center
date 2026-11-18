@@ -19,6 +19,9 @@ for (const k of ['FLEET_AUTH_SINGLE_FLIGHT', 'FLEET_AUTH_SINGLE_OWNER_AEA', 'FLE
 process.env.FLEET_JUSTME_READ_CONTEXT = '0';
 // On-demand DBR lookup forced OFF so legacy suites run the flag-off parity path.
 process.env.FLEET_AI_DBR_LOOKUP = '0';
+// Carrier Intel (default ON) forced OFF so legacy suites run the flag-off path.
+// Carrier-intel tests set '1' inside the test and restore '0'.
+process.env.FLEET_AI_CARRIER_INTEL = '0';
 // Aki lane forced OFF so legacy suites can never reach Aki (its settings default is ON).
 // Aki tests use relay.__test__.setAkiFlags or pass an explicit env to resolveAiAkiFlags.
 process.env.FLEET_AI_AKI = '0';

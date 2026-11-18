@@ -67,6 +67,8 @@
  *
  *   settings.ai.dbrLookup / FLEET_AI_DBR_LOOKUP '0' | '1'
  *
+ * Carrier Intel (default ON; see resolveCarrierIntelFlags): settings.ai.carrierIntel / FLEET_AI_CARRIER_INTEL '0' | '1'
+ *
  * Structured extraction (default ON; see resolveExtractFlags below; read per call):
  *
  *   settings.extract.enabled  / FLEET_EXTRACT           '0' | '1'
@@ -559,6 +561,28 @@ function loadDbrLookup(deps = {}) {
     return resolveDbrLookupFlags({}, {});
   }
 }
+// ── Carrier Intel (default ON) ──────────────────────────────────────────────
+//   settings.ai.carrierIntel (!== false) / FLEET_AI_CARRIER_INTEL '0'|'1'
+// Read once per processOrchaAction call. No new store key: 'settings' is registered.
+function resolveCarrierIntelFlags(settings, env) {
+  const flags = { enabled: _obj(_obj(settings).ai).carrierIntel !== false };
+  const e = _envBool(env, 'FLEET_AI_CARRIER_INTEL');
+  if (e !== null) flags.enabled = e;
+  return flags;
+}
+function loadCarrierIntel(deps = {}) {
+  try {
+    const env = deps.env || process.env;
+    let settings = {};
+    try {
+      const loadFn = deps.load || require('../store').load;
+      settings = loadFn('settings', {}) || {};
+    } catch (_) { settings = {}; }
+    return resolveCarrierIntelFlags(settings, env);
+  } catch (_) {
+    return resolveCarrierIntelFlags({}, {});
+  }
+}
 
 // ── Fleet DBR (Daily Call, default ON) ──────────────────────────────────────
 //   settings.dbr.fleetData    (!== false) / FLEET_DBR_FLEET_DATA    '0'|'1'
@@ -960,6 +984,7 @@ module.exports = {
   resolveWorkerIsolationFlags, loadWorkerIsolation, ISOLATION_GROUPS, ISOLATION_ENV,
   resolveJustMeContextFlags, loadJustMeContext,
   resolveDbrLookupFlags, loadDbrLookup,
+  resolveCarrierIntelFlags, loadCarrierIntel,
   resolveFleetDbrFlags, loadFleetDbr, FLEET_DBR_ENV,
   resolveExtractFlags, loadExtract, EXTRACT_ENV,
   resolveDbrServerFilterFlags, loadDbrServerFilter, DBR_SERVER_FILTER_ENV,

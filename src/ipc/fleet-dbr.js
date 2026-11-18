@@ -577,4 +577,9 @@ function _resetForTests(overrides) {
   _aliasTriedAt = 0;
 }
 
-module.exports = { registerFleetDbrIPC, guarded, _resetForTests, CHANNELS, __test__: { handlers } };
+// Read-only wrappers for Carrier Intel (same [FAS] tagging inputs as the DBR draft).
+// cachedAapAlias reads the session cache only; it never primes or fetches.
+function enrichFor(ids) { return _enrich('carrier-intel', Array.isArray(ids) ? ids : []); }
+function fasNamesFor(scac, domicile) { return _fasNames({ scac, domicile }); }
+function cachedAapAlias() { return _aapAlias(); }
+module.exports = { registerFleetDbrIPC, guarded, _resetForTests, CHANNELS, enrichFor, fasNamesFor, cachedAapAlias, __test__: { handlers } };
