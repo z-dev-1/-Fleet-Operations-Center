@@ -35,11 +35,12 @@ const INTL_PART_RE = /\b(\d{7}C\d{1,2})\b/g;
 const QTY_RE = /\bQty\.?\s*:?\s*(\d{1,3})\b/i;
 const VOR_RE = /\b(?:ordered|it\s+was\s+ordered)\s+VOR\b/i;
 const PART_STATUS = [
-  ['ordered', /\b(?:was|been|is)\s+ordered\b|\bon\s+order\b/gi],
+  ['ordered', /\b(?:was|been|is)\s+ordered\b|\bon\s+order\b|\bparts?\s+ordered\b|\b(?:and|have|has)\s+ordered\b|\bSelected\s+Reason:\s*CC\s*-\s*Parts\s+Ordered\b/gi],
   ['backorder', /\bback[\s-]?order(?:ed)?\b/gi],
   ['shipped', /\b(?:has|have)\s+shipped\b|\bshipped\s+(?:on|out)\b|\btracking\s+(?:#|number)\s*:?\s*[A-Z0-9]{8,}/gi],
-  ['arrived', /\b(?:ha(?:s|ve)\s+)?arrived\b(?![^.]{0,20}\?)|\breceived\s+the\s+parts?\b|\bparts?\s+(?:are|is)\s+(?:in|in\s+stock)\b|\ball\s+required\s+parts\s+(?:have\s+arrived|are\s+(?:currently\s+)?in\s+stock)\b/gi],
+  ['arrived', /\b(?:ha(?:s|ve)\s+)?arrived\b(?![^.]{0,20}\?)|\breceived\s+the\s+parts?\b|\b(?:have|has|we've|we\s+have)\s+received\s+(?:the\s+)?parts?\b|\bparts?\s+(?:are|is)\s+(?:in|in\s+stock)\b|\ball\s+required\s+parts\s+(?:have\s+arrived|are\s+(?:currently\s+)?in\s+stock)\b/gi],
 ];
+const PART_STATUS_TEST = PART_STATUS.map(([, re]) => new RegExp(re.source, 'i'));
 const STATUS_NEG_RE = /\b(?:not|n't|no|yet\s+to)\b/i;
 const RO_RE = /\bR\.?O\.?\s*#\s*:?\s*((?=[A-Z0-9-]{0,20}\d)[A-Z0-9][A-Z0-9-]{2,20})\b/gi;
 const AMERIT_RO_RE = /^\d{3}-\d{8}$/;
@@ -235,7 +236,18 @@ function _isTa(text, prov, opts) {
   return prov.author === 'TA' || _str(opts.vendor) === 'TA' || (prov.side === 'vendor' && TA_SIG_RE.test(text));
 }
 
-function _textPass(ctx, rawText, prov) {
+// M2: the sentence around a match ends in '?' (first [.!?\n] after the match is a '?').
+function _endsInQuestion(text, end) {
+  for (let i = end; i < text.length; i++) {
+    const c = text[i];
+    if (c === '?') return true;
+    if (c === '.' || c === '!' || c === '\n') return false;
+  }
+  return false;
+}
+
+// tctx: { afterArrival } from extractRelay (comment logged after the recorded tech arrival).
+function _textPass(ctx, rawText, prov, tctx) {
   const opts = ctx.opts;
   let text = decodeEntities(rawText);
   if (text.length > CAPS.perCommentChars) { text = text.slice(0, CAPS.perCommentChars); ctx.truncated++; }
@@ -297,6 +309,7 @@ function _textPass(ctx, rawText, prov) {
   for (const [status, re] of PART_STATUS) {
     for (const m of text.matchAll(re)) {
       if (STATUS_NEG_RE.test(text.slice(Math.max(0, m.index - 25), m.index))) continue;
+      if (_endsInQuestion(text, m.index + m[0].length)) continue;
       const s = sentOf(m.index);
       const inSent = parts.filter((p) => p.start >= s.start && p.start < s.end);
       const open = ctx.parts.map((f) => f.value).filter((v, i, a) => a.indexOf(v) === i);
@@ -421,7 +434,10 @@ function _textPass(ctx, rawText, prov) {
   for (const re of TA_SUBMITTED_RES) for (const m of text.matchAll(re)) est(m, m[1].trim(), 'submitted', prov);
 
   // ETC mentions, negations, markers (§5, §6)
-  const scan = D.scanEtc(text, { at: prov.at, ta });
+  // M3/M8: the comment talks about parts (any part-status phrase or the COX CC "Parts" template).
+  const partsContext = PART_STATUS_TEST.some((re) => re.test(text))
+    || [...text.matchAll(COX_CC_RE)].some((m) => /\bparts?\b/i.test(m[1]));
+  const scan = D.scanEtc(text, { at: prov.at, ta, partsContext, afterArrival: !!(tctx && tctx.afterArrival) });
   const refIn = (s) => {
     const r = parts.find((p) => p.start >= s.start && p.start < s.end) || orders.find((o) => o.start >= s.start && o.start < s.end);
     return r ? r.value : undefined;
@@ -602,17 +618,22 @@ function extractRelay(serviceDetail, opts = {}) {
   // History first, so the current structured value equal to the last newValue is a duplicate.
   const history = Array.isArray(opts.history) ? opts.history : [];
   const lastNew = {};
+  let arrivalMs = null;   // M3: earliest recorded actual tech arrival
   for (const log of history) {
     if (!log || !Array.isArray(log.serviceChangeDetails)) continue;
     const at = _iso(D.parseTs(log.eventDateTime));
     const who = classifyRelayAuthor(log.requester, opts);
     const prov = { source: who.source, side: who.side, at, author: log.requester ? _clip(log.requester, 60) : null, via: 'history' };
-    for (const det of log.serviceChangeDetails) {
+    for (const det of WH.collapseCostDetails(log.serviceChangeDetails)) {
       if (!det || !det.field) continue;
       const hf = HISTORY_FIELDS[det.field];
       if (hf) {
         const v = D.ymd(D.parseTs(det.newValue));
         if (!v) continue;
+        if (det.field === 'Actual technician arrival date time') {
+          const am = D.parseTs(det.newValue);
+          if (arrivalMs == null || am < arrivalMs) arrivalMs = am;
+        }
         lastNew[det.field] = _str(det.newValue);
         const prev = D.ymd(D.parseTs(det.oldValue));
         _sf(ctx, 'etcMention', v, prov, det.field, det.newValue, { etcKind: hf.etcKind, prev: prev || undefined, marker: hf.marker, chain: hf.marker ? hf.etcKind : undefined, via: 'history' });
@@ -698,12 +719,19 @@ function extractRelay(serviceDetail, opts = {}) {
     .sort((a, b) => ((a.ms == null ? Infinity : a.ms) - (b.ms == null ? Infinity : b.ms)) || (a.i - b.i))
     .map((x) => x.c);
   block.counts.comments = comments.length;
+  if (arrivalMs == null) {
+    for (const w of wos) {
+      const am = D.parseTs(w.actualTechnicianArrivalDateTime);
+      if (am != null && (arrivalMs == null || am < arrivalMs)) arrivalMs = am;
+    }
+  }
   for (const c of comments) {
     const who = classifyRelayAuthor(c.createdBy, opts);
     const at = _iso(D.parseTs(c.timestamp));
     const prov = { source: who.source, side: who.side, at, author: c.createdBy ? _clip(c.createdBy, 60) : null };
     block.events.push({ at, author: prov.author, side: who.side, role: null, internal: !!c.internalOnly, via: 'comment' });
-    _textPass(ctx, c.text, prov);
+    const commentMs = D.parseTs(c.timestamp);
+    _textPass(ctx, c.text, prov, { afterArrival: arrivalMs != null && commentMs != null && commentMs > arrivalMs });
   }
   block.facts = _finishRefs(ctx.facts);
   block.counts.rejected = ctx.rejected;

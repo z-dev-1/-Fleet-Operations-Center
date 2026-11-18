@@ -308,9 +308,18 @@ const NEG_RULES = new Set([1, 2, 5, 6]);
 // plus `will advise` -> repairCompletion (Path B). Never a gate rule.
 const NEG_EXTRA_RE = /\b(?:No\s+ESD|ETC\s*(?::|-)?\s*(?:TBD|N\/A)|Pending\s+ETC|no\s+eta|no\s+(?:updated\s+)?parts\s+ETA|no\s+information\s+on\s+parts\s+ETC|ETA\s+(?:TBD|N\/A)|will\s+advise)(?![\w/])/gi;
 
-function _keywordMatches(t, ta) {
+// M8: in a comment with a part-status phrase, 'will be in <weekday|M/D>' is a parts ETA
+// ('ordered. will be in Monday'). 'in the morning' stays unparsed.
+const PARTS_CONTEXT_KW = [
+  { rule: 1, kind: 'partsArrival', re: /\bwill\s+be\s+in\b(?=\s+(?:on\s+)?(?:mon|tue|wed|thu|fri|sat|sun|\d{1,2}\/\d{1,2}))/gi },
+];
+// M3: a tech word AFTER 'no eta', joined by on/for ('no eta on the second tech').
+const NO_ETA_TECH_AFTER_RE = /^\s*(?:on|for)\s+(?:the\s+)?(?:\w+\s+){0,2}tech(?:nician)?s?\b/i;
+
+function _keywordMatches(t, ta, opts = {}) {
   const out = [];
-  for (const k of KW) {
+  const list = opts && opts.partsContext ? KW.concat(PARTS_CONTEXT_KW) : KW;
+  for (const k of list) {
     if (k.taOnly && !ta) continue;
     k.re.lastIndex = 0;
     for (const m of t.matchAll(k.re)) {
@@ -320,7 +329,7 @@ function _keywordMatches(t, ta) {
   return out;
 }
 
-function _negKind(phrase, t, start, end, members) {
+function _negKind(phrase, t, start, end, members, opts = {}) {
   const p = phrase.toLowerCase().replace(/\s+/g, ' ');
   if (/^no esd/.test(p)) return 'partsShip';
   if (/^no (?:updated )?parts eta|^no information on parts etc/.test(p)) return 'partsArrival';
@@ -332,6 +341,11 @@ function _negKind(phrase, t, start, end, members) {
     return 'repairCompletion';
   }
   if (/^no eta/.test(p)) {
+    // (1) a real tech ETA; text before the phrase ('Technician Notes:') never counts.
+    if (NO_ETA_TECH_AFTER_RE.test(t.slice(end, end + 40))) return 'techOnsite';
+    // (2) the comment is about parts, or the tech has already arrived.
+    if (opts && (opts.partsContext || opts.afterArrival)) return 'partsArrival';
+    // (3) today's ±20-char rule.
     const around = t.slice(Math.max(0, start - 20), start) + ' ' + t.slice(end, end + 20);
     return /\bparts?\b/i.test(around) ? 'partsArrival' : 'techOnsite';
   }
@@ -341,7 +355,7 @@ function _negKind(phrase, t, start, end, members) {
 // §6.2 scanner: -> { negated: [{date:null, negated:true, kind, start, end, phrase}], negSpans: [{start,end}] }
 function findNegatedMentions(text, opts = {}) {
   const t = _str(text);
-  const kws = _keywordMatches(t, !!opts.ta).filter((k) => NEG_RULES.has(k.rule));
+  const kws = _keywordMatches(t, !!opts.ta, opts).filter((k) => NEG_RULES.has(k.rule));
   NEG_EXTRA_RE.lastIndex = 0;
   for (const m of t.matchAll(NEG_EXTRA_RE)) {
     kws.push({ start: m.index, end: m.index + m[0].length, rule: 'NEG', phrase: m[0] });
@@ -363,7 +377,7 @@ function findNegatedMentions(text, opts = {}) {
     }
     const isNeg = !!neg || etcKeywordNegated(t, chosen.start, chosen.end);
     if (!isNeg) continue;
-    const kind = neg ? _negKind(neg.phrase, t, neg.start, neg.end, g.members) : chosen.kind;
+    const kind = neg ? _negKind(neg.phrase, t, neg.start, neg.end, g.members, opts) : chosen.kind;
     const span = { start: g.start, end: g.end };
     negSpans.push(span);
     negated.push({ date: null, negated: true, kind, start: g.start, end: g.end, phrase: t.slice(g.start, g.end) });
@@ -374,8 +388,8 @@ function findNegatedMentions(text, opts = {}) {
 function _inSpans(spans, i) { return spans.some((s) => i >= s.start && i < s.end); }
 
 // Keyword index for nearest-keyword lookups (binary search on end).
-function _kwIndex(t, ta, negSpans) {
-  const list = _keywordMatches(t, ta).filter((k) => !_inSpans(negSpans || [], k.start));
+function _kwIndex(t, ta, negSpans, opts = {}) {
+  const list = _keywordMatches(t, ta, opts).filter((k) => !_inSpans(negSpans || [], k.start));
   const byEnd = list.slice().sort((a, b) => a.end - b.end);
   const trailing = list.filter((k) => k.trailing).sort((a, b) => a.start - b.start);
   return { byEnd, trailing };
@@ -405,14 +419,14 @@ function _classifyWith(idx, m) {
 // §6.1: nearest ETC keyword for a dated mention -> { kind, rule, tentative? } | null.
 function classify(text, m, opts = {}) {
   const t = _str(text);
-  const idx = _kwIndex(t, !!opts.ta, opts.negSpans);
+  const idx = _kwIndex(t, !!opts.ta, opts.negSpans, opts);
   return _classifyWith(idx, m);
 }
 
 // ── Markers (§6.3 rule (a)) ─────────────────────────────────────────────────
 // Parts miss markers. Cited-date groups 1..5.
 const MISS_MARKER_RE = /\b(?:was\s+expected\s+on\s+(\d{1,2}\/\d{1,2})\s+but\s+has\s+not\s+arrived|originally\s+scheduled\s+to\s+ship(?:\s+on)?\s+(\d{1,2}\/\d{1,2})|previously\s+expected\s+to\s+ship\s+on\s+(\d{1,2}\/\d{1,2})|was\s+scheduled\s+to\s+ship\s+on\s+(\d{1,2}\/\d{1,2})[^.]{0,60}\bno\s+(?:tracking|shipping)|expecting\s+the\s+[a-z ]{0,30}to\s+ship\s+on\s+(\d{1,2}\/\d{1,2})[\s\S]{0,160}?\bno\s+(?:shipping|tracking)|missed\s+(?:the\s+)?(?:ETC|ETA)|did\s+not\s+(?:arrive|ship)|has\s+not\s+(?:arrived|shipped))/gid;
-const MET_MARKER_RE = /\b(?:all\s+(?:required\s+)?parts\s+(?:have\s+)?(?:arrived|received|are\s+in)|parts?\s+(?:has|have)\s+arrived|parts?\s+(?:arrived|received)(?:\s+on\s+(\d{1,2}\/\d{1,2}))?|repairs?\s+(?:is|are|has\s+been)\s+completed?|unit\s+is\s+ready(?:\s+for\s+pick\s*up)?)\b/gid;
+const MET_MARKER_RE = /\b(?:all\s+(?:required\s+)?parts\s+(?:have\s+)?(?:arrived|received|are\s+in)|parts?\s+(?:has|have)\s+arrived|parts?\s+(?:arrived|received)(?:\s+on\s+(\d{1,2}\/\d{1,2}))?|(?:have|has|we've|we\s+have)\s+received\s+(?:the\s+)?parts?|repairs?\s+(?:is|are|has\s+been)\s+completed?|unit\s+is\s+ready(?:\s+for\s+pick\s*up)?)\b/gid;
 // Before-only guard (Path B: no etcKeywordNegated call; this list already covers no|not|pending).
 const MET_GUARD_RE = /\b(?:once|when|until|after|before|if|as\s+soon\s+as|will|to\s+be|waiting\s+(?:for|until|on)|pending|not|no|yet\s+to|expect(?:ed|ing)?)\b/i;
 
@@ -474,8 +488,8 @@ function scanEtc(text, opts = {}) {
   const ta = !!opts.ta;
   const mk = findMarkers(t, { at: opts.at });
   const dates = findDateMentions(t, { at: opts.at, ta, consumed: mk.consumed });
-  const neg = findNegatedMentions(t, { ta });
-  const idx = _kwIndex(t, ta, neg.negSpans);
+  const neg = findNegatedMentions(t, { ta, partsContext: opts.partsContext, afterArrival: opts.afterArrival });
+  const idx = _kwIndex(t, ta, neg.negSpans, opts);
   const mentions = [];
   for (const d of dates) {
     const c = _classifyWith(idx, d);

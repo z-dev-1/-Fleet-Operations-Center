@@ -81,6 +81,21 @@ function _etcRevision(L, det, kind) {
 }
 
 /**
+ * collapseCostDetails(details) -> details. When one log carries >= 2 'Estimate' COST details and
+ * one value equals the sum of the others (within $0.01), the others are subtotals: keep only that
+ * one. Every other detail, and every other case, is returned unchanged (M5).
+ */
+function collapseCostDetails(details) {
+  const list = Array.isArray(details) ? details : [];
+  const cost = list.filter((d) => d && d.field === 'Estimate' && d.displayType === 'COST' && _num(d.newValue) != null);
+  if (cost.length < 2) return list;
+  const total = cost.reduce((s, d) => s + _num(d.newValue), 0);
+  const keep = cost.find((d) => Math.abs(_num(d.newValue) - (total - _num(d.newValue))) <= 0.01 + 1e-9);
+  if (!keep) return list;
+  return list.filter((d) => !cost.includes(d) || d === keep);
+}
+
+/**
  * historyTrend(logs, { classify, now }) -> trend object | null (see module header).
  */
 function historyTrend(logs, opts = {}) {
@@ -103,7 +118,7 @@ function historyTrend(logs, opts = {}) {
     let stateDecision = null;
     let reason = null;
     let reasonDet = null;
-    for (const det of L.details) {
+    for (const det of collapseCostDetails(L.details)) {
       const etcKind = ETC_FIELDS[det.field];
       if (etcKind) {
         const r = _etcRevision(L, det, etcKind);
@@ -153,6 +168,8 @@ function historyTrend(logs, opts = {}) {
   for (const r of rc) if (seq[seq.length - 1] !== r.toIso) seq.push(r.toIso);
   const seqOut = _tail(seq, CAPS.seq);
   const slips = rc.filter((r) => r.dir === 'slip');
+  // M6: calendar-day moves (local ET day of from vs to) over every revision with a from (untailed).
+  const withFrom = rc.filter((r) => r.from);
   const vendorOnly = vendorChanges.filter((v) => v.field === 'Vendor');
 
   return {
@@ -166,6 +183,9 @@ function historyTrend(logs, opts = {}) {
       revisions: _tail(etcRevs, CAPS.etc),
       slipCount: slips.length,
       pullInCount: rc.filter((r) => r.dir === 'pull-in').length,
+      daySlipCount: withFrom.filter((r) => r.to > r.from).length,
+      dayPullInCount: withFrom.filter((r) => r.to < r.from).length,
+      sameDayRetimes: withFrom.filter((r) => r.to === r.from).length,
       seq: seqOut,
       firstIso: seqOut.length ? seqOut[0] : null,
       currentIso: seqOut.length ? seqOut[seqOut.length - 1] : null,
@@ -185,4 +205,4 @@ function historyTrend(logs, opts = {}) {
   };
 }
 
-module.exports = { historyTrend, ETC_FIELDS, CAPS, TREND_VERSION };
+module.exports = { historyTrend, collapseCostDetails, ETC_FIELDS, CAPS, TREND_VERSION };

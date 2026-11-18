@@ -107,9 +107,11 @@ function nameKey(s) {
   t = t.toLowerCase().replace(/&/g, ' and ').replace(/[–—]/g, '-');
   return t.replace(/[^a-z0-9]+/g, ' ').trim();
 }
+// Relay vendor placeholders: never a dealer / sub-vendor name (M4).
+const PLACEHOLDER_RE = /^(DSP_ENTERED|UNASSIGNED|TBD|N\/A|NONE|--)$/i;
 function _supplierName(s) {
   const t = _str(s).trim();
-  if (!t || OEM_ENUM_RE.test(t)) return '';
+  if (!t || OEM_ENUM_RE.test(t) || PLACEHOLDER_RE.test(t)) return '';
   return t;
 }
 // A cut-off name ('M&K Truck Cen...') resolves to the first candidate whose key starts with it, else ''.
@@ -475,7 +477,9 @@ function partsModel(facts) {
     for (const p of targets) { p.status = s.value; p.lastStatusAt = s.at || p.lastStatusAt; }
   }
   const last = statuses[statuses.length - 1];
-  return { parts, partsStatus: last ? last.value : '', facts: re };
+  const arrived = statuses.filter((s) => s.value === 'arrived');
+  const lastArrived = arrived[arrived.length - 1];
+  return { parts, partsStatus: last ? last.value : '', partsArrivedAt: lastArrived ? lastArrived.at || null : null, facts: re };
 }
 
 // ── Estimate (§7) ───────────────────────────────────────────────────────────
@@ -703,9 +707,16 @@ function _historyOf(rf) {
   const h = rf && rf.historyTrend;
   return h && typeof h === 'object' && h.etc && typeof h.etc === 'object' && h.estimate && typeof h.estimate === 'object' ? h : null;
 }
-function _emptyFactSet(row) {
+const PM_DUE_KEYS = Object.freeze(['pmBDue', 'pmXDue', 'dotDue', 'quarterlyLiftDue', 'pmADue']);
+function _pmDueRaw(row) {
+  const out = {};
+  for (const k of PM_DUE_KEYS) out[k] = String((row && row[k]) || '');
+  return out;
+}
+function _emptyFactSet(row, today) {
   return {
-    parts: [], partsStatus: '', orders: [], ros: [], dealerRo: '',
+    today: today || null, pmDueRaw: _pmDueRaw(row), wrNeedByMs: null, structEtc: null, etcRestated: false,
+    parts: [], partsStatus: '', partsArrivedAt: null, orders: [], ros: [], dealerRo: '',
     etc: etcModel([], {}), estimate: estimateModel([]), caseIds: caseIds([]), dealer: dealerModel([], row || {}),
     cause: [], correction: [], warranty: [], vendorDelayReason: '', leadTime: '', pmAddedToRo: false, tow: [], dtna: [], vins: [],
     pmSchedule: Array.isArray(row && row.pmSchedule) ? row.pmSchedule : [],
@@ -745,7 +756,7 @@ function buildFactSet(row, opts = {}) {
   const of = _isBlock(r.offsiteFacts) ? r.offsiteFacts : null;
   const nf = opts.notesFacts && Array.isArray(opts.notesFacts.facts) ? opts.notesFacts.facts : (Array.isArray(opts.notesFacts) ? opts.notesFacts : null);
   if (!rf && !of && !(nf && nf.length)) {
-    const e = _emptyFactSet(r);
+    const e = _emptyFactSet(r, today);
     const since = _ms((rf && rf.wrCreatedAt) || r.created);
     if (Array.isArray(r.offsiteStageHistory) && r.offsiteStageHistory.length) {
       e.stageDwell = stageDwell(r.offsiteStageHistory, { since: since != null ? since - PRIOR_EPISODE_MS : undefined });
@@ -803,8 +814,15 @@ function buildFactSet(row, opts = {}) {
 
   const events = [].concat(rf && Array.isArray(rf.events) ? rf.events : [], of && Array.isArray(of.events) ? of.events : []).slice().sort(_byAtAsc);
   const allOrders = _uniq(cur.filter((f) => f.kind === 'order').map((f) => _str(f.value).toUpperCase()).concat(pm.parts.map((p) => p.orderNo)));
+  // M7: the structured WO repair ETC (newest) and whether the vendor ever restated it in history.
+  const se = _newest(cur.filter((f) => f.kind === 'etcMention' && f.etcKind === 'repairCompletion' && f.via === 'structured'
+    && /^expectedCompletionDateTime:/.test(_str(f.snippet))));
   return {
-    parts: pm.parts, partsStatus: pm.partsStatus,
+    today, pmDueRaw: _pmDueRaw(r),
+    wrNeedByMs: D.parseTs(rf && rf.wrNeedBy),
+    structEtc: se ? { date: se.value, valueMs: D.parseTs(se.raw) } : null,
+    etcRestated: cur.some((f) => f.kind === 'etcMention' && f.via === 'history' && f.etcKind === 'repairCompletion'),
+    parts: pm.parts, partsStatus: pm.partsStatus, partsArrivedAt: pm.partsArrivedAt,
     orders: allOrders,
     ros: _uniq(ros.map((f) => _str(f.value).toUpperCase())),
     dealerRo: dRo ? _str(dRo.value).toUpperCase() : '',
@@ -850,19 +868,72 @@ function resolveFields(fs) {
 // ── Mirrors (§12.3, §10) ────────────────────────────────────────────────────
 const PM_SHORT = { PM_A: 'PM A', PM_B: 'PM B', PM_X: 'PM X', WASH: 'Wash', DOT: 'DOT', APU: 'APU', SVR: 'SVR', STATE_DOT: 'State insp',
   STATE: 'State insp', R360_HANDOFF_INSPECTION: 'R360', QUARTERLY_LIFT: 'Lift', SEMIANNUAL_LIFT: 'Lift' };
-function _pmOverdue(schedule) {
-  const list = (Array.isArray(schedule) ? schedule : []).filter((e) => e && Number(e.overdueDays) > 0)
+// list: pmOverdueList() entries (or pmSchedule entries) -> 'DOT 7d; PM B 2d' (overdue-desc, 120-char cap).
+function _pmOverdue(list) {
+  const due = (Array.isArray(list) ? list : []).filter((e) => e && Number(e.overdueDays) > 0)
     .sort((a, b) => Number(b.overdueDays) - Number(a.overdueDays));
-  const parts = list.map((e) => (PM_SHORT[e.type] || _str(e.label || e.type)) + ' ' + Number(e.overdueDays) + 'd');
+  const parts = due.map((e) => (PM_SHORT[e.type] || _str(e.label || e.type)) + ' ' + Number(e.overdueDays) + 'd');
   let out = '';
   for (const p of parts) { const next = out ? out + '; ' + p : p; if (next.length > 120) break; out = next; }
+  return out;
+}
+
+// Raw AAP due fields -> schedule type (M9). Same keys the compliance filter uses.
+const PM_RAW_TYPE = Object.freeze({ pmBDue: 'PM_B', pmXDue: 'PM_X', dotDue: 'DOT', quarterlyLiftDue: 'QUARTERLY_LIFT', pmADue: 'PM_A' });
+const PM_MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+// 'Mon D, YYYY' -> that day; 'Mon YYYY' -> the month's last day (AAP MONTH_AND_YEAR). -> 'YYYY-MM-DD' | null.
+function _pmDueYmd(raw) {
+  const t = _str(raw).trim();
+  let m = /^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/.exec(t);
+  if (m) {
+    const mo = PM_MON[m[1].toLowerCase().slice(0, 3)];
+    if (!mo) return null;
+    const dt = new Date(+m[3], mo - 1, +m[2]);
+    return dt.getMonth() === mo - 1 ? D.ymd(dt.getTime()) : null;
+  }
+  m = /^([A-Za-z]{3,9})\.?\s+(\d{4})$/.exec(t);
+  if (m) {
+    const mo = PM_MON[m[1].toLowerCase().slice(0, 3)];
+    return mo ? D.ymd(new Date(+m[2], mo, 0).getTime()) : null;
+  }
+  return null;
+}
+
+/**
+ * pmOverdueList(row, today) -> [{ type, label, due:'YYYY-MM-DD'|null, overdueDays }] (M9).
+ * pmSchedule[] when present (its overdueDays unchanged); else the raw pm*Due fields, due at the
+ * end of the due day, overdueDays = whole days past due (null when not overdue). Without
+ * `today` only the schedule is read.
+ */
+function pmOverdueList(row, today) {
+  const r = row && typeof row === 'object' ? row : {};
+  const sched = Array.isArray(r.pmSchedule) ? r.pmSchedule.filter(Boolean) : [];
+  if (sched.length || !today) {
+    return sched.map((e) => ({ type: e.type, label: PM_SHORT[e.type] || _str(e.label || e.type),
+      due: /^\d{4}-\d{2}-\d{2}/.test(_str(e.nextDueIso)) ? _str(e.nextDueIso).slice(0, 10) : null, overdueDays: e.overdueDays }));
+  }
+  const t = _localMidnight(today);
+  if (t == null) return [];
+  const out = [];
+  for (const k of Object.keys(PM_RAW_TYPE)) {
+    const due = _pmDueYmd(r[k]);
+    if (!due) continue;
+    const type = PM_RAW_TYPE[k];
+    const days = Math.round((t - _localMidnight(due)) / DAY_MS);
+    out.push({ type, label: PM_SHORT[type], due, overdueDays: days > 0 ? days : null });
+  }
   return out;
 }
 
 function rowMirrors(fs) {
   const etc = fs.etc;
   const ce = etc.currentEtc;
-  const repDate = ce && ce.kind === 'repairCompletion' && ce.date ? ce.date : '';
+  // M7: a past structured ETC that is only the WR need-by default (never restated, counted none).
+  const se = fs.structEtc;
+  const needByDefault = !!(etc.openHeads.length === 0 && ce && ce.kind === 'repairCompletion'
+    && se && ce.date === se.date && fs.today && ce.date < fs.today && etc.counted.state === 'none' && !fs.etcRestated
+    && se.valueMs != null && fs.wrNeedByMs != null && Math.abs(se.valueMs - fs.wrNeedByMs) <= 15 * 60e3);
+  const repDate = !needByDefault && ce && ce.kind === 'repairCompletion' && ce.date ? ce.date : '';
   const pe = etc.partsEta && etc.partsEta.date ? etc.partsEta.date : '';
   const est = fs.estimate;
   const ext = [fs.blocks.relayAt, fs.blocks.offsiteAt].filter(Boolean).sort().pop() || '';
@@ -891,7 +962,7 @@ function rowMirrors(fs) {
     pmAddedToRo: !!fs.pmAddedToRo,
     leadTime: fs.leadTime || '',
     dealerCallAttempts: fs.dealer.callAttempts.length,
-    pmOverdue: _pmOverdue(fs.pmSchedule),
+    pmOverdue: _pmOverdue(pmOverdueList(Object.assign({ pmSchedule: fs.pmSchedule }, fs.pmDueRaw), fs.today)),
     factConflicts: fs.conflicts.length,
     extractedAt: ext,
   };
@@ -968,6 +1039,13 @@ function _fill(row, key, v) {
  */
 function applyToRow(row, fs, flags) {
   if (!row || !fs || !flags || !flags.enabled) return row;
+  // M4: an own-filled Relay placeholder ('DSP_ENTERED') is cleared; user / AAP values are never touched.
+  const own = row._factFilled && typeof row._factFilled === 'object' ? row._factFilled : null;
+  if (own) {
+    for (const k of ['dealerName', 'subVendor']) {
+      if (own[k] !== undefined && PLACEHOLDER_RE.test(_str(own[k]).trim()) && row[k] === own[k]) { row[k] = ''; delete own[k]; }
+    }
+  }
   const fills = resolveFields(fs);
   for (const k of FILL_KEYS) _fill(row, k, fills[k]);
   if (row._factFilled && typeof row._factFilled === 'object' && !Object.keys(row._factFilled).length) delete row._factFilled;
@@ -1163,6 +1241,6 @@ function digestForRi(fs) {
 module.exports = {
   buildFactSet, etcModel, estimateModel, partsModel, caseIds, dealerModel, nameKey, resolveFields, stageDwell,
   applyToRow, refreshRowFacts, refreshFleetFacts, carryFactBlocks, trimFleetBlocks, rowMirrors, digestForRi, typedIndex,
-  rendererView, rendererRow, dealerOf, freshness, joinLines, untruncate,
-  AUTH_TAG, FACT_BLOCK_KEYS, FILL_KEYS,
+  rendererView, rendererRow, dealerOf, freshness, joinLines, untruncate, pmOverdueList,
+  AUTH_TAG, FACT_BLOCK_KEYS, FILL_KEYS, PLACEHOLDER_RE,
 };
