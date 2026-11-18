@@ -7,6 +7,7 @@
  */
 
 import bus from '../bus.js';
+import { formatAvmLabel } from '../util/avm-label.js';
 
 let _el = null;
 let _open = false;
@@ -44,7 +45,7 @@ function _render() {
     const aiDetails = wr.payload ? `
       <div class="wr-inbox-ai">
         <div><strong>Title:</strong> ${_esc(wr.payload.title)}</div>
-        <div><strong>Area:</strong> ${_esc(wr.aiArea || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].area))} → ${_esc(wr.aiSubcategory || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].subcategory))}</div>
+        <div><strong>Area:</strong> ${_esc(formatAvmLabel(wr.aiArea || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].area)))} → ${_esc(formatAvmLabel(wr.aiSubcategory || (wr.payload.areaPairs && wr.payload.areaPairs[0] && wr.payload.areaPairs[0].subcategory)))}</div>
         <div><strong>Vendor:</strong> ${_esc(wr.aiVendor || wr.payload.vendor || 'Auto-assign')}</div>
         ${isDealerWR ? '<div style="color:#4493f8;font-weight:600">⚠ Create this WR manually via the dealer portal, then Mark Done.</div>' : ''}
         <div><strong>Urgent:</strong> ${wr.payload.urgent === 'Yes' ? '\u26a0\ufe0f YES' : 'No'}</div>

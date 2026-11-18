@@ -23,6 +23,7 @@ import bus from '../bus.js';
 import toast           from '../components/toast.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import { extractJsonObject } from '../util/ai-json.js';
+import { formatAvmLabel } from '../util/avm-label.js';
 
 // ── Vendor list (mirrors aap_create_wr.js VENDOR_IDS) ─────────────────────
 const VENDORS = [
@@ -67,7 +68,7 @@ const AREA_SUBS = {"BODY":["AIR FILTERS","BATTERY BOX","BODY CAB COMPONENTS","BO
 // The Component-Area rows are three cascading <select>s — Category (L1) ->
 // Sub-category (L2) -> Sub-sub-category (L3) — populated LIVE from AAP's
 // avmCodes tree (window.aapApi.avmTree) so they always match the real wizard.
-// Option VALUE = AAP code, LABEL = displayName. L3 only shows for L2 codes that
+// Option VALUE = AAP code, LABEL = formatAvmLabel(displayName || code). L3 only shows for L2 codes that
 // actually have children (e.g. Tires); it stays hidden otherwise.
 //
 // TOW is special: it is NOT an avmCode but the tow flow (AI Fill, the tow tab)
@@ -97,7 +98,9 @@ export function avmOptionsHtml(items, selected, placeholder) {
   const opts = ['<option value="">' + _safe(placeholder || '-- Select --') + '</option>'];
   for (const it of (items || [])) {
     const code = (it && it.code != null) ? String(it.code) : '';
-    const name = (it && (it.displayName || it.code)) || '';
+    // LABEL only is humanized (TOTAL_VEHICLE -> Total Vehicle); the option
+    // VALUE stays the raw AAP code that buildAreaPairsPayload submits.
+    const name = formatAvmLabel((it && (it.displayName || it.code)) || '');
     const sel = (selected != null && String(selected) === code) ? ' selected' : '';
     opts.push('<option value="' + _safeAttr(code) + '"' + sel + '>' + _safe(name) + '</option>');
   }
