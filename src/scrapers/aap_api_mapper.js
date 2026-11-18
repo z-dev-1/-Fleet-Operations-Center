@@ -534,7 +534,9 @@ function toFleetRow(wo, assetSummary, serviceDetail, extra = {}) {
 // (unit._secondaryWRs[]). Includes CLOSED work orders — a WO is shown whether
 // it's open or closed (per product: "closed doesn't matter if it's still a
 // work order"). `serviceDetail` is optional (comment thread for that WO).
-function toSecondaryWR(wo, serviceDetail) {
+// opts.wrType ('planned' | 'unplanned'): the caller knows which category pass
+// the WO came from; overrides the category regex (search items can lack it).
+function toSecondaryWR(wo, serviceDetail, opts) {
   if (!wo) return null;
   const id = wo.workRequestId || wo.id || '';
   const l1 = []; const l2 = [];
@@ -565,7 +567,8 @@ function toSecondaryWR(wo, serviceDetail) {
     fullConversation: extComments.length ? ('Conversation\n' + commentsToTimeline(extComments, { includeInternal: true, tagInternal: false })) : '',
     repairTimeline:  '',   // AI-built by deep-scan, never a raw dump
     // 'planned' | 'unplanned' — drives the card's section title.
-    _wrType:         /plan/i.test(cat) && !/unplan/i.test(cat) ? 'planned' : 'unplanned',
+    _wrType:         (opts && (opts.wrType === 'planned' || opts.wrType === 'unplanned')) ? opts.wrType
+      : (/plan/i.test(cat) && !/unplan/i.test(cat) ? 'planned' : 'unplanned'),
     // Split View: the Relay URL for THIS work order.
     _serviceUUID:    id,
     _relayUrl:       id ? ('https://aap-na.corp.amazon.com/v2/service/' + id) : '',

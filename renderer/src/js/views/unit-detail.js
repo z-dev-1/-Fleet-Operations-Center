@@ -2271,6 +2271,126 @@ function _parseRelayConvo(raw) {
 }
 
 
+// Planned WR card (Repair tab). Exported for tests.
+export function plannedWrCardHtml(unit){
+  // Planned WR card: shown for PM Failed / Expired Inspection Unavailable units
+  // that also have an open Unplanned WR (primary scraped) AND an open Planned WR.
+  // unit._plannedWRData is populated by the relay.js second-pass scrape.
+  var plannedWRCard='';
+  var _pmReasonsRe=/^(PM\s*Failed|Expired\s*Inspection)$/i;
+  if(unit._plannedWRData && _pmReasonsRe.test(unit.lifecycleReason||'')){
+    var p=unit._plannedWRData;
+    var pStateRaw=p.serviceState||'';
+    var pStateKey=(p.completed||/clos|complet/i.test(pStateRaw))?'closed':/sour/i.test(pStateRaw)?'sourcing':'open';
+    var pFields=[
+      p.workRequestId?['WR ID',p.workRequestId]:null,
+      (p.alternativeId||p.altId)?['AMZ ID',p.alternativeId||p.altId]:null,
+      p.salesforceCase?['SF Case',p.salesforceCase]:null,
+      p.serviceCategory?['Category',p.serviceCategory]:null,
+      p.totalCost?['Total Cost',p.totalCost]:null,
+    ].filter(Boolean);
+    plannedWRCard=
+      '<div class="dp-section-title dp-section-title--planned">Planned Work Order</div>'+
+      '<div class="dp-wo-card dp-wo-card--planned">'+
+        '<div class="dp-wo-card__header">'+
+          '<span class="dp-wo-card__vendor">'+esc(p.vendor||'Unknown Vendor')+'</span>'+
+          '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--'+pStateKey+'">'+esc(pStateRaw||'Open')+'</span>'+
+        '</div>'+
+        (p.issueDetails?'<div class="dp-wo-card__desc">'+esc(p.issueDetails)+'</div>':'')+
+        (pFields.length?'<div class="dp-wo-card__fields">'+pFields.map(function(f){
+          return '<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';
+        }).join('')+'</div>':'')+
+        (p.created||p.completed?'<div class="dp-wo-card__dates">'+
+          (p.created?'<span>Opened '+fmtDate(p.created)+'</span>':'')+
+          (p.completed?'<span>Closed '+fmtDate(p.completed)+'</span>':'')+
+        '</div>':'')+
+        // FIX (2026-08-17): give the Planned WR its own Split View button too.
+        // Its Relay URL is built from _serviceUUID (scrapeServiceByUUID doesn't
+        // attach _relayUrl to _plannedWRData the way it does for _secondaryWRs).
+        (function(){
+          var _plUuid = p._serviceUUID || '';
+          if (!_plUuid) return '';
+          var _plRelay = 'https://aap-na.corp.amazon.com/v2/service/' + _plUuid;
+          var _plOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
+          return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
+            '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
+              ' data-secondary-split="1"' +
+              ' data-split-left="' + esc(_plRelay) + '"' +
+              ' data-split-right="' + esc(_plOffsite) + '">' +
+              '🔍 Open in Relay (Split View)</button>' +
+          '</div>';
+        })()+
+      '</div>';
+  }
+  return plannedWRCard;
+}
+
+// Secondary WR cards (Repair tab). Skips the WO already shown as the planned
+// card so a planned WO in both _plannedWRData and _secondaryWRs renders once.
+export function secondaryWrCardsHtml(unit){
+  var shownPlannedId = plannedWrCardHtml(unit) ? String((unit._plannedWRData||{}).workRequestId||'') : '';
+  // ── secondary WR cards (multi-WR pass) ──────────────────────────────────
+  // One card per entry in unit._secondaryWRs, styled same as plannedWRCard.
+  var secondaryWRCards = '';
+  if (Array.isArray(unit._secondaryWRs) && unit._secondaryWRs.length) {
+    unit._secondaryWRs.forEach(function(p) {
+      if (shownPlannedId && String(p.workRequestId||'') === shownPlannedId) return;
+      var pStateRaw  = p.serviceState || '';
+      var pStateKey  = (p.completed || /clos|complet/i.test(pStateRaw)) ? 'closed'
+                     : /sour/i.test(pStateRaw) ? 'sourcing' : 'open';
+      var pTypeLabel = p._wrType === 'planned' ? 'Planned' : 'Unplanned';
+      var pFields = [
+        p.workRequestId          ? ['WR ID',      p.workRequestId]          : null,
+        (p.alternativeId||p.altId)?['AMZ ID',     p.alternativeId||p.altId] : null,
+        p.salesforceCase         ? ['SF Case',    p.salesforceCase]         : null,
+        p.serviceCategory        ? ['Category',   p.serviceCategory]        : null,
+        p.totalCost              ? ['Total Cost', p.totalCost]              : null,
+      ].filter(Boolean);
+      secondaryWRCards +=
+        '<div class="dp-section-title dp-section-title--planned">' + pTypeLabel + ' Work Order</div>' +
+        '<div class="dp-wo-card dp-wo-card--planned">' +
+          '<div class="dp-wo-card__header">' +
+            '<span class="dp-wo-card__vendor">' + esc(p.vendor || 'Unknown Vendor') + '</span>' +
+            '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--' + pStateKey + '">' + esc(pStateRaw || 'Open') + '</span>' +
+          '</div>' +
+          (p.issueDetails ? '<div class="dp-wo-card__desc">' + esc(p.issueDetails) + '</div>' : '') +
+          (pFields.length ? '<div class="dp-wo-card__fields">' + pFields.map(function(f) {
+            return '<span class="dp-wo-field"><span class="dp-wo-field__k">' + esc(f[0]) + '</span>' +
+                   '<span class="dp-wo-field__v">' + esc(f[1]) + '</span></span>';
+          }).join('') + '</div>' : '') +
+          ((p.created || p.completed) ? '<div class="dp-wo-card__dates">' +
+            (p.created   ? '<span>Opened ' + fmtDate(p.created)   + '</span>' : '') +
+            (p.completed ? '<span>Closed ' + fmtDate(p.completed) + '</span>' : '') +
+          '</div>' : '') +
+          (function() {
+            // FIX (2026-08-17): two bugs on secondary/multi-WR cards —
+            //  (1) "Open in Relay ↗" used data-ext-url (opened an EXTERNAL
+            //      window), never the split view.
+            //  (2) The Split View button only rendered when an OFFSITE url
+            //      existed, so a secondary WR with a Relay link but no offsite
+            //      (e.g. 921126's planned APU WR) got NO Split View option.
+            // Now: Split View is available whenever _relayUrl exists (offsite
+            // optional — _openInlineSplit handles a missing right pane), and
+            // "Open in Relay ↗" opens the split view too. The offsite link (if
+            // any) stays as its own external link.
+            if (!p._relayUrl) return '';
+            var _pOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
+            var _pLabel   = p.asistLabel || p.offsiteShopEvent || 'ASIST';
+            return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
+              '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
+                ' data-secondary-split="1"' +
+                ' data-split-left="' + esc(p._relayUrl) + '"' +
+                ' data-split-right="' + esc(_pOffsite) + '">' +
+                '🔍 Open in Relay (Split View)</button>' +
+              (_pOffsite ? ' <a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' : '') +
+            '</div>';
+          })() +
+        '</div>';
+    });
+  }
+  return secondaryWRCards;
+}
+
 function renderRepairPane(unit){
   // ── WR summary card ────────────────────────────────────────────────────────
   var hasRelay=unit.relaySynced&&(unit.vendor||unit.issueDetails||unit.workRequestId);
@@ -2325,117 +2445,8 @@ function renderRepairPane(unit){
   }
 
   // ── work duration bar ──────────────────────────────────────────────────────
-  // Planned WR card: shown for PM Failed / Expired Inspection Unavailable units
-  // that also have an open Unplanned WR (primary scraped) AND an open Planned WR.
-  // unit._plannedWRData is populated by the relay.js second-pass scrape.
-  var plannedWRCard='';
-  var _pmReasonsRe=/^(PM\s*Failed|Expired\s*Inspection)$/i;
-  if(unit._plannedWRData && _pmReasonsRe.test(unit.lifecycleReason||'')){
-    var p=unit._plannedWRData;
-    var pStateRaw=p.serviceState||'';
-    var pStateKey=(p.completed||/clos|complet/i.test(pStateRaw))?'closed':/sour/i.test(pStateRaw)?'sourcing':'open';
-    var pFields=[
-      p.workRequestId?['WR ID',p.workRequestId]:null,
-      (p.alternativeId||p.altId)?['AMZ ID',p.alternativeId||p.altId]:null,
-      p.salesforceCase?['SF Case',p.salesforceCase]:null,
-      p.serviceCategory?['Category',p.serviceCategory]:null,
-      p.totalCost?['Total Cost',p.totalCost]:null,
-    ].filter(Boolean);
-    plannedWRCard=
-      '<div class="dp-section-title dp-section-title--planned">Planned Work Order</div>'+
-      '<div class="dp-wo-card dp-wo-card--planned">'+
-        '<div class="dp-wo-card__header">'+
-          '<span class="dp-wo-card__vendor">'+esc(p.vendor||'Unknown Vendor')+'</span>'+
-          '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--'+pStateKey+'">'+esc(pStateRaw||'Open')+'</span>'+
-        '</div>'+
-        (p.issueDetails?'<div class="dp-wo-card__desc">'+esc(p.issueDetails)+'</div>':'')+
-        (pFields.length?'<div class="dp-wo-card__fields">'+pFields.map(function(f){
-          return '<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';
-        }).join('')+'</div>':'')+
-        (p.created||p.completed?'<div class="dp-wo-card__dates">'+
-          (p.created?'<span>Opened '+fmtDate(p.created)+'</span>':'')+
-          (p.completed?'<span>Closed '+fmtDate(p.completed)+'</span>':'')+
-        '</div>':'')+
-        // FIX (2026-08-17): give the Planned WR its own Split View button too.
-        // Its Relay URL is built from _serviceUUID (scrapeServiceByUUID doesn't
-        // attach _relayUrl to _plannedWRData the way it does for _secondaryWRs).
-        (function(){
-          var _plUuid = p._serviceUUID || '';
-          if (!_plUuid) return '';
-          var _plRelay = 'https://aap-na.corp.amazon.com/v2/service/' + _plUuid;
-          var _plOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
-          return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
-            '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
-              ' data-secondary-split="1"' +
-              ' data-split-left="' + esc(_plRelay) + '"' +
-              ' data-split-right="' + esc(_plOffsite) + '">' +
-              '🔍 Open in Relay (Split View)</button>' +
-          '</div>';
-        })()+
-      '</div>';
-  }
-
-
-  // ── secondary WR cards (multi-WR pass) ──────────────────────────────────
-  // One card per entry in unit._secondaryWRs, styled same as plannedWRCard.
-  var secondaryWRCards = '';
-  var _secondaryRelayUrl = ''; // captured for split-view below
-  if (Array.isArray(unit._secondaryWRs) && unit._secondaryWRs.length) {
-    unit._secondaryWRs.forEach(function(p, idx) {
-      if (idx === 0) _secondaryRelayUrl = p._relayUrl || '';
-      var pStateRaw  = p.serviceState || '';
-      var pStateKey  = (p.completed || /clos|complet/i.test(pStateRaw)) ? 'closed'
-                     : /sour/i.test(pStateRaw) ? 'sourcing' : 'open';
-      var pTypeLabel = p._wrType === 'planned' ? 'Planned' : 'Unplanned';
-      var pFields = [
-        p.workRequestId          ? ['WR ID',      p.workRequestId]          : null,
-        (p.alternativeId||p.altId)?['AMZ ID',     p.alternativeId||p.altId] : null,
-        p.salesforceCase         ? ['SF Case',    p.salesforceCase]         : null,
-        p.serviceCategory        ? ['Category',   p.serviceCategory]        : null,
-        p.totalCost              ? ['Total Cost', p.totalCost]              : null,
-      ].filter(Boolean);
-      secondaryWRCards +=
-        '<div class="dp-section-title dp-section-title--planned">' + pTypeLabel + ' Work Order</div>' +
-        '<div class="dp-wo-card dp-wo-card--planned">' +
-          '<div class="dp-wo-card__header">' +
-            '<span class="dp-wo-card__vendor">' + esc(p.vendor || 'Unknown Vendor') + '</span>' +
-            '<span class="dp-wo-card__status-pill dp-wo-card__status-pill--' + pStateKey + '">' + esc(pStateRaw || 'Open') + '</span>' +
-          '</div>' +
-          (p.issueDetails ? '<div class="dp-wo-card__desc">' + esc(p.issueDetails) + '</div>' : '') +
-          (pFields.length ? '<div class="dp-wo-card__fields">' + pFields.map(function(f) {
-            return '<span class="dp-wo-field"><span class="dp-wo-field__k">' + esc(f[0]) + '</span>' +
-                   '<span class="dp-wo-field__v">' + esc(f[1]) + '</span></span>';
-          }).join('') + '</div>' : '') +
-          ((p.created || p.completed) ? '<div class="dp-wo-card__dates">' +
-            (p.created   ? '<span>Opened ' + fmtDate(p.created)   + '</span>' : '') +
-            (p.completed ? '<span>Closed ' + fmtDate(p.completed) + '</span>' : '') +
-          '</div>' : '') +
-          (function() {
-            // FIX (2026-08-17): two bugs on secondary/multi-WR cards —
-            //  (1) "Open in Relay ↗" used data-ext-url (opened an EXTERNAL
-            //      window), never the split view.
-            //  (2) The Split View button only rendered when an OFFSITE url
-            //      existed, so a secondary WR with a Relay link but no offsite
-            //      (e.g. 921126's planned APU WR) got NO Split View option.
-            // Now: Split View is available whenever _relayUrl exists (offsite
-            // optional — _openInlineSplit handles a missing right pane), and
-            // "Open in Relay ↗" opens the split view too. The offsite link (if
-            // any) stays as its own external link.
-            if (!p._relayUrl) return '';
-            var _pOffsite = p.offsiteShopEventUrl || p.asistSrUrl || '';
-            var _pLabel   = p.asistLabel || p.offsiteShopEvent || 'ASIST';
-            return '<div class="dp-wo-card__dates" style="gap:10px;flex-wrap:wrap">' +
-              '<button class="dp-split-view-btn" style="font-size:9px;padding:3px 10px"' +
-                ' data-secondary-split="1"' +
-                ' data-split-left="' + esc(p._relayUrl) + '"' +
-                ' data-split-right="' + esc(_pOffsite) + '">' +
-                '🔍 Open in Relay (Split View)</button>' +
-              (_pOffsite ? ' <a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' : '') +
-            '</div>';
-          })() +
-        '</div>';
-    });
-  }
+  var plannedWRCard = plannedWrCardHtml(unit);
+  var secondaryWRCards = secondaryWrCardsHtml(unit);
 
   var durBar=workDurationBar(unit);
 

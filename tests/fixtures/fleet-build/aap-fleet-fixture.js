@@ -69,6 +69,40 @@ export const FLEET = {
   },
 };
 
+// Multi open WO shapes. M1001 = 122269/322283/B62281 (1 open unplanned + 1 open
+// planned). M1002 = single open WO (+ a completed one). M1003 = FLD260703
+// (2 open unplanned + 1 open planned). M1004 = ACTIVE with two zombie open WOs.
+const H = 3600000;
+const MU = {
+  m1u: mkWo({ id: 'svc-m1-u', aaid: 'aaid-m1', unit: 'M1001', vendor: 'AMERIT', modified: T0 - 2 * H }),
+  m1p: mkWo({ id: 'svc-m1-p', aaid: 'aaid-m1', unit: 'M1001', vendor: 'CUMMINS', category: 'PLANNED', status: 'SCHEDULED', modified: T0 - 5 * H }),
+  m2u: mkWo({ id: 'svc-m2-u', aaid: 'aaid-m2', unit: 'M1002', vendor: 'VOLVO' }),
+  m2old: mkWo({ id: 'svc-m2-old', aaid: 'aaid-m2', unit: 'M1002', vendor: 'VOLVO', status: 'COMPLETED', completed: T0 - 30 * 24 * H, modified: T0 - 30 * 24 * H }),
+  m3u1: mkWo({ id: 'svc-m3-u1', aaid: 'aaid-m3', unit: 'M1003', vendor: 'PACCAR', modified: T0 - 1 * H }),
+  m3u2: mkWo({ id: 'svc-m3-u2', aaid: 'aaid-m3', unit: 'M1003', vendor: 'AMERIT', modified: T0 - 10 * H }),
+  m3p: mkWo({ id: 'svc-m3-p', aaid: 'aaid-m3', unit: 'M1003', vendor: 'TA', category: 'PLANNED', status: 'SCHEDULED', modified: T0 - 3 * H, reason: 'PM_FAILED' }),
+  m4u: mkWo({ id: 'svc-m4-u', aaid: 'aaid-m4', unit: 'M1004', modified: T0 - 400 * 24 * H, state: 'ACTIVE' }),
+  m4p: mkWo({ id: 'svc-m4-p', aaid: 'aaid-m4', unit: 'M1004', category: 'PLANNED', status: 'SCHEDULED', modified: T0 - 400 * 24 * H, state: 'ACTIVE' }),
+};
+export const MULTI = {
+  wos: MU,
+  assets: [
+    mkAsset({ aaid: 'aaid-m1', unit: 'M1001' }),
+    mkAsset({ aaid: 'aaid-m2', unit: 'M1002' }),
+    mkAsset({ aaid: 'aaid-m3', unit: 'M1003', reason: 'PM_FAILED' }),
+    mkAsset({ aaid: 'aaid-m4', unit: 'M1004', state: 'ACTIVE' }),
+  ],
+  unplannedWos: [MU.m1u, MU.m2u, MU.m2old, MU.m3u1, MU.m3u2, MU.m4u],
+  plannedWos: [MU.m1p, MU.m3p, MU.m4p],
+  // refreshUnit: per-unit answers by search category.
+  byUnit: {
+    M1001: { unplanned: [MU.m1u], planned: [MU.m1p] },
+    M1002: { unplanned: [MU.m2u, MU.m2old], planned: [] },
+    M1003: { unplanned: [MU.m3u1, MU.m3u2], planned: [MU.m3p] },
+    M1004: { unplanned: [MU.m4u], planned: [MU.m4p] },
+  },
+};
+
 // n asset entries starting at index `start` (aaid 'aaid-p<i>', unit 'P<i>').
 export function mkAssetPage(n, start = 0) {
   return Array.from({ length: n }, (_, k) => mkAsset({ aaid: 'aaid-p' + (start + k), unit: 'P' + (start + k) }));

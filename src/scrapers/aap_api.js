@@ -993,16 +993,27 @@ async function buildFleetDataset(opts = {}) {
   // per value. The UNPLANNED open set is already `woList` above (the default
   // searchRequest is UNPLANNED + the open-status list); we add a PLANNED pass.
   // Counts are indexed by aaid and attached to each row below.
+  // The open WO objects are kept per aaid too (same lists as the counts), so
+  // the row can attach every OTHER open WO as a secondary card below.
   const openUnplannedByAaid = new Map();
   const openPlannedByAaid = new Map();
+  const openUnplannedWosByAaid = new Map();
+  const openPlannedWosByAaid = new Map();
+  const _pushTo = (m, k, w) => { const l = m.get(k); if (l) l.push(w); else m.set(k, [w]); };
   for (const w of woList) {
-    if (w && w.aaid && woIsOpen(w)) openUnplannedByAaid.set(w.aaid, (openUnplannedByAaid.get(w.aaid) || 0) + 1);
+    if (w && w.aaid && woIsOpen(w)) {
+      openUnplannedByAaid.set(w.aaid, (openUnplannedByAaid.get(w.aaid) || 0) + 1);
+      _pushTo(openUnplannedWosByAaid, w.aaid, w);
+    }
   }
   try {
     const plannedReq = Object.assign({}, woReq, { category: 'PLANNED' });
     const plannedList = await searchAllPages(plannedReq, { maxPages: opts.maxPages || 50 });
     for (const w of plannedList) {
-      if (w && w.aaid && woIsOpen(w)) openPlannedByAaid.set(w.aaid, (openPlannedByAaid.get(w.aaid) || 0) + 1);
+      if (w && w.aaid && woIsOpen(w)) {
+        openPlannedByAaid.set(w.aaid, (openPlannedByAaid.get(w.aaid) || 0) + 1);
+        _pushTo(openPlannedWosByAaid, w.aaid, w);
+      }
     }
   } catch (e) {
     try { logger.warn('buildFleetDataset: PLANNED WO count pass failed: ' + e.message); } catch (_) { /* noop */ }
@@ -1093,6 +1104,37 @@ async function buildFleetDataset(opts = {}) {
       row.relaySynced = false;
       wo = null; // ensure no secondary/detail logic treats it as having a WO
     }
+
+    // SECONDARY WOs — every OTHER open WO for this asset (unplanned first, then
+    // planned, newest first), from the same lists the U/P counts come from, so
+    // openPlanned=1 means the planned WO is attached. Detail (comments) only
+    // when withComments is on, inside the same per-call timeout + detail budget.
+    const secondary = [];
+    if (wo && aaid) {
+      const primaryId = wo.workRequestId || wo.id;
+      const byNewest = (l) => (l || []).slice().sort((a, b) => woTs(b) - woTs(a));
+      const seen = new Set([primaryId]);
+      const cands = [];
+      for (const [list, wrType] of [[openUnplannedWosByAaid.get(aaid), 'unplanned'], [openPlannedWosByAaid.get(aaid), 'planned']]) {
+        for (const w of byNewest(list)) {
+          const id = w.workRequestId || w.id;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          cands.push({ w, wrType });
+        }
+      }
+      for (const { w, wrType } of cands.slice(0, 6)) {
+        let sd = null;
+        if (opts.withComments !== false && detailDone < detailCap) {
+          try { sd = await withTimeout(getService(w.workRequestId || w.id), perCallMs); detailDone++; }
+          catch (_) { /* leave the secondary's comments empty */ }
+        }
+        const entry = mapper.toSecondaryWR(w, sd, { wrType });
+        if (entry) secondary.push(entry);
+      }
+    }
+    row._secondaryWRs = secondary;
+    row._plannedWRData = secondary.find((s) => s._wrType === 'planned') || null;
 
     // ASSET MASTER DATA — read straight from the BULK search result's
     // attributesText (operator, owner, domicileSite, bodyType, make, VIN). This
@@ -1216,9 +1258,13 @@ async function refreshUnit(unitNumber) {
   // unconstrained by the restrictive default filter. We show every WO as a card
   // in the detail pane — a closed WO is still a work order worth seeing.
   let allWOs = [];
+  let unplannedWOs = [];
+  const plannedIds = new Set();
+  const _wid = (w) => (w && (w.workRequestId || w.id)) || '';
   try {
     const r1 = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
-    allWOs = (r1 && r1.serviceAggregates) || [];
+    unplannedWOs = (r1 && r1.serviceAggregates) || [];
+    allWOs = unplannedWOs;
     // If the restrictive body hid them, widen (same two-tier logic as findOpenWO).
     if (!allWOs.length) {
       const r2 = await searchServices({
@@ -1226,8 +1272,31 @@ async function refreshUnit(unitNumber) {
         lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1,
       });
       allWOs = (r2 && r2.serviceAggregates) || [];
+    } else {
+      // Attempt 1 is pinned to category UNPLANNED, so a unit with an open
+      // unplanned WO never saw its open PLANNED one. One bounded PLANNED pass
+      // (filters nulled: planned DAMAGE WRs fall outside them); on failure the
+      // unit keeps the unplanned-only result.
+      let plannedWOs = [];
+      try {
+        const rp = await _withTimeout(searchServices({
+          equipmentIds: [u], statuses: [], category: 'PLANNED',
+          lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1,
+        }), 8000);
+        plannedWOs = (rp && rp.serviceAggregates) || [];
+      } catch (_) { plannedWOs = []; }
+      const seenIds = new Set(unplannedWOs.map(_wid).filter(Boolean));
+      const extra = [];
+      for (const w of plannedWOs) {
+        const id = _wid(w);
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        plannedIds.add(id);
+        extra.push(w);
+      }
+      allWOs = unplannedWOs.concat(extra);
     }
-  } catch (_) { allWOs = []; }
+  } catch (_) { allWOs = []; unplannedWOs = []; }
 
   // Classify WOs. The search with statuses:[] returns the unit's ENTIRE WO
   // history (every old completed/cancelled WO), so we must NOT show all of them
@@ -1254,7 +1323,10 @@ async function refreshUnit(unitNumber) {
   //     hidden unless it's the single thing explaining an unavailable unit).
   //     For an AVAILABLE unit, never surface a cancelled WO as the primary card.
   const byRecency = allWOs.slice().sort((a, b) => _ts(b) - _ts(a));
-  let wo = openWOs[0] || null;
+  // The PLANNED pass only adds secondaries: when attempt 1 has an open
+  // (unplanned) WO it stays the primary, even if a planned WO is newer.
+  const r1Open = unplannedWOs.filter(_isOpen).sort((a, b) => _ts(b) - _ts(a));
+  let wo = r1Open[0] || openWOs[0] || null;
   if (!wo) {
     const newestNonCancelled = byRecency.find((w) => !_isCancelled(w)) || null;
     if (newestNonCancelled) {
@@ -1294,17 +1366,21 @@ async function refreshUnit(unitNumber) {
   // returned many old closed ones). A just-closed WO only surfaces as the
   // PRIMARY card (the openWOs[0]||newest fallback above), never as a secondary.
   const primaryId = wo ? (wo.workRequestId || wo.id) : null;
-  const others = openWOs.filter((w) => (w.workRequestId || w.id) !== primaryId);
+  // Unplanned first, then planned (each newest first), same order as the bulk build.
+  const others = openWOs.filter((w) => (w.workRequestId || w.id) !== primaryId)
+    .sort((a, b) => (plannedIds.has(_wid(a)) ? 1 : 0) - (plannedIds.has(_wid(b)) ? 1 : 0));
   const secondary = [];
   const SECONDARY_CAP = 6;
   for (const w of others.slice(0, SECONDARY_CAP)) {
     let sd = null;
     const wid = w.workRequestId || w.id;
-    if (wid) { try { sd = await getService(wid); } catch (_) {} }
-    const entry = mapper.toSecondaryWR(w, sd);
+    // Bounded per call: up to 6 secondaries per unit inside the hydration loop.
+    if (wid) { try { sd = await _withTimeout(getService(wid), 8000); } catch (_) {} }
+    const entry = mapper.toSecondaryWR(w, sd, { wrType: plannedIds.has(wid) ? 'planned' : undefined });
     if (entry) secondary.push(entry);
   }
   row._secondaryWRs = secondary.length ? secondary : [];
+  row._plannedWRData = secondary.find((s) => s._wrType === 'planned') || null;
   if (full) {
     const d = mapper.assetDetailFields(full);
     row.vin = d.vin || row.vin;
@@ -1372,6 +1448,7 @@ async function refreshUnit(unitNumber) {
     row.level2 = '';
     row.relaySynced = false;
     row._secondaryWRs = [];
+    row._plannedWRData = null;
     if (_xf.enabled) {
       // The ten WR keys toFleetRow writes with extraction on (AC29).
       row.relayFacts = null;

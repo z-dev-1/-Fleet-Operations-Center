@@ -611,8 +611,11 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
   // timeline builder, so their notes/comments were silently dropped. Collect
   // each secondary WR's conversation so the AI sees ALL work orders' activity.
   const secondaryConvs = [];
+  // The API path also lists the planned WO in _secondaryWRs; it is fed once above.
+  const plannedFedId = plannedConv ? String(u._plannedWRData.workRequestId || '') : '';
   if (Array.isArray(u._secondaryWRs) && u._secondaryWRs.length) {
     u._secondaryWRs.forEach(function (w, idx) {
+      if (plannedFedId && w && String(w.workRequestId || '') === plannedFedId) return;
       let sConv = (w && w.fullConversation) || '';
       if (!sConv) return;
       const sStart = sConv.indexOf('Conversation');

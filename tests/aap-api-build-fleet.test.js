@@ -10,7 +10,7 @@ import { createRequire } from 'module';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { FLEET, mkAsset, mkWo, mkAssetPage, mkWoPages } from './fixtures/fleet-build/aap-fleet-fixture.js';
+import { FLEET, MULTI, mkAsset, mkWo, mkAssetPage, mkWoPages } from './fixtures/fleet-build/aap-fleet-fixture.js';
 
 const require = createRequire(import.meta.url);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aap-build-fleet-'));
@@ -236,6 +236,119 @@ describe('buildFleetDataset AAP_API_TIMEOUT mid-build', () => {
     expect(aap.getCallStats().consecutiveTimeouts).toBe(0);
     expect(prov.opened).toBe(2);
     expect(guard.release(s2.token).released).toBe(true);
+  });
+});
+
+describe('buildFleetDataset multi open WOs', () => {
+  const multiSpec = (extra = {}) => Object.assign({
+    assets: { domicileSite: { 0: MULTI.assets } },
+    unplanned: [MULTI.unplannedWos],
+    planned: [MULTI.plannedWos],
+  }, extra);
+  const RELAY = 'https://aap-na.corp.amazon.com/v2/service/';
+  const isMultiDetail = (r) => r.method === 'GET' && /^\/api\/v1\/serviceaggregates\/svc-m[^/]*$/.test(r.path);
+  const detail = (id) => ok({ id, workRequest: { comments: [{ timestamp: '2026-11-10T14:00:00Z', createdBy: 'Vendor', text: 'note ' + id }] } });
+
+  it('1 unplanned + 1 planned (122269 shape): the planned WO is the secondary and _plannedWRData', async () => {
+    useRouter(multiSpec());
+    const u = byUnit(await aap.buildFleetDataset(BASE));
+    expect(u.M1001.workRequestId).toBe('svc-m1-u');
+    expect(u.M1001.openUnplanned).toBe(1);
+    expect(u.M1001.openPlanned).toBe(1);
+    expect(u.M1001._secondaryWRs).toHaveLength(1);
+    expect(u.M1001._secondaryWRs[0]).toMatchObject({ workRequestId: 'svc-m1-p', _wrType: 'planned', _serviceUUID: 'svc-m1-p',
+      _relayUrl: RELAY + 'svc-m1-p' });
+    expect(u.M1001._plannedWRData).not.toBe(null);
+    expect(u.M1001._plannedWRData.workRequestId).toBe('svc-m1-p');
+  });
+  it('single open WO: no secondary, no planned card; the completed WO never appears', async () => {
+    useRouter(multiSpec());
+    const u = byUnit(await aap.buildFleetDataset(BASE));
+    expect(u.M1002.workRequestId).toBe('svc-m2-u');
+    expect(u.M1002._secondaryWRs).toEqual([]);
+    expect(u.M1002._plannedWRData).toBe(null);
+    expect(u.M1002.openUnplanned).toBe(1);
+    expect(u.M1002.openPlanned).toBe(0);
+  });
+  it('2 unplanned + 1 planned (FLD260703 shape): both others attach, unplanned first', async () => {
+    useRouter(multiSpec());
+    const u = byUnit(await aap.buildFleetDataset(BASE));
+    expect(u.M1003.workRequestId).toBe('svc-m3-u1');
+    expect(u.M1003._secondaryWRs.map((s) => s.workRequestId)).toEqual(['svc-m3-u2', 'svc-m3-p']);
+    expect(u.M1003._secondaryWRs.map((s) => s._wrType)).toEqual(['unplanned', 'planned']);
+    expect(u.M1003._plannedWRData.workRequestId).toBe('svc-m3-p');
+    expect(u.M1003.openUnplanned).toBe(2);
+    expect(u.M1003.openPlanned).toBe(1);
+  });
+  it('Active unit: zombie WOs are cleared, no secondaries', async () => {
+    useRouter(multiSpec());
+    const u = byUnit(await aap.buildFleetDataset(BASE));
+    expect(u.M1004.lifecycleState).toBe('Active');
+    expect(u.M1004.workRequestId).toBe('');
+    expect(u.M1004._secondaryWRs).toEqual([]);
+    expect(u.M1004._plannedWRData).toBe(null);
+  });
+  it('FLEET.T1001 (1 + 1) attaches its planned WO; openPlanned > 0 always has the planned WO attached', async () => {
+    useRouter(fleetSpec());
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(byUnit(ds).T1001._secondaryWRs[0].workRequestId).toBe('svc-u1-pm');
+    useRouter(multiSpec());
+    const ds2 = await aap.buildFleetDataset(BASE);
+    for (const r of ds.rows.concat(ds2.rows)) {
+      if (r.openPlanned > 0 && r.lifecycleState !== 'Active') {
+        expect(r._plannedWRData || /^PLANNED$/i.test(r.serviceCategory || '')).toBeTruthy();
+        expect(r._secondaryWRs.filter((s) => s._wrType === 'planned').length + (/^PLANNED$/i.test(r.serviceCategory || '') ? 1 : 0)).toBe(r.openPlanned);
+      }
+    }
+  });
+  it('budget: withComments:false makes no detail GETs; detailCap:1 makes exactly one', async () => {
+    const { page } = useRouter(multiSpec({ service: detail }));
+    await aap.buildFleetDataset(BASE);
+    expect(page.requests.filter(isMultiDetail)).toHaveLength(0);
+    aap.dispose();
+    const { page: page2 } = useRouter(multiSpec({ service: detail }));
+    await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 1 }));
+    expect(page2.requests.filter(isMultiDetail)).toHaveLength(1);
+  });
+  it('withComments:true fills secondary conversations', async () => {
+    useRouter(multiSpec({ service: detail }));
+    // detailCap defaults to the asset count (primaries + secondaries share it).
+    const u = byUnit(await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 20 })));
+    expect(u.M1001._secondaryWRs[0].fullConversation).toMatch(/note svc-m1-p/);
+    expect(u.M1003._secondaryWRs[1].fullConversation).toMatch(/note svc-m3-p/);
+  });
+  it('a hanging secondary detail is bounded by detailPerCallMs: the build resolves with that secondary blank', async () => {
+    vi.useFakeTimers();
+    const router = mkRouter(multiSpec({ service: detail }));
+    let n = 0;
+    const prov = mkProvider(() => (n++ === 0
+      ? mkRoutedPage(router, { hangWhen: (r) => r.method === 'GET' && r.path === '/api/v1/serviceaggregates/svc-m1-p' })
+      : mkRoutedPage(router)));
+    aap._setProviderForTest(prov);
+    let done = null;
+    const p = aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailPerCallMs: 50 })).then((d) => { done = d; return d; });
+    await vi.advanceTimersByTimeAsync(61000);
+    const ds = await p;
+    expect(done).toBeTruthy();
+    const u = byUnit(ds);
+    expect(u.M1001._secondaryWRs[0]).toMatchObject({ workRequestId: 'svc-m1-p', _wrType: 'planned', fullConversation: '' });
+    expect(u.M1003._secondaryWRs.map((s) => s.workRequestId)).toEqual(['svc-m3-u2', 'svc-m3-p']);
+  });
+  it('a PLANNED pass HTTP 500 leaves M1001 unplanned-only and every row still builds', async () => {
+    useRouter(multiSpec({ planned: fail(500) }));
+    const ds = await aap.buildFleetDataset(BASE);
+    const u = byUnit(ds);
+    expect(ds.count).toBe(4);
+    expect(u.M1001._secondaryWRs).toEqual([]);
+    expect(u.M1001._plannedWRData).toBe(null);
+    expect(u.M1001.openPlanned).toBe(0);
+    expect(u.M1003._secondaryWRs.map((s) => s.workRequestId)).toEqual(['svc-m3-u2']);
+  });
+  it('hydration copies _plannedWRData next to _secondaryWRs (src/window/index.js)', () => {
+    const src = fs.readFileSync(new URL('../src/window/index.js', import.meta.url), 'utf8');
+    const i = src.indexOf('r._secondaryWRs = fr._secondaryWRs');
+    expect(i).toBeGreaterThan(0);
+    expect(src.slice(i, i + 300)).toContain('r._plannedWRData = fr._plannedWRData');
   });
 });
 

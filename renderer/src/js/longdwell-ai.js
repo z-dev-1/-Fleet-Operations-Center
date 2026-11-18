@@ -433,8 +433,17 @@ export function sourceContextWithMeta(row, opts = {}) {
     const offsite = _tidySource(r.asistNotes);
     if (offsite) feeds.push({ key: 'offsite', header: 'Offsite/dealer notes:', body: offsite, anchor: 0 });
     const wos = [];
-    if (r._plannedWRData && typeof r._plannedWRData === 'object') wos.push(r._plannedWRData);
-    if (Array.isArray(r._secondaryWRs)) wos.push(...r._secondaryWRs);
+    // The planned WO can be both _plannedWRData and a _secondaryWRs entry: once.
+    const woSeen = new Set();
+    const addWo = (w) => {
+      if (!w || typeof w !== 'object') return;
+      const id = String(w.workRequestId || '');
+      if (id && woSeen.has(id)) return;
+      if (id) woSeen.add(id);
+      wos.push(w);
+    };
+    addWo(r._plannedWRData);
+    if (Array.isArray(r._secondaryWRs)) r._secondaryWRs.forEach(addWo);
     const items = [];
     for (const w of wos) {
       if (items.length >= 3) break;

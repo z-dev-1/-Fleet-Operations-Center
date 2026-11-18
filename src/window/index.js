@@ -1198,6 +1198,19 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                 // with live data (including [] when a secondary WO closes).
                 if ((!Array.isArray(row._secondaryWRs) || !row._secondaryWRs.length) && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
                   row._secondaryWRs = p._secondaryWRs;
+                } else if (Array.isArray(row._secondaryWRs) && row._secondaryWRs.length && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
+                  // The bulk build now attaches secondaries itself, but without
+                  // conversations. Carry each one's thread per WR id.
+                  const prevConv = new Map();
+                  for (const s of p._secondaryWRs) if (s && s.workRequestId && !blank(s.fullConversation)) prevConv.set(s.workRequestId, s.fullConversation);
+                  if (p._plannedWRData && p._plannedWRData.workRequestId && !blank(p._plannedWRData.fullConversation) && !prevConv.has(p._plannedWRData.workRequestId)) {
+                    prevConv.set(p._plannedWRData.workRequestId, p._plannedWRData.fullConversation);
+                  }
+                  for (const s of row._secondaryWRs) {
+                    if (s && blank(s.fullConversation) && prevConv.has(s.workRequestId)) s.fullConversation = prevConv.get(s.workRequestId);
+                  }
+                  const pw = row._plannedWRData;
+                  if (pw && blank(pw.fullConversation) && prevConv.has(pw.workRequestId)) pw.fullConversation = prevConv.get(pw.workRequestId);
                 }
                 if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;
               }
@@ -1378,6 +1391,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               const fr = await api.refreshUnit(r.equipmentId);
               if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; r._convFetchedAt = new Date().toISOString(); hydrated++; }
               if (fr && fr._secondaryWRs) r._secondaryWRs = fr._secondaryWRs;
+              if (fr && Array.isArray(fr._secondaryWRs)) r._plannedWRData = fr._plannedWRData || null;
               // PM due dates (raw + pills), offsite URL (Split View right pane),
               // and location — all from getAsset + the WO comment thread.
               if (fr) {
