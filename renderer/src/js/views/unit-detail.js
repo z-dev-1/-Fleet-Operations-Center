@@ -25,6 +25,7 @@ const RCA_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
 let _pendingRca = null;
 import toast         from '../components/toast.js';
 import { redactForSharing } from '../util/redact.js';
+import { pmOverdueDays } from '../util/pm-overdue.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -1559,12 +1560,15 @@ function renderHeader(unit){
 // come from unit.pmB/pmX/dot/quarterlyLift (API: asset.maintenanceScheduleStatuses;
 // scrape: parsed dueDate). Shows ALL set PM types (not hidden at 60 days like the
 // grid), color-coded overdue/soon/ok. Location from unit.geofence || domicileSite.
-function _pmLocationRow(unit){
-  function pill(label,val){
+export function _pmLocationRow(unit){
+  function pill(label,val,raw){
     if(!val||val==='--')return '';
     var cls='dp-pm-pill--ok';
     var v=String(val).toLowerCase();
-    if(v==='overdue'){ cls='dp-pm-pill--overdue'; }
+    var text=String(val);
+    // Overdue with a known day count (from the raw due field) -> "<N>d over",
+    // matching the Fleet table pill.
+    if(v==='overdue'){ cls='dp-pm-pill--overdue'; var n=pmOverdueDays(raw); if(n) text=n+'d over'; }
     else {
       // val is "Mon D" (no year) — assume the NEXT occurrence: if that month/day
       // already passed this year, it's next year. Avoids the grid's this-year
@@ -1575,12 +1579,14 @@ function _pmLocationRow(unit){
         if(d< now) d=new Date(val+' '+(now.getFullYear()+1));
         var days=Math.round((d-now)/86400000);
         cls=days<=0?'dp-pm-pill--overdue':days<=30?'dp-pm-pill--soon':'dp-pm-pill--ok';
+        if(days<0) text=(-days)+'d over';
+        else if(days===0) text='due today';
       }
     }
     return '<span class="dp-pm-pill '+cls+'"><span class="dp-pm-pill__lbl">'+esc(label)+'</span>'+
-           '<span class="dp-pm-pill__val">'+esc(val)+'</span></span>';
+           '<span class="dp-pm-pill__val">'+esc(text)+'</span></span>';
   }
-  var pills=[pill('PM B',unit.pmB),pill('PM X',unit.pmX),pill('DOT',unit.dot),pill('Qtrly Lift',unit.quarterlyLift)].filter(Boolean).join('');
+  var pills=[pill('PM B',unit.pmB,unit.pmBDue),pill('PM X',unit.pmX,unit.pmXDue),pill('DOT',unit.dot,unit.dotDue),pill('Qtrly Lift',unit.quarterlyLift,unit.quarterlyLiftDue)].filter(Boolean).join('');
   var loc=unit.geofence||unit.domicileSite||unit.domicile||'';
   var locChip=loc?'<span class="dp-pm-loc"><span class="dp-pm-loc__icon">\ud83d\udccd</span>'+esc(loc)+'</span>':'';
   if(!pills&&!locChip)return '';
@@ -4129,6 +4135,8 @@ export function init(container) {
                   vin: fresh.vin || _unit.vin,
                   pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
                   dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  pmBDue: fresh.pmBDue || _unit.pmBDue, pmXDue: fresh.pmXDue || _unit.pmXDue,
+                  dotDue: fresh.dotDue || _unit.dotDue, quarterlyLiftDue: fresh.quarterlyLiftDue || _unit.quarterlyLiftDue,
                   _secondaryWRs: [],
                 })
               : Object.assign({}, _unit, {
@@ -4153,6 +4161,8 @@ export function init(container) {
                   geofence:       fresh.geofence || _unit.geofence,
                   pmB: fresh.pmB || _unit.pmB, pmX: fresh.pmX || _unit.pmX,
                   dot: fresh.dot || _unit.dot, quarterlyLift: fresh.quarterlyLift || _unit.quarterlyLift,
+                  pmBDue: fresh.pmBDue || _unit.pmBDue, pmXDue: fresh.pmXDue || _unit.pmXDue,
+                  dotDue: fresh.dotDue || _unit.dotDue, quarterlyLiftDue: fresh.quarterlyLiftDue || _unit.quarterlyLiftDue,
                   // Offsite (Decisiv/ASIST) — gives Split View its right pane immediately.
                   offsiteShopEventUrl: fresh.offsiteShopEventUrl || _unit.offsiteShopEventUrl,
                   savedOffsiteUrl:     fresh.savedOffsiteUrl || _unit.savedOffsiteUrl,

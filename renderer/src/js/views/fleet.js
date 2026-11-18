@@ -19,6 +19,7 @@ import { showContextMenu } from '../components/context-menu.js';
 import { aap } from '../bridge.js';
 import { mount as mountOverview } from './fleet-overview.js';
 import rcaTodo from '../rca-todo.js';
+import { pmOverdueDays } from '../util/pm-overdue.js';
 
 // Current filter/search applied client-side
 const _filters = {};
@@ -161,14 +162,19 @@ function _riskBadge(score) {
 // unit-detail panel). Color-coded by urgency: overdue (red), ≤30d (yellow),
 // ≤60d (green), and far-out (>60d) muted so it's visible but low-emphasis.
 // val is: 'overdue' | 'Jul 8' | 'Aug 3' | '--'
-function _pmPill(label, val) {
+// raw is the per-label raw due field (row.pmBDue etc.); when the item is
+// overdue and raw carries a day count, the pill reads "<label> <N>d over".
+export function _pmPill(label, val, raw) {
   if (!val || val === '--') return '';   // hide blanks only
 
   const v = val.toLowerCase();
   let cls = 'pm-pill--ok';
+  let text = val;
 
   if (v === 'overdue') {
     cls = 'pm-pill--overdue';
+    const n = pmOverdueDays(raw);
+    if (n) text = n + 'd over';
   } else {
     const today = new Date(); today.setHours(0,0,0,0);
     // val is "Mon D" with NO year — assume the NEXT occurrence. If that month/day
@@ -182,28 +188,30 @@ function _pmPill(label, val) {
           : daysOut <= 30 ? 'pm-pill--soon'
           : daysOut <= 60 ? 'pm-pill--ok'
           :                 'pm-pill--far';   // >60d: visible but muted (was hidden)
+      if (daysOut < 0) text = (-daysOut) + 'd over';
+      else if (daysOut === 0) text = 'due today';
     }
   }
 
   return '<span class="pm-pill ' + cls + '">'
        + '<span class="pm-pill__lbl">' + label + '</span>'
-       + '<span class="pm-pill__val">' + val + '</span>'
+       + '<span class="pm-pill__val">' + text + '</span>'
        + '</span>';
 }
 
 
 // S9: merge relay data into row for virtual columns
-function _augmentRow(row) {
+export function _augmentRow(row) {
   const rel        = _relayMap[row.equipmentId] || {};
   const unplanned  = parseInt(row.openUnplanned, 10) || 0;
   const planned    = parseInt(row.openPlanned,   10) || 0;
 
   // Build PM pills — only include pills that are within 60 days
   const pills = [
-    _pmPill('B',   row.pmB           || '--'),
-    _pmPill('X',   row.pmX           || '--'),
-    _pmPill('DOT', row.dot           || '--'),
-    _pmPill('Q',   row.quarterlyLift || '--'),
+    _pmPill('B',   row.pmB           || '--', row.pmBDue),
+    _pmPill('X',   row.pmX           || '--', row.pmXDue),
+    _pmPill('DOT', row.dot           || '--', row.dotDue),
+    _pmPill('Q',   row.quarterlyLift || '--', row.quarterlyLiftDue),
   ].filter(Boolean);
 
   const pmDatesHtml = pills.length
