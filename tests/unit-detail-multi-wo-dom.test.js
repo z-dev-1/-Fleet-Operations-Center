@@ -60,6 +60,32 @@ describe('repair pane WO cards', () => {
     expect(h.indexOf('svc-m3-u2')).toBeLessThan(h.lastIndexOf('Planned Work Order'));
     expect(h.lastIndexOf('Planned Work Order')).toBeLessThan(h.indexOf('svc-m3-p'));
   });
+  it('full repair pane: the primary WO card and the planned WO card render together, primary first', () => {
+    vi.useFakeTimers(); // renderRepairPane schedules DOM wiring; never run it here
+    const hadWindow = 'window' in globalThis;
+    if (!hadWindow) globalThis.window = {};
+    try {
+      for (const reason of ['Offsite Shop Repair', 'PM Failed']) {
+        const u = Object.assign(unitM1001(reason), { serviceState: 'Work In Progress', issueDetails: 'Engine misfire' });
+        const h = m.renderRepairPane(u);
+        expect(h).toContain('id="dp-pane-repair"');
+        const primary = h.indexOf('<span class="dp-wo-field__v">svc-m1-u</span>');
+        const planned = h.indexOf('<span class="dp-wo-field__v">svc-m1-p</span>');
+        expect(primary).toBeGreaterThan(0);
+        expect(planned).toBeGreaterThan(primary);
+        expect(count(h, '<span class="dp-wo-field__v">svc-m1-p</span>')).toBe(1);
+        expect(h.lastIndexOf('Planned Work Order')).toBeGreaterThan(primary);
+      }
+      const single = m.renderRepairPane({ equipmentId: 'M1002', workRequestId: 'svc-m2-u', vendor: 'Amerit', relaySynced: true,
+        lifecycleReason: 'PM Failed', _secondaryWRs: [], _plannedWRData: null });
+      expect(single).toContain('<span class="dp-wo-field__v">svc-m2-u</span>');
+      expect(single).not.toContain('dp-wo-card--planned');
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      if (!hadWindow) delete globalThis.window;
+    }
+  });
   it('single open WO: no extra cards', () => {
     const u = { equipmentId: 'M1002', workRequestId: 'svc-m2-u', lifecycleReason: 'PM Failed', _secondaryWRs: [], _plannedWRData: null };
     expect(m.plannedWrCardHtml(u)).toBe('');

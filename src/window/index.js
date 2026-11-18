@@ -1166,6 +1166,8 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             const blank = (v) => v == null || v === '' || v === '--';
             const blankV = (v) => blank(v) || (Array.isArray(v) && !v.length);   // pmSchedule: [] is blank
             const prevById = new Map(prev.rows.map((r) => [r.equipmentId, r]));
+            const _wrMapper = require('../scrapers/aap_api_mapper');
+            const _plannedPassFailed = !!(ds && ds.plannedPassOk === false);
             for (const row of rows) {
               const p = prevById.get(row.equipmentId);
               if (!p) continue;
@@ -1192,13 +1194,19 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                 }
                 if (p._offsiteWrId && blank(row._offsiteWrId)) row._offsiteWrId = p._offsiteWrId;
                 // Extra open WOs (secondary / planned WR cards in the unit panel).
-                // The bulk rebuild doesn't fetch them, so every 5-min refresh
-                // emptied _secondaryWRs and the extra WO cards vanished until the
-                // next hydration (up to ~20 min). Hydration still replaces them
-                // with live data (including [] when a secondary WO closes).
-                if ((!Array.isArray(row._secondaryWRs) || !row._secondaryWRs.length) && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
-                  row._secondaryWRs = p._secondaryWRs;
-                } else if (Array.isArray(row._secondaryWRs) && row._secondaryWRs.length && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
+                // The bulk build attaches them from the same lists as the U/P
+                // counts, so its result wins (a closed WO drops off). Carry the
+                // previous ones only where the bulk build could not see them:
+                // planned WOs when its PLANNED pass failed, unplanned ones when
+                // it counted no open unplanned WO for this unit (per-unit
+                // fallback primary).
+                const _kept = _wrMapper.keepPrevSecondaryWRs(row, p, {
+                  planned: _plannedPassFailed,
+                  unplanned: !(Number(row.openUnplanned) > 0),
+                });
+                row._secondaryWRs = _kept.secondary;
+                row._plannedWRData = _kept.planned;
+                if (Array.isArray(row._secondaryWRs) && row._secondaryWRs.length && Array.isArray(p._secondaryWRs) && p._secondaryWRs.length) {
                   // The bulk build now attaches secondaries itself, but without
                   // conversations. Carry each one's thread per WR id.
                   const prevConv = new Map();
@@ -1212,7 +1220,6 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                   const pw = row._plannedWRData;
                   if (pw && blank(pw.fullConversation) && prevConv.has(pw.workRequestId)) pw.fullConversation = prevConv.get(pw.workRequestId);
                 }
-                if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;
               }
             }
           }
@@ -1390,8 +1397,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               // (the bulk asset search does NOT return that field).
               const fr = await api.refreshUnit(r.equipmentId);
               if (fr && fr.fullConversation) { r.fullConversation = fr.fullConversation; r._convFetchedAt = new Date().toISOString(); hydrated++; }
-              if (fr && fr._secondaryWRs) r._secondaryWRs = fr._secondaryWRs;
-              if (fr && Array.isArray(fr._secondaryWRs)) r._plannedWRData = fr._plannedWRData || null;
+              if (fr && Array.isArray(fr._secondaryWRs)) {
+                // refreshUnit's PLANNED search failed or timed out: keep the
+                // planned WO the bulk build attached to this row.
+                const kept = require('../scrapers/aap_api_mapper').keepPrevSecondaryWRs(fr, r, { planned: fr._plannedPassOk === false });
+                r._secondaryWRs = kept.secondary;
+                r._plannedWRData = kept.planned;
+              }
               // PM due dates (raw + pills), offsite URL (Split View right pane),
               // and location — all from getAsset + the WO comment thread.
               if (fr) {

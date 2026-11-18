@@ -575,9 +575,37 @@ function toSecondaryWR(wo, serviceDetail, opts) {
   };
 }
 
+// Keep secondary WOs from an older row that a fresher result could not see.
+// `fresh` / `prev`: { workRequestId, _secondaryWRs, _plannedWRData }.
+// keep.planned: the fresh result's PLANNED search failed, so carry prev's
+// _wrType:'planned' entries and _plannedWRData. keep.unplanned: the fresh
+// result did not see this unit's unplanned WOs, so carry the others too.
+// An entry already in `fresh` (or its primary) is never added twice.
+// Returns { secondary, planned }; inputs are not modified.
+function keepPrevSecondaryWRs(fresh, prev, keep) {
+  const f = fresh || {};
+  const p = prev || {};
+  const k = keep || {};
+  const sec = Array.isArray(f._secondaryWRs) ? f._secondaryWRs : [];
+  let planned = f._plannedWRData || null;
+  const have = new Set([f.workRequestId].concat(sec.map((s) => s && s.workRequestId)).filter(Boolean));
+  const add = [];
+  for (const s of (Array.isArray(p._secondaryWRs) ? p._secondaryWRs : [])) {
+    if (!s || !s.workRequestId || have.has(s.workRequestId)) continue;
+    if (!(s._wrType === 'planned' ? k.planned : k.unplanned)) continue;
+    have.add(s.workRequestId);
+    add.push(s);
+  }
+  if (!planned && k.planned && p._plannedWRData && p._plannedWRData.workRequestId !== f.workRequestId) {
+    planned = p._plannedWRData;
+  }
+  return { secondary: add.length ? sec.concat(add) : sec, planned };
+}
+
 module.exports = {
   toFleetRow,
   toSecondaryWR,
+  keepPrevSecondaryWRs,
   woStatus,
   pmDueFields,
   pmTypeKey,

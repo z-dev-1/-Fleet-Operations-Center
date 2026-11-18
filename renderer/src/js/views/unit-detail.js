@@ -2391,7 +2391,8 @@ export function secondaryWrCardsHtml(unit){
   return secondaryWRCards;
 }
 
-function renderRepairPane(unit){
+// Exported for tests.
+export function renderRepairPane(unit){
   // ── WR summary card ────────────────────────────────────────────────────────
   var hasRelay=unit.relaySynced&&(unit.vendor||unit.issueDetails||unit.workRequestId);
   var woCard='';

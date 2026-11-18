@@ -111,6 +111,30 @@ describe('refreshUnit multi open WOs', () => {
     expect(row.workRequestId).toBe('svc-m3-u1');
     expect(ids(row)).toEqual(['svc-m3-u2']);
     expect(row._plannedWRData).toBe(null);
+    expect(row._plannedPassOk).toBe(false);
+  });
+  it('_plannedPassOk: true when the PLANNED search answered (or the widened search covered it)', async () => {
+    useRouter();
+    expect((await aap.refreshUnit('M1001'))._plannedPassOk).toBe(true);
+    expect((await aap.refreshUnit('M1002'))._plannedPassOk).toBe(true);
+    const p = mkWo({ id: 'svc-w-p', aaid: 'aaid-w', unit: 'W1', category: 'PLANNED', status: 'SCHEDULED' });
+    aap.dispose();
+    useRouter({ byUnit: { W1: { unplanned: [], planned: [p] } } });
+    const w = await aap.refreshUnit('W1');
+    expect(w.workRequestId).toBe('svc-w-p');
+    expect(w._plannedPassOk).toBe(true);
+  });
+  it('a hanging PLANNED search is bounded at 8 s: unplanned-only result with _plannedPassOk false', async () => {
+    vi.useFakeTimers();
+    useRouter({}, { hangWhen: (r) => isSearch(r) && r.body.category === 'PLANNED' });
+    let row = null;
+    const p = aap.refreshUnit('M1001').then((x) => { row = x; return x; });
+    // The abandoned search still holds the request lock until EVAL_REQUEST_MS.
+    await vi.advanceTimersByTimeAsync(61000);
+    await p;
+    expect(row.workRequestId).toBe('svc-m1-u');
+    expect(row._secondaryWRs).toEqual([]);
+    expect(row._plannedPassOk).toBe(false);
   });
   it('a hanging secondary getService is bounded at 8 s: refreshUnit resolves, secondary kept blank', async () => {
     vi.useFakeTimers();

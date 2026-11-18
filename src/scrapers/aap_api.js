@@ -888,6 +888,7 @@ async function buildTrackerRows(opts = {}) {
 //   withComments : fetch per-WO service detail for the comment thread (default true)
 //   withVin      : fetch per-asset detail for VIN/model (default true)
 //   detailCap    : cap per-unit detail GETs (bounds enrichment)
+//   secondaryDetailCap : cap secondary-WO detail GETs (default = detailCap)
 async function buildFleetDataset(opts = {}) {
   const mapper = require('./aap_api_mapper');
 
@@ -1006,6 +1007,9 @@ async function buildFleetDataset(opts = {}) {
       _pushTo(openUnplannedWosByAaid, w.aaid, w);
     }
   }
+  // Returned on the dataset: when false, openPlanned / planned secondaries are
+  // missing because the pass failed, not because no planned WO is open.
+  let plannedPassOk = true;
   try {
     const plannedReq = Object.assign({}, woReq, { category: 'PLANNED' });
     const plannedList = await searchAllPages(plannedReq, { maxPages: opts.maxPages || 50 });
@@ -1016,18 +1020,24 @@ async function buildFleetDataset(opts = {}) {
       }
     }
   } catch (e) {
+    plannedPassOk = false;
     try { logger.warn('buildFleetDataset: PLANNED WO count pass failed: ' + e.message); } catch (_) { /* noop */ }
   }
 
   // 3) Build one fleet row per ASSET (the app's set). Attach the current WO if
   //    the unit has one; units with no open WO still appear (lifecycle-driven).
   const detailCap = opts.detailCap != null ? opts.detailCap : assetEntries.length;
+  // Secondary WO detail GETs have their own budget (default = detailCap), so
+  // a unit early in the loop with several secondaries can't use up the
+  // budget that later units' primaries need.
+  const secondaryDetailCap = opts.secondaryDetailCap != null ? opts.secondaryDetailCap : detailCap;
   const perCallMs = opts.detailPerCallMs || 8000;
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('detail-timeout')), ms))]);
 
   const rows = [];
   const _xf = _extractFlags();
   let detailDone = 0;
+  let secondaryDetailDone = 0;
   let woFallbacks = 0;
   for (const assetSummary of assetEntries) {
     const aaid = assetSummary.asset && assetSummary.asset.aaid;
@@ -1125,8 +1135,8 @@ async function buildFleetDataset(opts = {}) {
       }
       for (const { w, wrType } of cands.slice(0, 6)) {
         let sd = null;
-        if (opts.withComments !== false && detailDone < detailCap) {
-          try { sd = await withTimeout(getService(w.workRequestId || w.id), perCallMs); detailDone++; }
+        if (opts.withComments !== false && secondaryDetailDone < secondaryDetailCap) {
+          try { sd = await withTimeout(getService(w.workRequestId || w.id), perCallMs); secondaryDetailDone++; }
           catch (_) { /* leave the secondary's comments empty */ }
         }
         const entry = mapper.toSecondaryWR(w, sd, { wrType });
@@ -1187,7 +1197,7 @@ async function buildFleetDataset(opts = {}) {
   logger.info('buildFleetDataset: ' + rows.length + ' units ('
     + 'unavailable: ' + unavailableCount + ', filter: [' + filterVals.join(',') + '], '
     + 'comments: ' + (opts.withComments !== false) + ', vin: ' + (opts.withVin !== false) + ')');
-  return { rows, count: rows.length, unavailableCount, filter: filterVals, syncedAt: new Date().toISOString(), source: 'aap-api' };
+  return { rows, count: rows.length, unavailableCount, filter: filterVals, syncedAt: new Date().toISOString(), source: 'aap-api', plannedPassOk };
 }
 
 // Find a unit's CURRENT OPEN work order, unconstrained by the restrictive
@@ -1260,6 +1270,10 @@ async function refreshUnit(unitNumber) {
   let allWOs = [];
   let unplannedWOs = [];
   const plannedIds = new Set();
+  // false when this call could not see the unit's PLANNED WOs (the PLANNED
+  // search failed / timed out, or the whole search threw). Hydration then
+  // keeps the planned WO the bulk build attached instead of dropping it.
+  let plannedPassOk = false;
   const _wid = (w) => (w && (w.workRequestId || w.id)) || '';
   try {
     const r1 = await searchServices({ equipmentIds: [u], statuses: [], page: 1 });
@@ -1272,6 +1286,7 @@ async function refreshUnit(unitNumber) {
         lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1,
       });
       allWOs = (r2 && r2.serviceAggregates) || [];
+      plannedPassOk = true; // category:null covers PLANNED too
     } else {
       // Attempt 1 is pinned to category UNPLANNED, so a unit with an open
       // unplanned WO never saw its open PLANNED one. One bounded PLANNED pass
@@ -1284,6 +1299,7 @@ async function refreshUnit(unitNumber) {
           lifecycleStates: null, assetPrograms: null, fleetIds: null, page: 1,
         }), 8000);
         plannedWOs = (rp && rp.serviceAggregates) || [];
+        plannedPassOk = true;
       } catch (_) { plannedWOs = []; }
       const seenIds = new Set(unplannedWOs.map(_wid).filter(Boolean));
       const extra = [];
@@ -1296,7 +1312,7 @@ async function refreshUnit(unitNumber) {
       }
       allWOs = unplannedWOs.concat(extra);
     }
-  } catch (_) { allWOs = []; unplannedWOs = []; }
+  } catch (_) { allWOs = []; unplannedWOs = []; plannedPassOk = false; }
 
   // Classify WOs. The search with statuses:[] returns the unit's ENTIRE WO
   // history (every old completed/cancelled WO), so we must NOT show all of them
@@ -1381,6 +1397,7 @@ async function refreshUnit(unitNumber) {
   }
   row._secondaryWRs = secondary.length ? secondary : [];
   row._plannedWRData = secondary.find((s) => s._wrType === 'planned') || null;
+  row._plannedPassOk = plannedPassOk;
   if (full) {
     const d = mapper.assetDetailFields(full);
     row.vin = d.vin || row.vin;
@@ -1449,6 +1466,7 @@ async function refreshUnit(unitNumber) {
     row.relaySynced = false;
     row._secondaryWRs = [];
     row._plannedWRData = null;
+    row._plannedPassOk = true; // Active: no open WOs to keep
     if (_xf.enabled) {
       // The ten WR keys toFleetRow writes with extraction on (AC29).
       row.relayFacts = null;

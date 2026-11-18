@@ -38,3 +38,47 @@ describe('toSecondaryWR', () => {
     expect(mapper.toSecondaryWR(null)).toBe(null);
   });
 });
+
+// keepPrevSecondaryWRs: used by hydration (refreshUnit's PLANNED search failed)
+// and by the bulk-rebuild carry-forward in src/window/index.js.
+describe('keepPrevSecondaryWRs', () => {
+  const planned = mapper.toSecondaryWR(mkWo({ id: 'svc-m1-p', category: 'PLANNED', status: 'SCHEDULED' }), null, { wrType: 'planned' });
+  const unpl2 = mapper.toSecondaryWR(mkWo({ id: 'svc-m1-u2' }), null, { wrType: 'unplanned' });
+  // The bulk row for a 122269-shaped unit (1 unplanned primary + 1 planned).
+  const bulkRow = { workRequestId: 'svc-m1-u', _secondaryWRs: [planned], _plannedWRData: planned };
+
+  it('hydration, PLANNED search failed: the bulk-attached planned WO is kept', () => {
+    const fr = { workRequestId: 'svc-m1-u', _secondaryWRs: [], _plannedWRData: null, _plannedPassOk: false };
+    const k = mapper.keepPrevSecondaryWRs(fr, bulkRow, { planned: fr._plannedPassOk === false });
+    expect(k.secondary.map((s) => s.workRequestId)).toEqual(['svc-m1-p']);
+    expect(k.secondary[0]._wrType).toBe('planned');
+    expect(k.planned.workRequestId).toBe('svc-m1-p');
+    expect(fr._secondaryWRs).toEqual([]); // input not modified
+  });
+  it('hydration, PLANNED search failed, FLD260703 shape: fresh unplanned secondary + kept planned, no duplicates', () => {
+    const freshU2 = Object.assign({}, unpl2, { fullConversation: 'Conversation\nlive' });
+    const fr = { workRequestId: 'svc-m3-u1', _secondaryWRs: [freshU2], _plannedWRData: null };
+    const prev = { workRequestId: 'svc-m3-u1', _secondaryWRs: [unpl2, planned], _plannedWRData: planned };
+    const k = mapper.keepPrevSecondaryWRs(fr, prev, { planned: true });
+    expect(k.secondary.map((s) => s.workRequestId)).toEqual(['svc-m1-u2', 'svc-m1-p']);
+    expect(k.secondary[0].fullConversation).toBe('Conversation\nlive');
+  });
+  it('PLANNED search succeeded: the fresh result wins, so a closed planned WO drops off', () => {
+    const fr = { workRequestId: 'svc-m1-u', _secondaryWRs: [], _plannedWRData: null, _plannedPassOk: true };
+    const k = mapper.keepPrevSecondaryWRs(fr, bulkRow, { planned: fr._plannedPassOk === false });
+    expect(k.secondary).toEqual([]);
+    expect(k.planned).toBe(null);
+  });
+  it('never re-adds the fresh primary as a secondary or as the planned card', () => {
+    const fr = { workRequestId: 'svc-m1-p', _secondaryWRs: [], _plannedWRData: null };
+    const k = mapper.keepPrevSecondaryWRs(fr, bulkRow, { planned: true, unplanned: true });
+    expect(k.secondary).toEqual([]);
+    expect(k.planned).toBe(null);
+  });
+  it('unplanned entries are carried only with keep.unplanned', () => {
+    const fresh = { workRequestId: 'svc-m1-u', _secondaryWRs: [], _plannedWRData: null };
+    const prev = { workRequestId: 'svc-m1-u', _secondaryWRs: [unpl2, planned], _plannedWRData: planned };
+    expect(mapper.keepPrevSecondaryWRs(fresh, prev, { planned: false, unplanned: false }).secondary).toEqual([]);
+    expect(mapper.keepPrevSecondaryWRs(fresh, prev, { planned: false, unplanned: true }).secondary.map((s) => s.workRequestId)).toEqual(['svc-m1-u2']);
+  });
+});

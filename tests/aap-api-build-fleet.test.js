@@ -301,18 +301,27 @@ describe('buildFleetDataset multi open WOs', () => {
       }
     }
   });
-  it('budget: withComments:false makes no detail GETs; detailCap:1 makes exactly one', async () => {
+  it('budget: withComments:false makes no detail GETs; detailCap:1 + secondaryDetailCap:0 makes exactly one', async () => {
     const { page } = useRouter(multiSpec({ service: detail }));
     await aap.buildFleetDataset(BASE);
     expect(page.requests.filter(isMultiDetail)).toHaveLength(0);
     aap.dispose();
     const { page: page2 } = useRouter(multiSpec({ service: detail }));
-    await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 1 }));
+    await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 1, secondaryDetailCap: 0 }));
     expect(page2.requests.filter(isMultiDetail)).toHaveLength(1);
+  });
+  it('secondaries have their own detail budget: they never use up the primaries\u2019 detailCap', async () => {
+    const { page } = useRouter(multiSpec({ service: detail }));
+    // 3 primaries with a WO (M1004 is Active); secondaries capped at 1.
+    const u = byUnit(await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 3, secondaryDetailCap: 1 })));
+    const got = page.requests.filter(isMultiDetail).map((r) => r.path.split('/').pop());
+    expect(got.filter((id) => ['svc-m1-u', 'svc-m2-u', 'svc-m3-u1'].includes(id)).sort()).toEqual(['svc-m1-u', 'svc-m2-u', 'svc-m3-u1']);
+    expect(got.filter((id) => ['svc-m1-p', 'svc-m3-u2', 'svc-m3-p'].includes(id))).toHaveLength(1);
+    expect(u.M1003.fullConversation).toMatch(/note svc-m3-u1/);
   });
   it('withComments:true fills secondary conversations', async () => {
     useRouter(multiSpec({ service: detail }));
-    // detailCap defaults to the asset count (primaries + secondaries share it).
+    // secondaryDetailCap defaults to detailCap (its own counter).
     const u = byUnit(await aap.buildFleetDataset(Object.assign({}, BASE, { withComments: true, detailCap: 20 })));
     expect(u.M1001._secondaryWRs[0].fullConversation).toMatch(/note svc-m1-p/);
     expect(u.M1003._secondaryWRs[1].fullConversation).toMatch(/note svc-m3-p/);
@@ -339,16 +348,29 @@ describe('buildFleetDataset multi open WOs', () => {
     const ds = await aap.buildFleetDataset(BASE);
     const u = byUnit(ds);
     expect(ds.count).toBe(4);
+    expect(ds.plannedPassOk).toBe(false);
     expect(u.M1001._secondaryWRs).toEqual([]);
     expect(u.M1001._plannedWRData).toBe(null);
     expect(u.M1001.openPlanned).toBe(0);
     expect(u.M1003._secondaryWRs.map((s) => s.workRequestId)).toEqual(['svc-m3-u2']);
   });
-  it('hydration copies _plannedWRData next to _secondaryWRs (src/window/index.js)', () => {
+  it('plannedPassOk is true on the dataset when the PLANNED pass answered', async () => {
+    useRouter(multiSpec());
+    expect((await aap.buildFleetDataset(BASE)).plannedPassOk).toBe(true);
+  });
+  it('src/window/index.js wiring: hydration keeps planned WOs on a failed refreshUnit PLANNED search; carry-forward only on a failed bulk PLANNED pass', () => {
     const src = fs.readFileSync(new URL('../src/window/index.js', import.meta.url), 'utf8');
-    const i = src.indexOf('r._secondaryWRs = fr._secondaryWRs');
-    expect(i).toBeGreaterThan(0);
-    expect(src.slice(i, i + 300)).toContain('r._plannedWRData = fr._plannedWRData');
+    const h = src.indexOf('keepPrevSecondaryWRs(fr, r, { planned: fr._plannedPassOk === false })');
+    expect(h).toBeGreaterThan(0);
+    expect(src.slice(h, h + 300)).toContain('r._secondaryWRs = kept.secondary');
+    expect(src.slice(h, h + 300)).toContain('r._plannedWRData = kept.planned');
+    expect(src).toContain('const _plannedPassFailed = !!(ds && ds.plannedPassOk === false);');
+    const c = src.indexOf('keepPrevSecondaryWRs(row, p, {');
+    expect(c).toBeGreaterThan(0);
+    expect(src.slice(c, c + 200)).toContain('planned: _plannedPassFailed');
+    // The old unconditional carry rules are gone.
+    expect(src).not.toContain('if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;');
+    expect(src).not.toContain('row._secondaryWRs = p._secondaryWRs;');
   });
 });
 
