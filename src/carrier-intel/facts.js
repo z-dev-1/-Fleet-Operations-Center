@@ -564,5 +564,5 @@ function rollup(args = {}) {
 module.exports = {
   unitRecord, renderRecord, etcDayCounts, arrivalOf, rollup, compliance, keyLines, daysDownFrac, partsNoEta,
   fmtDays, md, vendorLabel, etcByLabel, pmEntries, estimateOf: _estimate,
-  CI_RECORD_MAX, CI_ROLLUP_MAX, DSP_LABEL, NO_VENDOR_LABEL,
+  CI_RECORD_MAX, CI_ROLLUP_MAX, DSP_LABEL, NO_VENDOR_LABEL, BLOCKER_RE,
 };
