@@ -117,7 +117,8 @@ describe('AC-17d key lines and day-figure spacing', () => {
       expect(txt).not.toMatch(/\b0\d\/\d/);
       expect(txt).not.toMatch(/\/0\d\b/);
       expect(txt).not.toMatch(/raw slips?/i);
-      expect(txt.length).toBeLessThanOrEqual(Fx.CI_RECORD_MAX);
+      // The header line does not count toward the cap.
+      expect(txt.split('\n').slice(1).join('\n').length).toBeLessThanOrEqual(Fx.CI_RECORD_MAX);
     }
   });
 });
@@ -307,7 +308,7 @@ describe('g1 record (B6.2 example)', () => {
     expect(lines).toContain('dealer: Cox Fleet Services - 1100 New York City');
     expect(lines).toContain('PM/DOT: AAP shows PM A overdue 306 d (a later PM B was completed; likely stale schedule)');
     expect(lines).toContain('flags: parts-no-eta, etc-rolling');
-    expect(txt.length).toBeLessThanOrEqual(Fx.CI_RECORD_MAX);
+    expect(lines.slice(1).join('\n').length).toBeLessThanOrEqual(Fx.CI_RECORD_MAX);
   });
   it('the record cap drops key lines first', () => {
     const rec = recOf(g1());

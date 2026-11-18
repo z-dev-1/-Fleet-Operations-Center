@@ -68,9 +68,14 @@ describe('AC-17 assembled context for the AUVTE fixture fleet', () => {
     expect(B.ciText.get('B12267')).toContain('parts: ordered · parts ETA 11/16 (passed, no arrival recorded)');
     expect(B.ciText.get('B12267')).toContain('$10,977.48');
     expect(B.ciText.get('B12258')).toContain('cause: dealer-offsite · owner dealer (KWNE) · offsite');
-    // Key lines are kept when the record fits CI_RECORD_MAX (B6.2 drop order: key lines first).
-    for (const id of ['B13014', 'B12258']) expect(B.ciText.get(id)).toMatch(/\nkey line \d{1,2}\/\d{1,2} /);
-    for (const r of B.model.detailed) expect(Fx.renderRecord(r).length).toBeLessThanOrEqual(C.CI_RECORD_MAX);
+    // Key lines are kept when the record body fits CI_RECORD_MAX (the header line is not counted;
+    // B6.2 drop order: key lines first). B12195 and B12267 still drop theirs (body + key line > 700).
+    for (const id of ['B13014', 'B12258', 'B62059', 'B12263']) expect(B.ciText.get(id)).toMatch(/\nkey line \d{1,2}\/\d{1,2} /);
+    expect(B.ciText.get('B12267')).toContain('flags: parts-eta-passed, etc-rolling, vendor-response-lag');
+    for (const r of B.model.detailed) {
+      if ((r.flags || []).length) expect(Fx.renderRecord(r)).toContain('\nflags: ');
+      expect(Fx.renderRecord(r).split('\n').slice(1).join('\n').length).toBeLessThanOrEqual(C.CI_RECORD_MAX);
+    }
   });
   it('the roll-up with the cause split is the SCAC block; no raw slip count in any record', () => {
     expect(B.prompt).toContain('SCAC AUVTE\nCI ROLLUP AUVTE\n');

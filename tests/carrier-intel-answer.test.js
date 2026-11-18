@@ -386,6 +386,46 @@ describe('mechanical lines pass the gate (AUVTE and the 40-unit context)', () =>
   });
 });
 
+describe('AC-23 / AC-24c undated cue-gap claims (G-REASSIGN, G-DRIVER, G-CND none)', () => {
+  const BC = auvte({ cues: ALL_CUES });
+  const ids = BC.model.gaps.map((g) => g.id);
+  it('the cue gaps are selected on the AUVTE fixture', () => {
+    for (const id of ['G-REASSIGN', 'G-DRIVER', 'G-CND']) expect(ids).toContain(id);
+    expect(BC.model.themes.hits['could not duplicate'] || []).toEqual([]);
+  });
+  for (const [sec, text, units] of [
+    ['answer', 'Yes, COX has been moving techs off box trucks to trailers and hostlers.', []],
+    ['trends', 'COX shifted box-truck techs to hostlers in October.', []],
+    ['trends', 'COX pulled 3 techs to trailers.', []],
+    ['trends', 'COX pulled 5 techs to trailers.', []],
+    ['trends', 'Drivers report the CNG misfires mostly on cold starts and under load.', []],
+    ['fasInput', 'Misfires on B12271 show up under load.', ['B12271']],
+    ['trends', 'The techs could not duplicate the misfires on B12271.', ['B12271']],
+  ]) {
+    it('removed: ' + text, () => {
+      expect(A.checkItem({ text, units }, sec, BC)).toBe('cue-gap-claim');
+      const g = A.gateAnswer(A.parseAnswer(JSON.stringify({ [sec]: [{ text, units }] })), BC);
+      expect(g.removals).toEqual([{ section: sec, code: 'cue-gap-claim' }]);
+    });
+  }
+  for (const [text, units] of [
+    ['Tech reassignment isn\'t recorded in the data.', []],
+    ['No driver-reported pattern (cold start, after fueling, under load) is in the notes.', []],
+    ['"Could not duplicate" doesn\'t appear in the notes.', []],
+    ['B62053 "will not start after fueling" 9/24–10/5.', ['B62053']],
+  ]) {
+    it('kept (negated or quoted from evidence): ' + text, () => {
+      expect(A.checkItem({ text, units }, 'trends', BC)).toBeNull();
+    });
+  }
+  it('a driver quote that is not in the evidence is removed', () => {
+    expect(A.checkItem({ text: 'B62053 "stalls on cold starts every morning".', units: ['B62053'] }, 'trends', BC)).toBe('cue-gap-claim');
+  });
+  it('without the cue gaps the same claims are not checked by step 8', () => {
+    expect(A.checkItem({ text: 'COX shifted box-truck techs to hostlers in October.', units: [] }, 'trends', B)).toBeNull();
+  });
+});
+
 describe('gate-error', () => {
   it('a throwing gateEntry removes the item and adds one warn diag', () => {
     vi.spyOn(G, 'gateEntry').mockImplementation(() => { throw new Error('x'); });

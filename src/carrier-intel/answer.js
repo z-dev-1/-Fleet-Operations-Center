@@ -81,6 +81,16 @@ const NOUN_FIELD = Object.freeze([
   [/^(?:slips?|moves?)$/i, 'daySlips'], [/^pull-?ins?$/i, 'dayPullIns'], [/^re-?times?$/i, 'sameDay'],
   [/^(?:revisions?|changes?|updates?)$/i, 'revised'],
 ]);
+// Step 8: claims a selected cue gap says the data can't support (AC-23, AC-24c).
+const CI_TECH_WORD = '\\btech(?:nician)?s?\\b(?!\\s+(?:on\\s*site|arriv))';
+const CI_REASSIGN_CLAIM_RE = new RegExp('\\bre-?assign\\w*|\\b(?:mov|pull|shift|redeploy|divert|transferr?)\\w*\\b[^.?;]{0,40}' + CI_TECH_WORD +
+  '|' + CI_TECH_WORD + '[^.?;]{0,40}\\b(?:trailers?|hostlers?|yard\\s+trucks?)\\b', 'gi');
+const CI_DRIVER_CLAIM_RE = /\bcold[\s-]+starts?\b|\bafter\s+fuel\w*|\bunder\s+(?:a\s+)?load\b|\bdrivers?\s+(?:report|say|said|mention|complain|note|describ)\w*/gi;
+const CI_CND_CLAIM_RE = /\b(?:could\s*n[o']?t|can'?t|cannot|unable\s+to|did\s*n[o']?t|failed\s+to)\s+(?:duplicate|replicate|reproduce)\b/gi;
+const CI_CLAIM_NEG_RE = /\b(?:no|not|none|never|nothing|cannot|without|unrecorded|unknown|unavailable)\b|n't\b/i;
+const CI_CONTRAST_RE = /,\s*(?:but|while|though|although|and)\b|\b(?:but|however|although)\b/gi;
+const CI_THEME_LABEL_RE = /\btheme\s+(?:cold\s+start|after\s+fueling|under\s+load|could\s+not\s+duplicate)\b|\bno\s+hits:[^.;\n]*/gi;
+const CI_QUOTE_RE = /["\u201C\u201D]([^"\u201C\u201D]{8,})["\u201C\u201D]/g;
 const ETC_FIELDS = Object.freeze(['revised', 'daySlips', 'dayPullIns', 'sameDay']);
 const CLAUSE_G_RE = new RegExp(G.CLAUSE_SPLIT_RE.source, 'g');
 
@@ -344,7 +354,55 @@ function _nameAllow(model) {
   return s;
 }
 
-/** checkItem(item, section, built) -> null | drop code (checks 1–7 in B8.2 order). */
+// True when `re` matches outside a negated clause (the match itself is blanked before the
+// negation test, so "could not duplicate" is not its own negation).
+function _claimed(text, re) {
+  const g = new RegExp(re.source, 'gi');
+  let m;
+  while ((m = g.exec(text))) {
+    if (!m[0]) { g.lastIndex += 1; continue; }
+    const s = m.index;
+    const e = s + m[0].length;
+    const cs = _clauseStart(text, s);
+    CLAUSE_G_RE.lastIndex = e;
+    const ce = CLAUSE_G_RE.exec(text);
+    const clause = _blank(text, s, e).slice(cs, ce ? ce.index : text.length);
+    const off = s - cs;
+    let a = 0;
+    let b = clause.length;
+    const cr = new RegExp(CI_CONTRAST_RE.source, 'gi');
+    let c;
+    while ((c = cr.exec(clause))) {
+      if (c.index + c[0].length <= off) a = c.index + c[0].length;
+      else if (c.index >= off + m[0].length) { b = c.index; break; }
+    }
+    if (!CI_CLAIM_NEG_RE.test(clause.slice(a, b))) return true;
+  }
+  return false;
+}
+
+// Step 8: an item asserting what a selected cue gap (G-REASSIGN, G-DRIVER, G-CND none) says is
+// not in the data. G-DRIVER allows a quote found in the scoped evidence; theme labels are data.
+function _cueGapClaim(text, scacScope, built) {
+  const m = built.model || {};
+  const ids = new Set((m.gaps || built.gaps || []).map((g) => g && g.id));
+  if (!ids.size) return null;
+  const t = _blankAll(text, CI_THEME_LABEL_RE);
+  if (ids.has('G-REASSIGN') && _claimed(t, CI_REASSIGN_CLAIM_RE)) return 'cue-gap-claim';
+  if (ids.has('G-DRIVER')) {
+    const ev = EV.normQuote(_textOf(scacScope, built));
+    const d = t.replace(new RegExp(CI_QUOTE_RE.source, 'g'), (q, inner) => {
+      const n = EV.normQuote(inner);
+      return n && ev.includes(n) ? ' '.repeat(q.length) : q;
+    });
+    if (_claimed(d, CI_DRIVER_CLAIM_RE)) return 'cue-gap-claim';
+  }
+  const cnd = ((m.themes && m.themes.hits) || {})['could not duplicate'] || [];
+  if (ids.has('G-CND') && !cnd.length && _claimed(t, CI_CND_CLAIM_RE)) return 'cue-gap-claim';
+  return null;
+}
+
+/** checkItem(item, section, built) -> null | drop code (checks 1–8: B8.2 order, then cue-gap claims). */
 function checkItem(item, section, built) {
   const { ctx, model, countBy } = built;
   const text = _s(item.text);
@@ -368,7 +426,7 @@ function checkItem(item, section, built) {
   const allow = _nameAllow(model);
   const names = G.nameFlags(text, unitScope, ctx).filter((x) => !allow.has(x.toLowerCase()));
   if (names.length) return 'unknown-name';
-  return null;
+  return _cueGapClaim(text, scacScope, built);
 }
 
 // ── Mechanical fallback (B8.3) ──────────────────────────────────────────────
@@ -641,5 +699,5 @@ module.exports = {
   SECTIONS, CAPS, REPLY_MAX, CI_FAS_QUOTE_MAX, CI_FAS_QUOTE_MIN, NO_FAS_LINE,
   CI_TIMES_RE, CI_ETC_VERB_RE, CI_LIST_SEP_RE, CI_RECUR_RE, CI_ETC_NUM_FIRST_RE, CI_MISS_WORD_RE, CI_ETC_WORD_RE,
   CI_MISS_NEG_RE, CI_COUNT_CATS, CI_UNIT_COUNT_RE, CI_CAUSE_COUNT_RE, CI_CLASS_RE, CI_NUM_TOKEN_RE, CI_NAME_ALLOW,
-  CI_GENERIC_VENDOR_WORDS,
+  CI_GENERIC_VENDOR_WORDS, CI_REASSIGN_CLAIM_RE, CI_DRIVER_CLAIM_RE, CI_CND_CLAIM_RE, CI_CLAIM_NEG_RE,
 };

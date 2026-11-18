@@ -208,6 +208,28 @@ describe('AC-24 / AC-24b / AC-24c gaps end to end', () => {
     }
   });
 
+  it('AC-24b undated reassignment / driver / could-not-duplicate claims removed; negated item kept', async () => {
+    const reply = JSON.parse(JSON.stringify(GOOD));
+    reply.answer.unshift({ text: 'Yes, COX has been moving techs off box trucks to trailers and hostlers.', units: [] });
+    reply.trends.push({ text: 'COX shifted box-truck techs to hostlers in October.', units: [] });
+    reply.trends.push({ text: 'Drivers report the CNG misfires mostly on cold starts and under load.', units: [] });
+    reply.fasInput.push({ text: 'The techs could not duplicate the misfires on B12271.', units: ['B12271'] });
+    reply.fasInput.push({ text: 'Tech reassignment isn\'t recorded in the data.', units: [] });
+    setup({ awt: async () => JSON.stringify(reply) });
+    const r = await h.ai.processOrchaAction(COMBINED, jm());
+    expect(r).toMatchObject({ ok: true, carrierIntel: true });
+    expect(r.text).not.toContain('moving techs off box trucks');
+    expect(r.text).not.toContain('techs to hostlers in October');
+    expect(r.text).not.toContain('mostly on cold starts');
+    expect(r.text).not.toContain('techs could not duplicate');
+    expect(r.text).toContain('Tech reassignment isn\'t recorded in the data.');
+    expect(r.text).toContain('Fact-check removed 4 item(s)');
+    const body = r.text.slice(0, r.text.indexOf('Not in the data'));
+    for (const l of body.split('\n')) {
+      if (/\b(?:moving|shifted|pulled|moved)\b[^.]*\btechs?\b|cold[- ]start|under\s+load|could\s+not\s+duplicate/i.test(l)) expect(l).toMatch(NEG_RE);
+    }
+  });
+
   it('AC-24b maximal items + 6 h old syncedAt: <= 3,500 chars and every cue gap in full', async () => {
     const t300 = (k) => (k + ' item: keep pushing the vendor on parts for these trucks and follow up every morning ').repeat(5).slice(0, 300).trim();
     const reply = {};
