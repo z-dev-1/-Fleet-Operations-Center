@@ -170,10 +170,12 @@ describe('buildFleetDataset fleet scope (Managed Domiciles, not a fleetIds allow
   const PAGE_ID = '817ca098-8441-4329-a71e-6768f9d7e6c5';   // AAP page/view id, NOT a fleet id
   const NINTH = '9bf5bae8-f536-4157-8b23-f5632ced5e1d';
   const WO_DEFAULT_9 = require('../src/scrapers/aap_longdwell').DEFAULT_SEARCH_REQUEST.fleetIds;
+  const ATS_NA_TRACTOR = 'ba97eda1-cb03-446e-a907-474084194777';
+  const BOGUS = '00000000-dead-beef-0000-000000000000';
   const hasFleetIds = (r) => Object.prototype.hasOwnProperty.call(r.body, 'fleetIds');
-  const isOmitted = (r) => isAssetSearch(r) && !hasFleetIds(r);
+  const isGetFleet = (r) => r.method === 'GET' && r.path.startsWith('/api/v1/fleet/');
+  const fleetOf = (r) => decodeURIComponent(r.path.slice('/api/v1/fleet/'.length));
   const fnf = { ok: false, status: 404, json: { message: 'com.amazon.lifeguard.FleetNotFoundException: Could not find fleet ' + PAGE_ID } };
-  const needFleet = { ok: false, status: 400, json: { message: 'at least one fleet id is required' } };
   const routed = (fn) => {
     const base = mkRouter(fleetSpec());
     const page = mkRoutedPage((r) => fn(r) || base(r));
@@ -199,16 +201,25 @@ describe('buildFleetDataset fleet scope (Managed Domiciles, not a fleetIds allow
     expect(WO_DEFAULT_9).not.toContain(PAGE_ID);
     expect(aap.SCOPE_FLEET_IDS).toBeUndefined();
   });
-  it('attempt 1 omits fleetIds; domicileSite/operator filters and all 3 lifecycle states scope it; AMZ503669 builds', async () => {
-    const assets = FLEET.assets.concat([mkAsset({ aaid: 'aaid-amz', unit: 'AMZ503669' })]);
+  it('the settings default (DEFAULT_ASSET_FLEET_IDS) is the original 8 plus ATS NA Tractor, deduped', () => {
+    expect(aap.DEFAULT_ASSET_FLEET_IDS).toContain(ATS_NA_TRACTOR);
+    for (const id of ORIGINAL_8) expect(aap.DEFAULT_ASSET_FLEET_IDS).toContain(id);
+    expect(new Set(aap.DEFAULT_ASSET_FLEET_IDS).size).toBe(aap.DEFAULT_ASSET_FLEET_IDS.length);
+    expect(aap.DEFAULT_ASSET_FLEET_IDS).not.toContain(PAGE_ID);
+  });
+  it('one asset-search attempt: validated fleet ids, boundingBox null, domicile/operator filters, 3 lifecycle states; AMZ503669 builds', async () => {
+    const assets = FLEET.assets.concat([mkAsset({ aaid: 'aaid-amz', unit: 'AMZ503669', state: 'ORDERED', reason: 'PENDING_DELIVERY' })]);
     const { page } = useRouter(fleetSpec({ assets: { domicileSite: { 0: assets } } }));
     const ds = await aap.buildFleetDataset(BASE);
     expect(ds.count).toBe(7);
-    expect(byUnit(ds).AMZ503669).toBeTruthy();
+    expect(byUnit(ds).AMZ503669).toMatchObject({ lifecycleState: 'Ordered' });
+    expect(page.requests.filter(isGetFleet).map(fleetOf).sort()).toEqual([...aap.DEFAULT_ASSET_FLEET_IDS].sort());
     const assetReqs = page.requests.filter(isAssetSearch);
     expect(assetReqs.map(assetKey)).toEqual(['domicileSite', 'operator']);
     for (const r of assetReqs) {
-      expect(hasFleetIds(r)).toBe(false);
+      expect([...r.body.fleetIds].sort()).toEqual([...aap.DEFAULT_ASSET_FLEET_IDS].sort());
+      expect(r.body.fleetIds).toContain(ATS_NA_TRACTOR);
+      expect(r.body.boundingBox).toBe(null);
       expect(r.body.fieldFilters).toEqual([{ key: assetKey(r), values: ['TST1'] }]);
       expect(r.body.lifecycleStates.map((l) => l.state)).toEqual(['ACTIVE', 'UNAVAILABLE', 'ORDERED']);
     }
@@ -225,49 +236,92 @@ describe('buildFleetDataset fleet scope (Managed Domiciles, not a fleetIds allow
     }
     expectValidFleetIds(page);
   });
-  it('a 400 "at least one fleet id is required" on the omitted body falls back to the original 8, still scoped', async () => {
-    const page = routed((r) => (isOmitted(r) ? needFleet : null));
-    const ds = await aap.buildFleetDataset(BASE);
+  it('an unknown fleet id (getFleet 404) is dropped before the search; the fleet still builds every unit', async () => {
+    const page = routed((r) => (isGetFleet(r) && fleetOf(r) === BOGUS ? fnf : null));
+    const ds = await aap.buildFleetDataset(Object.assign({}, BASE, { assetFleetIds: ORIGINAL_8.concat([BOGUS]) }));
     expect(ds.count).toBe(6);
     const assetReqs = page.requests.filter(isAssetSearch);
-    expect(hasFleetIds(assetReqs[0])).toBe(false);
-    const fb = assetReqs.slice(1);
-    expect(fb.map(assetKey)).toEqual(['domicileSite', 'operator']);
-    for (const r of fb) {
+    expect(assetReqs).toHaveLength(2);
+    for (const r of assetReqs) {
+      expect(r.body.fleetIds).not.toContain(BOGUS);
       expect([...r.body.fleetIds].sort()).toEqual([...ORIGINAL_8].sort());
-      expect(r.body.fieldFilters).toEqual([{ key: assetKey(r), values: ['TST1'] }]);
-      expect(r.body.lifecycleStates.map((l) => l.state)).toEqual(['ACTIVE', 'UNAVAILABLE', 'ORDERED']);
     }
     expectValidFleetIds(page);
   });
-  it('a FleetNotFoundException 404 mid-pass on attempt 1 falls back to the original 8 and keeps every unit', async () => {
-    const page = routed((r) => (isOmitted(r) && assetKey(r) === 'operator' ? fnf : null));
-    const ds = await aap.buildFleetDataset(BASE);
-    expect(ds.count).toBe(6);
-    expectValidFleetIds(page);
+  it('settings.assetFleetIds is read; when every id fails validation the original 8 are used', async () => {
+    const store = require('../src/store');
+    const prev = store.load('settings', {});
+    store.save('settings', Object.assign({}, prev, { assetFleetIds: [BOGUS, ' ' + BOGUS + ' '] }));
+    try {
+      const page = routed((r) => (isGetFleet(r) && fleetOf(r) === BOGUS ? fnf : null));
+      const ds = await aap.buildFleetDataset(BASE);
+      expect(ds.count).toBe(6);
+      expect(page.requests.filter(isGetFleet).map(fleetOf)).toEqual([BOGUS]);
+      for (const r of page.requests.filter(isAssetSearch)) {
+        expect([...r.body.fleetIds].sort()).toEqual([...ORIGINAL_8].sort());
+      }
+    } finally {
+      store.save('settings', prev);
+    }
   });
-  it('zero assets on the omitted body falls back to the original 8', async () => {
-    routed((r) => (isOmitted(r) ? ok({ assets: [] }) : null));
-    const ds = await aap.buildFleetDataset(BASE);
-    expect(ds.count).toBe(6);
+  it('the old no-fleet-ids attempt is gone: no asset search is sent without fleet ids', async () => {
+    const { page } = useRouter(fleetSpec());
+    await aap.buildFleetDataset(BASE);
+    const assetReqs = page.requests.filter(isAssetSearch);
+    expect(assetReqs.length).toBeGreaterThan(0);
+    expect(assetReqs.every((r) => hasFleetIds(r) && Array.isArray(r.body.fleetIds) && r.body.fleetIds.length > 0)).toBe(true);
   });
-  it('a 404 on every attempt rejects (never an empty fleet), so callers keep the last-good fleet_data.json', async () => {
-    routed((r) => (isAssetSearch(r) ? fnf : null));
+  it('a 404 on the asset search rejects (never an empty fleet), so callers keep the last-good fleet_data.json', async () => {
+    const page = routed((r) => (isAssetSearch(r) ? fnf : null));
     const e = await errOf(aap.buildFleetDataset(BASE));
     expect(e).toBeTruthy();
     expect(e.code).toBe('AAP_API_ERROR');
     expect(e.status).toBe(404);
+    expect(page.requests.filter(isAssetSearch)).toHaveLength(1);
   });
-  it('zero assets on every attempt rejects AAP_ASSET_SEARCH_EMPTY instead of resolving 0 rows', async () => {
+  it('zero assets rejects AAP_ASSET_SEARCH_EMPTY instead of resolving 0 rows', async () => {
     routed((r) => (isAssetSearch(r) ? ok({ assets: [] }) : null));
     const e = await errOf(aap.buildFleetDataset(BASE));
     expect(e && e.code).toBe('AAP_ASSET_SEARCH_EMPTY');
   });
-  it('an auth rejection on attempt 1 throws at once (no fallback request)', async () => {
-    const page = routed((r) => (isOmitted(r) ? { ok: false, status: 401, json: {} } : null));
+  it('an auth rejection on the asset search throws at once (no retry)', async () => {
+    const page = routed((r) => (isAssetSearch(r) ? { ok: false, status: 401, json: {} } : null));
     const e = await errOf(aap.buildFleetDataset(BASE));
     expect(e && e.code).toBe('MIDWAY_SESSION_INVALID');
     expect(page.requests.filter(isAssetSearch)).toHaveLength(1);
+  });
+  it('an auth rejection during getFleet validation throws (no id is silently dropped, no asset search)', async () => {
+    const page = routed((r) => (isGetFleet(r) ? { ok: false, status: 401, json: {} } : null));
+    const e = await errOf(aap.buildFleetDataset(BASE));
+    expect(e && e.code).toBe('MIDWAY_SESSION_INVALID');
+    expect(page.requests.filter(isAssetSearch)).toHaveLength(0);
+  });
+  it('ORDERED asset with an open WR keeps its WR; cancelled-only and zombie Active units stay blank', async () => {
+    const W = (id, status, modified) => mkWo({ id, aaid: 'aaid-amz', unit: 'AMZ503669', vendor: 'TA', status, modified, state: 'ORDERED', reason: 'PENDING_DELIVERY' });
+    const assets = FLEET.assets.concat([
+      mkAsset({ aaid: 'aaid-amz', unit: 'AMZ503669', state: 'ORDERED', reason: 'PENDING_DELIVERY', assetType: 'tractor' }),
+      mkAsset({ aaid: 'aaid-o2', unit: 'O2', state: 'ORDERED' }),
+    ]);
+    const spec = fleetSpec({
+      assets: { domicileSite: { 0: assets } },
+      unplanned: [FLEET.unplannedWos.concat([mkWo({ id: 'svc-o2-c', aaid: 'aaid-o2', unit: 'O2', status: 'CANCELLED', state: 'ORDERED' })])],
+      fallback: (r) => {
+        if (r.body.equipmentIds[0] === 'AMZ503669') {
+          return ok({ serviceAggregates: [W('svc-amz-c1', 'CANCELLED', 4000), W('svc-amz-open', 'WORK_ORDER_ASSIGNED', 1000), W('svc-amz-c2', 'CANCELLED', 3000), W('svc-amz-c3', 'CANCELLED', 2000)] });
+        }
+        if (r.body.equipmentIds[0] === 'O2') return ok({ serviceAggregates: [mkWo({ id: 'svc-o2-c2', aaid: 'aaid-o2', unit: 'O2', status: 'CANCELLED' })] });
+        return ok({ serviceAggregates: FLEET.fallbackWos[r.body.equipmentIds[0]] ? [FLEET.fallbackWos[r.body.equipmentIds[0]]] : [] });
+      },
+    });
+    useRouter(spec);
+    const u = byUnit(await aap.buildFleetDataset(BASE));
+    expect(u.AMZ503669).toMatchObject({ lifecycleState: 'Ordered', workRequestId: 'svc-amz-open',
+      serviceUrl: 'https://aap-na.corp.amazon.com/v2/service/svc-amz-open', lifecycleReason: '' });
+    expect(u.AMZ503669.vendor).toBeTruthy();
+    expect(u.O2).toMatchObject({ lifecycleState: 'Ordered', workRequestId: '', serviceUrl: '', vendor: '' });
+    expect(u.T1006).toMatchObject({ lifecycleState: 'Ordered', workRequestId: '' });
+    expect(u.T1005).toMatchObject({ lifecycleState: 'Active', workRequestId: '', vendor: '' });
+    expect(u.T1001.workRequestId).toBe('svc-u1');
   });
   it('the page id is never a standalone id literal (only inside /page/ URLs) in the AAP search modules', () => {
     for (const f of ['../src/scrapers/aap_api.js', '../src/scrapers/aap_longdwell.js']) {

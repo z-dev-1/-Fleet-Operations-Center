@@ -158,4 +158,22 @@ describe('refreshUnit multi open WOs', () => {
     expect(row._secondaryWRs).toEqual([]);
     expect(row._plannedWRData).toBe(null);
   });
+  it('Ordered asset (AMZ503669 shape): the open inspection WR stays, the 3 cancelled ones are ignored', async () => {
+    const A = 'aaid-amz';
+    const W = (id, status, modified) => mkWo({ id, aaid: A, unit: 'AMZ503669', vendor: 'TA', status, modified, state: 'ORDERED', reason: 'PENDING_DELIVERY' });
+    const byUnit = {
+      AMZ503669: { unplanned: [W('svc-amz-c1', 'CANCELLED', 4000), W('svc-amz-open', 'WORK_ORDER_ASSIGNED', 1000), W('svc-amz-c2', 'CANCELLED', 3000), W('svc-amz-c3', 'CANCELLED', 2000)], planned: [] },
+      O2: { unplanned: [mkWo({ id: 'svc-o2-c', aaid: 'aaid-o2', unit: 'O2', status: 'CANCELLED', state: 'ORDERED' })], planned: [] },
+    };
+    useRouter({ byUnit, assetState: { [A]: 'ORDERED', 'aaid-o2': 'ORDERED' } });
+    const row = await aap.refreshUnit('AMZ503669');
+    expect(row.lifecycleState).toBe('Ordered');
+    expect(row.workRequestId).toBe('svc-amz-open');
+    expect(row.serviceUrl).toBe(RELAY + 'svc-amz-open');
+    expect(row.vendor).toBeTruthy();
+    expect(row._secondaryWRs).toEqual([]);
+    const o2 = await aap.refreshUnit('O2');
+    expect(o2.workRequestId).toBe('');
+    expect(o2.serviceUrl).toBe('');
+  });
 });

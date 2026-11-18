@@ -344,7 +344,7 @@ function _searchBody(searchRequest, filters) {
 // KNOWN-GOOD asset-search fleet ids: exactly the 8 UUIDs pinned in
 // DEFAULT_ASSET_SEARCH_REQUEST.fleetIds (aap_longdwell.js) before the
 // 2026-11-18 fleet-scope change. buildFleetDataset falls back to this list when
-// the no-fleet-id asset body is rejected. Never add a guessed id here: AAP
+// no configured asset fleet id passes getFleet validation. Never add a guessed id here: AAP
 // rejects the WHOLE search (404 FleetNotFoundException) if any id is unknown.
 // 817ca098-… is an AAP page/view id (the /v2/page/<id> URL), not a fleet id.
 // 9bf5bae8-… (WO list only) is left out: nothing shows it is valid on the asset endpoint.
@@ -358,6 +358,37 @@ const ASSET_FALLBACK_FLEET_IDS = Object.freeze([
   'ba97eda1-cb03-446e-a907-474084194777',
   'daa83ad7-5d8f-43a4-ba9c-76c643e45e1e',
 ]);
+// ATS NA Tractor: the AAP fleet of new-delivery tractors such as AMZ503669
+// (fleetId read live from GET /api/v1/assets/<aaid>, 2026-11-18).
+const ATS_NA_TRACTOR_FLEET_ID = 'ba97eda1-cb03-446e-a907-474084194777';
+// Default for settings.assetFleetIds: the original 8 plus ATS NA Tractor
+// (deduped). buildFleetDataset validates every id with getFleet() first.
+const DEFAULT_ASSET_FLEET_IDS = Object.freeze([...new Set(ASSET_FALLBACK_FLEET_IDS.concat([ATS_NA_TRACTOR_FLEET_ID]))]);
+
+// Keep only fleet ids that AAP knows. One unknown id makes AAP reject the whole
+// asset search (404 FleetNotFoundException), so each id is checked with
+// getFleet() and any id that answers with an AAP_API_ERROR is dropped. Auth
+// errors and timeouts are rethrown (same rule as the asset search). If no id
+// survives, the original 8 are used.
+async function _validateAssetFleetIds(ids) {
+  const used = [];
+  const dropped = [];
+  for (const id of ids) {
+    try {
+      await getFleet(id);
+      used.push(id);
+    } catch (e) {
+      if (!e || e.code !== 'AAP_API_ERROR') throw e;
+      dropped.push(id);
+      logger.warn('buildFleetDataset: dropping asset fleet id ' + id + ' (getFleet failed: ' + e.message + ')');
+    }
+  }
+  if (!used.length) {
+    logger.warn('buildFleetDataset: no asset fleet id passed validation — using the original 8');
+    return { used: ASSET_FALLBACK_FLEET_IDS.slice(), dropped };
+  }
+  return { used, dropped };
+}
 
 function searchServices(searchRequest, opts) {
   return apiPost('/api/v1/serviceaggregates/search', _searchBody(searchRequest, opts && opts.filters));
@@ -922,6 +953,24 @@ async function buildFleetDataset(opts = {}) {
   }
   const filterVals = (filters || []).map((d) => String(d).trim().toUpperCase());
 
+  // Asset-search fleet ids: opts.assetFleetIds, else settings.assetFleetIds,
+  // else DEFAULT_ASSET_FLEET_IDS. AAP requires a non-empty list (HTTP 400
+  // "at least one fleet id is required"), so every id is validated and an
+  // unknown one is dropped instead of failing the whole search.
+  let fleetIdsWanted = opts.assetFleetIds;
+  if (!Array.isArray(fleetIdsWanted) || !fleetIdsWanted.length) {
+    fleetIdsWanted = null;
+    try {
+      const s = require('../store').load('settings', {});
+      if (Array.isArray(s.assetFleetIds) && s.assetFleetIds.length) fleetIdsWanted = s.assetFleetIds;
+    } catch (_) { /* use the default */ }
+  }
+  fleetIdsWanted = [...new Set((fleetIdsWanted || DEFAULT_ASSET_FLEET_IDS)
+    .map((id) => String(id || '').trim()).filter(Boolean))];
+  const { used: assetFleetIds, dropped: droppedFleetIds } = await _validateAssetFleetIds(fleetIdsWanted);
+  logger.info('buildFleetDataset: asset fleet ids used [' + assetFleetIds.join(',') + ']'
+    + ', dropped [' + droppedFleetIds.join(',') + ']');
+
   // 1) ASSET SET — union of domicileSite-matched and operator-matched assets.
   //    This is the app's fleet scope. Keyed by aaid. We request the master-data
   //    fields IN BULK via fieldsToReturn (confirmed the search honors it), so
@@ -940,17 +989,18 @@ async function buildFleetDataset(opts = {}) {
     // Location fields so EVERY unit shows a "Last Geofence" (geoFences are
     // confirmed valid search fields — DEFAULT_ASSET_SEARCH_REQUEST requests them).
     'geoFences', 'yardBuildingID', 'latestLocationTimestamp', 'geoPoint'];
-  // FLEET SCOPE: the domicileSite/operator fieldFilters define the fleet. The
-  // asset search is tried in this order and the live endpoint decides:
-  //   1. 'no-fleet-ids'  — fleetIds key omitted (undefined is dropped by
-  //      JSON.stringify), so units in any AAP fleet in the domiciles load.
-  //   2. 'original-8'    — ASSET_FALLBACK_FLEET_IDS, the known-good pre-11/18 pin.
-  // fleetIds: [] is NOT tried: live logs (2026-11-18) show AAP answers it with
-  // HTTP 400 "at least one fleet id is required". An AAP_API_ERROR (any 4xx/5xx,
-  // e.g. 404 FleetNotFoundException) or 0 assets on attempt 1 moves on to
-  // attempt 2. Auth errors and page hangs (AAP_API_TIMEOUT) throw at once. If
-  // every attempt fails, or the last one returns 0 assets for a non-empty
-  // domicile list, the build THROWS, so callers keep the last-good fleet.
+  // FLEET SCOPE: the domicileSite/operator fieldFilters define the fleet, inside
+  // the validated assetFleetIds. ONE asset-search attempt, with that list. A
+  // request without fleet ids is not tried: AAP always answers it with HTTP 400
+  // "at least one fleet id is required" (live, 2026-11-18).
+  // boundingBox: null — the default box (DEFAULT_ASSET_SEARCH_REQUEST) drops
+  // assets with no GPS position, e.g. not-yet-delivered ORDERED tractors
+  // (AMZ503669: live search returned it only with boundingBox null). The
+  // domicile/operator filters + fleet ids + lifecycle states already scope the
+  // result, so removing the geographic box does not widen it past the fleet.
+  // Any error (4xx/5xx, auth, AAP_API_TIMEOUT) THROWS, and 0 assets for a
+  // non-empty domicile list throws AAP_ASSET_SEARCH_EMPTY, so callers keep the
+  // last-good fleet.
   const assetPass = async (fleetIds, st) => {
     const byAaid = new Map();    // aaid -> asset summary record
     for (const key of ['domicileSite', 'operator']) {
@@ -969,6 +1019,7 @@ async function buildFleetDataset(opts = {}) {
             { state: 'ORDERED', reasons: [] },
           ],
           fleetIds,
+          boundingBox: null,
         });
         st.calls++;
         const list = (res && res.assets) || [];
@@ -983,34 +1034,12 @@ async function buildFleetDataset(opts = {}) {
     }
     return byAaid;
   };
-  const assetAttempts = [
-    { label: 'no-fleet-ids', fleetIds: undefined },
-    { label: 'original-8', fleetIds: ASSET_FALLBACK_FLEET_IDS.slice() },
-  ];
-  let assetByAaid = null;
-  for (let i = 0; i < assetAttempts.length; i++) {
-    const att = assetAttempts[i];
-    const isLast = i === assetAttempts.length - 1;
-    let got = null;
-    try {
-      got = await assetPass(att.fleetIds, { calls: 0 });
-    } catch (e) {
-      if (isLast || !e || e.code !== 'AAP_API_ERROR') throw e;
-      logger.warn('buildFleetDataset: asset search attempt "' + att.label + '" failed (' + e.message + ') — trying "' + assetAttempts[i + 1].label + '"');
-      continue;
-    }
-    if (!got.size && filterVals.length) {
-      if (isLast) {
-        throw Object.assign(new Error('AAP asset search returned 0 units for the Managed Domiciles (attempt "' + att.label + '") — keeping the last good fleet'),
-          { code: 'AAP_ASSET_SEARCH_EMPTY' });
-      }
-      logger.warn('buildFleetDataset: asset search attempt "' + att.label + '" returned 0 assets — trying "' + assetAttempts[i + 1].label + '"');
-      continue;
-    }
-    logger.info('buildFleetDataset: asset search attempt "' + att.label + '" succeeded — ' + got.size + ' assets');
-    assetByAaid = got;
-    break;
+  const assetByAaid = await assetPass(assetFleetIds, { calls: 0 });
+  if (!assetByAaid.size && filterVals.length) {
+    throw Object.assign(new Error('AAP asset search returned 0 units for the Managed Domiciles — keeping the last good fleet'),
+      { code: 'AAP_ASSET_SEARCH_EMPTY' });
   }
+  logger.info('buildFleetDataset: asset search returned ' + assetByAaid.size + ' assets (' + assetFleetIds.length + ' fleet ids)');
 
   // Optionally narrow to UNAVAILABLE assets only.
   const assetEntries = [...assetByAaid.values()].filter((a) => {
@@ -1147,10 +1176,17 @@ async function buildFleetDataset(opts = {}) {
     const _assetReason = assetSummary.asset && assetSummary.asset.lifecycleStateReason;
     row.lifecycleState = mapper.mapLifecycleState(_assetState) || row.lifecycleState;
     const _assetUnavailable = /unavail/i.test(String(_assetState || ''));
+    // ORDERED (new-delivery) unit with an OPEN, non-cancelled WO: that WO is
+    // current work (e.g. AMZ503669's "New Delivery Tractor Inspection"), not a
+    // zombie, so its WR fields stay. Cancelled WOs never count.
+    const _orderedOpenWo = /^ordered$/i.test(String(_assetState || '')) && !!wo && woIsOpen(wo) && !_woIsCancelled(wo);
     if (_assetUnavailable) {
       // Unavailable: use the asset's reason (truth); only keep the WO-derived
       // reason if the asset doesn't carry one.
       row.lifecycleReason = mapper.mapLifecycleReason(_assetReason) || row.lifecycleReason;
+    } else if (_orderedOpenWo) {
+      // Ordered: no unavailable reason; the open WO's fields stay on the row.
+      row.lifecycleReason = '';
     } else {
       // AVAILABLE / Active: the unit is in service — it has NO unavailable
       // reason, and any WO the bulk search attached is HISTORICAL (a zombie
@@ -1508,7 +1544,11 @@ async function refreshUnit(unitNumber) {
   // falling back to the WO aggregate's lifecycleState.
   const _finalState = String(row.lifecycleState || '');
   const _available = !/unavail/i.test(_finalState) && !!_finalState;
-  if (_available) {
+  // Same rule as buildFleetDataset: an ORDERED unit keeps its OPEN,
+  // non-cancelled WO (a new-delivery inspection WR is current work).
+  const _orderedOpenWo = /^ordered$/i.test(_finalState) && !!wo && _isOpen(wo) && !_isCancelled(wo);
+  if (_orderedOpenWo) row.lifecycleReason = '';
+  if (_available && !_orderedOpenWo) {
     row.lifecycleReason = '';
     row.vendor = '';
     row.serviceState = '';
@@ -3119,6 +3159,7 @@ module.exports = {
   _searchBody,                  // exported: search body = defaults + request + cleaned filters (tests)
   searchAssets,
   ASSET_FALLBACK_FLEET_IDS,     // exported: known-good asset-search fleetIds fallback (tests)
+  DEFAULT_ASSET_FLEET_IDS,      // exported: settings.assetFleetIds default (original 8 + ATS NA Tractor)
   getFleet,
   buildTrackerRows,
   buildFleetDataset,
