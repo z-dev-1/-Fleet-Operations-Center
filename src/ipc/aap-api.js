@@ -194,7 +194,21 @@ function registerAapApiIPC(ctx) {
     const unit = String((payload && payload.unit) || '').trim();
     if (!unit) return { ok: false, error: 'no unit number' };
     try {
-      const row = await api().refreshUnit(unit);
+      let row = await api().refreshUnit(unit);
+      // The per-unit PLANNED search failed or timed out: keep the planned WO
+      // the bulk build attached to the stored row, so the detail panel does
+      // not drop the planned card (same rule as hydration in window/index.js).
+      if (row && row._plannedPassOk === false) {
+        try {
+          const want = String(row.equipmentId || unit).toUpperCase();
+          const stored = ((store.load('fleetData', { rows: [] }) || {}).rows || [])
+            .find((r) => r && String(r.equipmentId || '').toUpperCase() === want);
+          if (stored) {
+            const kept = require('../scrapers/aap_api_mapper').keepPrevSecondaryWRs(row, stored, { planned: true });
+            row = Object.assign({}, row, { _secondaryWRs: kept.secondary, _plannedWRData: kept.planned });
+          }
+        } catch (e) { logger.warn('refresh-unit planned merge skipped: ' + e.message); }
+      }
       // relay-extract §12.3 #9 / §12.5: mirrors computed here; fact blocks never reach the renderer.
       const woFacts = require('../repair-intel/wo-facts');
       return { ok: true, row: woFacts.rendererRow(woFacts.refreshRowFacts(row, require('../config/perf-flags').loadExtract())) };

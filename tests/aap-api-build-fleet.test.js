@@ -368,6 +368,8 @@ describe('buildFleetDataset multi open WOs', () => {
     const c = src.indexOf('keepPrevSecondaryWRs(row, p, {');
     expect(c).toBeGreaterThan(0);
     expect(src.slice(c, c + 200)).toContain('planned: _plannedPassFailed');
+    expect(src.slice(c, c + 200)).toContain('outsideBulk: true');
+    expect(src.slice(h - 200, h)).toContain('markOutsideBulkPlanned(');
     // The old unconditional carry rules are gone.
     expect(src).not.toContain('if (!row._plannedWRData && p._plannedWRData) row._plannedWRData = p._plannedWRData;');
     expect(src).not.toContain('row._secondaryWRs = p._secondaryWRs;');

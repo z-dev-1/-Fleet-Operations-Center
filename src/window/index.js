@@ -1199,10 +1199,12 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                 // previous ones only where the bulk build could not see them:
                 // planned WOs when its PLANNED pass failed, unplanned ones when
                 // it counted no open unplanned WO for this unit (per-unit
-                // fallback primary).
+                // fallback primary). Planned WOs hydration tagged _outsideBulk
+                // are always carried: the bulk filters can't return them.
                 const _kept = _wrMapper.keepPrevSecondaryWRs(row, p, {
                   planned: _plannedPassFailed,
                   unplanned: !(Number(row.openUnplanned) > 0),
+                  outsideBulk: true,
                 });
                 row._secondaryWRs = _kept.secondary;
                 row._plannedWRData = _kept.planned;
@@ -1400,7 +1402,10 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               if (fr && Array.isArray(fr._secondaryWRs)) {
                 // refreshUnit's PLANNED search failed or timed out: keep the
                 // planned WO the bulk build attached to this row.
-                const kept = require('../scrapers/aap_api_mapper').keepPrevSecondaryWRs(fr, r, { planned: fr._plannedPassOk === false });
+                // Planned WOs the bulk filters can't return get tagged so the
+                // next rebuild's carry-forward keeps them.
+                const _m = require('../scrapers/aap_api_mapper');
+                const kept = _m.markOutsideBulkPlanned(_m.keepPrevSecondaryWRs(fr, r, { planned: fr._plannedPassOk === false }), r);
                 r._secondaryWRs = kept.secondary;
                 r._plannedWRData = kept.planned;
               }

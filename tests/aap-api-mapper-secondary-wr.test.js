@@ -82,3 +82,53 @@ describe('keepPrevSecondaryWRs', () => {
     expect(mapper.keepPrevSecondaryWRs(fresh, prev, { planned: false, unplanned: true }).secondary.map((s) => s.workRequestId)).toEqual(['svc-m1-u2']);
   });
 });
+
+// Planned WOs only the widened per-unit PLANNED search can see (outside the
+// bulk program/fleet/lifecycle filters): hydration tags them, carry-forward
+// keeps them across successful rebuilds, the next hydration drops closed ones.
+describe('markOutsideBulkPlanned + keepPrevSecondaryWRs outsideBulk', () => {
+  const planned = mapper.toSecondaryWR(mkWo({ id: 'svc-m1-p', category: 'PLANNED', status: 'SCHEDULED' }), null, { wrType: 'planned' });
+  const damage = mapper.toSecondaryWR(mkWo({ id: 'svc-dmg-p', category: 'PLANNED', status: 'SCHEDULED' }), null, { wrType: 'planned' });
+  const unpl2 = mapper.toSecondaryWR(mkWo({ id: 'svc-m1-u2' }), null, { wrType: 'unplanned' });
+
+  it('tags only planned entries the bulk row did not have; inputs untouched', () => {
+    const bulk = { workRequestId: 'svc-m1-u', _secondaryWRs: [planned], _plannedWRData: planned };
+    const kept = { secondary: [unpl2, planned, damage], planned };
+    const t = mapper.markOutsideBulkPlanned(kept, bulk);
+    expect(t.secondary.map((s) => !!s._outsideBulk)).toEqual([false, false, true]);
+    expect(t.secondary[2].workRequestId).toBe('svc-dmg-p');
+    expect(t.planned._outsideBulk).toBeUndefined();
+    expect(damage._outsideBulk).toBeUndefined();
+  });
+  it('the planned card and its secondary entry share one tagged copy', () => {
+    const t = mapper.markOutsideBulkPlanned({ secondary: [damage], planned: damage }, { workRequestId: 'svc-x', _secondaryWRs: [], _plannedWRData: null });
+    expect(t.planned._outsideBulk).toBe(true);
+    expect(t.planned).toBe(t.secondary[0]);
+  });
+  it('successful rebuild that cannot see the tagged WO keeps it; one that sees it uses the bulk entry', () => {
+    const tagged = Object.assign({}, damage, { _outsideBulk: true });
+    const prev = { workRequestId: 'svc-x', _secondaryWRs: [tagged], _plannedWRData: tagged };
+    const blind = { workRequestId: 'svc-x', _secondaryWRs: [], _plannedWRData: null };
+    const k = mapper.keepPrevSecondaryWRs(blind, prev, { planned: false, unplanned: true, outsideBulk: true });
+    expect(k.secondary.map((s) => s.workRequestId)).toEqual(['svc-dmg-p']);
+    expect(k.planned.workRequestId).toBe('svc-dmg-p');
+    const sees = { workRequestId: 'svc-x', _secondaryWRs: [damage], _plannedWRData: damage };
+    const k2 = mapper.keepPrevSecondaryWRs(sees, prev, { planned: false, outsideBulk: true });
+    expect(k2.secondary).toEqual([damage]);
+    expect(k2.planned).toBe(damage);
+  });
+  it('untagged planned entries still drop on a successful rebuild (closed WO)', () => {
+    const prev = { workRequestId: 'svc-m1-u', _secondaryWRs: [planned], _plannedWRData: planned };
+    const k = mapper.keepPrevSecondaryWRs({ workRequestId: 'svc-m1-u', _secondaryWRs: [], _plannedWRData: null }, prev, { planned: false, outsideBulk: true });
+    expect(k.secondary).toEqual([]);
+    expect(k.planned).toBe(null);
+  });
+  it('next hydration whose PLANNED search succeeds without it drops the tagged WO', () => {
+    const tagged = Object.assign({}, damage, { _outsideBulk: true });
+    const r = { workRequestId: 'svc-x', _secondaryWRs: [tagged], _plannedWRData: tagged };
+    const fr = { workRequestId: 'svc-x', _secondaryWRs: [], _plannedWRData: null, _plannedPassOk: true };
+    const t = mapper.markOutsideBulkPlanned(mapper.keepPrevSecondaryWRs(fr, r, { planned: fr._plannedPassOk === false }), r);
+    expect(t.secondary).toEqual([]);
+    expect(t.planned).toBe(null);
+  });
+});

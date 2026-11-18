@@ -2271,6 +2271,29 @@ function _parseRelayConvo(raw) {
 }
 
 
+// On-open refresh: which extra WOs the panel keeps. Fresh wins, so a closed
+// planned WO drops off. When the per-unit PLANNED search failed
+// (_plannedPassOk:false) the IPC handler has already merged the stored row's
+// planned WO into fresh; if it could not, keep the panel's own planned card.
+// Exported for tests.
+export function refreshPatchWRs(unit, fresh){
+  var u = unit || {}, f = fresh || {};
+  var failedEmpty = f._plannedPassOk === false && !f._plannedWRData
+    && !(u._plannedWRData && f.workRequestId && u._plannedWRData.workRequestId === f.workRequestId);
+  var sec = f._secondaryWRs || u._secondaryWRs;
+  if (f._plannedPassOk === false && Array.isArray(f._secondaryWRs) && Array.isArray(u._secondaryWRs)) {
+    var have = {};
+    [f.workRequestId].concat(f._secondaryWRs.map(function(s){ return s && s.workRequestId; }))
+      .forEach(function(id){ if (id) have[id] = 1; });
+    var add = u._secondaryWRs.filter(function(s){ return s && s._wrType === 'planned' && s.workRequestId && !have[s.workRequestId]; });
+    if (add.length) sec = f._secondaryWRs.concat(add);
+  }
+  return {
+    _secondaryWRs: sec,
+    _plannedWRData: (f._plannedWRData === undefined || failedEmpty) ? u._plannedWRData : f._plannedWRData,
+  };
+}
+
 // Planned WR card (Repair tab). Exported for tests.
 export function plannedWrCardHtml(unit){
   // Planned WR card: shown for PM Failed / Expired Inspection Unavailable units
@@ -4127,8 +4150,7 @@ export function init(container) {
                   offsiteStage:        fresh.offsiteStage || _unit.offsiteStage,
                   offsiteStageDetail:  fresh.offsiteStageDetail || _unit.offsiteStageDetail,
                   offsiteStageSince:   fresh.offsiteStageSince || _unit.offsiteStageSince,
-                  _secondaryWRs:  fresh._secondaryWRs || _unit._secondaryWRs,
-                });
+                }, refreshPatchWRs(_unit, fresh));
             // Preserve the active tab across the re-render.
             const activeEl = _panel.querySelector('.dp-tab.active');
             const activeTab = activeEl && activeEl.dataset ? activeEl.dataset.tab : null;

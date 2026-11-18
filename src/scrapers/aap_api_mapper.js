@@ -580,32 +580,61 @@ function toSecondaryWR(wo, serviceDetail, opts) {
 // keep.planned: the fresh result's PLANNED search failed, so carry prev's
 // _wrType:'planned' entries and _plannedWRData. keep.unplanned: the fresh
 // result did not see this unit's unplanned WOs, so carry the others too.
+// keep.outsideBulk: also carry prev's planned entries tagged _outsideBulk
+// (see markOutsideBulkPlanned), even when keep.planned is false.
 // An entry already in `fresh` (or its primary) is never added twice.
 // Returns { secondary, planned }; inputs are not modified.
 function keepPrevSecondaryWRs(fresh, prev, keep) {
   const f = fresh || {};
   const p = prev || {};
   const k = keep || {};
+  const keepPlanned = (s) => !!(k.planned || (k.outsideBulk && s && s._outsideBulk));
   const sec = Array.isArray(f._secondaryWRs) ? f._secondaryWRs : [];
   let planned = f._plannedWRData || null;
   const have = new Set([f.workRequestId].concat(sec.map((s) => s && s.workRequestId)).filter(Boolean));
   const add = [];
   for (const s of (Array.isArray(p._secondaryWRs) ? p._secondaryWRs : [])) {
     if (!s || !s.workRequestId || have.has(s.workRequestId)) continue;
-    if (!(s._wrType === 'planned' ? k.planned : k.unplanned)) continue;
+    if (!(s._wrType === 'planned' ? keepPlanned(s) : k.unplanned)) continue;
     have.add(s.workRequestId);
     add.push(s);
   }
-  if (!planned && k.planned && p._plannedWRData && p._plannedWRData.workRequestId !== f.workRequestId) {
+  if (!planned && p._plannedWRData && keepPlanned(p._plannedWRData) && p._plannedWRData.workRequestId !== f.workRequestId) {
     planned = p._plannedWRData;
   }
   return { secondary: add.length ? sec.concat(add) : sec, planned };
+}
+// Hydration: refreshUnit's PLANNED search drops the fleet/program/lifecycle
+// filters the bulk PLANNED pass uses, so it can find planned WOs the bulk
+// build never returns. Tag those (planned entries not in `bulkRow`, ignoring
+// entries that are themselves tagged) with _outsideBulk so the next rebuild's
+// carry-forward keeps them. The next hydration replaces them with its own
+// result, so a closed one drops off there. Returns { secondary, planned }
+// with tagged copies; inputs are not modified.
+function markOutsideBulkPlanned(kept, bulkRow) {
+  const b = bulkRow || {};
+  const bulkIds = new Set((Array.isArray(b._secondaryWRs) ? b._secondaryWRs : [])
+    .concat(b._plannedWRData ? [b._plannedWRData] : [])
+    .filter((s) => s && s.workRequestId && !s._outsideBulk)
+    .map((s) => s.workRequestId));
+  const tagged = new Map();
+  const tag = (s) => {
+    if (!s || s._wrType !== 'planned' || !s.workRequestId || bulkIds.has(s.workRequestId) || s._outsideBulk) return s;
+    if (!tagged.has(s.workRequestId)) tagged.set(s.workRequestId, Object.assign({}, s, { _outsideBulk: true }));
+    return tagged.get(s.workRequestId);
+  };
+  const k = kept || {};
+  return {
+    secondary: (Array.isArray(k.secondary) ? k.secondary : []).map(tag),
+    planned: k.planned ? tag(k.planned) : (k.planned || null),
+  };
 }
 
 module.exports = {
   toFleetRow,
   toSecondaryWR,
   keepPrevSecondaryWRs,
+  markOutsideBulkPlanned,
   woStatus,
   pmDueFields,
   pmTypeKey,
