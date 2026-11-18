@@ -26,7 +26,7 @@ describe('AC-36 fixture reproducibility', () => {
   afterAll(() => { vi.useRealTimers(); });
   it('build() deep-equals the committed JSON', () => {
     expect(JSON.parse(JSON.stringify(builder.build()))).toEqual(committed);
-  });
+  }, 30000);   // the full build replays 7 rows through extractRelay; > 5 s under full-suite load
 });
 
 describe('AUVTE fixture fleet', () => {
