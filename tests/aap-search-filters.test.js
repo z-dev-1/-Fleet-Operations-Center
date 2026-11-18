@@ -16,8 +16,8 @@ const END = 'totalEstimatePendingApprovalEndCost';
 // Representative requests from the real callers.
 const REQS = {
   historyBody: { equipmentIds: ['B62020'], statuses: [], lifecycleStates: null, assetPrograms: null, page: 1 },
-  fleetWoReq: { assetDomicileSites: ['ABE40', 'TUZR'] },
-  findOpenWO: { equipmentIds: ['B62020'], statuses: [], page: 1 },
+  fleetWoReq: { fleetIds: aap.SCOPE_FLEET_IDS.slice(), assetDomicileSites: ['ABE40', 'TUZR'] },
+  findOpenWO: { equipmentIds: ['B62020'], statuses: [], fleetIds: aap.SCOPE_FLEET_IDS.slice(), page: 1 },
   empty: {},
 };
 

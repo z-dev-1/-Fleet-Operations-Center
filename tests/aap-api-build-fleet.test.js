@@ -159,6 +159,60 @@ describe('buildFleetDataset per-unit WO fallback', () => {
   });
 });
 
+describe('buildFleetDataset fleet scope (Managed Domiciles, not a fleetIds allow-list)', () => {
+  const OLD_ASSET_8 = require('../src/scrapers/aap_longdwell').DEFAULT_ASSET_SEARCH_REQUEST.fleetIds;
+  const OLD_WO_9 = require('../src/scrapers/aap_longdwell').DEFAULT_SEARCH_REQUEST.fleetIds;
+  const AMZ_FLEET = '817ca098-8441-4329-a71e-6768f9d7e6c5';
+  const NINTH = '9bf5bae8-f536-4157-8b23-f5632ced5e1d';
+
+  it('SCOPE_FLEET_IDS is the union of both default lists plus 817ca098', () => {
+    expect([...new Set([...OLD_ASSET_8, ...OLD_WO_9, AMZ_FLEET])].sort()).toEqual([...aap.SCOPE_FLEET_IDS].sort());
+    expect(OLD_ASSET_8).toHaveLength(8);   // shared default untouched
+  });
+  it('asset search drops the 8-UUID pin; domicileSite/operator filters and all 3 lifecycle states still scope it', async () => {
+    const { page } = useRouter(fleetSpec());
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(ds.count).toBe(6);
+    const assetReqs = page.requests.filter(isAssetSearch);
+    expect(assetReqs.map(assetKey)).toEqual(['domicileSite', 'operator']);
+    for (const r of assetReqs) {
+      expect(r.body.fleetIds).toEqual([]);
+      expect(r.body.fieldFilters).toEqual([{ key: assetKey(r), values: ['TST1'] }]);
+      expect(r.body.lifecycleStates.map((l) => l.state)).toEqual(['ACTIVE', 'UNAVAILABLE', 'ORDERED']);
+    }
+  });
+  it('bulk + planned + per-unit fallback WO searches include 817ca098, 9bf5bae8 and the old 8', async () => {
+    const assets = FLEET.assets.concat([mkAsset({ aaid: 'aaid-amz', unit: 'AMZ503669' })]);
+    const { page } = useRouter(fleetSpec({ assets: { domicileSite: { 0: assets } } }));
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(byUnit(ds).AMZ503669).toBeTruthy();
+    const wo = page.requests.filter(isWoSearch);
+    const attempt1 = page.requests.filter((r) => isFallback(r) && r.body.category !== null);
+    expect(attempt1.length).toBeGreaterThan(0);
+    for (const r of page.requests.filter(isUnplanned).concat(page.requests.filter(isPlanned), attempt1)) {
+      expect(r.body.fleetIds).toEqual(expect.arrayContaining([AMZ_FLEET, NINTH, ...OLD_ASSET_8]));
+    }
+    expect(wo.filter(isUnplanned)[0].body.assetDomicileSites).toEqual(['TST1']);
+  });
+  it('falls back to SCOPE_FLEET_IDS when the domicile-only asset body is rejected on the first request', async () => {
+    const base = mkRouter(fleetSpec());
+    const page = mkRoutedPage((r) => (isAssetSearch(r) && Array.isArray(r.body.fleetIds) && !r.body.fleetIds.length ? fail(500) : base(r)));
+    aap._setProviderForTest(mkProvider([page]));
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(ds.count).toBe(6);
+    const assetReqs = page.requests.filter(isAssetSearch);
+    expect(assetReqs[0].body.fleetIds).toEqual([]);
+    expect(assetReqs.slice(1).every((r) => r.body.fleetIds.includes(AMZ_FLEET) && r.body.fleetIds.length === 10)).toBe(true);
+  });
+  it('falls back to SCOPE_FLEET_IDS when the domicile-only asset body returns zero assets', async () => {
+    const base = mkRouter(fleetSpec());
+    const page = mkRoutedPage((r) => (isAssetSearch(r) && !r.body.fleetIds.length ? ok({ assets: [] }) : base(r)));
+    aap._setProviderForTest(mkProvider([page]));
+    const ds = await aap.buildFleetDataset(BASE);
+    expect(ds.count).toBe(6);
+  });
+});
+
 describe('buildFleetDataset partial failures keep rows', () => {
   it('a PLANNED pass HTTP 500 still resolves all rows with openPlanned 0', async () => {
     useRouter(fleetSpec({ planned: fail(500) }));

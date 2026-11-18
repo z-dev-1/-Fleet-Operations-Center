@@ -259,7 +259,8 @@ function _applyFiltersAndSort(rows) {
     }
     if (_search) {
       const s = _search.toLowerCase();
-      const match = COLS.some((c) => String(row[c.key] || '').toLowerCase().includes(s));
+      const match = COLS.some((c) => String(row[c.key] || '').toLowerCase().includes(s))
+        || ['vin', 'operator', 'domicileSite', 'alternativeId'].some((k) => String(row[k] || '').toLowerCase().includes(s));
       if (!match) return false;
     }
     return true;
