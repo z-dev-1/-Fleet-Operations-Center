@@ -183,9 +183,10 @@ describe('NFR-8 off-limits files and import lists', () => {
     // fix/ai-json-parse makes the Long Dwell AI Fill parse tolerant of Aki-wrapped JSON
     // (longdwell-csv.js _aiFillRow) and states the output contract up front (longdwell-ai.js).
     // 2026-11-09 fix/longdwell-aki-format adds the 7-bullet summary normalizer (longdwell-summary-format.js).
+    // feature/carrier-intel (FEAT-004) adds the read-only carrier-intel pre-router to ai.js processOrchaAction.
     const LATER_FEAT_FILES = new Set(['src/workers/supervisor.js', 'src/orcha/relay.js',
       'renderer/src/js/views/longdwell-csv.js', 'renderer/src/js/longdwell-ai.js',
-      'renderer/src/js/longdwell-summary-format.js']);
+      'renderer/src/js/longdwell-summary-format.js', 'src/ipc/ai.js']);
     const offenders = files.filter((f) => !LATER_FEAT_FILES.has(f) && OFF_LIMITS.some((re) => re.test(f)));
     expect(offenders).toEqual([]);
     const untracked = (git('ls-files', '--others', '--exclude-standard') || '').split('\n').map((s) => s.trim()).filter(Boolean);
