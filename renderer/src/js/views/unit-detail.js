@@ -4059,6 +4059,19 @@ function _injectOfflineQuickAdd(container, equipmentId) {
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
 }
 
+// Keep the drawer between #topbar and the bottom status bar: copy their real
+// heights into the --topbar-h / --statusbar-h tokens used by .detail-panel
+// (the status bar grows when the auth step-up banner is shown).
+function _syncDrawerBounds() {
+  try {
+    const root = document.documentElement;
+    const tb = document.getElementById('topbar');
+    const sb = document.getElementById('status-bar-mount');
+    if (tb) root.style.setProperty('--topbar-h', Math.round(tb.getBoundingClientRect().bottom) + 'px');
+    if (sb) root.style.setProperty('--statusbar-h', Math.max(0, Math.round(window.innerHeight - sb.getBoundingClientRect().top)) + 'px');
+  } catch (_) { /* keep the CSS defaults */ }
+}
+
 export function init(container) {
   _panel = document.createElement('div');
   _panel.id = 'detail-panel';
@@ -4070,6 +4083,7 @@ export function init(container) {
     // the History tab, scroll to it and open its RCA form (see _wireRcaButtons).
     _pendingRca = rcaWorkOrderId ? { wo: String(rcaWorkOrderId), unit: String(unit && unit.equipmentId || ''), until: Date.now() + 30000 } : null;
     _renderUnit(unit);
+    _syncDrawerBounds();
     requestAnimationFrame(() => _panel.classList.add('detail-panel--open'));
     // Optional: open on a specific tab (e.g. the overview's "RCA to do" list
     // opens straight on History, where the RCA button is).

@@ -668,6 +668,7 @@ export function init(container) {
 
   // Lazy-load on first reveal so startup stays fast and empty engines are fine.
   bus.on('ui:view-change', function(ev){
+    if (ev && ev.to === 'settings') return; // Settings is an overlay, not a view
     if (ev && ev.to === 'trends' && !_loaded) {
       _loaded = true;
       _populateFilters();

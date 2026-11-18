@@ -2734,7 +2734,12 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
    ================================================================= */
 
 /* ── Panel shell ── */
-.detail-panel{position:fixed;top:0;right:0;bottom:0;width:460px;background:var(--panel);border-left:1px solid var(--bdrs);box-shadow:-12px 0 40px rgba(0,0,0,.55);z-index:9500;transform:translateX(100%);transition:transform .35s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;overflow:hidden}
+/* The only .detail-panel shell rule. Anchored below #topbar and above the
+   bottom status bar so the topbar controls and the trust pills stay visible.
+   Defaults match #topbar (48px) and .sb-row (26px); unit-detail.js updates
+   the tokens with the measured heights when the drawer opens. */
+:root{--topbar-h:48px;--statusbar-h:26px}
+.detail-panel{position:fixed;top:var(--topbar-h);right:0;bottom:var(--statusbar-h);width:440px;background:var(--panel);border-left:1px solid var(--bdrs);box-shadow:-12px 0 40px rgba(0,0,0,.55);z-index:9500;transform:translateX(100%);transition:transform .32s cubic-bezier(.22,1,.36,1);display:flex;flex-direction:column;overflow:hidden}
 .detail-panel--open{transform:translateX(0)}
 .detail-panel::before{content:'';position:absolute;top:0;left:0;bottom:0;width:1px;background:linear-gradient(180deg,var(--acc),transparent 40%,transparent 60%,var(--pur));opacity:.5}
 
@@ -4343,21 +4348,7 @@ td:has(.pm-pills-row) {
    UNIT DETAIL DRAWER — v3 polish
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Drawer shell */
-.detail-panel {
-  position: fixed;
-  top: 0; right: 0; bottom: 0;
-  width: 420px;
-  background: var(--panel);
-  border-left: 1px solid var(--bdr);
-  box-shadow: -12px 0 40px rgba(0,0,0,.5);
-  z-index: 9500;
-  transform: translateX(100%);
-  transition: transform .32s cubic-bezier(.22,1,.36,1);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
+/* Drawer shell: defined once in the "Panel shell" section above. */
 .detail-panel--open { transform: translateX(0); }
 
 /* Accent stripe */
@@ -6432,8 +6423,9 @@ body::after {
   margin-top: 2px;
 }
 
-/* Custom toggle switch */
-input[type="checkbox"] {
+/* Custom toggle switch: Settings drawer only. Checkboxes elsewhere (fleet
+   row select, Email test mode, DBR filters, ...) stay native checkboxes. */
+#settings-drawer input[type="checkbox"] {
   -webkit-appearance: none;
   appearance: none;
   width: 36px; height: 20px;
@@ -6445,7 +6437,7 @@ input[type="checkbox"] {
   transition: all .25s var(--transition-smooth, cubic-bezier(.22,1,.36,1));
   flex-shrink: 0;
 }
-input[type="checkbox"]::after {
+#settings-drawer input[type="checkbox"]::after {
   content: '';
   position: absolute;
   top: 2px; left: 2px;
@@ -6454,11 +6446,11 @@ input[type="checkbox"]::after {
   background: #fff;
   transition: transform .25s var(--transition-smooth, cubic-bezier(.22,1,.36,1)), box-shadow .2s;
 }
-input[type="checkbox"]:checked {
+#settings-drawer input[type="checkbox"]:checked {
   background: linear-gradient(135deg, var(--acc, #58a6ff), var(--pur, #d2a8ff));
   border-color: rgba(88,166,255,.4);
 }
-input[type="checkbox"]:checked::after {
+#settings-drawer input[type="checkbox"]:checked::after {
   transform: translateX(16px);
   box-shadow: 0 0 6px rgba(88,166,255,.4);
 }
@@ -8029,10 +8021,6 @@ body {
    DRAWER LAYOUT IMPROVEMENTS
    ══════════════════════════════════════════════════════════════════════════════ */
 
-/* Wider drawer for more breathing room */
-.detail-panel {
-  width: 440px !important;
-}
 
 /* Tighter header */
 .dp-header {

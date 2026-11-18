@@ -710,6 +710,7 @@ export function init(container) {
   });
 
   bus.on('ui:view-change', ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     _el.style.display = to === 'daily-call' ? 'flex' : 'none';
     if (to === 'daily-call') _update(state.slice('fleet').rows || []);
   });

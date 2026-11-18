@@ -27,9 +27,18 @@ let   _search  = '';
 // S9: relay cache map { [equipmentId]: { vendor, woStatus, serviceUUID } }
 let _relayMap = {};
 
-// S9: sort state
-let _sortKey             = null;
-let _sortDir             = 'asc';
+// S9: sort state. Default = Duration descending (oldest-down first); the user's
+// last header-click choice is remembered in localStorage.
+const _SORT_STORE_KEY    = 'fleet_sort';
+let _sortKey             = 'duration';
+let _sortDir             = 'desc';
+try {
+  const _savedSort = JSON.parse(localStorage.getItem(_SORT_STORE_KEY) || 'null');
+  if (_savedSort && typeof _savedSort.key === 'string' && (_savedSort.dir === 'asc' || _savedSort.dir === 'desc')) {
+    _sortKey = _savedSort.key;
+    _sortDir = _savedSort.dir;
+  }
+} catch (_) { /* corrupt value: keep the default */ }
 let _quickFilterHighRisk = false;
 let _hasRiskScore        = false; // "Has Score" quick-filter: only units with a real Uptake risk score (>0)
 let _showFleetNet        = false; // FleetNet units hidden by default; shown via the FleetNet quick-filter pill
@@ -54,6 +63,30 @@ function _parseDurationDays(dur) {
     if (!isNaN(n)) days = n;
   }
   return days || null;
+}
+
+// Column sort comparator. Score sorts as a number and Duration as days (via
+// _parseDurationDays); rows with no value ("--", blank) sort last in both
+// directions. Every other column keeps the text compare.
+export function compareRows(a, b, sortKey, sortDir) {
+  const dirMul = sortDir === 'asc' ? 1 : -1;
+  if (sortKey === 'riskScore' || sortKey === 'duration') {
+    const num = (row) => {
+      if (sortKey === 'duration') return _parseDurationDays(row.duration);
+      const n = parseFloat(row.riskScore);
+      return isNaN(n) ? null : n;
+    };
+    const an = num(a), bn = num(b);
+    if (an === null && bn === null) return 0;
+    if (an === null) return 1;
+    if (bn === null) return -1;
+    return (an - bn) * dirMul;
+  }
+  // S28-Sprint1: health column sorts by numeric score
+  const resolvedKey = sortKey === '_health' ? '_healthScore' : sortKey;
+  const av = String(a[resolvedKey] || '');
+  const bv = String(b[resolvedKey] || '');
+  return av.localeCompare(bv, undefined, { numeric: true }) * dirMul;
 }
 
 // Manual pins: Set of equipmentId strings (user right-click pinned)
@@ -233,14 +266,7 @@ function _applyFiltersAndSort(rows) {
   });
 
   if (_sortKey) {
-    result = result.slice().sort((a, b) => {
-      // S28-Sprint1: health column sorts by numeric score
-      const resolvedKey = _sortKey === '_health' ? '_healthScore' : _sortKey;
-      const av = String(a[resolvedKey] || '');
-      const bv = String(b[resolvedKey] || '');
-      const cmp = av.localeCompare(bv, undefined, { numeric: true });
-      return _sortDir === 'asc' ? cmp : -cmp;
-    });
+    result = result.slice().sort((a, b) => compareRows(a, b, _sortKey, _sortDir));
   }
 
   _memoKey    = key;
@@ -698,6 +724,7 @@ export function init(container) {
         _sortKey = key;
         _sortDir = 'asc';
       }
+      try { localStorage.setItem(_SORT_STORE_KEY, JSON.stringify({ key: _sortKey, dir: _sortDir })); } catch (_) {}
       _renderRows(_allRows);
     });
   });

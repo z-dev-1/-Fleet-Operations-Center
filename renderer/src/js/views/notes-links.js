@@ -418,6 +418,7 @@ export function init(container) {
 
   // Show / hide on view-change
   bus.on('ui:view-change', ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     _el.style.display = to === 'notes-links' ? 'flex' : 'none';
     if (to === 'notes-links') {
       _search = '';

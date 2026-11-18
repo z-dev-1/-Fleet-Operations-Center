@@ -428,6 +428,7 @@ export function init(container) {
 
   // Show/hide
   bus.on('ui:view-change', ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     _el.style.display = to === 'rca-queue' ? 'flex' : 'none';
     if (to === 'rca-queue') _render();
   });

@@ -186,6 +186,7 @@ export function init(container){
   _wireToggle('dn-runlog-head','dn-runlog-body','dn-runlog-chev');
   _wireToggle('dn-declog-head','dn-declog-body','dn-declog-chev');
   bus.on('ui:view-change',({to})=>{
+    if (to === 'settings') return; // Settings is an overlay, not a view
     const vis=to==='daily-notes';
     _el.style.display=vis?'flex':'none';
     if(vis)_activate();

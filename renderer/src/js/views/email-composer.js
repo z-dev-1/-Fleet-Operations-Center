@@ -881,6 +881,7 @@ export async function init(container) {
   // this view becomes visible closes that gap without needing a
   // cross-view event bus wire-up.
   bus.on('ui:view-change', async ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     _el.style.display = to === 'email-composer' ? 'flex' : 'none';
     if (to === 'email-composer') {
       await _loadSpEmails();

@@ -1653,6 +1653,7 @@ export function init(container) {
   // _activeTab back to 'overview' -- if the user was on Long Dwell Units
   // when they left this view, it stays open when they come back.
   bus.on('ui:view-change', async ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     _el.style.display = to === 'analytics' ? 'flex' : 'none';
     if (to === 'analytics') {
       _update(state.slice('fleet').rows || []);

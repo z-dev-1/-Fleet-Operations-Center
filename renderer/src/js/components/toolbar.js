@@ -14,6 +14,7 @@ import bus                        from '../bus.js';
 import { fleet as fleetBridge, settings as settingsBridge } from '../bridge.js';
 
 let _suppressFilterEvents = false;
+const QUICK_PILL_STORE_KEY = 'fleet_quick_pill'; // last-chosen Fleet quick-filter pill
 
 // ── Nav tab → bus view map ──────────────────────────────────────────────────
 const TAB_VIEW = {
@@ -615,6 +616,7 @@ export function init(container) {
       el.querySelectorAll('.tb-pill').forEach(p => p.classList.remove('active'));
       pill.classList.add('active');
       const f = pill.dataset.filter;
+      try { localStorage.setItem(QUICK_PILL_STORE_KEY, f); } catch (_) {}
       const lc  = document.getElementById('tb-lifecycle');
       const dom = document.getElementById('tb-domicile');
       const op  = document.getElementById('tb-operator');
@@ -653,6 +655,18 @@ export function init(container) {
       }
     });
   });
+
+  // Default pill on load = "Unavailable" (the daily triage list), or the
+  // user's last choice. Marked active now; applied on the next tick so the
+  // fleet view (initialised after the toolbar) receives the filter events.
+  let _savedPill = null;
+  try { _savedPill = localStorage.getItem(QUICK_PILL_STORE_KEY); } catch (_) {}
+  const _initialPill = (_savedPill && el.querySelector('#tb-pills .tb-pill[data-filter="' + _savedPill.replace(/[^a-z-]/g, '') + '"]'))
+    || el.querySelector('#tb-pills .tb-pill[data-filter="unavailable"]');
+  if (_initialPill) {
+    el.querySelectorAll('#tb-pills .tb-pill').forEach(p => p.classList.toggle('active', p === _initialPill));
+    setTimeout(() => _initialPill.click(), 0);
+  }
 
 
   // ── Avatar / User Profile ─────────────────────────────────────────────

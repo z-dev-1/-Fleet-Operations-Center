@@ -1096,6 +1096,7 @@ export function init(container) {
   if (window.fleetScheduler && window.fleetScheduler.onJobUpdate) window.fleetScheduler.onJobUpdate(() => { if (_el && _el.style.display !== 'none') _refresh(); });
 
   bus.on('ui:view-change', ({ to }) => {
+    if (to === 'settings') return; // Settings is an overlay, not a view
     const vis = to === 'schedulers';
     _el.style.display = vis ? 'flex' : 'none';
     if (vis) { _refresh().then(() => _populateTimeInputs()); _startTick(); }
