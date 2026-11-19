@@ -26,6 +26,8 @@ let _pendingRca = null;
 import toast         from '../components/toast.js';
 import { redactForSharing } from '../util/redact.js';
 import { pmOverdueDays } from '../util/pm-overdue.js';
+import modal         from '../components/modal.js';
+import { wrCardActionRowHtml, headerLifecycleButtonHtml, wireRelayActions } from './relay-actions.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -1627,6 +1629,7 @@ function renderHeader(unit){
         'data-aap-url="'+esc(_garageUrlForUnit(unit))+'">'+esc(unit.equipmentId)+'</span>'+
       (unit.vin?'<span class="dp-header__vin">'+esc(unit.vin)+'</span>':'')+
       '<span class="dp-header__state-badge dp-header__state-badge--'+(isUnavail?'unavailable':'active')+'">'+esc(unit.lifecycleState||'Active')+'</span>'+
+      headerLifecycleButtonHtml(unit)+
       '<div class="dp-header__launchers">'+launchers+'</div>'+
       '<button id="dp-close" class="dp-header__close">\u00d7</button>'+
     '</div>'+
@@ -2430,6 +2433,7 @@ export function plannedWrCardHtml(unit){
               '🔍 Open in Relay (Split View)</button>' +
           '</div>';
         })()+
+        wrCardActionRowHtml(Object.assign({}, p, { workRequestId: p.workRequestId || p._serviceUUID }))+
       '</div>';
   }
   return plannedWRCard;
@@ -2494,6 +2498,7 @@ export function secondaryWrCardsHtml(unit){
               (_pOffsite ? ' <a class="dp-wo-card__relay-link" href="#" data-ext-url="' + esc(_pOffsite) + '">' + esc(_pLabel) + ' ↗</a>' : '') +
             '</div>';
           })() +
+          wrCardActionRowHtml(p) +
         '</div>';
     });
   }
@@ -2549,6 +2554,7 @@ export function renderRepairPane(unit){
         (unit.created?'<span>Opened '+fmtDate(unit.created)+'</span>':'')+
         (unit.completed?'<span>Closed '+fmtDate(unit.completed)+'</span>':'')+
       '</div>':'')+
+      wrCardActionRowHtml(unit)+
     '</div>';
   } else {
     woCard='<div class="dp-empty-state"><span class="dp-empty-state__icon">\ud83d\udcc2</span>No Relay WR data</div>';
@@ -3298,6 +3304,12 @@ function _renderUnit(unit) {
   // ── repair tab: WR escalation card ─────────────────────────────────────────
   _wireEscalation(unit);
   _wireRelayComment(unit);
+  // WR-card Escalate / Add Relay Comment and header Change Lifecycle modals (gated writes only).
+  try {
+    wireRelayActions(document, unit, { modal, bridge: window.relayWrites, aapApi: window.aapApi,
+      confirm: (msg) => window.confirm(msg), toast,
+      verifyLifecycle: async (u, st, rs) => lifecycleMatches(await _refreshLiveLC(u), st, rs) });
+  } catch (e) { console.warn('[relay-actions] wiring failed:', e && e.message); }
 
   // ── history tab: 12-month repair intelligence report + controls ───────────
   _wireRepairIntel(unit);

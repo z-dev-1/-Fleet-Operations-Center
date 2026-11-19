@@ -4915,6 +4915,12 @@ td:has(.pm-pills-row) {
 .dp-escalate__count--over { color: var(--red); }
 .dp-escalate__btn { font-size: 11px; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--acc2); background: var(--acc2); color: #fff; cursor: pointer; }
 .dp-escalate__btn:disabled { opacity: .5; cursor: default; }
+/* Relay actions: WR-card action row + header Change Lifecycle (relay-actions.js) */
+.dp-ra-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.dp-ra-btn { font-size: 10px; padding: 3px 10px; }
+.dp-launcher--lc { width: auto; padding: 0 9px; font-size: 11px; margin-left: 6px; border-color: var(--warn, var(--ylw)); color: var(--warn, var(--ylw)); }
+.ra-stale { color: var(--warn, var(--ylw)); font-size: 11px; }
+.ra-hint, .ra-fill-note { color: var(--txt2); font-size: 11px; }
 .dp-offsite-card__ts    { font-size: 9px; color: var(--mut); margin-top: 2px; }
 .dp-offsite-card__src-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--acc2); }
 
