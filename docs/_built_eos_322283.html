@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]-->
+</head>
+<body style="margin:0;padding:0;background-color:#e9edf3;font-family:Arial,sans-serif;">
+<!-- REDESIGN (2026-11, v3): OWA-safe light shell. No style element, no div
+     wrappers, no gradient or image fills, no alpha colors. Layout = nested presentation tables;
+     every fill is bgcolor + inline background-color; text via <font>. Light
+     backgrounds + dark text + a few strong solid accent tiles so the report
+     reads in both light and dark mode. Section placeholders are complete
+     <tr> rows (or empty) built by emailBuilder.js. -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#e9edf3" style="background-color:#e9edf3;">
+<tr><td align="center" bgcolor="#e9edf3" style="background-color:#e9edf3;padding:24px 12px;">
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="940" bgcolor="#ffffff" style="max-width:940px;background-color:#ffffff;border:1px solid #d3dae5;border-radius:14px;overflow:hidden;">
+
+  <!-- Permanent accent bar. Inner text blank by default, "TEST" only during testMode sends. -->
+  <tr><td bgcolor="#b84500" style="background-color:#b84500;padding:5px 16px;text-align:center;">
+    <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.25em;">&nbsp;</font>
+  </td></tr>
+
+  <!-- HERO (light, dark-mode safe) -->
+  <tr><td bgcolor="#f5f8fc" style="background-color:#f5f8fc;padding:0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+      <td valign="top" width="42%" style="padding:22px 20px 16px 28px;">
+        <font color="#1565c0" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.20em;">FLEET OPERATIONS &#183; TUZR &#183; PNK1</font><br>
+        <font color="#0f1b2d" face="Arial,sans-serif" style="font-size:24px;font-weight:bold;"><b>End of Shift Report</b></font><br>
+        <font color="#64748a" face="Arial,sans-serif" style="font-size:11px;">Thursday, November 19, 2026 — 5:43 PM EDT</font>
+      </td>
+      <td valign="middle" align="right" width="58%" style="padding:16px 28px 12px 8px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr>
+<td bgcolor="#dc2626" valign="top" style="background-color:#dc2626;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#ffe0e0" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">UNITS DOWN</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>1</b></font><font color="#ffe0e0" face="Arial,sans-serif" style="font-size:12px">&nbsp;/ 3</font><br>
+<font color="#ffe0e0" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">Day Cab 1</font>
+</td>
+<td width="8" style="width:8px;">&nbsp;</td>
+<td bgcolor="#16a34a" valign="top" style="background-color:#16a34a;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#dcfce7" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">IN SERVICE</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>67</b></font><font color="#dcfce7" face="Arial,sans-serif" style="font-size:12px">%</font><br>
+<font color="#dcfce7" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">2 of 3</font>
+</td>
+<td width="8" style="width:8px;">&nbsp;</td>
+<td bgcolor="#1565c0" valign="top" style="background-color:#1565c0;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#d6e7fb" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">FLEET</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>3</b></font><br>
+<font color="#d6e7fb" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">Day Cab 3</font>
+</td>
+</tr></table>
+      </td>
+    </tr></table>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td bgcolor="#dc2626" width="33%" style="background-color:#dc2626;height:5px;line-height:5px;font-size:1px;">&nbsp;</td><td bgcolor="#16a34a" width="67%" style="background-color:#16a34a;height:5px;line-height:5px;font-size:1px;">&nbsp;</td></tr></table>
+  </td></tr>
+
+  <!-- Slot badge + quick line (light) -->
+  <tr><td bgcolor="#f4f6f9" style="background-color:#f4f6f9;padding:9px 28px;border-bottom:1px solid #e2e8f0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #e6b84d;border-radius:12px;padding:3px 12px;"><font color="#b87a00" face="Arial,sans-serif" style="font-size:10px;"><b>🌆 EOS REPORT</b></font></td></tr></table>
+    <font color="#475569" face="Arial,sans-serif" style="font-size:10px;">&nbsp;&nbsp;1 down &#183; 0 PM/DOT overdue &#183; 0 new deliveries &#183; 0 very-high risk</font>
+  </td></tr>
+
+  <!-- Note bar (optional, injected when emailNote present) -->
+  <tr><td bgcolor="#fdf3f3" style="background-color:#fdf3f3;padding:10px 28px;border-bottom:1px solid #f3dede;"><font color="#dc2626" face="Arial,sans-serif" style="font-size:12px;font-weight:bold;">NOTE: Yard closes early Friday</font></td></tr>
+
+  <!-- Change since last report (optional, only with a baseline) -->
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 28px 2px 28px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">SINCE LAST REPORT (PM / EOS &#183; Nov 19, 9:43 AM)&nbsp;&nbsp;</font><font color="#475569" face="Arial,sans-serif" style="font-size:10px">&#10003; No significant changes since last report. Fleet status stable.</font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">Unavailable 1 &#183; Avg days down 64.1 &#183; High risk (70+) 0</font></td></tr>
+
+  <!-- Greeting -->
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:14px 28px 4px 28px;">
+    <font color="#0f1b2d" face="Arial,sans-serif" style="font-size:13px;"><b>Good evening,</b></font><br>
+    <font color="#3a4657" face="Arial,sans-serif" style="font-size:11px;line-height:1.6;">Below is the <b>EOS fleet maintenance update</b> for <b>TUZR</b>. This report covers unavailable units, PM-B / PM-X / DOT due dates, relay garage events.</font>
+  </td></tr>
+
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:16px 24px 14px 24px;"><font color="#334155" face="Arial,sans-serif" style="font-size:11px;font-weight:bold;letter-spacing:0.06em"><b>&#128202; FLEET BY BODY TYPE</b></font><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr><td width="100%" valign="top" style=""><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#1565c0" width="6" style="background-color:#1565c0;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:9px 12px;"><font color="#0f1b2d" face="Arial,sans-serif" style="font-size:12px"><b>DAY CAB &#183; TUZR</b></font><br><font color="#dc2626" face="Arial,sans-serif" style="font-size:11px"><b>1</b> down</font> <font color="#94a3b8" face="Arial,sans-serif" style="font-size:11px">&#183;</font> <font color="#16a34a" face="Arial,sans-serif" style="font-size:11px"><b>2</b> in svc</font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">3 total &#183; </font><font color="#1565c0" face="Arial,sans-serif" style="font-size:10px"><b>67%</b></font></td>
+</tr></table></td></tr></table></td></tr>
+
+  <tr><td bgcolor="#fdf3f3" style="background-color:#fdf3f3;padding:14px 24px 12px 24px;border-top:1px solid #f3dede;border-bottom:1px solid #f3dede;"><font color="#7f1d1d" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#128683; UNAVAILABLE UNITS</b></font><font color="#a06464" face="Arial,sans-serif" style="font-size:11px">&nbsp;&#8212; 1 down</font></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.05em">ACTIVE VENDORS:&nbsp;</font><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#eef2f7" style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;"><font color="#334155" face="Arial,sans-serif" style="font-size:9px"><b>VOLVO: 1</b></font></td></tr></table>&nbsp;</td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#dc2626" width="6" style="background-color:#dc2626;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 14px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+<td valign="top" width="62%">
+<font color="#1a56db" face="Arial,sans-serif" style="font-size:15px;font-weight:bold"><b>322283</b></font>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#dbeafe" style="background-color:#dbeafe;padding:2px 6px;border-radius:3px;"><font color="#1e3a5f" face="Arial,sans-serif" style="font-size:9px"><b>VOLVO</b></font></td></tr></table>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#e0f2fe" style="background-color:#e0f2fe;padding:2px 6px;border-radius:3px;"><font color="#075985" face="Arial,sans-serif" style="font-size:9px"><b>DAY CAB</b></font></td></tr></table>
+&nbsp;<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">Offsite Shop Repair</font>
+<br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">PNK1 &#183; TUZR &#183; Unavailable</font>
+</td>
+<td valign="top" align="right" width="38%">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr><td bgcolor="#fde8e8" style="background-color:#fde8e8;border-radius:10px;padding:4px 10px;text-align:right;"><font color="#dc2626" face="Arial,sans-serif" style="font-size:11px"><b>&#9660; DOWN 64d 3h 0m</b></font></td></tr></table>
+</td>
+</tr>
+<tr><td colspan="2" valign="top" width="100%" class="eos-meta" style="width:100%;padding-top:3px;line-height:1.5;word-wrap:break-word;word-break:break-word;overflow-wrap:anywhere;">
+<font color="#555555" face="Arial,sans-serif" style="font-size:11px"><b>Offsite Shop Repair</b></font><font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px"> &#183;&nbsp;Alt ID </font><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>amz-kzcqubb6kx3dcf</b></font><font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px"> &#183;&nbsp;Case </font><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>00034097</b></font>
+</td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr>
+<td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">RELAY GARAGE</font><br>
+<font color="#1e2d3d" face="Arial,sans-serif" style="font-size:11px"><b>Volvo</b></font> <font color="#7c3aed" face="Arial,sans-serif" style="font-size:10px">&#183; Bergey's Truck Centers - Pennsauken</font><br><font color="#dc2626" face="Arial,sans-serif" style="font-size:10px"><b>Down: 64d 3h 0m</b></font><br><font color="#555555" face="Arial,sans-serif" style="font-size:10px"><i>CEL with exhaust catalyst efficiency faults</i></font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px"><b>Last update:</b> </font><font color="#374151" face="Arial,sans-serif" style="font-size:10px">11/18 - Road test failed for new CEL fault. Dealer confirmed diagnosis of new fault underway. Body repairs and final QC not yet completed. No ETR provided. 64 days down.</font>
+</td>
+<td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">TIMELINE</font><br>
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:3px 0 5px 0;"><tr><td class="eos-tl-latest" bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #eccd86;border-radius:4px;padding:5px 7px;"><font color="#92500a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.06em"><b>LATEST 11/18</b></font><br><font color="#1f2937" face="Arial,sans-serif" style="font-size:11px;line-height:1.45"><b>Road test failed for new CEL fault. Dealer confirmed diagnosis of new fault underway. Body repairs and final QC not yet completed. No ETR provided. 64 days down.</b></font></td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>09/16</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Work order created with Volvo (ASIST) for Uptake-flagged exhaust catalyst efficiency concern and elevated fault code activity.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>09/18</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Tow arranged. Unit transported to initial dealer location; initial dealer confirmed not certified for CNG work. Unit subsequently rerouted.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>09/22</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Unit relocated to alternate shop. Work order not yet created at new vendor location; diagnostic start blocked.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>09/30</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Confirmed unit on-site at new location; however, work order had not been created, blocking diagnostic start. Internal escalation submitted to open ASIST case.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/06</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Internal escalation submitted requesting work order be opened and diagnostics scheduled. 20 days down with no diagnostic start at that point.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/12</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">ASIST case created. B service added to repair order. Pending shop acceptance.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/14</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Unit at CNG-capable shop (new location). Two ASIST cases opened. B added to repair order. Pending shop acceptance of new cases and diagnostic start.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/15</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Diagnostics initiated. Unit is at a CNG-capable Bergey's Truck Centers - Pennsauken location with two new ASIST cases open and PM-B added to the repair order.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/17</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Per update 10/16, unit confirmed in shop undergoing diagnostics. Case in Triage status. No findings, estimate, or ETR provided yet.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/20</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Dealer submitted Est V1 for internal review. Pending approval. Est V1 rejected.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/21</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Est V2 approved: four batteries replaced, B service and spark plugs, accelerator pedal replacement, hood replacement and paint. ARC confirmed.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/26</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Follow-up submitted to dealer for repair status update. No new findings provided.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>10/28</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Est V3 approved; added: transmission diagnostics and R/I/R authorization (non-final, teardown pending). B, catalyst/O2, and hood scope carried from V2.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/03</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Dealer confirmed unit dispatched to transmission specialist for further diagnostics.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/04</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Est V4 approved; added: MTM and air dryer parts authorized (labor V5 pending). MTM water contamination via air dryer failure confirmed as root cause pattern.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/07–11/09</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Internal follow-ups submitted requesting update on water intrusion findings and transmission repair status. Pending dealer response.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/10</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Bergey's Truck Centers - Pennsauken confirmed transmission repairs and other approved mechanical repairs still in progress; follow-up scheduled.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/11</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Dealer reiterated transmission repairs in progress; committed to providing update as soon as available. No ETR provided.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/13</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">ETR requested from dealer; no response received.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/16</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">Dealer confirmed transmission repairs complete. B service and new driver alert speaker fault being finalized. Body repairs and final QC inspection to follow.</font></td></tr><tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;"><font color="#1a56db" face="Arial,sans-serif" style="font-size:10px"><b>11/18</b></font></td><td valign="top" style="padding:1px 0;"><font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.4">ETR request submitted via ASIST; no ETR provided by dealer.</font></td></tr></table>
+</td>
+</tr></table></td>
+</tr></table></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:0;height:14px;line-height:14px;font-size:1px;">&nbsp;</td></tr>
+
+  <tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:14px 24px 2px 24px;border-top:1px solid #d8eede;"><font color="#14532d" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#128197; PM &amp; DOT COMPLIANCE</b></font><font color="#5a8468" face="Arial,sans-serif" style="font-size:11px">&nbsp;&#8212; 0 overdue, 0 due soon</font></td></tr><tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:8px 24px 2px 24px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">OVERDUE</font>&nbsp;&nbsp;
+<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">None overdue &#10003;</font></td></tr><tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:6px 24px 12px 24px;border-bottom:1px solid #d8eede;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">DUE &#8804; 60d</font>&nbsp;&nbsp;
+<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">None due within 60 days</font></td></tr>
+
+  <tr><td bgcolor="#f6f4fc" style="background-color:#f6f4fc;padding:14px 24px 14px 24px;border-top:1px solid #e5e0f2;"><font color="#4c1d95" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#9889; UPTAKE INSIGHTS</b></font><br><font color="#94a3b8" face="Arial,sans-serif" style="font-size:11px">No active predictive insights (score &lt; 60)</font></td></tr>
+
+  <!-- FOOTER (light) -->
+  <tr><td bgcolor="#f4f6f9" style="background-color:#f4f6f9;padding:14px 28px;border-top:1px solid #e2e8f0;">
+    <font color="#64748a" face="Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
+  </td></tr>
+
+</table>
+
+</td></tr>
+</table>
+
+</body>
+</html>

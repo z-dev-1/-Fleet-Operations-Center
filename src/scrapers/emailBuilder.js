@@ -11,6 +11,10 @@ const TEMPLATE_PATH = path.join(__dirname, 'email_template.html');
 // Render-time redaction (personal names + dollar amounts) for free text that
 // goes into the email. Stored timeline / notes are never modified.
 const { redactForEmail } = require('../orcha/redact_sharing');
+// Timeline-digest engine (pure sync helpers + cached grounded digest lines).
+// The email never calls the async AI/store paths (buildDigest / refresh).
+const TD = require('../orcha/timeline-digest');
+const TT = require('../orcha/timeline-text');
 
 function ft(color, text, extra) {
   return `<font color="${color}" face="Arial,sans-serif"${extra ? ' style="'+extra+'"' : ''}>${text}</font>`;
@@ -130,6 +134,232 @@ const PM_RAW_KEY = { pmB: 'pmBDue', pmX: 'pmXDue', dot: 'dotDue', quarterlyLift:
 // Free text -> redacted (names, $ amounts) -> HTML-escaped. Redaction runs
 // on plain text before escaping/link-building; the source string is untouched.
 function _safeText(s) { return _esc(redactForEmail(s)); }
+
+// ── Condensed TIMELINE digest (email only, render time) ──────────────────────
+// Dated trail (oldest first, one short line per date, same-day entries merged)
+// plus the newest entry in full in a LATEST block. Ids, $ amounts, names and
+// dealer-name hedges are stripped from a local copy; stored data is untouched.
+const TRAIL_LINE_MAX = 160;
+const _p2md = (md) => String(md || '').split('/').map(x => String(x).padStart(2, '0')).join('/');
+const ID_FILLER = new Set(['additional', 'created', 'opened', 'open', 'new', 'case', 'cases', 'service', 'request',
+  'requests', 'ticket', 'ref', 'also', 'another', 'and', 'the', 'was', 'were', 'has', 'been']);
+const TOKEN_STOP = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'was', 'were', 'are', 'has', 'have',
+  'been', 'being', 'not', 'but', 'per', 'via', 'unit', 'into', 'its', 'all', 'any']);
+const OEM_LEADS = /^(volvo|freightliner|kenworth|peterbilt|mack|international|cummins|navistar|paccar|daimler|amerit|penske|ryder|rush)$/i;
+
+// '11/07 — x' / '11/07: x' / '11/16 Vendor: x' -> '11/07 - x' (the engine's LINE_RE form).
+function _normTimeline(text) {
+  return String(text || '').replace(/\r/g, '').split('\n').map(l => l.trim()
+    .replace(/^(\d{1,2}\/\d{1,2}(?:\s*[-\u2013]\s*\d{1,2}\/\d{1,2})?)\s*[\u2014:]\s*/, '$1 - ')
+    .replace(/^(\d{1,2}\/\d{1,2})\s+(?=[A-Za-z])/, '$1 - ')).join('\n');
+}
+function _parseTl(line) {
+  const m = TT.LINE_RE.exec(String(line || '').trim());
+  if (!m) return null;
+  return { key: m[2] ? m[1] + '\u2013' + m[2] : m[1], pad: m[2] ? '' : _p2md(m[1]), body: m[4] };
+}
+// Dealer-name hedges, citation tags, email attributions, leading source labels.
+function _stripHedges(s) {
+  return String(s || '')
+    .replace(/\s*\([^()]*\b(?:sources?\s+(?:disagree|differ|conflict)\w*|disputed?|dealer name|unclear)\b[^()]*\)/gi, '')
+    .replace(/\s*\[F\d+\]/g, '')
+    .replace(/\s*\(\s*per\b[^()]*\b(?:e-?mail|call|text|message|msg|voicemail)\b[^()]*\)/gi, '')
+    .replace(/[,;]?\s*\(?\b(?:dealer|vendor|shop)\s+name\s+(?:disputed|unclear|unconfirmed)\b\)?/gi, '')
+    .replace(/^\s*(?:Vendor|Dealer|Internal|Note)\s*:\s*/i, '');
+}
+const ID_LABELLED_RE = /(?:\b(?:ASIST|SF|Salesforce|DTNA|Decisiv|RO|WO|WR|SR)\s+)?(?:\b(?:cases?|service requests?|SR|tickets?|ref|work orders?|work requests?|orders?|requests?)\s*)?#?\s*\b\d{5,}\b(?:\s*\((?:created\s+)?\d{1,2}\/\d{1,2}\))?/gi;
+function _stripIdsRaw(s) {
+  return String(s || '')
+    .replace(/\b(?:tow\s+)?ref\.?\s*#?\s*[A-Za-z0-9-]*\d[A-Za-z0-9-]{5,}/gi, '')
+    .replace(/\bamz-[a-z0-9]{6,}\b/gi, '')
+    .replace(ID_LABELLED_RE, '')
+    .replace(/(?<![/\d.])\b\d{5,}\b(?![/\d])/g, '');
+}
+// Nothing left but dates, filler words and punctuation.
+function _isResidue(t) {
+  const words = String(t || '').replace(/\d{1,2}\/\d{1,2}/g, ' ').toLowerCase().match(/[a-z]+/g) || [];
+  return words.every(w => ID_FILLER.has(w));
+}
+// Case / ASIST / SF / WR / SR ids, tow refs, amz- refs, bare 5+ digit runs.
+function _stripEmailIds(s) {
+  const t = String(s || '').replace(/\(([^()]*)\)/g, (m, inner) => {
+    const x = _stripIdsRaw(inner);
+    if (x === inner) return m;
+    return _isResidue(x) ? '' : '(' + x + ')';
+  });
+  return _stripIdsRaw(t);
+}
+function _tidy(s) {
+  return String(s || '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\(\s*(?:tow\s+)?(?:ref\.?)?[\s,;:]*\)/gi, '')
+    .replace(/\b(?:against|for|via|under|on|to|per|with|from|of)\s+(?=(?:and|or)\b|[.,;:)]|$)/gi, '')
+    .replace(/[:,;]\s*(?:(?:and|or)\s*)?(?=[.;]|$)/gi, '')
+    .replace(/\s+(?:and|or)\s*(?=[.,;:])/gi, '')
+    .replace(/\s+([.,;:])/g, '$1')
+    .replace(/([.,;:])\1+/g, '$1')
+    .replace(/^[\s.,;:]+/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+function _splitSentences(s) {
+  return String(s || '').split(/(?<=[.!?])\s+/).map(x => x.trim()).filter(Boolean);
+}
+// Canonical dealer from the record: dealerName, then subVendor (not the geofence), then vendor.
+function _canonicalDealer(u) {
+  const sub = u.subVendor && u.subVendor !== u.geofence ? u.subVendor : '';
+  return String(u.dealerName || sub || u.vendor || '').trim();
+}
+// Label variants of the canonical shop ("Bergeys Truck Centers Pennsauk", "Bergey's")
+// -> the canonical name. Generic OEM/vendor leads are left alone (could be another shop).
+function _resolveDealer(s, u) {
+  const canon = _canonicalDealer(u);
+  const lead = (canon.match(/[A-Za-z'\u2019]{4,}/) || [''])[0];
+  const stem = lead.replace(/['\u2019]s$/, '').replace(/['\u2019]/g, '');
+  if (stem.length < 4 || OEM_LEADS.test(stem)) return s;
+  const ci = stem.split('').map(c => (/[a-z]/i.test(c) ? '[' + c.toUpperCase() + c.toLowerCase() + ']' : c)).join('');
+  const re = new RegExp('\\b' + ci + "(?:['\u2019]?s)?\\b(?:\\s+(?:-|[A-Z][A-Za-z]*)){0,4}", 'g');
+  return String(s).replace(re, (m) => {
+    const tail = /\s+-$/.exec(m);
+    return canon + (tail ? tail[0] : '');
+  });
+}
+// Body -> cleaned plain text (no condensing). Used for LATEST (in full) and trail rows.
+function _cleanBody(body, u) {
+  let s = _stripHedges(redactForEmail(String(body || '')));
+  const out = [];
+  for (const sen of _splitSentences(s)) {
+    if (/\breturn tow\b[^.]*\brestrict|\bDO NOT set up FLEETNET/i.test(sen)) continue;
+    if (/^[a-z]/.test(sen) && sen.split(/\s+/).length < 4) continue;
+    let t = _tidy(_resolveDealer(_stripEmailIds(sen), u));
+    if (!t || !/[A-Za-z]/.test(t) || (t !== sen && _isResidue(t))) continue;
+    if (/^[\s.,;:]*$/.test(t)) continue;
+    out.push(t.charAt(0).toUpperCase() + t.slice(1));
+  }
+  return out.join(' ');
+}
+function _abbrev(s) {
+  return String(s || '')
+    .replace(/\bEstimate\s+V(\d+)\b/gi, 'Est V$1')
+    .replace(/\b(Est V\d+ approved)\.\s+Added scope:\s*/gi, '$1; added: ')
+    .replace(/\b(Est V\d+ approved)\.\s+Scope:\s*/gi, '$1: ')
+    .replace(/\bquality control\b/gi, 'QC');
+}
+function _clipLine(s, max) {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max - 1);
+  const sp = cut.lastIndexOf(' ');
+  if (sp > max / 2) cut = cut.slice(0, sp);
+  return cut.replace(/[\s,;:-]+$/, '') + '\u2026';
+}
+// Sentences -> one line <= TRAIL_LINE_MAX: highest-signal sentence first (engine
+// IMPORTANT_CLASSES + vendor + estimate/root cause), more while they fit, source order.
+function _oneLine(sentences, u) {
+  const sens = (sentences || []).filter(Boolean);
+  if (!sens.length) return '';
+  const vre = TD.vendorClassRe(u);
+  const classes = TD.IMPORTANT_CLASSES.filter(c => c.key !== 'caseRef');
+  const protect = (x) => (vre && vre.test(x)) || /root cause|\bV\d/i.test(x);
+  const score = (x) => classes.filter(c => c.re.test(x)).length + (vre && vre.test(x) ? 1 : 0) + (/root cause|\bEst V\d/i.test(x) ? 2 : 0);
+  const order = sens.map((x, i) => ({ i, sc: score(x) })).sort((a, b) => b.sc - a.sc || a.i - b.i);
+  let top = sens[order[0].i];
+  if (top.length > TRAIL_LINE_MAX) {
+    top = _tidy(top.replace(/\s*\(([^()]*)\)/g, (m, inner) => (protect(inner) ? m : '')));
+    top = _clipLine(top, TRAIL_LINE_MAX);
+  }
+  const kept = { [order[0].i]: top };
+  let len = top.length;
+  for (const o of order.slice(1)) {
+    const x = sens[o.i];
+    if (len + 1 + x.length > TRAIL_LINE_MAX) continue;
+    kept[o.i] = x;
+    len += 1 + x.length;
+  }
+  return Object.keys(kept).map(Number).sort((a, b) => a - b).map(k => kept[k]).join(' ');
+}
+function _tokens(s) {
+  return [...new Set(String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !TOKEN_STOP.has(w)))];
+}
+// Group history entries by date (first-seen order); drop sentences whose content
+// tokens are >= 60% contained in an already-kept sentence of that date.
+function _mergeSameDay(entries, u) {
+  const groups = [];
+  const byKey = {};
+  for (const e of entries) {
+    if (!byKey[e.key]) { byKey[e.key] = { key: e.key, pad: e.pad, sens: [] }; groups.push(byKey[e.key]); }
+    const g = byKey[e.key];
+    for (const sen of _splitSentences(_abbrev(_cleanBody(e.body, u)))) {
+      const tk = _tokens(sen);
+      if (!tk.length) continue;
+      const dup = g.sens.some(k => tk.filter(w => k.tk.includes(w)).length / tk.length >= 0.6);
+      if (!dup) g.sens.push({ text: sen, tk });
+    }
+  }
+  return groups.map(g => ({ date: g.key, pad: g.pad, text: _oneLine(g.sens.map(x => x.text), u) })).filter(r => r.text);
+}
+// Cached grounded AI lines of unit.timelineDigest, by zero-padded single date,
+// only when the digest matches the timeline being rendered (read only).
+function _freshDigestLines(rawTimeline, digest, now) {
+  const out = {};
+  const d = digest;
+  if (!d || d.v !== TD.DIGEST_VERSION || !/^ai(\+backfill)?$/.test(String(d.method || '')) || !Array.isArray(d.lines)) return out;
+  const sp = TD.splitLatest(rawTimeline, now);
+  if (sp.latest !== d.latestEntry || sp.history.length !== d.historyCount) return out;
+  for (const line of d.lines) {
+    const p = _parseTl(line);
+    if (p && p.pad && !out[p.pad]) out[p.pad] = p.body;
+  }
+  return out;
+}
+function _fallbackLines(raw) {
+  return String(raw || '').split('\n').filter(l => l.trim().length > 5)
+    .map(l => _tidy(_stripEmailIds(redactForEmail(l.trim())))).filter(Boolean);
+}
+/**
+ * _timelineDigestModel(u, rawTimeline, digest, now) ->
+ *   { latest: {date, text} | null, trail: [{date, text}], fallback: string[] } (plain text).
+ * Never throws; never mutates its inputs.
+ */
+function _timelineDigestModel(u, rawTimeline, digest, now) {
+  const raw = String(rawTimeline || '');
+  try {
+    const unit = u || {};
+    const sp = TD.splitLatest(TT.cleanTimelineMeta(_normTimeline(raw)), now);
+    const lp = sp.latest ? _parseTl(sp.latest) : null;
+    if (!lp) return { latest: null, trail: [], fallback: _fallbackLines(raw) };
+    const latestText = _cleanBody(lp.body, unit);
+    const ai = _freshDigestLines(raw, digest, now);
+    const trail = _mergeSameDay(sp.history.map(_parseTl).filter(Boolean), unit).map(r => {
+      const aiBody = r.pad ? ai[r.pad] : '';
+      const aiText = aiBody ? _oneLine(_splitSentences(_abbrev(_cleanBody(aiBody, unit))), unit) : '';
+      return { date: r.date, text: aiText || r.text };
+    });
+    return { latest: latestText ? { date: lp.key, text: latestText } : null, trail, fallback: latestText || trail.length ? [] : _fallbackLines(raw) };
+  } catch (e) {
+    try { return { latest: null, trail: [], fallback: _fallbackLines(raw) }; } catch (_) { return { latest: null, trail: [], fallback: [] }; }
+  }
+}
+function _timelineDigestHtml(model) {
+  const m = model || {};
+  const trail = Array.isArray(m.trail) ? m.trail : [];
+  if (!m.latest && !trail.length) {
+    const fb = (m.fallback || []).map(_esc).filter(Boolean);
+    return ft('#374151', fb.length ? fb.join('<br>') : '\u2014', 'font-size:10px;line-height:1.5');
+  }
+  let h = '';
+  if (m.latest) {
+    h += `<table ${TBL} width="100%" style="margin:3px 0 5px 0;"><tr><td class="eos-tl-latest" bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #eccd86;border-radius:4px;padding:5px 7px;">` +
+      ft('#92500a', '<b>LATEST ' + _esc(m.latest.date) + '</b>', 'font-size:9px;letter-spacing:0.06em') + '<br>' +
+      ft('#1f2937', '<b>' + _esc(m.latest.text) + '</b>', 'font-size:11px;line-height:1.45') + '</td></tr></table>';
+  }
+  if (trail.length) {
+    h += `<table ${TBL} width="100%">` + trail.map(r =>
+      `<tr><td class="eos-tl-date" valign="top" width="44" style="width:44px;padding:1px 6px 1px 0;white-space:nowrap;">` +
+      ft('#1a56db', '<b>' + _esc(r.date) + '</b>', 'font-size:10px') +
+      `</td><td valign="top" style="padding:1px 0;">` + ft('#374151', _esc(r.text), 'font-size:10px;line-height:1.4') + '</td></tr>').join('') + '</table>';
+  }
+  return h;
+}
 
 // Uptake asset uuid: explicit field when a caller provides it, else parsed
 // from the insight deep link (https://fleet.uptake.com/asset/<uuid>/insights/..)
@@ -409,7 +639,9 @@ ${heroTile('#1565c0', '#d6e7fb', 'FLEET', totalUnits, '', fleetLines)}
       // scratchpad). Only the repair timeline goes out in the email.
       // Redacted per line (names, $ amounts); the stored timeline is untouched.
       const tlLines = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => _safeText(l.trim())).filter(Boolean) : [];
-      const notes = tlLines.length ? tlLines.join('<br>') : '\u2014';
+      // TIMELINE cell: condensed digest (render time; stored timeline untouched).
+      const tlDigest = u.timelineDigest || ((notesStore || {})[u.id] || {}).timelineDigest || (fdById[u.id] || {}).timelineDigest || null;
+      const tlHtml = _timelineDigestHtml(_timelineDigestModel(u, timeline, tlDigest, now));
 
       // Case / Offsite: Alt ID + Offsite Event + Salesforce Case (all hyperlinked)
       const altId = u.altId || '';
@@ -474,7 +706,7 @@ ${rgHtml}
 </td>
 <td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
 ${ft('#64748a', 'TIMELINE', 'font-size:9px;letter-spacing:0.08em')}<br>
-${ft('#374151', notes, 'font-size:10px;line-height:1.5')}
+${tlHtml}
 </td>
 </tr></table>`;
       unavailSection += _sectionRow('#ffffff', _spineCard(sev.spine, header + body), '10px 24px 0 24px');
@@ -635,4 +867,4 @@ ${ft('#374151', notes, 'font-size:10px;line-height:1.5')}
   return template;
 }
 
-module.exports = { buildEmail };
+module.exports = { buildEmail, _timelineDigestModel };
