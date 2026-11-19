@@ -124,8 +124,9 @@ function fill(v, label) {
 function toCaps(text) {
   return _s(text).split(CAPS_SPLIT_RE).map((part, i) => (i % 2 ? part : part.toUpperCase())).join('');
 }
+// Accepts numbers and money strings ('4850', '$4,850.00'); null for none / zero / invalid.
 function formatMoney(n) {
-  const v = Number(n);
+  const v = typeof n === 'string' ? Number(n.replace(/[$,\s]/g, '') || NaN) : Number(n);
   if (!Number.isFinite(v) || v <= 0) return null;
   const cents = Math.round(v * 100) % 100 !== 0;
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: cents ? 2 : 0, maximumFractionDigits: 2 });
@@ -309,12 +310,15 @@ function renderUpdateRequest(facts) {
   ]);
 }
 
+// EST amount: the amount the user typed (> 0), else the unit's estimate (offsite / Relay
+// Garage fact set, then AAP estimatePendingCost). With neither, the EST part is left out
+// (no $0 and no <FILL: est amount>); every other unknown value is still a <FILL: …>.
 function renderHveEstSubmitted(facts, slots, { estAmountInput } = {}) {
   const f = facts || {};
-  const amount = f.estAmount || formatMoney(Number(estAmountInput) > 0 ? Number(estAmountInput) : null) || '<FILL: est amount>';
+  const amount = formatMoney(Number(estAmountInput) > 0 ? Number(estAmountInput) : null) || f.estAmount;
   const lines = [
     'OFFSITE EST SUBMITTED - ' + fill(f.vendor, 'vendor') + ' (' + fill(f.cityState, 'city, st') + ')',
-    'UNIT: ' + fill(f.unit, 'unit') + ' | EST ' + amount,
+    'UNIT: ' + fill(f.unit, 'unit') + (amount ? ' | EST ' + amount : ''),
     'REPAIR: ' + fill(_slot(slots, 'repair'), 'repair'),
   ];
   if (f.lineItemsMatchPics && f.laborWithinGuidebook) lines.push('LINE ITEMS MATCH PICS. LABOR WITHIN GUIDEBOOK.');

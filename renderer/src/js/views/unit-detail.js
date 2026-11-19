@@ -308,259 +308,6 @@ export function openWrChoices(unit) {
   return out;
 }
 
-// ── WR escalation (Repair tab) ─────────────────────────────────────────────
-// Pure helpers for the Escalation card. Teams/current come live from AAP via
-// window.aapApi; createdBy is resolved in the main process, never sent here.
-export const ESC_COMMENT_MAX = 2000;
-export const ESC_CARRIER_UPDATE = 'MCS_CARRIER_UPDATE_REQUEST';
-
-export function escalationAaid(unit) {
-  const u = unit || {};
-  if (u.aaid) return String(u.aaid).trim();
-  const m = String(u.assetUrl || '').match(/\/v2\/asset\/([^/?#]+)/);
-  return m ? m[1] : '';
-}
-
-export function parseEscalationList(v) {
-  if (v == null) return [];
-  const arr = Array.isArray(v) ? v : String(v).split(/[;,]/);
-  const out = [];
-  arr.forEach((x) => {
-    const s = String((x && typeof x === 'object') ? (x.value || '') : (x == null ? '' : x)).trim();
-    if (s && !out.includes(s)) out.push(s);
-  });
-  return out;
-}
-
-export function escalationSelectable(options, current) {
-  const cur = new Set(parseEscalationList(current));
-  const seen = new Set();
-  const out = [];
-  (Array.isArray(options) ? options : []).forEach((o) => {
-    const v = String((o && o.value) || '').trim();
-    if (!v || cur.has(v) || seen.has(v)) return;
-    seen.add(v);
-    out.push(o);
-  });
-  return out;
-}
-
-export function validateEscalationDraft({ team, comment, current } = {}) {
-  const t = String(team || '').trim();
-  const c = String(comment || '').trim();
-  if (!t) return { ok: false, error: 'Pick a team to escalate to.' };
-  if (parseEscalationList(current).includes(t)) return { ok: false, error: 'That escalation is already applied.' };
-  if (!c) return { ok: false, error: 'A reason comment is required to escalate.' };
-  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
-  return { ok: true, error: null };
-}
-
-export function validateDeEscalation({ value, comment, current } = {}) {
-  const v = String(value || '').trim();
-  const c = String(comment || '').trim();
-  if (!v || !parseEscalationList(current).includes(v)) return { ok: false, error: 'That escalation is not currently applied.' };
-  if (v === ESC_CARRIER_UPDATE && !c) return { ok: false, error: 'Add a reason comment to remove Carrier Update Request' };
-  if (c.length > ESC_COMMENT_MAX) return { ok: false, error: 'Reason comment must be ' + ESC_COMMENT_MAX + ' characters or fewer.' };
-  return { ok: true, error: null };
-}
-
-export function buildEscalationPayload(unit, { add, remove, comment } = {}) {
-  const u = unit || {};
-  return {
-    workRequestId: u.workRequestId,
-    aaid: escalationAaid(u),
-    add: Array.isArray(add) ? add : [],
-    remove: Array.isArray(remove) ? remove : [],
-    comment: String(comment || ''),
-  };
-}
-
-// ── Internal Relay comment (Repair tab, under the Repair Timeline) ─────────
-// Sends through window.relayWrites.addComment -> relay:add-comment ->
-// aap_create_wr.addConversationNote, so the write-approval gate (and its modal)
-// decides whether anything reaches Relay. AAP/Relay only; no offsite control.
-export const RELAY_COMMENT_MAX = 2000; // mirrors write-gate COMMENT_MAX
-const _rcInFlight = new Set();         // WR ids with a send awaiting its result
-let _rcCurrent = null;                 // { wrId, refresh } of the card on screen
-
-// The unit's open primary Relay WR, or null (no WR id, closed WR, offsite-only).
-export function relayCommentTarget(unit) {
-  const p = openWrChoices(unit).find((c) => c.kind === 'primary');
-  return p ? { workRequestId: p.id } : null;
-}
-
-export function validateRelayComment(text) {
-  const t = String(text == null ? '' : text).trim();
-  if (!t) return { ok: false, error: 'Write a comment first.' };
-  if (t.length > RELAY_COMMENT_MAX) return { ok: false, error: 'Comment must be ' + RELAY_COMMENT_MAX + ' characters or fewer.' };
-  return { ok: true, error: null };
-}
-
-export function relayCommentOutcome(r, wrId) {
-  const o = (r && r.outcome) || '';
-  if (o === 'sent') {
-    return { level: 'success', clear: true,
-      text: 'Internal comment posted to Relay WR ' + String(wrId || '').slice(0, 8) + '. It appears in the Relay conversation after the next refresh.' };
-  }
-  if (o === 'pending-approval') return { level: 'info', clear: true, text: 'Queued in Relay writes. Approve it there to send.' };
-  if (o === 'skipped-not-approved') return { level: 'info', clear: false, text: 'Not sent.' };
-  return { level: 'error', clear: false, text: 'Relay comment failed: ' + ((r && r.error) || 'unknown') };
-}
-
-// AI draft (window.relayWrites.draftComment -> relay:draft-comment). It only fills the
-// textarea; Send (above) is still the only way out, through the approval gate.
-const RELAY_DRAFT_LABEL = 'Draft with AI';
-const RELAY_DRAFT_BUSY_HTML = '<span class="dp-ai-spinner" aria-hidden="true">\u25CC</span> Drafting\u2026';
-const RELAY_DRAFT_FIELDS = ['equipmentId', 'workRequestId', 'serviceUrl', 'vendor', 'subVendor', 'savedRepairStatus',
-  'serviceState', 'subState', 'lifecycleReason', 'issueSummary', 'issueDetails', 'repairTimeline', 'savedNotes',
-  'fullConversation', 'asistNotes', 'created', 'delayReasonCodes', 'offsiteStage', 'offsiteStageDetail', 'escalations',
-  'estimatePendingCost', 'dealerName', 'vendorWorkOrderId', 'salesforceCase', 'insights'];
-const _rdInFlight = new Set();         // WR ids with an AI draft awaiting its result
-
-// The plain string fields sent over IPC (main re-validates and caps them).
-export function relayDraftUnit(unit) {
-  const u = unit || {};
-  const out = {};
-  for (const k of RELAY_DRAFT_FIELDS) if (typeof u[k] === 'string') out[k] = u[k];
-  return out;
-}
-
-export function relayDraftStatus(r) {
-  if (!r || !r.ok) {
-    const code = (r && r.code) || '';
-    if (code === 'busy') return { level: 'info', insert: false, text: 'An AI draft for this WR is already running.' };
-    if (code === 'ai-timeout') return { level: 'error', insert: false, text: 'AI draft timed out. Try again.' };
-    if (code === 'ai-empty') return { level: 'error', insert: false, text: 'AI returned no draft. Try again.' };
-    if (code === 'wr-mismatch') return { level: 'error', insert: false, text: 'AI draft unavailable: the WR does not match this unit.' };
-    if (code === 'no-bridge') return { level: 'error', insert: false, text: 'AI draft failed: Relay writes bridge unavailable.' };
-    return { level: 'error', insert: false, text: 'AI draft failed' + ((r && r.error) ? ': ' + r.error : '.') };
-  }
-  const n = Number(r.droppedCount) || 0;
-  if (r.noUpdate) return { level: 'info', insert: false, text: 'AI found nothing new to add beyond the Relay conversation.' };
-  if (!String(r.draft || '').trim()) {
-    return { level: 'info', insert: false, text: 'AI draft not inserted: the evidence did not support its ' + n + ' line(s).' };
-  }
-  return { level: 'success', insert: true,
-    text: 'AI draft inserted. Review and edit it, then Send to Relay (you approve before it is sent).' +
-      (n ? ' Removed ' + n + ' line(s) the evidence did not support.' : '') };
-}
-
-export function relayCommentComposeHtml(unit) {
-  const t = relayCommentTarget(unit);
-  if (!t) return '';
-  const wr = t.workRequestId;
-  return '<div class="dp-escalate-wrap" id="dp-relay-comment-wrap" data-wr="' + escAttr(wr) + '">' +
-    '<div class="dp-section-title">Add comment to Relay</div>' +
-    '<div class="dp-escalate">' +
-      '<div class="dp-escalate__none">Posts an INTERNAL comment (internal only, not shared with the vendor) on Relay WR ' + escAttr(wr.slice(0, 8)) + '. You approve the exact text before anything is sent.</div>' +
-      '<textarea id="dp-relay-comment-text" class="dp-escalate__comment" maxlength="' + RELAY_COMMENT_MAX + '" rows="3" aria-label="Internal Relay comment" placeholder="Internal comment for the Relay WR"></textarea>' +
-      '<div class="dp-escalate__row">' +
-        '<span class="dp-escalate__count" id="dp-relay-comment-count">0/' + RELAY_COMMENT_MAX + '</span>' +
-        '<button type="button" id="dp-relay-comment-draft" class="dp-escalate__btn" title="AI drafts only the fleet-side updates not already in the Relay conversation. You edit it, then Send asks for approval.">' + RELAY_DRAFT_LABEL + '</button>' +
-        '<button type="button" id="dp-relay-comment-send" class="dp-escalate__btn" disabled>Send to Relay</button>' +
-      '</div>' +
-      '<div class="dp-escalate__none" id="dp-relay-comment-status" role="status" aria-live="polite"></div>' +
-    '</div>' +
-  '</div>';
-}
-
-export function wireRelayComment(root, unit) {
-  const t = relayCommentTarget(unit);
-  if (!root || !t) return;
-  const txt = root.querySelector('#dp-relay-comment-text');
-  const btn = root.querySelector('#dp-relay-comment-send');
-  const cnt = root.querySelector('#dp-relay-comment-count');
-  const st = root.querySelector('#dp-relay-comment-status');
-  if (!txt || !btn) return;
-  const dbtn = root.querySelector('#dp-relay-comment-draft');
-  const wrId = t.workRequestId;
-  let aiOrigin = false;                // textarea text came from an AI draft
-  let lastDraft = '';
-  const refresh = () => {
-    const n = String(txt.value || '').length;
-    if (cnt) {
-      cnt.textContent = n + '/' + RELAY_COMMENT_MAX;
-      cnt.classList.toggle('dp-escalate__count--over', n > RELAY_COMMENT_MAX);
-    }
-    btn.disabled = _rcInFlight.has(wrId) || _rdInFlight.has(wrId) || !validateRelayComment(txt.value).ok;
-    if (dbtn) dbtn.disabled = _rcInFlight.has(wrId) || _rdInFlight.has(wrId);
-  };
-  _rcCurrent = { wrId, refresh };
-  if (_rcInFlight.has(wrId) && st) st.textContent = 'Waiting for your approval…';
-  txt.addEventListener('input', () => { if (!String(txt.value || '').trim()) { aiOrigin = false; lastDraft = ''; } });
-  txt.addEventListener('input', refresh);
-  if (dbtn) {
-    dbtn.addEventListener('click', async () => {
-      if (_rdInFlight.has(wrId) || _rcInFlight.has(wrId)) return;
-      const cur = String(txt.value || '').trim();
-      if (cur && cur !== lastDraft.trim()) {
-        const ask = typeof window !== 'undefined' && window && typeof window.confirm === 'function' ? window.confirm : null;
-        if (!ask || !ask('Replace your text with the AI draft?')) return;
-      }
-      _rdInFlight.add(wrId);
-      dbtn.innerHTML = RELAY_DRAFT_BUSY_HTML;
-      if (dbtn.setAttribute) dbtn.setAttribute('aria-busy', 'true');
-      txt.readOnly = true;
-      refresh();
-      if (st) st.textContent = 'Drafting with AI…';
-      let r;
-      try {
-        const bridge = (typeof window !== 'undefined' && window && window.relayWrites) || null;
-        r = (bridge && typeof bridge.draftComment === 'function')
-          ? await bridge.draftComment(wrId, relayDraftUnit(unit))
-          : { ok: false, code: 'no-bridge' };
-      } catch (e) {
-        r = { ok: false, code: 'ai-failed', error: (e && e.message) || String(e) };
-      }
-      _rdInFlight.delete(wrId);
-      dbtn.innerHTML = RELAY_DRAFT_LABEL;
-      if (dbtn.removeAttribute) dbtn.removeAttribute('aria-busy');
-      txt.readOnly = false;
-      const o = relayDraftStatus(r);
-      if (o.insert && txt.isConnected === false) {
-        toast.show('info', 'AI draft finished after the panel refreshed; click Draft with AI again.', 4000);
-      } else {
-        if (o.insert) {
-          txt.value = String(r.draft).slice(0, RELAY_COMMENT_MAX);
-          aiOrigin = true;
-          lastDraft = txt.value;
-        }
-        toast.show(o.level, o.text, 4000);
-        if (st) st.textContent = o.text;
-      }
-      refresh();
-      if (o.insert && txt.isConnected !== false && typeof txt.focus === 'function') txt.focus();
-      if (_rcCurrent && _rcCurrent.wrId === wrId && _rcCurrent.refresh !== refresh) _rcCurrent.refresh();
-    });
-  }
-  btn.addEventListener('click', async () => {
-    if (_rcInFlight.has(wrId) || _rdInFlight.has(wrId) || !validateRelayComment(txt.value).ok) return;
-    _rcInFlight.add(wrId);
-    refresh();
-    if (st) st.textContent = 'Waiting for your approval…';
-    let r;
-    try {
-      const bridge = (typeof window !== 'undefined' && window && window.relayWrites) || null;
-      const args = [wrId, String(txt.value).trim(), String((unit && unit.equipmentId) || '')];
-      if (aiOrigin) args.push({ aiDrafted: true });
-      r = (bridge && typeof bridge.addComment === 'function')
-        ? await bridge.addComment(...args)
-        : { ok: false, error: 'Relay writes bridge unavailable' };
-    } catch (e) {
-      r = { ok: false, outcome: 'send-failed', error: (e && e.message) || String(e) };
-    }
-    _rcInFlight.delete(wrId);
-    const o = relayCommentOutcome(r, wrId);
-    toast.show(o.level, o.text, 4000);
-    if (st) st.textContent = o.text;
-    if (o.clear) { txt.value = ''; aiOrigin = false; lastDraft = ''; }
-    refresh();
-    // The pane may have re-rendered during the send; re-enable the card on screen.
-    if (_rcCurrent && _rcCurrent.wrId === wrId && _rcCurrent.refresh !== refresh) _rcCurrent.refresh();
-  });
-  refresh();
-}
-
 // ── History tab "📋 Open" helpers (pure) ────────────────────────────────────
 // Attribute-safe escaper (esc() below does not escape quotes).
 function escAttr(s) {
@@ -1575,7 +1322,8 @@ function _garageUrlForUnit(unit){
 }
 
 // ── header ────────────────────────────────────────────────────────────────────
-function renderHeader(unit){
+// Exported for tests.
+export function renderHeader(unit){
   var isUnavail=(unit.lifecycleState||'').toLowerCase().includes('unavail');
   var risk=parseInt(unit.riskScore,10)||0;
   var hdrCls=isUnavail?'unavailable':risk>=60?'risk':'active';
@@ -1620,6 +1368,8 @@ function renderHeader(unit){
     // panel (single close button) via _openInlineSplit — no more two separate
     // windows to close individually.
     (relayUrl||offsiteUrl)?'<button id="dp-launch-daily" class="dp-launcher" title="Open Relay + Offsite side-by-side (Daily Notes)">\ud83d\udccb Daily</button>':'',
+    // ⟳ Change Lifecycle icon (opens the gated lifecycle modal; wired by wireRelayActions).
+    headerLifecycleButtonHtml(unit),
   ].filter(Boolean).join('');
 
   return '<div class="dp-header dp-header--'+hdrCls+'">'+
@@ -1629,7 +1379,6 @@ function renderHeader(unit){
         'data-aap-url="'+esc(_garageUrlForUnit(unit))+'">'+esc(unit.equipmentId)+'</span>'+
       (unit.vin?'<span class="dp-header__vin">'+esc(unit.vin)+'</span>':'')+
       '<span class="dp-header__state-badge dp-header__state-badge--'+(isUnavail?'unavailable':'active')+'">'+esc(unit.lifecycleState||'Active')+'</span>'+
-      headerLifecycleButtonHtml(unit)+
       '<div class="dp-header__launchers">'+launchers+'</div>'+
       '<button id="dp-close" class="dp-header__close">\u00d7</button>'+
     '</div>'+
@@ -2833,16 +2582,10 @@ export function renderRepairPane(unit){
     });
   }, 100);
 
-  // Escalation card mount (filled by _wireEscalation; stays hidden unless AAP
-  // reports the feature enabled and returns teams for this unit's fleet).
-  var escalateHtml=(unit.workRequestId&&escalationAaid(unit))?'<div class="dp-escalate-wrap" id="dp-escalate-wrap" hidden></div>':'';
-  // Internal Relay comment compose (only for an open Relay WR; wired by _wireRelayComment).
-  var relayCommentHtml=relayCommentComposeHtml(unit);
-
   return '<div class="dp-pane active" id="dp-pane-repair">'+
     // Dealer case stage sits at the top so it's visible without scrolling.
     (stageHtml?'<div class="dp-section-title">Dealer Case Stage</div>'+stageHtml:'')+
-    '<div class="dp-section-title">Work Request</div>'+woCard+escalateHtml+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+relayCommentHtml+offsiteHtml+
+    '<div class="dp-section-title">Work Request</div>'+woCard+plannedWRCard+secondaryWRCards+splitViewBtn+durBar+timelineHtml+offsiteHtml+
   '</div>';
 }
 
@@ -3301,9 +3044,6 @@ function _renderUnit(unit) {
   // ── notes ──────────────────────────────────────────────────────────────────
   _wireNotes(unit);
 
-  // ── repair tab: WR escalation card ─────────────────────────────────────────
-  _wireEscalation(unit);
-  _wireRelayComment(unit);
   // WR-card Escalate / Add Relay Comment and header Change Lifecycle modals (gated writes only).
   try {
     wireRelayActions(document, unit, { modal, bridge: window.relayWrites, aapApi: window.aapApi,
@@ -3866,218 +3606,6 @@ function _wireHistoryPane(unit) {
     list.innerHTML = bds.map(renderCard).join('');
   }).catch(function(e) {
     list.innerHTML = '<div class="dp-empty" style="color:var(--red)">Failed to load breakdown history: ' + esc((e && e.message) || 'error') + '</div>';
-  });
-}
-
-// ── _wireEscalation ───────────────────────────────────────────────────────────
-// Repair tab Escalation card. _renderUnit re-runs on every live refresh, so the
-// AAP context (feature gate + live teams + current) is cached per WR for 2 min
-// and the AI/rules suggestion per WR+current for the session. Nothing is sent
-// to AAP until the user clicks Escalate or confirms a chip removal.
-var _escCtxCache=new Map();     // wrId -> {at, p} (p = in-flight/resolved escalationOptions promise)
-var _escSuggestCache=new Map(); // wrId|current -> suggestion
-var _escInFlight=new Set();     // wrIds with an updateEscalations call pending
-var _ESC_CTX_TTL=120000;
-
-function _escAttr(s){return esc(s).replace(/"/g,'&quot;');}
-
-function _escSetDisabled(root,on){
-  if(!root)return;
-  var b=root.querySelector('#dp-escalate-send');
-  if(b)b.disabled=on;
-  root.querySelectorAll('[data-esc-remove]').forEach(function(x){x.disabled=on;});
-}
-
-function _escClear(wrId){
-  _escCtxCache.delete(wrId);
-  Array.from(_escSuggestCache.keys()).forEach(function(k){if(k.indexOf(wrId+'|')===0)_escSuggestCache.delete(k);});
-}
-
-// Cache the PROMISE (not just the resolved value) so live re-renders that land
-// before the first response share one AAP round trip. Dropped on failure so
-// the next render refetches.
-function _escContext(wrId,aaid){
-  var hit=_escCtxCache.get(wrId);
-  if(hit&&Date.now()-hit.at<_ESC_CTX_TTL)return hit.p;
-  var entry={at:Date.now(),p:null};
-  var drop=function(){if(_escCtxCache.get(wrId)===entry)_escCtxCache.delete(wrId);};
-  entry.p=Promise.resolve().then(function(){
-    return window.aapApi.escalationOptions({aaid:aaid,workRequestId:wrId});
-  }).then(function(res){
-    if(!res||!res.ok)drop();
-    return res;
-  },function(e){drop();throw e;});
-  _escCtxCache.set(wrId,entry);
-  return entry.p;
-}
-
-function _wireRelayComment(unit){
-  var w=document.getElementById('dp-relay-comment-wrap');
-  if(w)wireRelayComment(w,unit);
-}
-
-function _wireEscalation(unit){
-  var wrap=document.getElementById('dp-escalate-wrap');
-  if(!wrap||!window.aapApi||typeof window.aapApi.escalationOptions!=='function')return;
-  var wrId=String(unit.workRequestId||'');
-  var aaid=escalationAaid(unit);
-  if(!wrId||!aaid)return;
-  var live=function(){return !!(_unit&&_unit.equipmentId===unit.equipmentId&&document.body.contains(wrap));};
-  (async function(){
-    var res=null;
-    try{res=await _escContext(wrId,aaid);}catch(_e){return;}
-    if(!live())return;
-    if(!res||!res.ok||!res.enabled||!Array.isArray(res.options)||!res.options.length)return;
-    _renderEscalation(unit,wrap,res,live);
-  })();
-}
-
-function _renderEscalation(unit,wrap,res,live){
-  var wrId=String(unit.workRequestId||'');
-  var options=res.options;
-  var current=parseEscalationList(res.current);
-  var selectable=escalationSelectable(options,current);
-  var labelOf=function(v){
-    for(var i=0;i<options.length;i++){if(options[i]&&options[i].value===v)return String(options[i].displayText||v);}
-    return v;
-  };
-
-  var chips=current.length?current.map(function(v){
-    var l=labelOf(v);
-    return '<span class="dp-escalate__chip">'+esc(l)+
-      '<button type="button" class="dp-escalate__chip-x" data-esc-remove="'+_escAttr(v)+'" aria-label="Remove escalation '+_escAttr(l)+'">×</button></span>';
-  }).join(''):'<span class="dp-escalate__none">No active escalations</span>';
-
-  // The comment box stays even when every team is applied: removing Carrier
-  // Update Request needs a reason comment.
-  var html='<div class="dp-section-title">Escalation</div><div class="dp-escalate">'+
-    '<div class="dp-escalate__chips">'+chips+'</div>'+
-    (selectable.length?'<div class="dp-escalate__ai" id="dp-escalate-ai">Suggesting…</div>':'')+
-    (selectable.length?'<div class="dp-escalate__row">'+
-      '<select id="dp-escalate-team" class="dp-escalate__select" aria-label="Escalation team">'+
-        '<option value="">Select team…</option>'+
-        selectable.map(function(o){return '<option value="'+_escAttr(o.value)+'">'+esc(o.displayText||o.value)+'</option>';}).join('')+
-      '</select>'+
-      '<button type="button" id="dp-escalate-send" class="dp-escalate__btn">Escalate</button>'+
-    '</div>':'')+
-    '<textarea id="dp-escalate-comment" class="dp-escalate__comment" maxlength="'+ESC_COMMENT_MAX+'" rows="3" aria-label="Escalation reason comment" placeholder="'+(selectable.length?'Reason comment (required)':'Reason comment')+'"></textarea>'+
-    '<span class="dp-escalate__count" id="dp-escalate-count">0/'+ESC_COMMENT_MAX+'</span>'+
-  '</div>';
-  wrap.innerHTML=html;
-  wrap.hidden=false;
-
-  var card=wrap.querySelector('.dp-escalate');
-  var teamEl=wrap.querySelector('#dp-escalate-team');
-  var cmtEl=wrap.querySelector('#dp-escalate-comment');
-  var countEl=wrap.querySelector('#dp-escalate-count');
-  var aiEl=wrap.querySelector('#dp-escalate-ai');
-  var sendBtn=wrap.querySelector('#dp-escalate-send');
-  var teamDirty=false, cmtDirty=false, busy=false;
-
-  var updCount=function(){
-    var n=cmtEl.value.length;
-    countEl.textContent=n+'/'+ESC_COMMENT_MAX;
-    countEl.classList.toggle('dp-escalate__count--over',n>ESC_COMMENT_MAX);
-  };
-  cmtEl.addEventListener('input',function(){cmtDirty=true;updCount();});
-  if(teamEl)teamEl.addEventListener('change',function(){teamDirty=true;});
-
-  var setBusy=function(on){
-    busy=on;
-    _escSetDisabled(card,on);
-  };
-  // A send for this WR is still pending from an earlier card (pane rebuilt
-  // mid-send): render this card's controls disabled so the same change can't
-  // be submitted twice. send() re-enables / re-wires whichever card is current.
-  // Only the DOM is disabled here (not the local busy flag): isBusy() reads the
-  // module-level _escInFlight, so this card works again once that send settles.
-  if(_escInFlight.has(wrId))_escSetDisabled(card,true);
-  var isBusy=function(){return busy||_escInFlight.has(wrId);};
-  var send=async function(payload,okMsg){
-    _escInFlight.add(wrId);
-    var r;
-    try{r=await window.aapApi.updateEscalations(payload);}catch(e){r={ok:false,error:e&&e.message};}
-    _escInFlight.delete(wrId);
-    // The card that started the send may have been replaced by a re-render;
-    // act on whichever escalation card is current for this unit.
-    var curWrap=document.getElementById('dp-escalate-wrap');
-    var curLive=!!(curWrap&&_unit&&_unit.equipmentId===unit.equipmentId&&String(_unit.workRequestId||'')===wrId);
-    if(r&&r.ok){
-      toast.show('success',okMsg,4000);
-      _escClear(wrId);
-      if(curLive)_wireEscalation(_unit);
-      return;
-    }
-    toast.show('error','Escalation failed: '+((r&&r.error)||'unknown'),6000);
-    busy=false;
-    if(live())setBusy(false);
-    else if(curLive)_escSetDisabled(curWrap,false);
-  };
-
-  // ── suggestion (fills team + comment only if the user hasn't touched them) ─
-  if(selectable.length){
-    var sk=wrId+'|'+current.join(',');
-    (async function(){
-      var s=_escSuggestCache.get(sk)||null;
-      if(!s&&typeof window.aapApi.escalationSuggest==='function'){
-        try{
-          var r=await window.aapApi.escalationSuggest({unit:unit.equipmentId,options:options,current:current});
-          s=(r&&r.ok&&r.suggestion)||null;
-        }catch(_e){s=null;}
-        if(s)_escSuggestCache.set(sk,s);
-      }
-      if(!live()||!document.body.contains(aiEl))return;
-      if(!s||!s.team||!selectable.some(function(o){return o.value===s.team;})){
-        aiEl.textContent='No suggestion — pick a team and write a reason.';
-        return;
-      }
-      if(!teamDirty&&teamEl)teamEl.value=s.team;
-      if(!cmtDirty&&s.comment){cmtEl.value=String(s.comment).slice(0,ESC_COMMENT_MAX);updCount();}
-      aiEl.innerHTML=esc(s.rationale||('Suggested: '+labelOf(s.team)))+
-        '<span class="dp-escalate__badge">'+(s.source==='ai'?'AI':'Rules')+'</span>';
-    })();
-  }
-
-  // ── Escalate ─────────────────────────────────────────────────────────────
-  if(sendBtn)sendBtn.addEventListener('click',function(){
-    if(isBusy())return;
-    var team=teamEl?teamEl.value:'';
-    var comment=cmtEl.value;
-    var v=validateEscalationDraft({team:team,comment:comment,current:current});
-    if(!v.ok){toast.show('warn',v.error,3500);return;}
-    setBusy(true);
-    send(buildEscalationPayload(unit,{add:[team],remove:[],comment:comment}),'Escalated to '+labelOf(team));
-  });
-
-  // ── chip × (de-escalate after confirm) ───────────────────────────────────
-  card.querySelectorAll('[data-esc-remove]').forEach(function(btn){
-    btn.addEventListener('click',function(){
-      if(isBusy())return;
-      var value=btn.getAttribute('data-esc-remove')||'';
-      var carrier=value===ESC_CARRIER_UPDATE;
-      // The box may hold the auto-filled ESCALATE draft (AI/rules). That is not
-      // a de-escalation reason, so only a user-edited comment is sent.
-      if(carrier&&!cmtDirty){
-        // AAP requires a reason to remove Carrier Update Request: ask the user
-        // to write one instead of reusing the suggestion draft. Marking the box
-        // dirty stops a late suggestion from refilling it.
-        cmtEl.value='';cmtDirty=true;updCount();cmtEl.focus();
-        toast.show('warn','Write a reason for removing Carrier Update Request, then click × again.',4500);
-        return;
-      }
-      var comment=cmtDirty?cmtEl.value:'';
-      var v=validateDeEscalation({value:value,comment:comment,current:current});
-      if(!v.ok){
-        toast.show('warn',v.error,3500);
-        if(carrier)cmtEl.focus();
-        return;
-      }
-      var label=labelOf(value);
-      // All escalation comments are internal only (user decision 2026-10-30).
-      if(!window.confirm('Remove escalation "'+label+'"?'))return;
-      setBusy(true);
-      send(buildEscalationPayload(unit,{add:[],remove:[value],comment:comment}),'Removed escalation '+label);
-    });
   });
 }
 

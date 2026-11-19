@@ -118,14 +118,17 @@ describe('templates with real values', () => {
 });
 
 describe('sparse row -> placeholders, never invented values', () => {
-  it('gives <FILL: RO#>, <FILL: link>, <FILL: est amount>, NO ETR GIVEN; no $ and no http', async () => {
+  it('gives <FILL: RO#>, <FILL: link>, no EST line, NO ETR GIVEN; no $ and no http', async () => {
     const off = await draft({ kind: 'comment', template: 'offsite-update', workRequestId: WR2, unit: { equipmentId: 'B70000' } });
     const upd = await draft({ kind: 'comment', template: 'update-request', workRequestId: WR2, unit: { equipmentId: 'B70000' } });
     const hve = await draft({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR2, unit: { equipmentId: 'B70000' }, userInputs: { estAmount: 0 } });
     expect(off.ok && upd.ok && hve.ok).toBe(true);
     expect(off.draft).toContain('<FILL: RO#>');
     expect(off.draft).toContain('<FILL: link>');
-    expect(hve.draft).toContain('<FILL: est amount>');
+    expect(hve.draft).not.toContain('<FILL: est amount>');
+    expect(hve.draft).not.toMatch(/\bEST \$|\| EST/);
+    expect(hve.draft.split('\n')[1]).toBe('UNIT: B70000');
+    expect(hve.draft).toContain('<FILL: vendor>');
     expect(upd.draft).toContain('NO ETR GIVEN');
     expect(upd.draft).toContain('NEED: CURRENT STATUS / ETR');
     for (const r of [off, upd, hve]) {
@@ -190,13 +193,40 @@ describe('High Value Estimate (first-class template)', () => {
     ]);
   });
 
-  it('LINE ITEMS line only with evidence; amount precedence data > input > placeholder', () => {
+  it('LINE ITEMS line only with evidence; amount precedence typed input > unit estimate > EST part omitted', () => {
     const noEv = D.collectFacts(FULL, { now: NOW, evidenceText: 'Turbo replacement.' });
     expect(D.renderHveEstSubmitted(noEv, {}).text).not.toContain('LINE ITEMS');
     const noAmt = D.collectFacts(Object.assign({}, FULL, { estimatePendingCost: 0 }), { now: NOW });
-    expect(D.renderHveEstSubmitted(D.collectFacts(FULL, { now: NOW }), {}, { estAmountInput: 3000 }).text).toContain('EST $4,850');
-    expect(D.renderHveEstSubmitted(noAmt, {}, { estAmountInput: 3000 }).text).toContain('EST $3,000');
-    expect(D.renderHveEstSubmitted(noAmt, {}, { estAmountInput: 0 }).text).toContain('EST <FILL: est amount>');
+    expect(D.renderHveEstSubmitted(D.collectFacts(FULL, { now: NOW }), {}, { estAmountInput: 0 }).text).toContain('UNIT: B62020 | EST $4,850');
+    expect(D.renderHveEstSubmitted(D.collectFacts(FULL, { now: NOW }), {}, { estAmountInput: 3000 }).text).toContain('UNIT: B62020 | EST $3,000');
+    expect(D.renderHveEstSubmitted(noAmt, {}, { estAmountInput: 3000 }).text).toContain('UNIT: B62020 | EST $3,000');
+    const blank = D.renderHveEstSubmitted(noAmt, {}, { estAmountInput: 0 });
+    expect(blank.text.split('\n')[1]).toBe('UNIT: B62020');
+    expect(blank.text).not.toMatch(/\$0|<FILL: est amount>|\| EST/);
+    expect(blank.placeholders).not.toContain('est amount');
+    expect(blank.text).toContain('EST LINK: ' + EST_URL);
+  });
+
+  it('auto-fills EST from the unit estimate: offsite/Relay Garage fact set first, then AAP estimatePendingCost (money strings too)', () => {
+    const fs = { estimate: { latestSubmitted: 7200, status: 'submitted' }, ros: [] };
+    expect(D.collectFacts(FULL, { now: NOW, factSet: fs }).estAmount).toBe('$7,200');
+    expect(D.collectFacts(Object.assign({}, FULL, { estimatePendingCost: '$4,850.50' }), { now: NOW }).estAmount).toBe('$4,850.50');
+    expect(D.collectFacts(Object.assign({}, FULL, { estimatePendingCost: '' }), { now: NOW }).estAmount).toBeNull();
+    expect(D.formatMoney('0')).toBeNull();
+    expect(D.formatMoney('')).toBeNull();
+  });
+
+  it('draftAction: unit estimate auto-fills, typed amount wins, none + blank omits the EST part', async () => {
+    const base = { kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', unit: { equipmentId: 'B62020' } };
+    const auto = await draft(Object.assign({ workRequestId: WR, userInputs: { estAmount: 0 } }, base));
+    expect(auto.draft.split('\n')[1]).toBe('UNIT: B62020 | EST $4,850');
+    const typed = await draft(Object.assign({ workRequestId: WR, userInputs: { estAmount: 3000 } }, base));
+    expect(typed.draft.split('\n')[1]).toBe('UNIT: B62020 | EST $3,000');
+    const none = await draft({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR2, unit: { equipmentId: 'B70000' }, userInputs: { estAmount: 0 } });
+    expect(none.draft.split('\n')[1]).toBe('UNIT: B70000');
+    expect(none.draft).not.toMatch(/\$0|<FILL: est amount>/);
+    expect(none.placeholders).not.toContain('est amount');
+    expect(none.placeholders).toEqual(expect.arrayContaining(['vendor', 'city, st', 'est link']));
   });
 });
 

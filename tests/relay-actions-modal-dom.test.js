@@ -151,6 +151,26 @@ describe('escalation modal', () => {
     expect(window.relayWrites.escalate).not.toHaveBeenCalled();
   });
 
+  it('HVE amount field: pre-filled from the unit estimate; only a typed amount is sent to the drafter', async () => {
+    fakeModal.st.panel = mkPanel();
+    await ra.openEscalationModal(Object.assign({}, UNIT, { estimatePendingCost: '$4,850.50' }), WR, deps);
+    expect(fakeModal.st.opts.body).toContain('id="ra-esc-amount" type="number" min="0" step="0.01" value="4850.5"');
+    q('#ra-esc-amount').value = '4850.5';
+    await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
+    await q('#ra-esc-draft').fire('click');
+    expect(window.relayWrites.draftAction.mock.calls[0][0].userInputs).toEqual({ estAmount: 0 });
+    await type('#ra-esc-amount', '3000');
+    deps.confirm.mockReturnValue(true);
+    await q('#ra-esc-draft').fire('click');
+    expect(window.relayWrites.draftAction.mock.calls[1][0].userInputs).toEqual({ estAmount: 3000 });
+    // Planned/secondary WR: its totalCost is the pending estimate; no estimate -> field stays 0.
+    fakeModal.st.panel = mkPanel();
+    await ra.openEscalationModal(Object.assign({}, UNIT, { _secondaryWRs: [{ workRequestId: WR2, totalCost: 1200 }] }), WR2, deps);
+    expect(fakeModal.st.opts.body).toContain('value="1200"');
+    expect(ra.unitEstAmount({})).toBe(0);
+    expect(ra.unitEstAmount({ estimatePendingCost: 'n/a' })).toBe(0);
+  });
+
   it('Submit closes the modal BEFORE bridge.escalate with add:[liveValue]; raw updateEscalations never called', async () => {
     await openEsc();
     await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
@@ -364,10 +384,55 @@ describe('card and header buttons', () => {
     }
   });
 
-  it('headerLifecycleButtonHtml is present only with an assetUrl', () => {
-    expect(ra.headerLifecycleButtonHtml(UNIT)).toContain('id="dp-lc-change"');
-    expect(ra.headerLifecycleButtonHtml(UNIT)).toContain('\u27F3 Change Lifecycle');
+  it('headerLifecycleButtonHtml is a ⟳ icon launcher, present only with an assetUrl', () => {
+    const h = ra.headerLifecycleButtonHtml(UNIT);
+    expect(h).toContain('id="dp-lc-change"');
+    expect(h).toContain('class="dp-launcher"');
+    expect(h).toContain('title="Change Lifecycle"');
+    expect(h).toMatch(/>\u27F3<\/button>$/);
+    expect(h).not.toContain('dp-launcher--lc');
     expect(ra.headerLifecycleButtonHtml({ equipmentId: 'X' })).toBe('');
+  });
+
+  it('renderHeader puts the ⟳ Change Lifecycle icon inside the launcher cluster; clicking it opens the lifecycle modal', async () => {
+    const u = Object.assign({}, UNIT, { serviceUrl: 'https://relay.amazon.com/x/' + WR });
+    const h = m.renderHeader(u);
+    const cluster = /<div class="dp-header__launchers">([\s\S]*?)<\/div>/.exec(h);
+    expect(cluster).not.toBeNull();
+    expect(cluster[1]).toContain('id="dp-lc-change"');
+    expect(cluster[1]).toContain('data-aap-url=');
+    expect(h.split('id="dp-lc-change"').length - 1).toBe(1);
+    expect(h.indexOf('id="dp-lc-change"')).toBeGreaterThan(h.indexOf('class="dp-header__launchers"'));
+    expect(h).not.toContain('\u27F3 Change Lifecycle');
+    expect(m.renderHeader({ equipmentId: 'X' })).not.toContain('dp-lc-change');
+    const lc = el();
+    const root = { querySelectorAll: () => [], querySelector: (s) => (s === '#dp-lc-change' ? lc : null) };
+    fakeModal.st.panel = mkPanel();
+    ra.wireRelayActions(root, u, deps);
+    await lc.fire('click');
+    expect(window.relayWrites.lifecycleOptions).toHaveBeenCalledTimes(1);
+    expect(fakeModal.st.opts.title).toBe('Change lifecycle \u2014 322168');
+    expect(fakeModal.st.opts.actions.map((a) => a.label)).toEqual(['Cancel', 'Change lifecycle']);
+  });
+
+  it('Repair tab no longer renders the old Escalation card or Add-comment box; WR-card buttons still render', () => {
+    vi.useFakeTimers();
+    try {
+      const u = { equipmentId: '322168', workRequestId: WR, assetUrl: ASSET, vendor: 'Rush', relaySynced: true,
+        serviceState: 'Work In Progress', repairTimeline: '11/18 vendor update', _secondaryWRs: [] };
+      const h = m.renderRepairPane(u);
+      for (const gone of ['dp-escalate-wrap', 'dp-relay-comment-', 'Add comment to Relay', 'Send to Relay',
+        '>Escalation</div>', 'dp-escalate-team', 'dp-escalate-send']) expect(h).not.toContain(gone);
+      expect(h).toContain('data-ra-escalate="' + WR + '"');
+      expect(h).toContain('data-ra-comment="' + WR + '"');
+      expect(h).toContain('\u26A0 Escalate');
+      expect(h).toContain('\uD83D\uDCAC Add Relay Comment');
+      for (const sym of ['escalationAaid', 'relayCommentTarget', 'relayCommentComposeHtml', 'wireRelayComment',
+        'buildEscalationPayload', 'validateEscalationDraft']) expect(m[sym]).toBeUndefined();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('wireRelayActions opens the matching modal from each button', async () => {

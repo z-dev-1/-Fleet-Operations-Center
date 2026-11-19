@@ -113,7 +113,23 @@ export function wrCardActionRowHtml(wr) {
 
 export function headerLifecycleButtonHtml(unit) {
   if (!unit || !unit.assetUrl) return '';
-  return '<button type="button" id="dp-lc-change" class="dp-launcher dp-launcher--lc" title="Change lifecycle in AAP (approval + confirm)">\u27F3 Change Lifecycle</button>';
+  // Icon-only, same size as the AAP / Relay / Portal / Daily launchers it sits with.
+  return '<button type="button" id="dp-lc-change" class="dp-launcher" title="Change Lifecycle" aria-label="Change Lifecycle">\u27F3</button>';
+}
+
+// The unit's known estimate amount for the HVE field (AAP estimatePendingCost), or 0.
+export function unitEstAmount(unit) {
+  const v = (unit || {}).estimatePendingCost;
+  const n = typeof v === 'string' ? Number(v.replace(/[$,\s]/g, '') || NaN) : Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// A planned/secondary WR carries its pending estimate as totalCost (same mapping as
+// main relay-comment-draft rowForWr).
+function _wrEstAmount(unit, wrId) {
+  const w = wrUnitOf(unit, wrId);
+  if (w === unit) return unitEstAmount(w);
+  return unitEstAmount(w) || unitEstAmount({ estimatePendingCost: w.totalCost });
 }
 
 // The plain string fields sent over IPC (main re-validates and caps them).
@@ -208,7 +224,8 @@ export function wrUnitOf(unit, wrId) {
 // ── body builders ───────────────────────────────────────────────────────────
 const NOTE_APPROVE = '<p class="ra-hint">You approve the exact text before anything is sent.</p>';
 
-export function escalationModalBody({ targets, current, labelOf } = {}) {
+export function escalationModalBody({ targets, current, labelOf, estAmount } = {}) {
+  const amt = Number(estAmount) > 0 ? String(Number(estAmount)) : '0';
   const ts = Array.isArray(targets) ? targets : resolveTargetOptions([]);
   const cur = Array.isArray(current) ? current : [];
   const lab = typeof labelOf === 'function' ? labelOf : (v) => v;
@@ -222,7 +239,7 @@ export function escalationModalBody({ targets, current, labelOf } = {}) {
   return '<div class="ra-modal ra-modal--esc">' +
     '<label>Escalate to <select id="ra-esc-target" class="detail-panel__select">' + opts + '</select></label>' +
     '<div id="ra-esc-current" class="ra-current">Current: ' + chips + '</div>' +
-    '<div id="ra-esc-hve" hidden>Est amount $ <input id="ra-esc-amount" type="number" min="0" step="0.01" value="0"> ' +
+    '<div id="ra-esc-hve" hidden>Est amount $ <input id="ra-esc-amount" type="number" min="0" step="0.01" value="' + escAttr(amt) + '"> ' +
       '<span class="ra-hint">' + escAttr(HVE_HINT) + '</span></div>' +
     '<div id="ra-esc-reactivation-hint" class="ra-hint" hidden>' + escAttr(REACTIVATION_HINT) + '</div>' +
     '<textarea id="ra-esc-reason" class="dp-escalate__comment" maxlength="' + ESC_MAX + '" rows="6" aria-label="Escalation reason" placeholder="Reason (internal only)"></textarea>' +
@@ -354,6 +371,7 @@ export async function openEscalationModal(unit, wrId, deps) {
   let q = () => null;
   let aiDrafted = false;
   let userTyped = false;
+  let amountTyped = false;
   let drafting = false;
   let sending = false;
 
@@ -408,7 +426,9 @@ export async function openEscalationModal(unit, wrId, deps) {
     if (btn) btn.disabled = true;
     let r;
     try {
-      const amt = Number((q('#ra-esc-amount') || {}).value) || 0;
+      // Only a typed amount is sent; untouched, main uses the unit's own estimate
+      // (offsite / Relay Garage, then AAP) or leaves the EST part out.
+      const amt = amountTyped ? (Number((q('#ra-esc-amount') || {}).value) || 0) : 0;
       r = await d.bridge.draftAction({ kind: 'escalation', target: key, workRequestId: wrId,
         unit: relayActionDraftUnit(u), userInputs: { estAmount: amt } });
     } catch (e) { r = { ok: false, error: e && e.message }; }
@@ -425,7 +445,7 @@ export async function openEscalationModal(unit, wrId, deps) {
   let upd = null;
   d.modal.show({
     title, width: 560,
-    body: escalationModalBody({ targets, current, labelOf }),
+    body: escalationModalBody({ targets, current, labelOf, estAmount: _wrEstAmount(u, wrId) }),
     actions: [
       { label: 'Cancel', cls: '', onClick: () => d.modal.close() },
       { label: 'Submit escalation', cls: 'primary', onClick: () => submit() },
@@ -439,6 +459,8 @@ export async function openEscalationModal(unit, wrId, deps) {
         if (hve) hve.hidden = tEl.value !== HVE_KEY;
         if (rh) rh.hidden = tEl.value !== REACT_KEY;
       });
+      const aEl = q('#ra-esc-amount');
+      if (aEl) aEl.addEventListener('input', () => { amountTyped = true; });
       const rEl = q('#ra-esc-reason');
       upd = _wireCount(rEl, q('#ra-esc-count'), () => {
         userTyped = true;

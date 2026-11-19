@@ -4899,7 +4899,6 @@ td:has(.pm-pills-row) {
 .dp-stage__sep { color: var(--mut); font-size: 10px; }
 .dp-stage__detail { font-size: 10px; color: var(--txt2); margin-top: 3px; }
 /* WR escalation card (Repair tab, under the Work Request card) */
-.dp-escalate-wrap { margin-top: 6px; }
 .dp-escalate { background: var(--card); border: 1px solid var(--bdr); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .dp-escalate__chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .dp-escalate__chip { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--txt); border: 1px solid var(--acc2); display: inline-flex; align-items: center; gap: 4px; }
@@ -4918,7 +4917,6 @@ td:has(.pm-pills-row) {
 /* Relay actions: WR-card action row + header Change Lifecycle (relay-actions.js) */
 .dp-ra-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 .dp-ra-btn { font-size: 10px; padding: 3px 10px; }
-.dp-launcher--lc { width: auto; padding: 0 9px; font-size: 11px; margin-left: 6px; border-color: var(--warn, var(--ylw)); color: var(--warn, var(--ylw)); }
 .ra-stale { color: var(--warn, var(--ylw)); font-size: 11px; }
 .ra-hint, .ra-fill-note { color: var(--txt2); font-size: 11px; }
 .dp-offsite-card__ts    { font-size: 9px; color: var(--mut); margin-top: 2px; }
