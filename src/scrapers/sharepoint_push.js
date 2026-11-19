@@ -5,6 +5,8 @@ const path = require('path');
 const { P } = require('../config/paths');
 const logger = require('../utils/logger').createLogger('sharepoint_push');
 const { withRetry } = require('../utils/retry');    // H-1: auth + digest retry
+// Column K is shared with partners: redact names/$ per line (stored text untouched).
+let _redactShare; try { _redactShare = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redactShare = (x) => x; }
 
 const SP_ORIGIN = 'https://amazon.sharepoint.com';
 const SP_SITE   = '/sites/AFP-FAS'; // Now overridable via config filePath
@@ -170,7 +172,7 @@ function buildRowValues(unit) {
       (unit.altId && unit.altId !== '\u2014' ? unit.altId : unit.alternativeId || ''), // H: RELAY GARAGE
       unit.savedOffsiteEvent || '',                             // I: OFFSITE SHOP EVENT (display)
       unit.savedSalesforceCase || '',                           // J: SALESFORCE CASE (display)
-      (unit.repairTimeline || unit.savedNotes || ''),           // K: REPAIR UPDATES (timeline)
+      String(unit.repairTimeline || unit.savedNotes || '').split('\n').map((l) => _redactShare(l)).join('\n'), // K: REPAIR UPDATES (timeline, redacted)
       unit.vendor || '',                                        // L: ASSIGNED VENDOR
       dateDown,                                                 // M: DATE DOWNED
       daysUnavail                                               // N: # DAYS UNAVAILABLE

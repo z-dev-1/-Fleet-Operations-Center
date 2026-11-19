@@ -16,6 +16,7 @@ const logger = require('../utils/logger')('deep-scan');
 const store  = require('../store');
 const crypto = require('crypto');
 const repairHistory = require('./repair-history');
+const TT = require('./timeline-text');
 
 const UNIT_TIMEOUT_MS = 180000;
 
@@ -80,6 +81,18 @@ function _stripTrailingGapFillers(text) {
     lines.pop();
   }
   return lines.join('\n');
+}
+
+// The deterministic post-processing chain applied to every AI timeline before
+// it is stored or shown: manual entries merged back, hidden entries removed,
+// meta lines cleaned (Next:/CONFLICT/PM-overdue), sorted, gap ranges
+// recomputed against real event days (timeline + raw source threads), and
+// trailing gap fillers stripped. Stored manualEntries are never modified.
+function _finishTimeline(text, ns, row) {
+  const n = ns || {};
+  return _stripTrailingGapFillers(TT.reconcileGapRanges(
+    _sortTimelineChronologically(TT.cleanTimelineMeta(_filterHiddenEntries(_mergeManualEntries(text, n.manualEntries), n.hiddenEntries))),
+    row ? TT.sourceEventMds(row) : []));
 }
 
 // Deep-scan base batch size (units processed in parallel per batch). History:
@@ -314,7 +327,7 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
           // AI regenerates the timeline purely from raw vendor/WO comments -- it has no
           // awareness of previously manually-added lines. Merge them back in so a rescan
           // never silently discards user-entered timeline entries (immutable truth).
-          const _rowTl = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(_stripCosts(val.timeline), ns.manualEntries), ns.hiddenEntries)));
+          const _rowTl = _finishTimeline(_stripCosts(val.timeline), ns, row);
           if (!_isPlaceholderRow(_rowTl) || _isPlaceholderRow(row.repairTimeline)) {
             row.repairTimeline = _rowTl;
           }
@@ -357,10 +370,15 @@ async function _runOrchaDeepScanBody(mergedRows, opts, jobRef) {
       };
       const _prevTl = ns.timeline || '';
       if (val.timeline) {
-        const _merged = _stripTrailingGapFillers(_sortTimelineChronologically(_filterHiddenEntries(_mergeManualEntries(val.timeline, ns.manualEntries), ns.hiddenEntries)));
+        const _merged = _finishTimeline(val.timeline, ns, row);
         // Only accept the new timeline if it is NOT a placeholder, OR the stored
         // one is already empty/placeholder too (nothing better to protect).
         if (!_isPlaceholder(_merged) || _isPlaceholder(_prevTl)) {
+          // Pre-WR history: lines dated before the current WR's created day
+          // would be lost when the new WR's timeline replaces this one.
+          const _carried = TT.carryPriorHistory({ prevTimeline: _prevTl, prevPrior: ns.priorHistory || '', newTimeline: _merged, createdIso: (row && row.created) || '', hiddenEntries: ns.hiddenEntries });
+          if (_carried && _carried !== (ns.priorHistory || '')) { ns.priorHistory = _carried; isChanged = true; }
+          if (row && ns.priorHistory) row.priorHistory = ns.priorHistory;
           ns.timeline = _merged;
           isChanged = true;
         } else {
@@ -928,6 +946,7 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
   if (_tl && _tl.ctx) {
     const g = await _gateTimelineOutput(u, _tl, { summary, correctedNotes, timeline }, askOrcha, {
       sourceData, today: _todayYmd, t0: _t0, rounds: _xf.reviewRounds, budget: tlRun && tlRun.budget,
+      prevTimeline: ns.timeline || '',
     });
     _noteDropped = !!correctedNotes && !g.correctedNotes;
     summary = g.summary;
@@ -937,7 +956,8 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
     const nDrops = Object.values(tlGate.drops).reduce((a, b) => a + b, 0);
     logger.info('[DS] tlGate ' + u.equipmentId + ' state=' + tlGate.state + ' drops=' + nDrops + ' ratio=' + tlGate.ratio
       + ' rounds=' + tlGate.rounds + ' self=' + tlGate.selfQuestions + ' skipped=' + (tlGate.reviewSkipped || '-')
-      + ' qa=' + tlGate.qaAnswered + '/' + tlGate.qaUnanswered + ' qaDrops=' + tlGate.qaDrops);
+      + ' qa=' + tlGate.qaAnswered + '/' + tlGate.qaUnanswered + ' qaDrops=' + tlGate.qaDrops
+      + (tlGate.restored > 0 ? ' restored=' + tlGate.restored : ''));
   }
 
   // Enforce note length cap
@@ -1031,6 +1051,10 @@ function _tlReviewPrompt(u, O, sheet, sourceData, cur, removals, asked) {
   ].join('\n');
 }
 
+function _padMdDs(md) {
+  return String(md || '').split('/').map((x) => x.padStart(2, '0')).join('/');
+}
+
 // Gate the draft, run the review loop, apply the timeline merge rule. Counts only in tlGate.
 async function _gateTimelineOutput(u, tl, out, askOrcha, o) {
   const O = tl.O;
@@ -1074,12 +1098,32 @@ async function _gateTimelineOutput(u, tl, out, askOrcha, o) {
     },
   });
   const cur = rv.cur;
+  // Review skipped (deadline/budget/ai-*): nothing rewrote the gate-dropped
+  // lines, so that day would read as a false "no update" gap. Restore the
+  // previous build's line for each dropped day the draft has no line for, if
+  // it still passes the same gate.
+  let restored = [];
+  if (!cur.replaced && rv.reviewSkipped && g0.dropped.length && o.prevTimeline && !cur.rejected) {
+    const mdOf = (l) => { const p = TT.LINE_RE.exec(String(l || '').trim()); return p ? { md: _padMdDs(p[1]), body: p[4] } : null; };
+    const droppedMds = new Set(g0.dropped.map((d) => mdOf(d.line)).filter(Boolean).map((p) => p.md));
+    const keptMds = new Set(cur.lines.map(mdOf).filter(Boolean).map((p) => p.md));
+    const prevCandidates = String(o.prevTimeline).split('\n').filter((l) => {
+      const p = mdOf(l);
+      return p && droppedMds.has(p.md) && !keptMds.has(p.md) && !TT.GAP_BODY_RE.test(p.body.trim());
+    });
+    if (prevCandidates.length) {
+      const gp = O.gateTimeline(prevCandidates.join('\n'), ctx, { today: o.today });
+      restored = gp.kept.filter((l) => { const p = mdOf(l); return p && !TT.GAP_BODY_RE.test(p.body.trim()); });
+      if (restored.length) cur.lines = cur.lines.concat(restored);
+    }
+  }
   const timeline = !cur.rejected && cur.lines.length ? cur.lines.join('\n') : null;
   const tlGate = {
     state: timeline == null ? 'rejected' : (cur.replaced ? 'reviewed' : 'ok'),
     drops, ratio: Math.round(g0.ratio * 100) / 100, rounds: rv.rounds, selfQuestions: rv.selfQuestions,
     reviewSkipped: rv.reviewSkipped || null, qaAnswered: rv.qa.answered.length, qaUnanswered: rv.qa.unanswered.length, qaDrops: rv.qa.qaDrops,
   };
+  if (restored.length > 0) tlGate.restored = restored.length;
   return { summary: cur.summary || null, correctedNotes: cur.note || null, timeline, tlGate };
 }
 
@@ -1238,4 +1282,6 @@ function _outOfScopeNote(u) { return {
   source: 'deep-scan', severity: 'medium' }; }
 
 module.exports = { runOrchaDeepScan, rebuildUnitTimeline, deepScanBatchSize, DS_BATCH_SIZE, isOffsiteCacheFresh, OFFSITE_CACHE_FRESH_MS, _mergeManualEntries, _filterHiddenEntries, _timelineEntrySignature, _stripTrailingGapFillers, _aiInputSig, _repairDoneNote, _outOfScopeNote,
-  _processUnit, TL_DEADLINE_MS, TL_REVIEW_MIN_MS, TL_REVIEW_CALL_MS };
+  _processUnit, TL_DEADLINE_MS, TL_REVIEW_MIN_MS, TL_REVIEW_CALL_MS,
+  _finishTimeline, cleanTimelineMeta: TT.cleanTimelineMeta, reconcileGapRanges: TT.reconcileGapRanges,
+  sourceEventMds: TT.sourceEventMds, carryPriorHistory: TT.carryPriorHistory };

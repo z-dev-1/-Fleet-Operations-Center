@@ -65,6 +65,7 @@ function _stripContacts(text, strict) {
 // KEEP_ORG_RE: "Uptime Center", "Bergey's Truck Centers", "Berman", DTNA.
 const EMAIL_ORG_RE = /(cent(?:er|re)s?|service|repair|shop|garage|motors|parts|diesel|tire|towing|uptime|dtna|daimler|decisiv|berman|bergey|\binc\b|\bllc\b|\bcorp\b)/i;
 function _isOrg(s) { return KEEP_ORG_RE.test(s) || EMAIL_ORG_RE.test(s); }
+const DATED_NAME_RE = new RegExp('((?:^|\\n)[ \\t]*\\d{1,2}\\/\\d{1,2}(?:\\s*-\\s*\\d{1,2}\\/\\d{1,2})?\\s+[-\\u2013]\\s+(?:\\[[^\\]\\n]{0,40}\\]\\s+)?)(' + NAME_SEQ + ')\\s+-\\s*(?=[A-Za-z])', 'g');
 
 // Remove the personal-name part of "<Name> - <Company> (Role)" style headers,
 // keeping the company/role. Also handles "to <NAME> - <Company>".
@@ -85,6 +86,9 @@ function _stripNameHeaders(text, strict) {
     new RegExp('(^|[\\n\\.;:,]\\s*)(' + NAME_SEQ + ')' + dash + '(?=[A-Za-z])', 'g'),
     (full, pre, name) => (strict && _isOrg(name) ? full : pre)
   );
+  // Dated timeline line "MM/DD - Firstname Lastname - Company" -> "MM/DD - Company"
+  // (spaced dash only; a company-like "name" is kept).
+  if (!strict) s = s.replace(DATED_NAME_RE, (full, pre, name) => (_isOrg(name) ? full : pre));
   return s;
 }
 
@@ -104,7 +108,26 @@ function _stripSignatureTails(text, strict) {
  * redactForSharing(text) -> redacted string. Never throws; returns '' for
  * empty/non-string input and the cleaned text otherwise.
  */
-function redactForSharing(text) { return _redact(text, false); }
+function redactForSharing(text) {
+  if (text == null) return '';
+  const s = String(text);
+  if (!s.trim()) return s;
+  try {
+    return _redact(_stripPerAttrib(s), false);
+  } catch (_) {
+    return _redact(text, false);
+  }
+}
+
+// Email-attribution tails the AI timeline writer appends, e.g.
+// "(per Z Santiago email 11/16)" / "(per Santiago, Z email 10/27)".
+// Keeps vendor/shop attributions ("per Amerit email", "per Uptime Center
+// email") via _isOrg.
+const PER_ATTRIB_RE = /\bper\s+([A-Z][a-zA-Z'’.-]*(?:,?\s+[A-Z][a-zA-Z'’.-]*){0,3})\s+(e-?mail|call|text|message|msg|voicemail)\b/g;
+function _stripPerAttrib(s) {
+  PER_ATTRIB_RE.lastIndex = 0;
+  return s.replace(PER_ATTRIB_RE, (m, name, via) => (_isOrg(name) ? m : 'per ' + via));
+}
 
 function _redact(text, strict) {
   if (text == null) return '';
@@ -130,27 +153,20 @@ function _redact(text, strict) {
   return s;
 }
 
-// Email-attribution tails the AI timeline writer appends, e.g.
-// "(per Z Santiago email 11/16)" / "(per Santiago, Z email 10/27)".
-// Keeps vendor/shop attributions ("per Amerit email", "per Uptime Center
-// email") via _isOrg.
-const PER_ATTRIB_RE = /\bper\s+([A-Z][a-zA-Z'’.-]*(?:,?\s+[A-Z][a-zA-Z'’.-]*){0,3})\s+(e-?mail|call|text|message|msg|voicemail)\b/g;
-
 /**
  * redactForEmail(text) -> the same redaction as redactForSharing() in strict
  * mode (see _stripNameHeaders / _stripContacts), plus shapes seen in the
  * SOS/EOS report data that the sharing redaction misses: "per <Name> email"
- * attributions and "$2.5K"-style / backslash-escaped ("\$2,340.00") dollar
- * amounts. Used only by src/scrapers/emailBuilder.js at render time, so
- * redactForSharing() (carrier briefing) and the renderer twin
- * (renderer/src/js/util/redact.js) behave exactly as before. Never throws.
+ * attributions (also applied by redactForSharing) and "$2.5K"-style /
+ * backslash-escaped ("\$2,340.00") dollar amounts. Used only by
+ * src/scrapers/emailBuilder.js at render time. Never throws.
  */
 function redactForEmail(text) {
   if (text == null) return '';
   let s = String(text);
   if (!s.trim()) return s;
   try {
-    s = s.replace(PER_ATTRIB_RE, (m, name, via) => (_isOrg(name) ? m : 'per ' + via));
+    s = _stripPerAttrib(s);
     s = s.replace(/\\?\$\s?[\d,]*\.?\d+\s?[kKmM]\b/g, ' ').replace(/\\(?=\$)/g, '');
   } catch (_) { /* fall through to the shared redaction */ }
   return _redact(s, true);

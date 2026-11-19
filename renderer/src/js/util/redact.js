@@ -9,6 +9,14 @@
 
 const KEEP_ORG_RE = /(amazon|logistics|amzl|fleet|relay|volvo|freightliner|kenworth|peterbilt|mack|international|cummins|navistar|paccar|travelcenters|\bta\b|amerit|cox|velociti|fleetnet|rush|hunter|kooner|goodyear|penske|ryder|dealer|truck|group|northeast|insurance|vanliner|protective)/i;
 const NAME_SEQ = String.raw`[A-Z][a-zA-Z'’.-]+(?:\s+[A-Z][a-zA-Z'’.-]+){0,3}`;
+const EMAIL_ORG_RE = /(cent(?:er|re)s?|service|repair|shop|garage|motors|parts|diesel|tire|towing|uptime|dtna|daimler|decisiv|berman|bergey|\binc\b|\bllc\b|\bcorp\b)/i;
+function _isOrg(s) { return KEEP_ORG_RE.test(s) || EMAIL_ORG_RE.test(s); }
+const DATED_NAME_RE = new RegExp('((?:^|\\n)[ \\t]*\\d{1,2}\\/\\d{1,2}(?:\\s*-\\s*\\d{1,2}\\/\\d{1,2})?\\s+[-\\u2013]\\s+(?:\\[[^\\]\\n]{0,40}\\]\\s+)?)(' + NAME_SEQ + ')\\s+-\\s*(?=[A-Za-z])', 'g');
+const PER_ATTRIB_RE = /\bper\s+([A-Z][a-zA-Z'’.-]*(?:,?\s+[A-Z][a-zA-Z'’.-]*){0,3})\s+(e-?mail|call|text|message|msg|voicemail)\b/g;
+function _stripPerAttrib(s) {
+  PER_ATTRIB_RE.lastIndex = 0;
+  return s.replace(PER_ATTRIB_RE, (m, name, via) => (_isOrg(name) ? m : 'per ' + via));
+}
 
 function _stripMoney(text) {
   return text
@@ -34,6 +42,7 @@ function _stripNameHeaders(text) {
     new RegExp('(^|[\\n\\.;:,]\\s*)' + NAME_SEQ + '\\s*-\\s*(?=[A-Za-z])', 'g'),
     (full, pre) => pre
   );
+  s = s.replace(DATED_NAME_RE, (full, pre, name) => (_isOrg(name) ? full : pre));
   return s;
 }
 
@@ -46,6 +55,16 @@ function _stripSignatureTails(text) {
 
 export function redactForSharing(text) {
   if (text == null) return '';
+  const s = String(text);
+  if (!s.trim()) return s;
+  try {
+    return _redact(_stripPerAttrib(s));
+  } catch (_) {
+    return _redact(s);
+  }
+}
+
+function _redact(text) {
   let s = String(text);
   if (!s.trim()) return s;
   try {
