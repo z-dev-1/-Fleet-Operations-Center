@@ -114,4 +114,66 @@ function seedBaseline(store, fx, sentAt) {
   store.save('emailLastSnapshot', root);
 }
 
-module.exports = { auvte, mixed, seedBaseline, fmtDate, UUID, UUID2, LONG_ISSUE };
+// Short pill form relay.js _formatPmDate emits for today/future: "Mon D" (no year).
+function shortDate(offsetDays) {
+  const d = new Date(); d.setHours(12, 0, 0, 0); d.setDate(d.getDate() + offsetDays);
+  return MON[d.getMonth()] + ' ' + d.getDate();
+}
+// "Mon YYYY" month-only raw due form (AAP MONTH_AND_YEAR).
+function monthYear(offsetMonths) {
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + offsetMonths);
+  return MON[d.getMonth()] + ' ' + d.getFullYear();
+}
+
+// FLD260703 shape (live data 11/19): down, lifecycleReason Damaged-Moderate
+// (not "offsite"), vendor Freightliner (DAIMLER), DTNA case + SF case, long
+// Alt ID, rich timeline. Seeded with dollar amounts and personal names in the
+// stored timeline/issue so render-time redaction can be checked.
+const FLD_NAMES = ['Tiberius Blackshear', 'Santiago', 'Christy Adriaansen', 'Jane Doe'];
+const FLD_TIMELINE = [
+  '11/17 - Work order created with Freightliner (DAIMLER) for malfunctioning parking/door sensor. Unit towed to dealer (tow ref amz-r938dmz7fhqtg8). DTNA case opened (ref 500gx000003O1RBAA0).',
+  '11/17 - Salesforce case 00036143 created to track potential carrier pickup (per Tiberius Blackshear email 11/17).',
+  '11/18 - Berman Truck Group (Leesport, PA) estimate $1,284.50 submitted; tow invoice $350 (per Santiago, Z email 11/18).',
+  '11/19 - Kenworth Northeast Group confirmed diagnosis, EST \\$2.5K pending approval (per Z Santiago email 11/19). Christy Adriaansen - Kenworth Northeast Group (Service Advisor) scheduled the appointment.',
+].join('\n');
+const FLD_ISSUE = 'Parking/door sensor malfunctioning and generating false alerts; dealer quoted $640.00 for the sensor.';
+
+function fldUnits() {
+  const base = { op: 'TUZR', site: 'ABE40', bodyType: 'Sleeper', atsState: 'Available', model: 'FREIGHTLINER' };
+  return [
+    { ...base, id: 'FLD260703', atsState: 'Unavailable', relayStatus: 'Damaged-Moderate', duration: '1d 12h 38m',
+      vendor: 'Freightliner (DAIMLER)', geofence: 'ABE40', savedRepairStatus: 'Appointment scheduled', savedPrimaryComponent: 'ELECTRICAL',
+      altId: 'amz-vvfnvm6rhep2et', serviceUrl: 'https://aap.example.com/v2/service/0918f605',
+      offsiteShopEvent: 'DTNA Case', offsiteShopEventUrl: 'https://dtna.example.com/case/500gx000003O1',
+      savedSalesforceCase: '00036143', savedSalesforceCaseUrl: 'https://sf.example.com/case/00036143',
+      pmB: shortDate(80), pmBDue: fmtDate(80), dot: shortDate(330), dotDue: fmtDate(330) },
+    // Down, non-offsite, vendor + issue only (no timeline)
+    { ...base, id: 'FLD300010', atsState: 'Unavailable', relayStatus: 'Damaged-Minor', duration: '3d 1h 0m',
+      vendor: 'COX', issue: 'Mirror bracket cracked, Jane Doe - COX (Service Writer) quoted $95.' },
+    // Down, nothing at all -> Relay Garage "—"
+    { ...base, id: 'FLD300011', atsState: 'Unavailable', relayStatus: 'Damaged-Minor', duration: '0d 4h 0m' },
+    // PM/DOT field-mapping cases
+    { ...base, id: 'FLD300001', pmB: 'overdue', pmBDue: fmtDate(-9) },          // short says only "overdue"; raw has the date
+    { ...base, id: 'FLD300002', dot: shortDate(25) },                           // short form only, due in 25d
+    { ...base, id: 'FLD300003' },                                               // no PM fields on the unit (scheduler shape); raw in fleetData
+    { ...base, id: 'FLD300004', pmB: '--' },                                    // compose fallback '--'; raw in fleetData
+    { ...base, id: 'FLD300005', pmXDue: fmtDate(60), dotDue: fmtDate(61) },     // 60d boundary
+  ];
+}
+// Persisted fleet rows (store 'fleetData') carrying the raw due fields the send
+// paths do not map onto units.
+const fldFleetRows = () => [
+  { equipmentId: 'FLD300003', dotDue: 'Overdue 4 days', pmXDue: monthYear(-2) },
+  { equipmentId: 'FLD300004', pmBDue: fmtDate(30) },
+];
+const fld = {
+  operator: 'TUZR', domicile: 'ABE40', slot: 'PM', scopeKey: 'TUZR_ABE40_PM',
+  get units() { return fldUnits(); },
+  relayCache: {},
+  notesStore: { FLD260703: { timeline: FLD_TIMELINE, issueSummary: FLD_ISSUE } },
+  fleetRows: fldFleetRows,
+  names: FLD_NAMES,
+  newIds: ['FLD300010'], returnedId: 'FLD300003',
+};
+
+module.exports = { auvte, mixed, fld, seedBaseline, fmtDate, shortDate, monthYear, UUID, UUID2, LONG_ISSUE, FLD_TIMELINE, FLD_ISSUE };

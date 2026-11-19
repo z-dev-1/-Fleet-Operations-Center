@@ -12,9 +12,10 @@ const fx = require('../tests/fixtures/eos-report-fixtures');
 
 const outDir = path.join(__dirname, '..', 'docs');
 fs.mkdirSync(outDir, { recursive: true });
-const jobs = [['_built_eos_auvte.html', fx.auvte], ['_built_eos_mixed.html', fx.mixed]];
+const jobs = [['_built_eos_auvte.html', fx.auvte], ['_built_eos_mixed.html', fx.mixed], ['_built_eos_fld260703.html', fx.fld]];
 for (const [name, f] of jobs) {
   fx.seedBaseline(store, f);
+  store.save('fleetData', { rows: f.fleetRows ? f.fleetRows() : [] });
   const html = buildEmail({
     operator: f.operator, domicile: f.domicile, slot: f.slot, units: f.units, testMode: false,
     relayCache: f.relayCache, notesStore: f.notesStore, emailNote: 'Yard closes early Friday',

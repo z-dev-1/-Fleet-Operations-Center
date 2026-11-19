@@ -8,6 +8,9 @@ const fs   = require('fs');
 const path = require('path');
 const logger = require('../utils/logger').createLogger('emailBuilder');
 const TEMPLATE_PATH = path.join(__dirname, 'email_template.html');
+// Render-time redaction (personal names + dollar amounts) for free text that
+// goes into the email. Stored timeline / notes are never modified.
+const { redactForEmail } = require('../orcha/redact_sharing');
 
 function ft(color, text, extra) {
   return `<font color="${color}" face="Arial,sans-serif"${extra ? ' style="'+extra+'"' : ''}>${text}</font>`;
@@ -79,6 +82,11 @@ function _sectionRow(bg, content, pad, extra) {
 // date "Mon DD, YYYY" -> whole calendar days between local midnights
 // (Math.round). Other overdue forms ("Overdue 5 months", "overdue", past
 // month-only dates) are overdue with no day count.
+// Accepted inputs: the raw AAP due fields (pmBDue etc.: "Mon D, YYYY",
+// "Mon YYYY" = last day of that month as in relay.js _formatPmDate,
+// "Overdue N days"), the short pill value (pmB etc.: "overdue" | "Mon D",
+// which relay.js only emits for today or later, so it is the next such
+// date), and ISO "YYYY-MM-DD" (local date).
 // Returns null (no data), {overdue:true, days}, or {overdue:false, dueIn, label}.
 function _pmInfo(val, now) {
   const t = String(val == null ? '' : val).trim();
@@ -87,23 +95,41 @@ function _pmInfo(val, now) {
   if (m) { const n = parseInt(m[1], 10); return { overdue: true, days: n > 0 ? n : null }; }
   if (/^overdue\b/i.test(t)) return { overdue: true, days: null };
   const today = new Date(now.getTime()); today.setHours(0, 0, 0, 0);
-  m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
-  if (m) {
-    const d = new Date(m[1] + ' ' + m[2] + ', ' + m[3]);
+  const dayLabel = (d) => { const dd = d.getDate(); return MONTHS_SHORT[d.getMonth()] + ' ' + (dd < 10 ? '0' + dd : '' + dd); };
+  const classify = (d, label, exactDays) => {
     if (isNaN(d.getTime())) return null;
     d.setHours(0, 0, 0, 0);
     const n = Math.round((today - d) / 86400000);
-    if (n > 0) return { overdue: true, days: n };
-    const dd = d.getDate();
-    return { overdue: false, dueIn: -n, label: MONTHS_SHORT[d.getMonth()] + ' ' + (dd < 10 ? '0' + dd : '' + dd) };
+    if (n > 0) return { overdue: true, days: exactDays ? n : null };
+    return { overdue: false, dueIn: -n, label: label || dayLabel(d) };
+  };
+  m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (m) return classify(new Date(m[1] + ' ' + m[2] + ', ' + m[3]), '', true);
+  m = t.match(/^(\d{4})-(\d{2})-(\d{2})(?:$|T)/);
+  if (m) return classify(new Date(+m[1], +m[2] - 1, +m[3]), '', true);
+  m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{4})$/);
+  if (m) {
+    const first = new Date(m[1] + ' 1, ' + m[2]);
+    if (isNaN(first.getTime())) return null;
+    return classify(new Date(first.getFullYear(), first.getMonth() + 1, 0), MONTHS_SHORT[first.getMonth()] + ' ' + m[2], false);
   }
-  const d = new Date(t);
-  if (isNaN(d.getTime())) return null;
-  d.setHours(0, 0, 0, 0);
-  const n = Math.round((today - d) / 86400000);
-  if (n > 0) return { overdue: true, days: null };
-  return { overdue: false, dueIn: -n, label: t };
+  m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2})$/);
+  if (m) {
+    let d = new Date(m[1] + ' ' + m[2] + ', ' + today.getFullYear());
+    if (isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    if (d < today) d = new Date(d.getFullYear() + 1, d.getMonth(), d.getDate());
+    return classify(d, '', true);
+  }
+  return null;
 }
+// Raw AAP due field for each short PM key (same map as the in-app
+// renderer/src/js/util/pm-overdue.js PM_RAW_KEY).
+const PM_RAW_KEY = { pmB: 'pmBDue', pmX: 'pmXDue', dot: 'dotDue', quarterlyLift: 'quarterlyLiftDue' };
+
+// Free text -> redacted (names, $ amounts) -> HTML-escaped. Redaction runs
+// on plain text before escaping/link-building; the source string is untouched.
+function _safeText(s) { return _esc(redactForEmail(s)); }
 
 // Uptake asset uuid: explicit field when a caller provides it, else parsed
 // from the insight deep link (https://fleet.uptake.com/asset/<uuid>/insights/..)
@@ -128,10 +154,23 @@ function buildEmail(opts) {
   const { operator, domicile, units, slot, testMode, relayCache, notesStore, emailNote } = opts;
   let template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
+  // Raw AAP PM/DOT due fields (pmBDue etc.) live on the persisted fleet rows.
+  // The send paths map rows to units without them (and the compose fallback
+  // derives pmB from the legacy dueDate string, which is empty), so read them
+  // here by unit id. Read-only.
+  const fdById = {};
+  try {
+    const fd = require('../store').load('fleetData', { rows: [] });
+    (Array.isArray(fd && fd.rows) ? fd.rows : []).forEach(r => { if (r && r.equipmentId) fdById[r.equipmentId] = r; });
+  } catch (e) { logger.warn('fleetData PM lookup failed (non-fatal):', e.message); }
+
   // Merge relay cache + notes into units (fills in altId, vendor, duration etc. from cache)
   const allUnits = (units || []).map(u => {
     const rc = (relayCache && relayCache[u.id]) || {};
     const ns = (notesStore && notesStore[u.id]) || {};
+    const fr = fdById[u.id] || {};
+    const pmRaw = {};
+    Object.keys(PM_RAW_KEY).forEach(k => { const rk = PM_RAW_KEY[k]; pmRaw[rk] = u[rk] || fr[rk] || ''; });
 
     // Model/Make: prefer relay cache (FREIGHTLINER, VOLVO etc.) over Uptake (MODEL YEAR 2021)
     let model = u.model || '';
@@ -142,6 +181,7 @@ function buildEmail(opts) {
 
     return {
       ...u,
+      ...pmRaw,
       model: model,
 
       altId: u.altId || rc.altId || ns.altId || '',
@@ -280,7 +320,8 @@ ${heroTile('#1565c0', '#d6e7fb', 'FLEET', totalUnits, '', fleetLines)}
   const pmOverdue = [], pmDue = [];
   filteredUnits.forEach(u => {
     pmTypes.forEach(([label, key]) => {
-      const info = _pmInfo(u[key], now);
+      // Raw AAP due date first (exact "Nd over"), else the short pill value.
+      const info = _pmInfo(u[PM_RAW_KEY[key]], now) || _pmInfo(u[key], now);
       if (!info) return;
       if (info.overdue) pmOverdue.push({ id: u.id, label, days: info.days });
       else if (info.dueIn <= 60) pmDue.push({ id: u.id, label, dueIn: info.dueIn, date: info.label });
@@ -366,7 +407,9 @@ ${heroTile('#1565c0', '#d6e7fb', 'FLEET', totalUnits, '', fleetLines)}
       const timeline = u.repairTimeline || u.savedTimeline || '';
       // BUG FIX (2026-07-16): never fall back to u.savedNotes (private
       // scratchpad). Only the repair timeline goes out in the email.
-      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => _esc(l.trim())).join('<br>') : '\u2014';
+      // Redacted per line (names, $ amounts); the stored timeline is untouched.
+      const tlLines = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => _safeText(l.trim())).filter(Boolean) : [];
+      const notes = tlLines.length ? tlLines.join('<br>') : '\u2014';
 
       // Case / Offsite: Alt ID + Offsite Event + Salesforce Case (all hyperlinked)
       const altId = u.altId || '';
@@ -376,25 +419,34 @@ ${heroTile('#1565c0', '#d6e7fb', 'FLEET', totalUnits, '', fleetLines)}
       const sfUrl = u.savedSalesforceCaseUrl || '';
       const serviceUrl = u.serviceUrl || '';
       const caseParts = [];
-      const caseItem = (label, val, url) => ft('#94a3b8', '&nbsp;&#183;&nbsp;' + label + ' ', 'font-size:10px') +
+      // Plain space before the dot so a long line breaks between items.
+      const caseItem = (label, val, url) => ft('#94a3b8', ' &#183;&nbsp;' + label + ' ', 'font-size:10px') +
         (url ? link(url, val) : ft('#1a56db', '<b>' + _esc(val) + '</b>', 'font-size:10px'));
       if (altId) caseParts.push(caseItem('Alt ID', altId, serviceUrl));
       if (offsiteEvent) caseParts.push(caseItem('Offsite', offsiteEvent, offsiteUrl));
       if (sfCase) caseParts.push(caseItem('Case', sfCase, sfUrl));
 
-      // Relay Garage (same gating as before: offsite + vendor)
+      // Relay Garage: every down unit with a vendor/dealer, an issue summary,
+      // or a timeline gets a block (was offsite + vendor only). Vendor (or
+      // dealer / sub-vendor) bold, location, Down, AI issue, freshest
+      // timeline line. "—" only when none of that exists.
       let rgHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
-      if (/offsite/i.test(u.relayStatus || '') && vendor) {
-        rgHtml = ft('#1e2d3d', '<b>' + _esc(vendor) + '</b>', 'font-size:11px');
+      // subVendor falls back to geofence in the merge above; don't print it as a vendor.
+      const _subV = [u.subVendor, u.dealerName].find(s => s && s !== u.geofence) || '';
+      const rgVendor = vendor || _subV;
+      const aiIssue = _safeText(u.issueSummary || u.issue || '');
+      const lastUpdate = tlLines.length ? tlLines[tlLines.length - 1] : '';
+      if (rgVendor || aiIssue || lastUpdate) {
+        rgHtml = rgVendor ? ft('#1e2d3d', '<b>' + _esc(rgVendor) + '</b>', 'font-size:11px') : '';
         const extra = [];
-        const _subV = u.subVendor || u.dealerName || '';
-        // subVendor falls back to geofence in the merge above; don't print it twice.
-        if (_subV && _subV !== vendor && _subV !== u.geofence) extra.push(_esc(_subV));
+        if (_subV && _subV !== rgVendor) extra.push(_esc(_subV));
         if (u.geofence) extra.push('\uD83D\uDCCD ' + _esc(u.geofence));
-        if (extra.length) rgHtml += ' ' + ft('#7c3aed', '&#183; ' + extra.join(' &#183; '), 'font-size:10px');
-        if (duration) rgHtml += '<br>' + ft(sev.text, '<b>Down: ' + _esc(duration) + '</b>', 'font-size:10px');
-        const aiIssue = u.issueSummary || u.issue || '';
-        if (aiIssue) rgHtml += '<br>' + ft('#555555', '<i>' + _esc(aiIssue) + '</i>', 'font-size:10px');
+        if (extra.length) rgHtml += (rgHtml ? ' ' : '') + ft('#7c3aed', (rgHtml ? '&#183; ' : '') + extra.join(' &#183; '), 'font-size:10px');
+        const rgLines = [];
+        if (duration) rgLines.push(ft(sev.text, '<b>Down: ' + _esc(duration) + '</b>', 'font-size:10px'));
+        if (aiIssue) rgLines.push(ft('#555555', '<i>' + aiIssue + '</i>', 'font-size:10px'));
+        if (lastUpdate) rgLines.push(ft('#64748a', '<b>Last update:</b> ', 'font-size:10px') + ft('#374151', lastUpdate, 'font-size:10px'));
+        rgHtml += (rgHtml && rgLines.length ? '<br>' : '') + rgLines.join('<br>');
       }
 
       const compReason = [u.savedPrimaryComponent, u.relayStatus].filter(s => s && s !== '--').map(_esc).join(' &#183; ');
@@ -407,12 +459,14 @@ ${ft('#1a56db', '<b>' + _esc(u.id || '--') + '</b>', 'font-size:15px;font-weight
 &nbsp;${_bodyBadge(bodyLabel(u))}
 ${compReason ? '&nbsp;' + ft('#64748a', compReason, 'font-size:10px') : ''}
 <br>${ft('#64748a', where, 'font-size:10px')}
-<br>${ft(rsColor, '<b>' + _esc(repairStatus) + '</b>', 'font-size:11px')}${caseParts.join('')}
 </td>
 <td valign="top" align="right" width="38%">
 <table ${TBL} align="right"><tr><td bgcolor="${sev.pillBg}" style="background-color:${sev.pillBg};border-radius:10px;padding:4px 10px;text-align:right;">${ft(sev.pillFg, '<b>&#9660; DOWN' + (duration ? ' ' + _esc(duration) : '') + '</b>', 'font-size:11px')}</td></tr></table>
 </td>
-</tr></table>`;
+</tr>
+<tr><td colspan="2" valign="top" width="100%" class="eos-meta" style="width:100%;padding-top:3px;line-height:1.5;word-wrap:break-word;word-break:break-word;overflow-wrap:anywhere;">
+${ft(rsColor, '<b>' + _esc(repairStatus) + '</b>', 'font-size:11px')}${caseParts.join('')}
+</td></tr></table>`;
       const body = `<table ${TBL} width="100%" style="margin-top:8px;"><tr>
 <td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
 ${ft('#64748a', 'RELAY GARAGE', 'font-size:9px;letter-spacing:0.08em')}<br>
@@ -483,7 +537,7 @@ ${ft('#374151', notes, 'font-size:10px;line-height:1.5')}
       const wr = u.issue || u.issueSummary || '';
       const inner = ft('#1a56db', '<b>' + _esc(u.id || '--') + '</b>', 'font-size:13px') + '&nbsp;' + _makeBadge(u.model) +
         '<br>' + ft('#b87a00', '<b>ORDERED &#183; ' + _esc(u.relayStatus || 'Pending Delivery') + '</b>', 'font-size:10px') +
-        (wr ? '<br>' + ft('#555555', _esc(wr), 'font-size:10px') : '');
+        (wr ? '<br>' + ft('#555555', _safeText(wr), 'font-size:10px') : '');
       deliveryHtml += `<table ${TBL} width="100%" style="margin-top:6px;"><tr><td>${_spineCard('#0e7490', inner, '#cfe9f2', '#ffffff', '10px 12px')}</td></tr></table>`;
     });
   }

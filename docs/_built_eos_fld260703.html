@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
+<!--[if gte mso 9]><xml><o:OfficeDocumentSettings><o:AllowPNG/><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml><![endif]-->
+</head>
+<body style="margin:0;padding:0;background-color:#e9edf3;font-family:Arial,sans-serif;">
+<!-- REDESIGN (2026-11, v3): OWA-safe light shell. No style element, no div
+     wrappers, no gradient or image fills, no alpha colors. Layout = nested presentation tables;
+     every fill is bgcolor + inline background-color; text via <font>. Light
+     backgrounds + dark text + a few strong solid accent tiles so the report
+     reads in both light and dark mode. Section placeholders are complete
+     <tr> rows (or empty) built by emailBuilder.js. -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#e9edf3" style="background-color:#e9edf3;">
+<tr><td align="center" bgcolor="#e9edf3" style="background-color:#e9edf3;padding:24px 12px;">
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="940" bgcolor="#ffffff" style="max-width:940px;background-color:#ffffff;border:1px solid #d3dae5;border-radius:14px;overflow:hidden;">
+
+  <!-- Permanent accent bar. Inner text blank by default, "TEST" only during testMode sends. -->
+  <tr><td bgcolor="#b84500" style="background-color:#b84500;padding:5px 16px;text-align:center;">
+    <font color="#ffffff" face="Arial,sans-serif" style="font-size:10px;letter-spacing:0.25em;">&nbsp;</font>
+  </td></tr>
+
+  <!-- HERO (light, dark-mode safe) -->
+  <tr><td bgcolor="#f5f8fc" style="background-color:#f5f8fc;padding:0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+      <td valign="top" width="42%" style="padding:22px 20px 16px 28px;">
+        <font color="#1565c0" face="Arial,sans-serif" style="font-size:10px;font-weight:bold;letter-spacing:0.20em;">FLEET OPERATIONS &#183; TUZR &#183; ABE40</font><br>
+        <font color="#0f1b2d" face="Arial,sans-serif" style="font-size:24px;font-weight:bold;"><b>End of Shift Report</b></font><br>
+        <font color="#64748a" face="Arial,sans-serif" style="font-size:11px;">Thursday, November 19, 2026 — 3:59 AM EDT</font>
+      </td>
+      <td valign="middle" align="right" width="58%" style="padding:16px 28px 12px 8px;">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr>
+<td bgcolor="#dc2626" valign="top" style="background-color:#dc2626;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#ffe0e0" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">UNITS DOWN</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>3</b></font><font color="#ffe0e0" face="Arial,sans-serif" style="font-size:12px">&nbsp;/ 8</font><br>
+<font color="#ffe0e0" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">Sleeper 3</font>
+</td>
+<td width="8" style="width:8px;">&nbsp;</td>
+<td bgcolor="#16a34a" valign="top" style="background-color:#16a34a;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#dcfce7" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">IN SERVICE</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>63</b></font><font color="#dcfce7" face="Arial,sans-serif" style="font-size:12px">%</font><br>
+<font color="#dcfce7" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">5 of 8</font>
+</td>
+<td width="8" style="width:8px;">&nbsp;</td>
+<td bgcolor="#1565c0" valign="top" style="background-color:#1565c0;border-radius:10px;padding:10px 14px;text-align:center;">
+<font color="#d6e7fb" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.12em">FLEET</font><br>
+<font color="#ffffff" face="Arial,sans-serif" style="font-size:28px;font-weight:bold"><b>8</b></font><br>
+<font color="#d6e7fb" face="Arial,sans-serif" style="font-size:9px;line-height:1.5">Sleeper 8</font>
+</td>
+</tr></table>
+      </td>
+    </tr></table>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr><td bgcolor="#dc2626" width="37%" style="background-color:#dc2626;height:5px;line-height:5px;font-size:1px;">&nbsp;</td><td bgcolor="#16a34a" width="63%" style="background-color:#16a34a;height:5px;line-height:5px;font-size:1px;">&nbsp;</td></tr></table>
+  </td></tr>
+
+  <!-- Slot badge + quick line (light) -->
+  <tr><td bgcolor="#f4f6f9" style="background-color:#f4f6f9;padding:9px 28px;border-bottom:1px solid #e2e8f0;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #e6b84d;border-radius:12px;padding:3px 12px;"><font color="#b87a00" face="Arial,sans-serif" style="font-size:10px;"><b>🌆 EOS REPORT</b></font></td></tr></table>
+    <font color="#475569" face="Arial,sans-serif" style="font-size:10px;">&nbsp;&nbsp;3 down &#183; 3 PM/DOT overdue &#183; 0 new deliveries &#183; 0 very-high risk</font>
+  </td></tr>
+
+  <!-- Note bar (optional, injected when emailNote present) -->
+  <tr><td bgcolor="#fdf3f3" style="background-color:#fdf3f3;padding:10px 28px;border-bottom:1px solid #f3dede;"><font color="#dc2626" face="Arial,sans-serif" style="font-size:12px;font-weight:bold;">NOTE: Yard closes early Friday</font></td></tr>
+
+  <!-- Change since last report (optional, only with a baseline) -->
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 28px 2px 28px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">SINCE LAST REPORT (PM / EOS &#183; Nov 18, 7:59 PM)&nbsp;&nbsp;</font><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fde8e8" style="background-color:#fde8e8;border:1px solid #f5bcbc;border-radius:12px;padding:4px 11px;"><font color="#b91c1c" face="Arial,sans-serif" style="font-size:10px"><b>&#9650; 1 newly down</b></font></td></tr></table>&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#dcf5e4" style="background-color:#dcf5e4;border:1px solid #a7e3bd;border-radius:12px;padding:4px 11px;"><font color="#15803d" face="Arial,sans-serif" style="font-size:10px"><b>&#9660; 1 back in service</b></font></td></tr></table>&nbsp;<font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px">&nbsp;New: FLD300010 &#183; Returned: FLD300003</font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">Unavailable 3 &#183; Avg days down 1.6 &#183; High risk (70+) 0</font></td></tr>
+
+  <!-- Greeting -->
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:14px 28px 4px 28px;">
+    <font color="#0f1b2d" face="Arial,sans-serif" style="font-size:13px;"><b>Good morning,</b></font><br>
+    <font color="#3a4657" face="Arial,sans-serif" style="font-size:11px;line-height:1.6;">Below is the <b>EOS fleet maintenance update</b> for <b>TUZR</b>. This report covers unavailable units, PM-B / PM-X / DOT due dates, relay garage events.</font>
+  </td></tr>
+
+  <tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:16px 24px 14px 24px;"><font color="#334155" face="Arial,sans-serif" style="font-size:11px;font-weight:bold;letter-spacing:0.06em"><b>&#128202; FLEET BY BODY TYPE</b></font><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr><td width="100%" valign="top" style=""><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#1565c0" width="6" style="background-color:#1565c0;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:9px 12px;"><font color="#0f1b2d" face="Arial,sans-serif" style="font-size:12px"><b>SLEEPER &#183; TUZR</b></font><br><font color="#dc2626" face="Arial,sans-serif" style="font-size:11px"><b>3</b> down</font> <font color="#94a3b8" face="Arial,sans-serif" style="font-size:11px">&#183;</font> <font color="#16a34a" face="Arial,sans-serif" style="font-size:11px"><b>5</b> in svc</font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">8 total &#183; </font><font color="#1565c0" face="Arial,sans-serif" style="font-size:10px"><b>63%</b></font></td>
+</tr></table></td></tr></table></td></tr>
+
+  <tr><td bgcolor="#fdf3f3" style="background-color:#fdf3f3;padding:14px 24px 12px 24px;border-top:1px solid #f3dede;border-bottom:1px solid #f3dede;"><font color="#7f1d1d" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#128683; UNAVAILABLE UNITS</b></font><font color="#a06464" face="Arial,sans-serif" style="font-size:11px">&nbsp;&#8212; 3 down</font></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.05em">ACTIVE VENDORS:&nbsp;</font><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#eef2f7" style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;"><font color="#334155" face="Arial,sans-serif" style="font-size:9px"><b>FREIGHTLINER (DAIMLER): 1</b></font></td></tr></table>&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#eef2f7" style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;"><font color="#334155" face="Arial,sans-serif" style="font-size:9px"><b>COX: 1</b></font></td></tr></table>&nbsp;</td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#16a34a" width="6" style="background-color:#16a34a;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 14px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+<td valign="top" width="62%">
+<font color="#1a56db" face="Arial,sans-serif" style="font-size:15px;font-weight:bold"><b>FLD260703</b></font>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#e5e7eb" style="background-color:#e5e7eb;padding:2px 6px;border-radius:3px;"><font color="#1f2937" face="Arial,sans-serif" style="font-size:9px"><b>FREIGHTLINER</b></font></td></tr></table>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#ede9fe" style="background-color:#ede9fe;padding:2px 6px;border-radius:3px;"><font color="#5b21b6" face="Arial,sans-serif" style="font-size:9px"><b>SLEEPER</b></font></td></tr></table>
+&nbsp;<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">ELECTRICAL &#183; Damaged-Moderate</font>
+<br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">ABE40 &#183; TUZR &#183; Unavailable</font>
+</td>
+<td valign="top" align="right" width="38%">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr><td bgcolor="#dcf5e4" style="background-color:#dcf5e4;border-radius:10px;padding:4px 10px;text-align:right;"><font color="#15803d" face="Arial,sans-serif" style="font-size:11px"><b>&#9660; DOWN 1d 12h 38m</b></font></td></tr></table>
+</td>
+</tr>
+<tr><td colspan="2" valign="top" width="100%" class="eos-meta" style="width:100%;padding-top:3px;line-height:1.5;word-wrap:break-word;word-break:break-word;overflow-wrap:anywhere;">
+<font color="#555555" face="Arial,sans-serif" style="font-size:11px"><b>Appointment scheduled</b></font><font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px"> &#183;&nbsp;Alt ID </font><a href="https://aap.example.com/v2/service/0918f605" style="color:#1a56db;font-size:10px;font-weight:bold;text-decoration:underline;">amz-vvfnvm6rhep2et</a><font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px"> &#183;&nbsp;Offsite </font><a href="https://dtna.example.com/case/500gx000003O1" style="color:#1a56db;font-size:10px;font-weight:bold;text-decoration:underline;">DTNA Case</a><font color="#94a3b8" face="Arial,sans-serif" style="font-size:10px"> &#183;&nbsp;Case </font><a href="https://sf.example.com/case/00036143" style="color:#1a56db;font-size:10px;font-weight:bold;text-decoration:underline;">00036143</a>
+</td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr>
+<td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">RELAY GARAGE</font><br>
+<font color="#1e2d3d" face="Arial,sans-serif" style="font-size:11px"><b>Freightliner (DAIMLER)</b></font> <font color="#7c3aed" face="Arial,sans-serif" style="font-size:10px">&#183; 📍 ABE40</font><br><font color="#16a34a" face="Arial,sans-serif" style="font-size:10px"><b>Down: 1d 12h 38m</b></font><br><font color="#555555" face="Arial,sans-serif" style="font-size:10px"><i>Parking/door sensor malfunctioning and generating false alerts; dealer quoted for the sensor.</i></font><br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px"><b>Last update:</b> </font><font color="#374151" face="Arial,sans-serif" style="font-size:10px">11/19 - Kenworth Northeast Group confirmed diagnosis, EST pending approval (per email 11/19). Kenworth Northeast Group (Service Advisor) scheduled the appointment.</font>
+</td>
+<td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">TIMELINE</font><br>
+<font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.5">11/17 - Work order created with Freightliner (DAIMLER) for malfunctioning parking/door sensor. Unit towed to dealer (tow ref amz-r938dmz7fhqtg8). DTNA case opened (ref 500gx000003O1RBAA0).<br>11/17 - Salesforce case 00036143 created to track potential carrier pickup (per email 11/17).<br>11/18 - Berman Truck Group (Leesport, PA) estimate submitted; tow invoice (per email 11/18).<br>11/19 - Kenworth Northeast Group confirmed diagnosis, EST pending approval (per email 11/19). Kenworth Northeast Group (Service Advisor) scheduled the appointment.</font>
+</td>
+</tr></table></td>
+</tr></table></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#d97706" width="6" style="background-color:#d97706;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 14px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+<td valign="top" width="62%">
+<font color="#1a56db" face="Arial,sans-serif" style="font-size:15px;font-weight:bold"><b>FLD300010</b></font>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#e5e7eb" style="background-color:#e5e7eb;padding:2px 6px;border-radius:3px;"><font color="#1f2937" face="Arial,sans-serif" style="font-size:9px"><b>FREIGHTLINER</b></font></td></tr></table>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#ede9fe" style="background-color:#ede9fe;padding:2px 6px;border-radius:3px;"><font color="#5b21b6" face="Arial,sans-serif" style="font-size:9px"><b>SLEEPER</b></font></td></tr></table>
+&nbsp;<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">Damaged-Minor</font>
+<br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">ABE40 &#183; TUZR &#183; Unavailable</font>
+</td>
+<td valign="top" align="right" width="38%">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border-radius:10px;padding:4px 10px;text-align:right;"><font color="#b45309" face="Arial,sans-serif" style="font-size:11px"><b>&#9660; DOWN 3d 1h 0m</b></font></td></tr></table>
+</td>
+</tr>
+<tr><td colspan="2" valign="top" width="100%" class="eos-meta" style="width:100%;padding-top:3px;line-height:1.5;word-wrap:break-word;word-break:break-word;overflow-wrap:anywhere;">
+<font color="#555555" face="Arial,sans-serif" style="font-size:11px"><b>Damaged-Minor</b></font>
+</td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr>
+<td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">RELAY GARAGE</font><br>
+<font color="#1e2d3d" face="Arial,sans-serif" style="font-size:11px"><b>COX</b></font><br><font color="#d97706" face="Arial,sans-serif" style="font-size:10px"><b>Down: 3d 1h 0m</b></font><br><font color="#555555" face="Arial,sans-serif" style="font-size:10px"><i>Mirror bracket cracked, COX (Service Writer) quoted.</i></font>
+</td>
+<td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">TIMELINE</font><br>
+<font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.5">—</font>
+</td>
+</tr></table></td>
+</tr></table></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:10px 24px 0 24px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #e3e8ef;border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="#16a34a" width="6" style="background-color:#16a34a;width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="#ffffff" style="background-color:#ffffff;padding:12px 14px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
+<td valign="top" width="62%">
+<font color="#1a56db" face="Arial,sans-serif" style="font-size:15px;font-weight:bold"><b>FLD300011</b></font>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#e5e7eb" style="background-color:#e5e7eb;padding:2px 6px;border-radius:3px;"><font color="#1f2937" face="Arial,sans-serif" style="font-size:9px"><b>FREIGHTLINER</b></font></td></tr></table>
+&nbsp;<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#ede9fe" style="background-color:#ede9fe;padding:2px 6px;border-radius:3px;"><font color="#5b21b6" face="Arial,sans-serif" style="font-size:9px"><b>SLEEPER</b></font></td></tr></table>
+&nbsp;<font color="#64748a" face="Arial,sans-serif" style="font-size:10px">Damaged-Minor</font>
+<br><font color="#64748a" face="Arial,sans-serif" style="font-size:10px">ABE40 &#183; TUZR &#183; Unavailable</font>
+</td>
+<td valign="top" align="right" width="38%">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr><td bgcolor="#dcf5e4" style="background-color:#dcf5e4;border-radius:10px;padding:4px 10px;text-align:right;"><font color="#15803d" face="Arial,sans-serif" style="font-size:11px"><b>&#9660; DOWN 0d 4h 0m</b></font></td></tr></table>
+</td>
+</tr>
+<tr><td colspan="2" valign="top" width="100%" class="eos-meta" style="width:100%;padding-top:3px;line-height:1.5;word-wrap:break-word;word-break:break-word;overflow-wrap:anywhere;">
+<font color="#555555" face="Arial,sans-serif" style="font-size:11px"><b>Damaged-Minor</b></font>
+</td></tr></table><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin-top:8px;"><tr>
+<td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">RELAY GARAGE</font><br>
+<font color="#bbbbbb" face="Arial,sans-serif" style="font-size:10px">—</font>
+</td>
+<td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
+<font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">TIMELINE</font><br>
+<font color="#374151" face="Arial,sans-serif" style="font-size:10px;line-height:1.5">—</font>
+</td>
+</tr></table></td>
+</tr></table></td></tr><tr><td bgcolor="#ffffff" style="background-color:#ffffff;padding:0;height:14px;line-height:14px;font-size:1px;">&nbsp;</td></tr>
+
+  <tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:14px 24px 2px 24px;border-top:1px solid #d8eede;"><font color="#14532d" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#128197; PM &amp; DOT COMPLIANCE</b></font><font color="#5a8468" face="Arial,sans-serif" style="font-size:11px">&nbsp;&#8212; 3 overdue, 3 due soon</font></td></tr><tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:8px 24px 2px 24px;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">OVERDUE</font>&nbsp;&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fde8e8" style="background-color:#fde8e8;border:1px solid #f5bcbc;border-radius:12px;padding:4px 11px;"><font color="#b91c1c" face="Arial,sans-serif" style="font-size:10px"><b>FLD300001 &#183; PM-B 9d over</b></font></td></tr></table>&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fde8e8" style="background-color:#fde8e8;border:1px solid #f5bcbc;border-radius:12px;padding:4px 11px;"><font color="#b91c1c" face="Arial,sans-serif" style="font-size:10px"><b>FLD300003 &#183; DOT 4d over</b></font></td></tr></table>&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fde8e8" style="background-color:#fde8e8;border:1px solid #f5bcbc;border-radius:12px;padding:4px 11px;"><font color="#b91c1c" face="Arial,sans-serif" style="font-size:10px"><b>FLD300003 &#183; PM-X overdue</b></font></td></tr></table>&nbsp;</td></tr><tr><td bgcolor="#f1faf4" style="background-color:#f1faf4;padding:6px 24px 12px 24px;border-bottom:1px solid #d8eede;"><font color="#64748a" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.08em">DUE &#8804; 60d</font>&nbsp;&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #eccd86;border-radius:12px;padding:4px 11px;"><font color="#92500a" face="Arial,sans-serif" style="font-size:10px"><b>FLD300002 &#183; DOT Dec 14</b></font></td></tr></table>&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #eccd86;border-radius:12px;padding:4px 11px;"><font color="#92500a" face="Arial,sans-serif" style="font-size:10px"><b>FLD300004 &#183; PM-B Dec 19</b></font></td></tr></table>&nbsp;
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td bgcolor="#fff4d9" style="background-color:#fff4d9;border:1px solid #eccd86;border-radius:12px;padding:4px 11px;"><font color="#92500a" face="Arial,sans-serif" style="font-size:10px"><b>FLD300005 &#183; PM-X Jan 18</b></font></td></tr></table>&nbsp;</td></tr>
+
+  <tr><td bgcolor="#f6f4fc" style="background-color:#f6f4fc;padding:14px 24px 14px 24px;border-top:1px solid #e5e0f2;"><font color="#4c1d95" face="Arial,sans-serif" style="font-size:13px;font-weight:bold"><b>&#9889; UPTAKE INSIGHTS</b></font><br><font color="#94a3b8" face="Arial,sans-serif" style="font-size:11px">No active predictive insights (score &lt; 60)</font></td></tr>
+
+  <!-- FOOTER (light) -->
+  <tr><td bgcolor="#f4f6f9" style="background-color:#f4f6f9;padding:14px 28px;border-top:1px solid #e2e8f0;">
+    <font color="#64748a" face="Arial,sans-serif" style="font-size:10px;">This report was generated automatically by Fleet Ops. Do not reply to this email.</font>
+  </td></tr>
+
+</table>
+
+</td></tr>
+</table>
+
+</body>
+</html>

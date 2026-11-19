@@ -50,25 +50,40 @@ function _stripMoney(text) {
     .replace(/\s+at\s+under\s/g, ' under ');
 }
 
-function _stripContacts(text) {
+// strict (email only): a 10-digit run right after "#" or a word character is
+// a reference number ("Order #3010287243"), not a phone.
+function _stripContacts(text, strict) {
+  const phone = strict
+    ? /(?<![#\w])\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g
+    : /\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
   return text
     .replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, '')          // emails
-    .replace(/\(?\b\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, ''); // phones
+    .replace(phone, '');                                    // phones
 }
+
+// Extra company/shop tokens for the strict (email) mode, on top of
+// KEEP_ORG_RE: "Uptime Center", "Bergey's Truck Centers", "Berman", DTNA.
+const EMAIL_ORG_RE = /(cent(?:er|re)s?|service|repair|shop|garage|motors|parts|diesel|tire|towing|uptime|dtna|daimler|decisiv|berman|bergey|\binc\b|\bllc\b|\bcorp\b)/i;
+function _isOrg(s) { return KEEP_ORG_RE.test(s) || EMAIL_ORG_RE.test(s); }
 
 // Remove the personal-name part of "<Name> - <Company> (Role)" style headers,
 // keeping the company/role. Also handles "to <NAME> - <Company>".
-function _stripNameHeaders(text) {
+// strict (email only): the dash must have a space before it, so hyphenated
+// words ("Follow-up", "PM-B", "Return-to-service") are not read as a name
+// header, and a "name" that is itself a company ("Bergey's Truck Centers -
+// Pennsauken") is kept.
+function _stripNameHeaders(text, strict) {
   let s = text;
+  const dash = strict ? '\\s+-\\s*' : '\\s*-\\s*';
   // "to Firstname Lastname - Company" -> "to Company"
   s = s.replace(
-    new RegExp('\\bto\\s+' + NAME_SEQ + '\\s*-\\s*(?=[A-Za-z])', 'g'),
-    (m) => (KEEP_ORG_RE.test(m) ? m : 'to ')
+    new RegExp('\\bto\\s+' + NAME_SEQ + dash + '(?=[A-Za-z])', 'g'),
+    (m) => ((strict ? _isOrg(m) : KEEP_ORG_RE.test(m)) ? m : 'to ')
   );
   // "Firstname Lastname - Company" -> "Company"  (name immediately before " - Org")
   s = s.replace(
-    new RegExp('(^|[\\n\\.;:,]\\s*)' + NAME_SEQ + '\\s*-\\s*(?=[A-Za-z])', 'g'),
-    (full, pre) => pre
+    new RegExp('(^|[\\n\\.;:,]\\s*)(' + NAME_SEQ + ')' + dash + '(?=[A-Za-z])', 'g'),
+    (full, pre, name) => (strict && _isOrg(name) ? full : pre)
   );
   return s;
 }
@@ -76,25 +91,29 @@ function _stripNameHeaders(text) {
 // Signature tails: a personal name immediately preceding a known vendor token,
 // e.g. "BETSY TA", "CHRISTINA TA", "MARK L TA" -> "TA". Only fires when the
 // trailing token is a company/vendor token (so we don't eat real sentences).
-function _stripSignatureTails(text) {
-  return text.replace(
-    /\b([A-Z][a-zA-Z'’.-]+(?:\s+[A-Z][a-zA-Z'’.-]+){0,2})\s+(TA|KW|PACCAR|Volvo|Amerit|Kenworth)\b/g,
-    (m, name, org) => org
-  );
+// strict (email only): ALL-CAPS signatures only ("BETSY TA", "MARK L TA"), so
+// sentence-case prose ("Requested Amerit", "Two TA locations") is kept.
+function _stripSignatureTails(text, strict) {
+  const re = strict
+    ? /\b([A-Z][A-Z'’.-]*(?:\s+[A-Z][A-Z'’.-]*){0,2})\s+(TA|KW|PACCAR|Volvo|Amerit|Kenworth)\b/g
+    : /\b([A-Z][a-zA-Z'’.-]+(?:\s+[A-Z][a-zA-Z'’.-]+){0,2})\s+(TA|KW|PACCAR|Volvo|Amerit|Kenworth)\b/g;
+  return text.replace(re, (m, name, org) => (strict && _isOrg(name) ? m : org));
 }
 
 /**
  * redactForSharing(text) -> redacted string. Never throws; returns '' for
  * empty/non-string input and the cleaned text otherwise.
  */
-function redactForSharing(text) {
+function redactForSharing(text) { return _redact(text, false); }
+
+function _redact(text, strict) {
   if (text == null) return '';
   let s = String(text);
   if (!s.trim()) return s;
   try {
-    s = _stripNameHeaders(s);
-    s = _stripSignatureTails(s);
-    s = _stripContacts(s);
+    s = _stripNameHeaders(s, strict);
+    s = _stripSignatureTails(s, strict);
+    s = _stripContacts(s, strict);
     s = _stripMoney(s);
     // Tidy whitespace/punctuation left by removals.
     s = s
@@ -104,9 +123,37 @@ function redactForSharing(text) {
       .replace(/\s+-\s*$/g, '')
       .trim();
   } catch (_) {
-    return String(text); // never throw — fall back to original on any error
+    // never throw — sharing falls back to the original; email drops the text
+    // rather than send it unredacted
+    return strict ? '' : String(text);
   }
   return s;
 }
 
-module.exports = { redactForSharing };
+// Email-attribution tails the AI timeline writer appends, e.g.
+// "(per Z Santiago email 11/16)" / "(per Santiago, Z email 10/27)".
+// Keeps vendor/shop attributions ("per Amerit email", "per Uptime Center
+// email") via _isOrg.
+const PER_ATTRIB_RE = /\bper\s+([A-Z][a-zA-Z'’.-]*(?:,?\s+[A-Z][a-zA-Z'’.-]*){0,3})\s+(e-?mail|call|text|message|msg|voicemail)\b/g;
+
+/**
+ * redactForEmail(text) -> the same redaction as redactForSharing() in strict
+ * mode (see _stripNameHeaders / _stripContacts), plus shapes seen in the
+ * SOS/EOS report data that the sharing redaction misses: "per <Name> email"
+ * attributions and "$2.5K"-style / backslash-escaped ("\$2,340.00") dollar
+ * amounts. Used only by src/scrapers/emailBuilder.js at render time, so
+ * redactForSharing() (carrier briefing) and the renderer twin
+ * (renderer/src/js/util/redact.js) behave exactly as before. Never throws.
+ */
+function redactForEmail(text) {
+  if (text == null) return '';
+  let s = String(text);
+  if (!s.trim()) return s;
+  try {
+    s = s.replace(PER_ATTRIB_RE, (m, name, via) => (_isOrg(name) ? m : 'per ' + via));
+    s = s.replace(/\\?\$\s?[\d,]*\.?\d+\s?[kKmM]\b/g, ' ').replace(/\\(?=\$)/g, '');
+  } catch (_) { /* fall through to the shared redaction */ }
+  return _redact(s, true);
+}
+
+module.exports = { redactForSharing, redactForEmail };
