@@ -12,6 +12,118 @@ const TEMPLATE_PATH = path.join(__dirname, 'email_template.html');
 function ft(color, text, extra) {
   return `<font color="${color}" face="Arial,sans-serif"${extra ? ' style="'+extra+'"' : ''}>${text}</font>`;
 }
+
+// ── Report redesign helpers (2026-11, v3 OWA-safe layout) ─────────────────────
+// Every block is a nested presentation table; fills are bgcolor + inline
+// background-color (solid 6-digit hex); text goes through ft().
+const TBL = 'role="presentation" cellpadding="0" cellspacing="0" border="0"';
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function _esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function _state(u) { return String(u.atsState || u.lifecycleState || ''); }
+function _isUnavail(u) { return _state(u).toLowerCase().indexOf('unavail') > -1; }
+function _isOrdered(u) { return /^ordered$/i.test(_state(u).trim()); }
+
+// Whole days from a duration string. AAP durations are "Nd Nh Nm"; legacy
+// strings are "8 days". Returns null when no day count is present.
+function _durDays(s) {
+  const m = String(s || '').match(/(\d+)\s*d(?:ays?)?\b/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+// One severity scale: red >= 7 days, amber 3-6, else green.
+function _sev(days) {
+  if (days != null && days >= 7) return { spine: '#dc2626', pillBg: '#fde8e8', pillFg: '#dc2626', text: '#dc2626' };
+  if (days != null && days >= 3) return { spine: '#d97706', pillBg: '#fff4d9', pillFg: '#b45309', text: '#d97706' };
+  return { spine: '#16a34a', pillBg: '#dcf5e4', pillFg: '#15803d', text: '#16a34a' };
+}
+function _badge(bg, fg, text) {
+  return `<table ${TBL} style="display:inline;"><tr><td bgcolor="${bg}" style="background-color:${bg};padding:2px 6px;border-radius:3px;">${ft(fg, '<b>' + text + '</b>', 'font-size:9px')}</td></tr></table>`;
+}
+function _makeBadge(model) {
+  const makeRaw = (model || '').toLowerCase();
+  let makeBg = '#f3f4f6', makeLbl = _esc(model || '--'), makeColor = '#374151';
+  if (makeRaw.includes('freightliner')) { makeBg = '#e5e7eb'; makeLbl = 'FREIGHTLINER'; makeColor = '#1f2937'; }
+  else if (makeRaw.includes('volvo'))   { makeBg = '#dbeafe'; makeLbl = 'VOLVO'; makeColor = '#1e3a5f'; }
+  else if (makeRaw.includes('peterbilt')){ makeBg = '#fee2e2'; makeLbl = 'PETERBILT'; makeColor = '#7f1d1d'; }
+  else if (makeRaw.includes('kenworth')) { makeBg = '#fef3c7'; makeLbl = 'KENWORTH'; makeColor = '#78350f'; }
+  else if (makeRaw.includes('mack'))    { makeBg = '#fed7aa'; makeLbl = 'MACK'; makeColor = '#78350f'; }
+  return _badge(makeBg, makeColor, makeLbl);
+}
+function _bodyBadge(label) {
+  if (!label) return '';
+  const l = label.toLowerCase();
+  if (/day\s*cab|tractor/.test(l)) return _badge('#e0f2fe', '#075985', _esc(label.toUpperCase()));
+  if (/sleeper/.test(l)) return _badge('#ede9fe', '#5b21b6', 'SLEEPER');
+  if (/box/.test(l)) return _badge('#dcfce7', '#166534', 'BOX TRUCK');
+  return _badge('#f3f4f6', '#374151', _esc(label.toUpperCase()));
+}
+function _chip(bg, border, fg, text) {
+  return `<table ${TBL} style="display:inline;"><tr><td bgcolor="${bg}" style="background-color:${bg};border:1px solid ${border};border-radius:12px;padding:4px 11px;">${ft(fg, '<b>' + text + '</b>', 'font-size:10px')}</td></tr></table>&nbsp;`;
+}
+function _spineCard(spine, inner, border, innerBg, pad) {
+  const bd = border || '#e3e8ef';
+  const bg = innerBg || '#ffffff';
+  return `<table ${TBL} width="100%" style="border:1px solid ${bd};border-radius:8px;border-collapse:separate;"><tr>
+<td bgcolor="${spine}" width="6" style="background-color:${spine};width:6px;border-radius:8px 0 0 8px;font-size:1px;line-height:1px;">&nbsp;</td>
+<td bgcolor="${bg}" style="background-color:${bg};padding:${pad || '12px 14px'};">${inner}</td>
+</tr></table>`;
+}
+function _sectionRow(bg, content, pad, extra) {
+  return `<tr><td bgcolor="${bg}" style="background-color:${bg};padding:${pad};${extra || ''}">${content}</td></tr>`;
+}
+
+// PM/DOT classification. Mirrors the in-app pmOverdueDays
+// (renderer/src/js/util/pm-overdue.js): "Overdue N days" -> N; a full past
+// date "Mon DD, YYYY" -> whole calendar days between local midnights
+// (Math.round). Other overdue forms ("Overdue 5 months", "overdue", past
+// month-only dates) are overdue with no day count.
+// Returns null (no data), {overdue:true, days}, or {overdue:false, dueIn, label}.
+function _pmInfo(val, now) {
+  const t = String(val == null ? '' : val).trim();
+  if (!t || t === '--' || /^unknown$/i.test(t)) return null;
+  let m = t.match(/^overdue\s+(\d+)\s+days?$/i);
+  if (m) { const n = parseInt(m[1], 10); return { overdue: true, days: n > 0 ? n : null }; }
+  if (/^overdue\b/i.test(t)) return { overdue: true, days: null };
+  const today = new Date(now.getTime()); today.setHours(0, 0, 0, 0);
+  m = t.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (m) {
+    const d = new Date(m[1] + ' ' + m[2] + ', ' + m[3]);
+    if (isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    const n = Math.round((today - d) / 86400000);
+    if (n > 0) return { overdue: true, days: n };
+    const dd = d.getDate();
+    return { overdue: false, dueIn: -n, label: MONTHS_SHORT[d.getMonth()] + ' ' + (dd < 10 ? '0' + dd : '' + dd) };
+  }
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  const n = Math.round((today - d) / 86400000);
+  if (n > 0) return { overdue: true, days: null };
+  return { overdue: false, dueIn: -n, label: t };
+}
+
+// Uptake asset uuid: explicit field when a caller provides it, else parsed
+// from the insight deep link (https://fleet.uptake.com/asset/<uuid>/insights/..)
+// which every caller already passes through as insightsList[].url.
+const UUID_RE = /^[0-9a-f-]{20,}$/i;
+function _uptakeUuid(u) {
+  const direct = String(u.uptakeAssetUuid || u.assetUuid || '').trim();
+  if (UUID_RE.test(direct)) return direct;
+  const list = Array.isArray(u.insightsList) ? u.insightsList : [];
+  for (const i of list) {
+    const mm = String((i && i.url) || '').match(/\/asset\/([0-9a-f-]{20,})/i);
+    if (mm && UUID_RE.test(mm[1])) return mm[1];
+  }
+  return '';
+}
+
+function _fill(template, key, value) {
+  return template.split('{{' + key + '}}').join(value);
+}
+
 function buildEmail(opts) {
   const { operator, domicile, units, slot, testMode, relayCache, notesStore, emailNote } = opts;
   let template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
@@ -92,97 +204,157 @@ function buildEmail(opts) {
   // conditional: blank by default, "TEST" only during an actual test send.
   const testBanner = testMode ? 'TEST' : '&nbsp;';
 
-  // KPI strip — DESIGN ADD (2026-07-21): quick-glance totals row.
   const inServicePct = totalUnits > 0 ? Math.round((inService / totalUnits) * 100) : 0;
-  const kpiStrip = `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>
-<td width="33%" style="padding:10px;text-align:center;background-color:#f3f6fa;border-radius:8px 0 0 8px;">${ft('#0f1b2d','<b>'+totalUnits+'</b>','font-size:20px')}<br>${ft('#64748a','TOTAL UNITS','font-size:9px;letter-spacing:0.05em')}</td>
-<td width="33%" style="padding:10px;text-align:center;background-color:#fdeceb;">${ft('#b91c1c','<b>'+unavailUnits.length+'</b>','font-size:20px')}<br>${ft('#64748a','UNAVAILABLE','font-size:9px;letter-spacing:0.05em')}</td>
-<td width="34%" style="padding:10px;text-align:center;background-color:#eaf7ef;border-radius:0 8px 8px 0;">${ft('#15803d','<b>'+inServicePct+'%</b>','font-size:20px')}<br>${ft('#64748a','FLEET IN-SERVICE','font-size:9px;letter-spacing:0.05em')}</td>
-</tr></table>`;
+  const reportTitle = slotLabel === 'AM' ? 'Start of Shift Report' : 'End of Shift Report';
 
-  // Vendor chips — DESIGN ADD (2026-07-21): quick vendor-load-at-a-glance,
-  // counted from currently unavailable units only (active vendor workload).
+  // Vendor chips — counted from currently unavailable units only (active vendor workload).
   const vendorCounts = {};
   unavailUnits.forEach(u => { const v = (u.vendor || '').trim(); if (v) vendorCounts[v] = (vendorCounts[v] || 0) + 1; });
   const vendorNames = Object.keys(vendorCounts);
-  let vendorChips = '';
-  if (vendorNames.length) {
-    vendorChips = ft('#64748a', 'ACTIVE VENDORS:&nbsp;', 'font-size:9px;letter-spacing:0.05em') +
-      vendorNames.map(v => `<table cellpadding="0" cellspacing="0" border="0" style="display:inline;"><tr><td style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;">${ft('#334155','<b>'+v.toUpperCase()+': '+vendorCounts[v]+'</b>','font-size:9px')}</td></tr></table>&nbsp;`).join('');
-  }
 
   const noteBar = emailNote
-    ? `<tr><td style="padding:10px 16px;"><font color="#dc2626" face="Arial,sans-serif" style="font-size:12px;font-weight:bold;">NOTE: ${emailNote.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</font></td></tr>`
+    ? _sectionRow('#fdf3f3', `<font color="#dc2626" face="Arial,sans-serif" style="font-size:12px;font-weight:bold;">NOTE: ${emailNote.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</font>`, '10px 28px', 'border-bottom:1px solid #f3dede;')
     : '';
 
-  // Fleet summary — split by body type (Day Cab + Sleeper side by side)
-  function buildSummaryCard(title, units) {
-    const total = units.length;
-    const oos = units.filter(u => (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase().indexOf('unavail') > -1).length;
-    const svc = total - oos;
-    const pct = total > 0 ? Math.round((svc / total) * 100) : 0;
-    return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="display:inline-block;vertical-align:top;min-width:380px;margin-right:16px;margin-bottom:12px;border:1px solid #dde1e6;border-radius:6px;overflow:hidden;">
-<tr><td bgcolor="#00a3bf" style="background-color:#00a3bf;padding:7px 12px;text-align:center;">${ft('#ffffff', '<b>' + title + ' &#8212; ' + op + '</b>', 'font-size:11px;letter-spacing:0.05em')}</td></tr>
-<tr><td style="padding:0;">
-<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;">
-<tr bgcolor="#e8edf3">
-<th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>CARRIER</b>','font-size:9px')}</th>
-<th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>OUT OF SERVICE</b>','font-size:9px')}</th>
-<th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>IN SERVICE</b>','font-size:9px')}</th>
-<th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;border-right:1px solid #e8ebef;">${ft('#333333','<b>TOTAL</b>','font-size:9px')}</th>
-<th style="padding:5px 10px;text-align:center;border-bottom:1px solid #e0e4ea;">${ft('#333333','<b>IN-SVC %</b>','font-size:9px')}</th>
-</tr>
-<tr>
-<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#1e2d3d','<b>'+op+'</b>','font-size:11px')}</td>
-<td bgcolor="#fecaca" style="background-color:#fecaca;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#991b1b','<b>'+oos+'</b>','font-size:11px')}</td>
-<td bgcolor="#bbf7d0" style="background-color:#bbf7d0;padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#166534','<b>'+svc+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;">${ft('#1e2d3d','<b>'+total+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-bottom:1px solid #eaecef;">${ft('#1a56db','<b>'+pct+'%</b>','font-size:11px')}</td>
-</tr>
-<tr bgcolor="#00a3bf">
-<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>Total</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+oos+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+svc+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;border-right:1px solid #33a8cc;">${ft('#ffffff','<b>'+total+'</b>','font-size:11px')}</td>
-<td style="padding:6px 10px;text-align:center;">${ft('#ffffff','<b>'+pct+'%</b>','font-size:11px')}</td>
-</tr>
-</table>
-</td></tr>
-</table>`;
-  }
+  // Body-type buckets (unchanged filters)
   const dayCabs = filteredUnits.filter(u => /day\s*cab|tractor/i.test(u.bodyType || ''));
   const sleepers = filteredUnits.filter(u => /sleeper/i.test(u.bodyType || ''));
   const boxTrucks = filteredUnits.filter(u => /box/i.test(u.bodyType || ''));
   const others = filteredUnits.filter(u => !dayCabs.includes(u) && !sleepers.includes(u) && !boxTrucks.includes(u));
 
-  // Build cards array
-  let cards = [];
-  if (dayCabs.length) cards.push(buildSummaryCard('DAY CAB', dayCabs));
-  if (sleepers.length) cards.push(buildSummaryCard('SLEEPER', sleepers));
-  if (boxTrucks.length) cards.push(buildSummaryCard('BOX TRUCK', boxTrucks));
-  if (others.length) cards.push(buildSummaryCard('OTHER', others));
-  if (!cards.length) cards.push(buildSummaryCard('ALL UNITS', filteredUnits));
+  function bucketStat(title, label, list) {
+    const down = list.filter(_isUnavail).length;
+    const total = list.length;
+    const inSvc = total - down;
+    return { title, label, down, inSvc, total, pct: total > 0 ? Math.round((inSvc / total) * 100) : 0 };
+  }
+  const bucketStats = [];
+  if (dayCabs.length) bucketStats.push(bucketStat('DAY CAB', 'Day Cab', dayCabs));
+  if (sleepers.length) bucketStats.push(bucketStat('SLEEPER', 'Sleeper', sleepers));
+  if (boxTrucks.length) bucketStats.push(bucketStat('BOX TRUCK', 'Box Truck', boxTrucks));
+  if (others.length) bucketStats.push(bucketStat('OTHER', 'Other', others));
+  if (!bucketStats.length) bucketStats.push(bucketStat('ALL UNITS', 'All Units', filteredUnits));
 
-  // Wrap in a table layout so they sit side by side (email clients ignore inline-block)
-  let fleetSummary = '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%"><tr>';
-  cards.forEach(card => { fleetSummary += '<td valign="top" style="padding-right:12px;">' + card + '</td>'; });
-  fleetSummary += '</tr></table>';
+  // Body-type label per unit (bucket, else the legacy PM-table fallback)
+  function bodyLabel(u) {
+    if (dayCabs.includes(u)) return 'Day Cab';
+    if (sleepers.includes(u)) return 'Sleeper';
+    if (boxTrucks.includes(u)) return 'Box Truck';
+    return u.bodyType || ((u.model || '').toLowerCase().includes('box') ? 'Box Truck' : (op === 'AUVTE' ? 'Box Truck' : 'Day Cab'));
+  }
 
+  // ── HERO tiles + health bar ──
+  const nLines = bucketStats.length;
+  const downLines = bucketStats.map(b => b.label + ' ' + b.down).join('<br>');
+  const fleetLines = bucketStats.map(b => b.label + ' ' + b.total).join('<br>');
+  let inLines = inService + ' of ' + totalUnits;
+  for (let i = 1; i < nLines; i++) inLines += '<br>&nbsp;';
+  function heroTile(bg, sub, label, big, suffix, lines) {
+    return `<td bgcolor="${bg}" valign="top" style="background-color:${bg};border-radius:10px;padding:10px 14px;text-align:center;">
+${ft(sub, label, 'font-size:9px;letter-spacing:0.12em')}<br>
+${ft('#ffffff', '<b>' + big + '</b>', 'font-size:28px;font-weight:bold')}${suffix ? ft(sub, suffix, 'font-size:12px') : ''}<br>
+${ft(sub, lines, 'font-size:9px;line-height:1.5')}
+</td>`;
+  }
+  const heroTiles = `<table ${TBL} align="right"><tr>
+${heroTile('#dc2626', '#ffe0e0', 'UNITS DOWN', unavailUnits.length, '&nbsp;/ ' + totalUnits, downLines)}
+<td width="8" style="width:8px;">&nbsp;</td>
+${heroTile('#16a34a', '#dcfce7', 'IN SERVICE', inServicePct, '%', inLines)}
+<td width="8" style="width:8px;">&nbsp;</td>
+${heroTile('#1565c0', '#d6e7fb', 'FLEET', totalUnits, '', fleetLines)}
+</tr></table>`;
 
-  let unavailTable = '';
+  const barTd = (hex, w) => `<td bgcolor="${hex}" width="${w}%" style="background-color:${hex};height:5px;line-height:5px;font-size:1px;">&nbsp;</td>`;
+  let healthBar = `<table ${TBL} width="100%"><tr>`;
+  if (totalUnits === 0) healthBar += barTd('#e2e8f0', 100);
+  else {
+    if (100 - inServicePct > 0) healthBar += barTd('#dc2626', 100 - inServicePct);
+    if (inServicePct > 0) healthBar += barTd('#16a34a', inServicePct);
+  }
+  healthBar += '</tr></table>';
+
+  // ── PM & DOT compliance chips ──
+  const _hasBoxTrucks = filteredUnits.some(u => /box/i.test(u.bodyType || ''));
+  const pmTypes = [['PM-B', 'pmB'], ['PM-X', 'pmX'], ['DOT', 'dot']];
+  if (_hasBoxTrucks) pmTypes.push(['Quarterly Lift', 'quarterlyLift']);
+  const pmOverdue = [], pmDue = [];
+  filteredUnits.forEach(u => {
+    pmTypes.forEach(([label, key]) => {
+      const info = _pmInfo(u[key], now);
+      if (!info) return;
+      if (info.overdue) pmOverdue.push({ id: u.id, label, days: info.days });
+      else if (info.dueIn <= 60) pmDue.push({ id: u.id, label, dueIn: info.dueIn, date: info.label });
+    });
+  });
+  pmOverdue.sort((a, b) => (b.days == null ? -1 : b.days) - (a.days == null ? -1 : a.days));
+  pmDue.sort((a, b) => a.dueIn - b.dueIn);
+
+  let pmSection = _sectionRow('#f1faf4',
+    ft('#14532d', '<b>&#128197; PM &amp; DOT COMPLIANCE</b>', 'font-size:13px;font-weight:bold') +
+    (filteredUnits.length ? ft('#5a8468', '&nbsp;&#8212; ' + pmOverdue.length + ' overdue, ' + pmDue.length + ' due soon', 'font-size:11px') : ''),
+    '14px 24px 2px 24px', 'border-top:1px solid #d8eede;');
+  if (filteredUnits.length) {
+    const overdueChips = pmOverdue.length
+      ? pmOverdue.map(p => _chip('#fde8e8', '#f5bcbc', '#b91c1c', _esc(p.id) + ' &#183; ' + p.label + ' ' + (p.days != null ? p.days + 'd over' : 'overdue'))).join('\n')
+      : ft('#64748a', 'None overdue &#10003;', 'font-size:10px');
+    const dueChips = pmDue.length
+      ? pmDue.map(p => _chip('#fff4d9', '#eccd86', '#92500a', _esc(p.id) + ' &#183; ' + p.label + ' ' + _esc(p.date))).join('\n')
+      : ft('#64748a', 'None due within 60 days', 'font-size:10px');
+    pmSection += _sectionRow('#f1faf4', ft('#64748a', 'OVERDUE', 'font-size:9px;letter-spacing:0.08em') + '&nbsp;&nbsp;\n' + overdueChips, '8px 24px 2px 24px');
+    pmSection += _sectionRow('#f1faf4', ft('#64748a', 'DUE &#8804; 60d', 'font-size:9px;letter-spacing:0.08em') + '&nbsp;&nbsp;\n' + dueChips, '6px 24px 12px 24px', 'border-bottom:1px solid #d8eede;');
+  } else {
+    pmSection += _sectionRow('#f1faf4', ft('#94a3b8', 'No PM data', 'font-size:12px'), '8px 24px 12px 24px', 'border-bottom:1px solid #d8eede;');
+  }
+
+  // ── Uptake + new delivery sets ──
+  const riskUnits = filteredUnits.filter(u => u.riskScore && u.riskScore >= 60)
+    .sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0));
+  const orderedUnits = filteredUnits.filter(_isOrdered);
+  const veryHighCount = riskUnits.filter(u => (u.riskScore || 0) >= 75).length;
+
+  // ── Quick stats line ──
+  const nDel = orderedUnits.length;
+  const quickStats = unavailUnits.length + ' down &#183; ' + pmOverdue.length + ' PM/DOT overdue &#183; ' +
+    nDel + ' new ' + (nDel === 1 ? 'delivery' : 'deliveries') + ' &#183; ' + veryHighCount + ' very-high risk';
+
+  // ── FLEET BY BODY TYPE ──
+  const cardW = Math.floor(100 / bucketStats.length);
+  let btCells = '';
+  bucketStats.forEach((b, i) => {
+    const last = i === bucketStats.length - 1;
+    const inner = ft('#0f1b2d', '<b>' + b.title + ' &#183; ' + _esc(op) + '</b>', 'font-size:12px') + '<br>' +
+      ft('#dc2626', '<b>' + b.down + '</b> down', 'font-size:11px') + ' ' + ft('#94a3b8', '&#183;', 'font-size:11px') + ' ' +
+      ft('#16a34a', '<b>' + b.inSvc + '</b> in svc', 'font-size:11px') + '<br>' +
+      ft('#64748a', b.total + ' total &#183; ', 'font-size:10px') + ft('#1565c0', '<b>' + b.pct + '%</b>', 'font-size:10px');
+    btCells += `<td width="${last ? 100 - cardW * (bucketStats.length - 1) : cardW}%" valign="top" style="${last ? '' : 'padding-right:8px;'}">${_spineCard('#1565c0', inner, '#e3e8ef', '#ffffff', '9px 12px')}</td>`;
+  });
+  const bodyTypeSection = _sectionRow('#ffffff',
+    ft('#334155', '<b>&#128202; FLEET BY BODY TYPE</b>', 'font-size:11px;font-weight:bold;letter-spacing:0.06em') +
+    `<table ${TBL} width="100%" style="margin-top:8px;"><tr>${btCells}</tr></table>`,
+    '16px 24px 14px 24px');
+
+  // ── UNAVAILABLE UNITS as status cards ──
+  let unavailBreak = '';
+  if (bucketStats.length > 1 && unavailUnits.length) {
+    const parts = bucketStats.filter(b => b.down > 0).map(b => b.down + ' ' + b.label);
+    if (parts.length) unavailBreak = ' (' + parts.join(' &#183; ') + ')';
+  }
+  let unavailSection = _sectionRow('#fdf3f3',
+    ft('#7f1d1d', '<b>&#128683; UNAVAILABLE UNITS</b>', 'font-size:13px;font-weight:bold') +
+    ft('#a06464', '&nbsp;&#8212; ' + unavailUnits.length + ' down' + unavailBreak, 'font-size:11px'),
+    '14px 24px 12px 24px', 'border-top:1px solid #f3dede;border-bottom:1px solid #f3dede;');
+  if (vendorNames.length) {
+    unavailSection += _sectionRow('#ffffff',
+      ft('#64748a', 'ACTIVE VENDORS:&nbsp;', 'font-size:9px;letter-spacing:0.05em') +
+      vendorNames.map(v => `<table ${TBL} style="display:inline;"><tr><td bgcolor="#eef2f7" style="background-color:#eef2f7;border-radius:10px;padding:3px 10px;">${ft('#334155','<b>'+_esc(v.toUpperCase())+': '+vendorCounts[v]+'</b>','font-size:9px')}</td></tr></table>&nbsp;`).join(''),
+      '10px 24px 0 24px');
+  }
+
+  const link = (href, text) => '<a href="' + _esc(href) + '" style="color:#1a56db;font-size:10px;font-weight:bold;text-decoration:underline;">' + _esc(text) + '</a>';
   if (unavailUnits.length) {
-    const hdrTh = (text) => `<th bgcolor="#475569" style="background-color:#475569;padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;white-space:nowrap;">${ft('#f1f5f9','<b>'+text+'</b>','font-size:9px;letter-spacing:0.07em')}</th>`;
-
-    let rows = '';
-    unavailUnits.forEach((u, i) => {
-      const bg = '#fff5f5'; // light pink for unavail rows
-      const makeRaw = (u.model || '').toLowerCase();
-      let makeBg = '#f3f4f6', makeLbl = u.model || '--', makeColor = '#374151';
-      if (makeRaw.includes('freightliner')) { makeBg = '#e5e7eb'; makeLbl = 'FREIGHTLINER'; makeColor = '#1f2937'; }
-      else if (makeRaw.includes('volvo'))   { makeBg = '#dbeafe'; makeLbl = 'VOLVO'; makeColor = '#1e3a5f'; }
-      else if (makeRaw.includes('peterbilt')){ makeBg = '#fee2e2'; makeLbl = 'PETERBILT'; makeColor = '#7f1d1d'; }
-      else if (makeRaw.includes('kenworth')) { makeBg = '#fef3c7'; makeLbl = 'KENWORTH'; makeColor = '#78350f'; }
-      else if (makeRaw.includes('mack'))    { makeBg = '#fed7aa'; makeLbl = 'MACK'; makeColor = '#78350f'; }
+    unavailUnits.forEach(u => {
+      const duration = u.duration || '';
+      const sev = _sev(_durDays(duration));
 
       const repairStatus = u.savedRepairStatus || u.relayStatus || '--';
       let rsColor = '#555555';
@@ -191,208 +363,76 @@ function buildEmail(opts) {
       else if (/done|complete/i.test(repairStatus)) rsColor = '#16a34a';
 
       const vendor = u.vendor || '';
-      const created = u.created || '';
-      const duration = u.duration || '';
-      const issue = u.issue || '';
       const timeline = u.repairTimeline || u.savedTimeline || '';
-      // BUG FIX (2026-07-16): previously fell back to u.savedNotes (the
-      // free-text "Add notes..." field on the unit detail panel -- a
-      // personal/internal scratchpad, NOT the repair timeline) whenever a
-      // unit had no timeline yet. That meant private notes could go out
-      // in the business-partner-facing status email. User confirmed:
-      // timeline content is fine to send, but savedNotes should stay
-      // internal-only, always -- never fall back to it here.
-      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => l.trim()).join('<br>') : '\u2014';
+      // BUG FIX (2026-07-16): never fall back to u.savedNotes (private
+      // scratchpad). Only the repair timeline goes out in the email.
+      const notes = timeline ? timeline.split('\n').filter(l => l.trim().length > 5).map(l => _esc(l.trim())).join('<br>') : '\u2014';
 
       // Case / Offsite: Alt ID + Offsite Event + Salesforce Case (all hyperlinked)
-      let caseHtml = '';
       const altId = u.altId || '';
       const offsiteEvent = u.offsiteShopEvent || u.savedOffsiteEvent || '';
       const offsiteUrl = u.offsiteShopEventUrl || u.savedOffsiteUrl || '';
       const sfCase = u.savedSalesforceCase || '';
       const sfUrl = u.savedSalesforceCaseUrl || '';
-
       const serviceUrl = u.serviceUrl || '';
-      if (altId) {
-        if (serviceUrl) caseHtml += ft('#555555', 'Alt ID: ', 'font-size:9px') + '<a href="' + serviceUrl + '" style="color:#1a56db;font-size:9px;font-weight:bold;text-decoration:underline;">' + altId + '</a><br>';
-        else caseHtml += ft('#555555', 'Alt ID: ', 'font-size:9px') + ft('#1a56db', '<b>' + altId + '</b>', 'font-size:9px') + '<br>';
-      }
-      if (offsiteEvent) {
-        if (offsiteUrl) caseHtml += ft('#555555', 'Offsite: ', 'font-size:9px') + '<a href="' + offsiteUrl + '" style="color:#1a56db;font-size:9px;font-weight:bold;text-decoration:underline;">' + offsiteEvent + '</a><br>';
-        else caseHtml += ft('#555555', 'Offsite: ', 'font-size:9px') + ft('#1a56db', '<b>' + offsiteEvent + '</b>', 'font-size:9px') + '<br>';
-      }
-      if (sfCase) {
-        if (sfUrl) caseHtml += ft('#555555', 'Case: ', 'font-size:9px') + '<a href="' + sfUrl + '" style="color:#1a56db;font-size:9px;font-weight:bold;text-decoration:underline;">' + sfCase + '</a>';
-        else caseHtml += ft('#555555', 'Case: ', 'font-size:9px') + ft('#1a56db', '<b>' + sfCase + '</b>', 'font-size:9px');
-      }
-      if (!caseHtml) caseHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
+      const caseParts = [];
+      const caseItem = (label, val, url) => ft('#94a3b8', '&nbsp;&#183;&nbsp;' + label + ' ', 'font-size:10px') +
+        (url ? link(url, val) : ft('#1a56db', '<b>' + _esc(val) + '</b>', 'font-size:10px'));
+      if (altId) caseParts.push(caseItem('Alt ID', altId, serviceUrl));
+      if (offsiteEvent) caseParts.push(caseItem('Offsite', offsiteEvent, offsiteUrl));
+      if (sfCase) caseParts.push(caseItem('Case', sfCase, sfUrl));
 
-      // Relay Garage
+      // Relay Garage (same gating as before: offsite + vendor)
       let rgHtml = ft('#bbbbbb', '\u2014', 'font-size:10px');
       if (/offsite/i.test(u.relayStatus || '') && vendor) {
-        rgHtml = ft('#1e2d3d', '<b>' + vendor + '</b>', 'font-size:10px');
+        rgHtml = ft('#1e2d3d', '<b>' + _esc(vendor) + '</b>', 'font-size:11px');
+        const extra = [];
         const _subV = u.subVendor || u.dealerName || '';
-        if (_subV && _subV !== vendor) rgHtml += '<br>' + ft('#7c3aed', _subV, 'font-size:9px');
-        if (u.geofence) rgHtml += '<br>' + ft('#7c3aed', '\uD83D\uDCCD ' + u.geofence, 'font-size:9px');
-        if (duration) {
-          let dColor = '#16a34a';
-          const dayMatch = duration.match(/(\d+)\s*day/);
-          if (dayMatch) {
-            const days = parseInt(dayMatch[1]);
-            if (days >= 7) dColor = '#dc2626';
-            else if (days >= 3) dColor = '#d97706';
-          }
-          rgHtml += '<br>' + ft(dColor, '<b>Down: ' + duration + '</b>', 'font-size:9px');
-        }
+        // subVendor falls back to geofence in the merge above; don't print it twice.
+        if (_subV && _subV !== vendor && _subV !== u.geofence) extra.push(_esc(_subV));
+        if (u.geofence) extra.push('\uD83D\uDCCD ' + _esc(u.geofence));
+        if (extra.length) rgHtml += ' ' + ft('#7c3aed', '&#183; ' + extra.join(' &#183; '), 'font-size:10px');
+        if (duration) rgHtml += '<br>' + ft(sev.text, '<b>Down: ' + _esc(duration) + '</b>', 'font-size:10px');
         const aiIssue = u.issueSummary || u.issue || '';
-        if (aiIssue) rgHtml += '<br>' + ft('#555555', '<i>' + aiIssue.substring(0, 120) + '</i>', 'font-size:9px');
+        if (aiIssue) rgHtml += '<br>' + ft('#555555', '<i>' + _esc(aiIssue) + '</i>', 'font-size:10px');
       }
 
-      const td = (content) => `<td bgcolor="${bg}" style="background-color:${bg};padding:7px 8px;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;vertical-align:top;">${content}</td>`;
+      const compReason = [u.savedPrimaryComponent, u.relayStatus].filter(s => s && s !== '--').map(_esc).join(' &#183; ');
+      const where = [u.site, u.op].filter(Boolean).map(_esc).concat(['Unavailable']).join(' &#183; ');
 
-      rows += `<tr>
-${td(ft('#1e2d3d', u.site || '--', 'font-size:10px'))}
-${td(ft('#1e2d3d', u.op || '--', 'font-size:10px'))}
-${td(ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px'))}
-${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${makeBg}" style="background-color:${makeBg};padding:2px 6px;border-radius:3px;">${ft(makeColor,'<b>'+makeLbl+'</b>','font-size:9px')}</td></tr></table>`)}
-${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="#dc2626" style="background-color:#dc2626;padding:2px 7px;border-radius:12px;">${ft('#ffffff','<b>UNAVAILABLE</b>','font-size:9px')}</td></tr></table>`)}
-${td(ft('#1e2d3d', u.relayStatus || '--', 'font-size:10px'))}
-${td(ft(rsColor, '<b>' + repairStatus + '</b>', 'font-size:10px'))}
-${td(ft('#1e2d3d', u.savedPrimaryComponent || '--', 'font-size:10px'))}
-${td(caseHtml)}
-${td(rgHtml)}
-<td bgcolor="${bg}" style="background-color:${bg};padding:7px 8px;border-bottom:1px solid #eaecef;vertical-align:top;"><table cellpadding="0" cellspacing="0" border="0" width="350"><tr><td width="350" style="width:350px;"><div style="background-color:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:8px 10px;font-size:10px;color:#374151;line-height:1.5;width:330px;max-width:330px;word-wrap:break-word;overflow:hidden;">${notes}</div></td></tr></table></td>
-</tr>`;
-
+      const header = `<table ${TBL} width="100%"><tr>
+<td valign="top" width="62%">
+${ft('#1a56db', '<b>' + _esc(u.id || '--') + '</b>', 'font-size:15px;font-weight:bold')}
+&nbsp;${_makeBadge(u.model)}
+&nbsp;${_bodyBadge(bodyLabel(u))}
+${compReason ? '&nbsp;' + ft('#64748a', compReason, 'font-size:10px') : ''}
+<br>${ft('#64748a', where, 'font-size:10px')}
+<br>${ft(rsColor, '<b>' + _esc(repairStatus) + '</b>', 'font-size:11px')}${caseParts.join('')}
+</td>
+<td valign="top" align="right" width="38%">
+<table ${TBL} align="right"><tr><td bgcolor="${sev.pillBg}" style="background-color:${sev.pillBg};border-radius:10px;padding:4px 10px;text-align:right;">${ft(sev.pillFg, '<b>&#9660; DOWN' + (duration ? ' ' + _esc(duration) : '') + '</b>', 'font-size:11px')}</td></tr></table>
+</td>
+</tr></table>`;
+      const body = `<table ${TBL} width="100%" style="margin-top:8px;"><tr>
+<td valign="top" width="410" style="width:410px;padding-right:10px;word-wrap:break-word;word-break:break-word;">
+${ft('#64748a', 'RELAY GARAGE', 'font-size:9px;letter-spacing:0.08em')}<br>
+${rgHtml}
+</td>
+<td valign="top" width="436" bgcolor="#f7f9fc" style="width:436px;background-color:#f7f9fc;border:1px solid #e5e9f0;border-radius:6px;padding:8px 10px;word-wrap:break-word;word-break:break-word;">
+${ft('#64748a', 'TIMELINE', 'font-size:9px;letter-spacing:0.08em')}<br>
+${ft('#374151', notes, 'font-size:10px;line-height:1.5')}
+</td>
+</tr></table>`;
+      unavailSection += _sectionRow('#ffffff', _spineCard(sev.spine, header + body), '10px 24px 0 24px');
     });
-
-    unavailTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid #dde1e6;border-top:none;">
-<tr>
-${hdrTh('DOMICILE')}${hdrTh('OPERATOR')}${hdrTh('UNIT ID')}${hdrTh('MAKE')}${hdrTh('STATE')}${hdrTh('REASON')}${hdrTh('REPAIR STATUS')}${hdrTh('PRIMARY COMP')}${hdrTh('CASE/OFFSITE')}${hdrTh('RELAY GARAGE')}<th bgcolor="#475569" width="350" style="background-color:#475569;padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;width:350px;white-space:nowrap;"><font color="#f1f5f9" face="Arial,sans-serif" style="font-size:9px;letter-spacing:0.07em"><b>NOTES</b></font></th>
-</tr>
-${rows}
-</table>`;
+    unavailSection += _sectionRow('#ffffff', '&nbsp;', '0', 'height:14px;line-height:14px;font-size:1px;');
   } else {
-    unavailTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #dde1e6;border-top:none;"><tr><td style="text-align:center;padding:14px;">${ft('#bbbbbb','No unavailable units &#10003;','font-size:12px')}</td></tr></table>`;
+    unavailSection += _sectionRow('#ffffff', ft('#94a3b8', 'No unavailable units &#10003;', 'font-size:12px'), '14px 24px', 'text-align:center;');
   }
 
-  // PM Due Dates table
-  const _hasBoxTrucks = filteredUnits.some(u => /box/i.test(u.bodyType || ''));
-  let pmTable = '';
-  if (filteredUnits.length) {
-
-    const pmHdr = (text) => `<th bgcolor="#d1fae5" style="background-color:#d1fae5;padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;white-space:nowrap;">${ft('#14532d','<b>'+text+'</b>','font-size:9px;letter-spacing:0.07em')}</th>`;
-
-    let pmRows = '';
-    filteredUnits.forEach((u, i) => {
-      const isUnavail = (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase().indexOf('unavail') > -1;
-      const bg = isUnavail ? '#fff5f5' : (i % 2 === 0 ? '#ffffff' : '#f9fbf9');
-      const makeRaw = (u.model || '').toLowerCase();
-      let makeBg = '#f3f4f6', makeLbl = u.model || '--', makeColor = '#374151';
-      if (makeRaw.includes('freightliner')) { makeBg = '#e5e7eb'; makeLbl = 'FREIGHTLINER'; makeColor = '#1f2937'; }
-      else if (makeRaw.includes('volvo'))   { makeBg = '#dbeafe'; makeLbl = 'VOLVO'; makeColor = '#1e3a5f'; }
-      else if (makeRaw.includes('peterbilt')){ makeBg = '#fee2e2'; makeLbl = 'PETERBILT'; makeColor = '#7f1d1d'; }
-      else if (makeRaw.includes('kenworth')) { makeBg = '#fef3c7'; makeLbl = 'KENWORTH'; makeColor = '#78350f'; }
-      else if (makeRaw.includes('mack'))    { makeBg = '#fed7aa'; makeLbl = 'MACK'; makeColor = '#78350f'; }
-
-      const statusBg = isUnavail ? '#dc2626' : '#16a34a';
-      const statusLbl = isUnavail ? 'UNAVAILABLE' : 'IN SERVICE';
-
-      function pmColor(val) {
-        if (!val || val === '--') return '#bbbbbb';
-        const d = new Date(val);
-        if (isNaN(d.getTime())) return '#222222';
-        const diff = (d - now) / (1000*60*60*24);
-        if (diff < 0) return '#dc2626';
-        if (diff < 31) return '#d97706';
-        return '#16a34a';
-      }
-
-      const pmB = u.pmB || '--';
-      const pmX = u.pmX || '--';
-      const dot = u.dot || '--';
-      const qlft = u.quarterlyLift || '--';
-      const bodyType = u.bodyType || (makeRaw.includes('box') ? 'Box Truck' : (op === 'AUVTE' ? 'Box Truck' : 'Day Cab'));
-
-      const td = (content, align) => `<td bgcolor="${bg}" style="background-color:${bg};padding:7px 8px;border-bottom:1px solid #eaecef;border-right:1px solid #eaecef;${align?'text-align:'+align+';':''}vertical-align:middle;">${content}</td>`;
-
-      pmRows += `<tr>
-${td(ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px'))}
-${td(ft('#1e2d3d', u.site || '--', 'font-size:10px'), 'center')}
-${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${makeBg}" style="background-color:${makeBg};padding:2px 6px;border-radius:3px;">${ft(makeColor,'<b>'+makeLbl+'</b>','font-size:9px')}</td></tr></table>`, 'center')}
-${td(ft('#555555', bodyType, 'font-size:10px'), 'center')}
-${td(ft(pmColor(pmB), '<b>' + pmB + '</b>', 'font-size:10px'), 'center')}
-${td(ft(pmColor(pmX), '<b>' + pmX + '</b>', 'font-size:10px'), 'center')}
-${td(ft(pmColor(dot), '<b>' + dot + '</b>', 'font-size:10px'), 'center')}
-${_hasBoxTrucks ? td(ft(pmColor(qlft), '<b>' + qlft + '</b>', 'font-size:10px'), 'center') : ''}
-${td(`<table cellpadding="0" cellspacing="0" border="0"><tr><td bgcolor="${statusBg}" style="background-color:${statusBg};padding:2px 7px;border-radius:12px;">${ft('#ffffff','<b>'+statusLbl+'</b>','font-size:9px')}</td></tr></table>`, 'center')}
-</tr>`;
-    });
-
-    pmTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid #dde1e6;border-top:none;">
-<tr>
-${pmHdr('UNIT ID')}${pmHdr('DOMICILE')}${pmHdr('MAKE')}${pmHdr('BODY TYPE')}${pmHdr('PM-B DUE')}${pmHdr('PM-X DUE')}${pmHdr('DOT DUE')}${_hasBoxTrucks ? pmHdr('QUARTERLY') : ''}${pmHdr('STATUS')}
-</tr>
-${pmRows}
-</table>`;
-  } else {
-    pmTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #dde1e6;border-top:none;"><tr><td style="text-align:center;padding:14px;">${ft('#bbbbbb','No PM data','font-size:12px')}</td></tr></table>`;
-  }
-
-  // Replace placeholders
-  template = template.replace(/\{\{TEST_BANNER\}\}/g, testBanner);
-  template = template.replace(/\{\{DATETIME\}\}/g, datetime);
-  template = template.replace(/\{\{SITE\}\}/g, site);
-  template = template.replace(/\{\{OPERATOR\}\}/g, op);
-  template = template.replace(/\{\{GREETING\}\}/g, greeting);
-  // Dynamic greeting body based on site content
-  const hasUptake = filteredUnits.some(u => u.riskScore && u.riskScore >= 60);
-  let pmList = 'PM-B / PM-X / DOT' + (_hasBoxTrucks ? ' / Quarterly Lift' : '');
-
-  let greetBody = 'Below is the <b>' + slotDisplayLabel.replace(' REPORT','') + ' fleet maintenance update</b> for <b>' + op + '</b>. This report covers unavailable units, ' + pmList + ' due dates, relay garage events';
-  if (hasUptake) greetBody += ', and <b>high-risk predictive maintenance insights (Uptake)</b>';
-  greetBody += '.';
-
-  template = template.replace(/\{\{GREETING_BODY\}\}/g, greetBody);
-
-  template = template.replace(/\{\{SLOT\}\}/g, slotLabel);
-  template = template.replace(/\{\{SLOT_LABEL\}\}/g, slotDisplayLabel);
-  template = template.replace(/\{\{SLOT_BG\}\}/g, slotBg);
-  template = template.replace(/\{\{SLOT_BORDER\}\}/g, slotBorder);
-  template = template.replace(/\{\{SLOT_COLOR\}\}/g, slotColor);
-  template = template.replace(/\{\{SLOT_ICON\}\}/g, slotIcon);
-  template = template.replace(/\{\{NOTE_BAR\}\}/g, noteBar);
-  template = template.replace(/\{\{KPI_STRIP\}\}/g, kpiStrip);
-  template = template.replace(/\{\{FLEET_SUMMARY\}\}/g, fleetSummary);
-  template = template.replace(/\{\{VENDOR_CHIPS\}\}/g, vendorChips);
-  template = template.replace(/\{\{UNAVAIL_COUNT\}\}/g, String(unavailUnits.length));
-
-  // Smart change summary — shows what changed since last email send
-  let changeSummaryHtml = '';
-  let changeMeta = null;
-  try {
-    const { buildChangeSummary } = require('./email-summary');
-    // Scope the change-summary snapshot per operator (+domicile if scoped) +slot
-    // so each recipient's "new / returned" diff compares against its own history,
-    // not a shared global snapshot that other operators' sends overwrite.
-    const _scopeKey = [String(op || 'ALL').toUpperCase(),
-                       (domicile && domicile !== 'ALL') ? String(domicile).toUpperCase() : '',
-                       String(slotLabel || '')].filter(Boolean).join('_');
-    const result = buildChangeSummary(filteredUnits, { slot: slotLabel, scopeKey: _scopeKey });
-    changeSummaryHtml = result.html || '';
-    changeMeta = result.meta || null;
-  } catch (e) { logger.warn('Change summary failed (non-fatal):', e.message); }
-
-  template = template.replace(/\{\{UNAVAIL_TABLE\}\}/g, changeSummaryHtml + unavailTable);
-  template = template.replace(/\{\{PM_TABLE\}\}/g, pmTable);
-
-  // Uptake Predictive Insights (score >= 60)
-  let uptakeTable = '';
-  const riskUnits = filteredUnits.filter(u => u.riskScore && u.riskScore >= 60)
-    .sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0));
-
+  // ── UPTAKE INSIGHTS (score >= 60) ──
+  let uptakeHtml = ft('#4c1d95', '<b>&#9889; UPTAKE INSIGHTS</b>', 'font-size:13px;font-weight:bold');
   if (riskUnits.length) {
-    let uptakeRows = '';
     riskUnits.forEach(u => {
       const score = u.riskScore || 0;
       const scoreColor = score >= 75 ? '#dc2626' : '#d97706';
@@ -407,7 +447,7 @@ ${pmRows}
       // Auto-determine PM status
       const issueText = ((u.savedNotes || '') + ' ' + (u.issue || '')).toLowerCase();
       const hasPM = issueText.includes('predictive maintenance') || issueText.includes('predictive maint');
-      const isActive = (u.atsState||u.lifecycleState) && (u.atsState||u.lifecycleState).toLowerCase() === 'available';
+      const isActive = _state(u) && _state(u).toLowerCase() === 'available';
       let pmStatus = u.pmStatus || '';
       if (!pmStatus) {
         if (hasPM && isActive) pmStatus = 'Completed';
@@ -418,37 +458,115 @@ ${pmRows}
       const pmColors = { 'Opened': '#6b7280', 'In Review': '#d97706', 'In Progress': '#2563eb', 'Completed': '#16a34a' };
       const pmColor = pmColors[pmStatus] || '#6b7280';
 
-      uptakeRows += `<tr>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;text-align:center;">
-<table cellpadding="0" cellspacing="0" border="0"><tr><td style="border:2px solid ${scoreColor};border-radius:50%;padding:3px 6px;text-align:center;">${ft(scoreColor, '<b>' + score + '</b>', 'font-size:11px')}</td></tr></table>
-</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#1a56db', '<b>' + (u.id || '--') + '</b>', 'font-size:11px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#1e2d3d', u.op || '--', 'font-size:10px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#555555', u.site || '--', 'font-size:10px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft(tierColor, '<b>' + tier + '</b>', 'font-size:10px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft('#333333', insight || '\u2014', 'font-size:10px')}</td>
-<td style="padding:8px;border-bottom:1px solid #eaecef;vertical-align:top;">${ft(pmColor, '<b>' + pmStatus + '</b>', 'font-size:10px')}</td>
-</tr>`;
+      const uuid = _uptakeUuid(u);
+      const uptakeLink = uuid
+        ? '&nbsp;&nbsp;<a href="https://fleet.uptake.com/asset/' + _esc(uuid) + '" style="color:#4c1d95;font-size:10px;font-weight:bold;text-decoration:underline;">View in Uptake &#8594;</a>'
+        : '';
+      const where = [u.op, u.site].filter(Boolean).map(_esc).join(' &#183; ');
+      const inner = ft('#1a56db', '<b>' + _esc(u.id || '--') + '</b>', 'font-size:13px') +
+        `&nbsp;<table ${TBL} style="display:inline;"><tr><td style="border:2px solid ${scoreColor};border-radius:50%;padding:1px 6px;">${ft(scoreColor, '<b>' + score + '</b>', 'font-size:11px')}</td></tr></table>` +
+        '&nbsp;' + ft(tierColor, '<b>' + _esc(tier) + '</b>', 'font-size:10px') +
+        (where ? '&nbsp;' + ft('#64748a', where, 'font-size:10px') : '') +
+        '<br>' + ft('#333333', insight ? _esc(insight) : '\u2014', 'font-size:10px') +
+        '<br>' + ft(pmColor, '<b>Status: ' + _esc(pmStatus) + '</b>', 'font-size:10px') + uptakeLink;
+      uptakeHtml += `<table ${TBL} width="100%" style="margin-top:6px;"><tr><td>${_spineCard(scoreColor, inner, '#e3e0f0', '#ffffff', '10px 12px')}</td></tr></table>`;
     });
-
-    uptakeTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;border:1px solid #dde1e6;border-top:none;">
-<tr bgcolor="#f5f0ff">
-<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>SCORE</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>UNIT ID</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>OPERATOR</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>DOMICILE</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>RISK</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;border-right:1px solid #e8ebef;">${ft('#444444','<b>ACTIVE INSIGHT</b>','font-size:9px')}</th>
-<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #dde1e6;">${ft('#444444','<b>STATUS</b>','font-size:9px')}</th>
-</tr>
-${uptakeRows}
-</table>`;
   } else {
-    uptakeTable = `<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border:1px solid #dde1e6;border-top:none;"><tr><td style="text-align:center;padding:14px;">${ft('#bbbbbb','No active predictive insights (score &lt; 60)','font-size:12px')}</td></tr></table>`;
+    uptakeHtml += '<br>' + ft('#94a3b8', 'No active predictive insights (score &lt; 60)', 'font-size:11px');
   }
 
+  // ── NEW DELIVERY (lifecycle ORDERED / Pending Delivery) ──
+  let deliveryHtml = '';
+  if (orderedUnits.length) {
+    deliveryHtml = ft('#0e7490', '<b>&#128666; NEW DELIVERY</b>', 'font-size:13px;font-weight:bold');
+    orderedUnits.forEach(u => {
+      const wr = u.issue || u.issueSummary || '';
+      const inner = ft('#1a56db', '<b>' + _esc(u.id || '--') + '</b>', 'font-size:13px') + '&nbsp;' + _makeBadge(u.model) +
+        '<br>' + ft('#b87a00', '<b>ORDERED &#183; ' + _esc(u.relayStatus || 'Pending Delivery') + '</b>', 'font-size:10px') +
+        (wr ? '<br>' + ft('#555555', _esc(wr), 'font-size:10px') : '');
+      deliveryHtml += `<table ${TBL} width="100%" style="margin-top:6px;"><tr><td>${_spineCard('#0e7490', inner, '#cfe9f2', '#ffffff', '10px 12px')}</td></tr></table>`;
+    });
+  }
+  const insightsInner = deliveryHtml
+    ? `<table ${TBL} width="100%"><tr><td valign="top" width="530" style="width:530px;padding-right:10px;">${uptakeHtml}</td><td valign="top" width="362" style="width:362px;">${deliveryHtml}</td></tr></table>`
+    : uptakeHtml;
+  const insightsDeliverySection = _sectionRow('#f6f4fc', insightsInner, '14px 24px 14px 24px', 'border-top:1px solid #e5e0f2;');
 
-  template = template.replace(/\{\{UPTAKE_TABLE\}\}/g, uptakeTable);
+  // Smart change summary — what changed since the last verified send of this scope
+  let changeMeta = null;
+  try {
+    const { buildChangeSummary } = require('./email-summary');
+    // Scope the change-summary snapshot per operator (+domicile if scoped) +slot
+    // so each recipient's "new / returned" diff compares against its own history,
+    // not a shared global snapshot that other operators' sends overwrite.
+    const _scopeKey = [String(op || 'ALL').toUpperCase(),
+                       (domicile && domicile !== 'ALL') ? String(domicile).toUpperCase() : '',
+                       String(slotLabel || '')].filter(Boolean).join('_');
+    const result = buildChangeSummary(filteredUnits, { slot: slotLabel, scopeKey: _scopeKey });
+    changeMeta = result.meta || null;
+  } catch (e) { logger.warn('Change summary failed (non-fatal):', e.message); }
+
+  let changeRow = '';
+  if (changeMeta && changeMeta.hasBaseline) {
+    const slotName = changeMeta.prevSlot === 'AM' ? 'AM / SOS' : changeMeta.prevSlot === 'PM' ? 'PM / EOS' : String(changeMeta.prevSlot || '');
+    let when = '';
+    if (changeMeta.prevSentAt) {
+      const d = new Date(changeMeta.prevSentAt);
+      if (!isNaN(d.getTime())) {
+        const ph = d.getHours(), pm = d.getMinutes();
+        when = MONTHS_SHORT[d.getMonth()] + ' ' + d.getDate() + ', ' + (ph % 12 || 12) + ':' + (pm < 10 ? '0' + pm : pm) + ' ' + (ph >= 12 ? 'PM' : 'AM');
+      }
+    }
+    const lbl = [slotName, when].filter(Boolean).map(_esc).join(' &#183; ');
+    let c = ft('#64748a', 'SINCE LAST REPORT' + (lbl ? ' (' + lbl + ')' : '') + '&nbsp;&nbsp;', 'font-size:9px;letter-spacing:0.08em');
+    if (changeMeta.newCount > 0) c += _chip('#fde8e8', '#f5bcbc', '#b91c1c', '&#9650; ' + changeMeta.newCount + ' newly down');
+    if (changeMeta.returnedCount > 0) c += _chip('#dcf5e4', '#a7e3bd', '#15803d', '&#9660; ' + changeMeta.returnedCount + ' back in service');
+    if (changeMeta.stalledCount > 0) c += _chip('#fff4d9', '#eccd86', '#92500a', '&#9888; ' + changeMeta.stalledCount + ' stalled');
+    const idParts = [];
+    if ((changeMeta.newIds || []).length) idParts.push('New: ' + changeMeta.newIds.map(_esc).join(', '));
+    if ((changeMeta.returnedIds || []).length) idParts.push('Returned: ' + changeMeta.returnedIds.map(_esc).join(', '));
+    if ((changeMeta.stalled || []).length) idParts.push('Stalled: ' + changeMeta.stalled.map(s => _esc(s.id) + ' (' + s.daysDown + 'd)').join(', '));
+    if (idParts.length) c += ft('#94a3b8', '&nbsp;' + idParts.join(' &#183; '), 'font-size:10px');
+    if (!changeMeta.newCount && !changeMeta.returnedCount && !changeMeta.stalledCount) {
+      c += ft('#475569', '&#10003; No significant changes since last report. Fleet status stable.', 'font-size:10px');
+    }
+    const dl = changeMeta.delta > 0 ? ' (+' + changeMeta.delta + ')' : changeMeta.delta < 0 ? ' (' + changeMeta.delta + ')' : '';
+    c += '<br>' + ft('#64748a', 'Unavailable ' + changeMeta.unavailCount + dl + ' &#183; Avg days down ' + _esc(changeMeta.avgDaysDown) +
+      ' &#183; High risk (70+) ' + changeMeta.highRiskCount, 'font-size:10px');
+    changeRow = _sectionRow('#ffffff', c, '12px 28px 2px 28px');
+  }
+
+  // Dynamic greeting body based on site content
+  const hasUptake = filteredUnits.some(u => u.riskScore && u.riskScore >= 60);
+  let pmList = 'PM-B / PM-X / DOT' + (_hasBoxTrucks ? ' / Quarterly Lift' : '');
+
+  let greetBody = 'Below is the <b>' + slotDisplayLabel.replace(' REPORT','') + ' fleet maintenance update</b> for <b>' + _esc(op) + '</b>. This report covers unavailable units, ' + pmList + ' due dates, relay garage events';
+  if (hasUptake) greetBody += ', and <b>high-risk predictive maintenance insights (Uptake)</b>';
+  greetBody += '.';
+
+  // Replace placeholders (split/join: values are never treated as regex replacement patterns)
+  template = _fill(template, 'TEST_BANNER', testBanner);
+  template = _fill(template, 'DATETIME', datetime);
+  template = _fill(template, 'SITE', _esc(site));
+  template = _fill(template, 'OPERATOR', _esc(op));
+  template = _fill(template, 'REPORT_TITLE', reportTitle);
+  template = _fill(template, 'HERO_TILES', heroTiles);
+  template = _fill(template, 'HEALTH_BAR', healthBar);
+  template = _fill(template, 'QUICK_STATS', quickStats);
+  template = _fill(template, 'GREETING', greeting);
+  template = _fill(template, 'GREETING_BODY', greetBody);
+  template = _fill(template, 'SLOT', slotLabel);
+  template = _fill(template, 'SLOT_LABEL', slotDisplayLabel);
+  template = _fill(template, 'SLOT_BG', slotBg);
+  template = _fill(template, 'SLOT_BORDER', slotBorder);
+  template = _fill(template, 'SLOT_COLOR', slotColor);
+  template = _fill(template, 'SLOT_ICON', slotIcon);
+  template = _fill(template, 'NOTE_BAR', noteBar);
+  template = _fill(template, 'CHANGE_ROW', changeRow);
+  template = _fill(template, 'BODY_TYPE_SECTION', bodyTypeSection);
+  template = _fill(template, 'UNAVAIL_SECTION', unavailSection);
+  template = _fill(template, 'PM_SECTION', pmSection);
+  template = _fill(template, 'INSIGHTS_DELIVERY_SECTION', insightsDeliverySection);
 
   // Store change metadata for subject enhancement (read by email:compose handler)
   buildEmail._lastChangeMeta = changeMeta;

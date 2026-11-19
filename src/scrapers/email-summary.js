@@ -20,7 +20,8 @@ const STALE_NO_UPDATE_HOURS = 48;
  * buildChangeSummary(currentUnits, opts)
  * @param {Array} currentUnits - Current fleet unit rows (already merged/enriched)
  * @param {object} opts - { slot }
- * @returns {{ html: string, meta: { newCount, returnedCount, stalledCount, unavailCount, delta } }}
+ * @returns {{ html: string, meta: { newCount, returnedCount, stalledCount, unavailCount, delta,
+ *   hasBaseline, newIds, returnedIds, stalled, avgDaysDown, highRiskCount, prevSlot, prevSentAt } }}
  */
 function buildChangeSummary(currentUnits, opts = {}) {
   const slot = opts.slot || '';
@@ -113,7 +114,11 @@ function buildChangeSummary(currentUnits, opts = {}) {
   // If no previous snapshot, skip the summary (first email ever)
   if (!prevSnap) {
     logger.info('[email-summary] No previous snapshot — skipping change summary (first send)');
-    return { html: '', meta: { newCount: 0, returnedCount: 0, stalledCount: stalled.length, unavailCount: currUnavail.length, delta: 0 } };
+    return { html: '', meta: {
+      newCount: 0, returnedCount: 0, stalledCount: stalled.length, unavailCount: currUnavail.length, delta: 0,
+      hasBaseline: false, newIds: [], returnedIds: [], stalled: [],
+      avgDaysDown: currAvgDays, highRiskCount: currHighRisk.length, prevSlot: '', prevSentAt: null,
+    } };
   }
 
   // Build HTML
@@ -181,6 +186,16 @@ function buildChangeSummary(currentUnits, opts = {}) {
     stalledCount: stalled.length,
     unavailCount: currUnavail.length,
     delta: unavailDelta,
+    // Additive fields (2026-11 report redesign): read by emailBuilder to
+    // render the OWA-safe "change since last report" chip row.
+    hasBaseline: true,
+    newIds: newBreakdowns.map(u => String(u.id)),
+    returnedIds: returned.map(u => String(u.id)),
+    stalled: stalled.map(u => ({ id: String(u.id), daysDown: u.daysDown, hoursSinceUpdate: u.hoursSinceUpdate })),
+    avgDaysDown: currAvgDays,
+    highRiskCount: currHighRisk.length,
+    prevSlot: prevSnap.slot || '',
+    prevSentAt: prevTime || null,
   };
 
   return { html, meta };
