@@ -190,7 +190,19 @@ export function localFreshnessWarnings(unit, now) {
   };
   one(u.asistScrapedAt, 'Offsite notes');
   one(u.scrapedAt, 'Relay row');
+  if (!String(u.fullConversation || '').trim()) out.push('No Relay conversation loaded');
   return out;
+}
+
+// The fields of WR `wrId` for local checks: the unit itself for its primary WR, else the
+// matching planned/secondary entry plus the unit's row scrape time (same rule as main rowForWr).
+export function wrUnitOf(unit, wrId) {
+  const u = unit || {};
+  const want = String(wrId || '').toLowerCase();
+  if (!want || String(u.workRequestId || '').toLowerCase() === want) return u;
+  const entries = [u._plannedWRData].concat(Array.isArray(u._secondaryWRs) ? u._secondaryWRs : []);
+  const e = entries.find((x) => x && String(x.workRequestId || '').toLowerCase() === want);
+  return e ? Object.assign({ scrapedAt: u.scrapedAt }, e) : u;
 }
 
 // ── body builders ───────────────────────────────────────────────────────────
@@ -467,7 +479,7 @@ export async function openCommentModal(unit, wrId, deps) {
     try {
       if (tpl === 'free-form') {
         r = await d.bridge.draftComment(wrId, relayActionDraftUnit(u));
-        if (r && r.ok) { text = toCapsKeepFills(r.draft || ''); warnings = localFreshnessWarnings(u); }
+        if (r && r.ok) { text = toCapsKeepFills(r.draft || ''); warnings = localFreshnessWarnings(wrUnitOf(u, wrId)); }
       } else {
         r = await d.bridge.draftAction({ kind: 'comment', template: tpl, workRequestId: wrId,
           unit: relayActionDraftUnit(u), userInputs: {} });

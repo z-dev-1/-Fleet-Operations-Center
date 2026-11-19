@@ -251,6 +251,29 @@ describe('comment modal', () => {
     expect(q('#ra-cm-text').value).toBe('VENDOR SAYS PARTS ETA FRIDAY, SEE https://x.example/Path');
     expect(q('#ra-stale').textContent).toContain('freshness unknown');
   });
+  it('localFreshnessWarnings warns when no Relay conversation is loaded (B5)', () => {
+    const now = Date.parse('2026-11-19T12:00:00Z');
+    const fresh = new Date(now - 3600000).toISOString();
+    expect(ra.localFreshnessWarnings({ asistScrapedAt: fresh, scrapedAt: fresh, fullConversation: '' }, now)).toEqual(['No Relay conversation loaded']);
+    expect(ra.localFreshnessWarnings({ asistScrapedAt: fresh, scrapedAt: fresh, fullConversation: 'Conversation\n11/19 - x' }, now)).toEqual([]);
+  });
+  it('a secondary-card draft sends the clicked WR; free-form freshness uses that WR entry', async () => {
+    const SEC = '0a1b2c3d-1111-2222-3333-777777777777';
+    const u = Object.assign({}, UNIT, { fullConversation: 'Conversation\n11/19 - primary', scrapedAt: new Date().toISOString(),
+      _secondaryWRs: [{ workRequestId: SEC, vendor: 'Volvo', fullConversation: '' }] });
+    fakeModal.st.panel = mkPanel();
+    await ra.openCommentModal(u, SEC, deps);
+    await choose('#ra-cm-template', 'offsite-update');
+    await q('#ra-cm-draft').fire('click');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledWith(expect.objectContaining({ workRequestId: SEC, unit: expect.objectContaining({ equipmentId: '322168' }) }));
+    await choose('#ra-cm-template', 'free-form');
+    await type('#ra-cm-text', '');
+    await q('#ra-cm-draft').fire('click');
+    expect(window.relayWrites.draftComment).toHaveBeenCalledWith(SEC, expect.objectContaining({ equipmentId: '322168' }));
+    expect(q('#ra-stale').textContent).toContain('No Relay conversation loaded');
+    expect(ra.wrUnitOf(u, SEC)).toMatchObject({ workRequestId: SEC, vendor: 'Volvo' });
+    expect(ra.wrUnitOf(u, UNIT.workRequestId)).toBe(u);
+  });
   it('empty text is refused', async () => {
     await openCm();
     await action('Submit comment').onClick();

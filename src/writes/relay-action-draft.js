@@ -174,7 +174,8 @@ function collectFacts(row, { now, factSet, evidenceText } = {}) {
       if (t != null) stamps.push(t);
     }
   } catch (_) { /* no thread */ }
-  for (const v of [r.offsiteStageSince, r.asistScrapedAt]) { const t = _ms(v); if (t != null) stamps.push(t); }
+  // Status stamps only. asistScrapedAt is the sync time (it drives the freshness warning).
+  { const t = _ms(r.offsiteStageSince); if (t != null) stamps.push(t); }
   if (stamps.length) lastStatusAt = Math.max(...stamps);
 
   const etr = fs && _isObj(fs.etc) && _isObj(fs.etc.currentEtc) ? first(fs.etc.currentEtc.date) : null;
@@ -422,11 +423,12 @@ async function draftAction({ kind, target, template, workRequestId, unit, userIn
   const D = require('./relay-comment-draft');
   const store = _store();
   const wr = _s(workRequestId).toLowerCase();
-  const row = D.resolveRow({ unit, lastData, store });
-  const id = _s(row.equipmentId).trim();
+  const unitRow = D.resolveRow({ unit, lastData, store });
+  const id = _s(unitRow.equipmentId).trim();
   // Same consistency check as relay-comment-draft.draftForUnit (not an authority check;
-  // nothing is written on this path).
-  const m = WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl));
+  // nothing is written on this path). A planned/secondary WR drafts from its own entry.
+  const row = D.rowForWr(unitRow, wr);
+  const m = row && (WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl)));
   if (!wr || !m || m[0].toLowerCase() !== wr) {
     _log('warn', 'action draft refused', { unit: id, code: 'wr-mismatch' });
     return { ok: false, code: 'wr-mismatch' };

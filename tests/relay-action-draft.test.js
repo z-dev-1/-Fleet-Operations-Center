@@ -24,7 +24,7 @@ const FULL = {
   vendorWorkOrderId: 'RO-12345', savedPrimaryComponent: 'Turbo', offsiteStage: 'approval',
   offsiteStageDetail: 'Estimate submitted', lifecycleState: 'Unavailable',
   created: iso(NOW.getTime() - (50 * H + 12 * M)),
-  offsiteStageSince: iso(NOW.getTime() - 20 * H),
+  offsiteStageSince: iso(NOW.getTime() - (26 * H + 7 * M)),
   asistScrapedAt: iso(NOW.getTime() - (3 * H + 5 * M)),
   scrapedAt: iso(NOW.getTime() - 1 * H),
   fullConversation: 'Conversation\n11/18 - Cox Service: estimate submitted RO-12345, waiting approval\n11/17 - Cox Service: unit received',
@@ -80,7 +80,7 @@ describe('templates with real values', () => {
       unavailable: true, urgent: false, lineItemsMatchPics: true, laborWithinGuidebook: true,
     });
     expect(f.downtimeMs).toBe(50 * H + 12 * M);
-    expect(f.sinceUpdateMs).toBe(3 * H + 5 * M);
+    expect(f.sinceUpdateMs).toBe(26 * H + 7 * M);
     const s = D.collectFacts(SPARSE, { now: NOW });
     expect(s).toMatchObject({ vendor: null, estAmount: null, estLink: null, roNumber: null, roLink: null, cityState: null, lastStatus: null });
   });
@@ -88,7 +88,7 @@ describe('templates with real values', () => {
   it('Offsite Update has computed AS OF and DOWNTIME', () => {
     const r = D.renderOffsiteUpdate(facts(), { notes: 'EST SUBMITTED, WAITING APPROVAL', next: 'APPROVAL' });
     const lines = D.toCaps(r.text).split('\n');
-    expect(lines[0]).toBe('OFFSITE - COX TRUCK CENTER - B62020 - TURBO - EST APPROVAL AS OF ' + D.formatAsOf(NOW.getTime() - (3 * H + 5 * M)));
+    expect(lines[0]).toBe('OFFSITE - COX TRUCK CENTER - B62020 - TURBO - EST APPROVAL AS OF ' + D.formatAsOf(NOW.getTime() - (26 * H + 7 * M)));
     expect(lines[1]).toBe('RO#: RO-12345 | RO LINK: ' + EST_URL);
     expect(lines[2]).toBe('NOTES: EST SUBMITTED, WAITING APPROVAL');
     expect(lines[3]).toBe('NEXT: APPROVAL | ETR: <FILL: etr>');
@@ -99,8 +99,8 @@ describe('templates with real values', () => {
   it('Update Request has LAST STATUS AS OF, NO UPDATE IN, NEED and REASON', () => {
     const lines = D.renderUpdateRequest(facts()).text.split('\n');
     expect(lines[0]).toBe('UPDATE REQUEST - Cox Truck Center - B62020 - Turbo');
-    expect(lines[1]).toBe('LAST STATUS: Estimate submitted AS OF ' + D.formatAsOf(NOW.getTime() - (3 * H + 5 * M)));
-    expect(lines[2]).toBe('NO UPDATE IN 3 HOURS 5 MINUTES. NO ETR GIVEN');
+    expect(lines[1]).toBe('LAST STATUS: Estimate submitted AS OF ' + D.formatAsOf(NOW.getTime() - (26 * H + 7 * M)));
+    expect(lines[2]).toBe('NO UPDATE IN 26 HOURS 7 MINUTES. NO ETR GIVEN');
     expect(lines[3]).toBe('NEED: ETR');
     expect(lines[4]).toBe('REASON: UNIT DOWN');
     expect(lines[5]).toBe('DOWNTIME: 50 HOURS 12 MINUTES');
@@ -233,7 +233,7 @@ describe('AI failure and request checks', () => {
     setAsk(() => { throw new Error('lane down'); });
     const r = await draft({ kind: 'escalation', target: 'FAS', workRequestId: WR, unit: { equipmentId: 'B62020' } });
     expect(r).toMatchObject({ ok: true, aiUsed: false, note: 'ai-failed' });
-    expect(r.draft).toBe('VENDOR NO UPDATE IN 3 HOURS 5 MINUTES. UNIT DOWN. PLEASE PUSH VENDOR FOR ETA.');
+    expect(r.draft).toBe('VENDOR NO UPDATE IN 26 HOURS 7 MINUTES. UNIT DOWN. PLEASE PUSH VENDOR FOR ETA.');
     setAsk(() => Promise.reject(Object.assign(new Error('t'), { code: 'AI_TIMEOUT' })));
     const t = await draft({ kind: 'comment', template: 'offsite-update', workRequestId: WR, unit: { equipmentId: 'B62020' } });
     expect(t).toMatchObject({ ok: true, aiUsed: false, note: 'ai-timeout' });
@@ -256,6 +256,44 @@ describe('AI failure and request checks', () => {
     expect(await draft({ kind: 'escalation', target: 'FAS', workRequestId: WR, unit: { equipmentId: 'B62020' } })).toEqual({ ok: false, code: 'busy' });
     release('{"reason":"VENDOR NOT RESPONDING"}');
     expect((await p1).draft).toBe('VENDOR NOT RESPONDING');
+  });
+});
+
+describe('status timestamps (B4)', () => {
+  it('a fresh scrape time is not a status update: no status stamp -> <FILL: as of> / <FILL: X HOURS Y MINUTES>', () => {
+    const row = Object.assign({}, FULL, { fullConversation: '', offsiteStageSince: '', asistScrapedAt: iso(NOW.getTime() - 1 * H) });
+    const f = D.collectFacts(row, { now: NOW });
+    expect(f.lastStatusAt).toBeNull();
+    expect(f.sinceUpdateMs).toBeNull();
+    const lines = D.renderUpdateRequest(f).text.split('\n');
+    expect(lines[1]).toBe('LAST STATUS: Estimate submitted AS OF <FILL: as of>');
+    expect(lines[2]).toBe('NO UPDATE IN <FILL: X HOURS Y MINUTES>. NO ETR GIVEN');
+  });
+});
+
+describe('planned / secondary WR drafts', () => {
+  const SEC_WR = '0a1b2c3d-1111-2222-3333-777777777777';
+  const PRIMARY = Object.assign({}, FULL, {
+    _secondaryWRs: [{ workRequestId: SEC_WR, vendor: 'Volvo Dealer', serviceState: 'In Progress', created: iso(NOW.getTime() - 10 * H),
+      fullConversation: 'Conversation\n11/19 - Volvo Dealer: parts ordered', totalCost: 1200 }],
+  });
+  const ld = { rows: [PRIMARY] };
+
+  it('drafts from the secondary WR entry, never the primary WR fields', async () => {
+    const r = await D.draftAction({ kind: 'comment', template: 'update-request', workRequestId: SEC_WR, unit: { equipmentId: 'B62020', workRequestId: WR }, lastData: ld });
+    expect(r.ok).toBe(true);
+    expect(r.draft).toContain('UPDATE REQUEST - VOLVO DEALER - B62020');
+    expect(r.draft).toContain('DOWNTIME: 10 HOURS 0 MINUTES');
+    expect(r.draft).not.toMatch(/COX|RO-12345/);
+  });
+
+  it('rowForWr returns the primary row, the entry, or null', () => {
+    const CD = require('../src/writes/relay-comment-draft');
+    expect(CD.rowForWr(PRIMARY, WR)).toBe(PRIMARY);
+    const s = CD.rowForWr(PRIMARY, SEC_WR);
+    expect(s).toMatchObject({ equipmentId: 'B62020', workRequestId: SEC_WR, vendor: 'Volvo Dealer', estimatePendingCost: 1200, lifecycleState: 'Unavailable' });
+    expect(s.offsiteShopEventUrl).toBeUndefined();
+    expect(CD.rowForWr(PRIMARY, WR2)).toBeNull();
   });
 });
 

@@ -104,6 +104,32 @@ function resolveRow({ unit, lastData, store } = {}) {
   return Object.assign({}, base || {}, picked);
 }
 
+function _wrIdOf(o) {
+  const m = WR_UUID_RE.exec(_s(o && o.workRequestId)) || WR_UUID_RE.exec(_s(o && o.serviceUrl));
+  return m ? m[0].toLowerCase() : '';
+}
+// Unit-level fields a planned/secondary WR draft keeps from the unit row.
+const UNIT_LEVEL_FIELDS = Object.freeze(['equipmentId', 'geofence', 'domicileSite', 'lifecycleState', 'lifecycleReason', 'scrapedAt']);
+
+// The row to draft from for WR `wr`: the resolved row itself when `wr` is its primary WR,
+// else unit-level fields + that WR's own stored entry (row._plannedWRData / row._secondaryWRs),
+// so no primary-WR field (vendor, offsite links, notes, thread) leaks into the draft.
+// Returns null when `wr` is none of the unit's WRs.
+function rowForWr(row, wr) {
+  const r = _isObj(row) ? row : {};
+  const want = _s(wr).toLowerCase();
+  if (!want) return null;
+  if (_wrIdOf(r) === want) return r;
+  const entries = [r._plannedWRData].concat(Array.isArray(r._secondaryWRs) ? r._secondaryWRs : []);
+  const entry = entries.find((e) => _isObj(e) && _wrIdOf(e) === want);
+  if (!entry) return null;
+  const out = {};
+  for (const k of UNIT_LEVEL_FIELDS) if (r[k] != null && r[k] !== '') out[k] = r[k];
+  Object.assign(out, entry);
+  if (out.estimatePendingCost == null && entry.totalCost !== '' && entry.totalCost != null) out.estimatePendingCost = entry.totalCost;
+  return out;
+}
+
 // fleet_notes.json manual entries ([FAS] actions), canonical state, email evidence.
 function loadEnrich(id, store) {
   const st = store || _store();
@@ -256,13 +282,15 @@ async function draftRelayComment({ row, enrich, today, ask, workRequestId } = {}
 async function draftForUnit({ workRequestId, unit, lastData } = {}) {
   const t0 = Date.now();
   const wr = _s(workRequestId).toLowerCase();
-  const row = resolveRow({ unit, lastData });
-  const id = _s(row.equipmentId).trim();
+  const unitRow = resolveRow({ unit, lastData });
+  const id = _s(unitRow.equipmentId).trim();
   // Consistency check only: resolveRow lays the renderer's workRequestId/serviceUrl over the
-  // stored row, so this confirms the payload WR matches the unit the renderer sent. It is not
-  // an authority check against main's stored row; nothing is written on this path, and the
-  // Send path (relay:add-comment) still goes through the write gate and approval.
-  const m = WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl));
+  // stored row, so this confirms the payload WR is the unit's primary WR or one of its
+  // planned/secondary WRs. It is not an authority check against main's stored row; nothing
+  // is written on this path, and the Send path (relay:add-comment) still goes through the
+  // write gate and approval.
+  const row = rowForWr(unitRow, wr);
+  const m = row && (WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl)));
   if (!wr || !m || m[0].toLowerCase() !== wr) {
     _log('warn', 'draft refused', { unit: id, code: 'wr-mismatch' });
     return { ok: false, code: 'wr-mismatch' };
@@ -287,6 +315,6 @@ function _setDepsForTest(d) { _deps = d || {}; _inFlight.clear(); }
 module.exports = {
   SOURCE, CALL_TIMEOUT_MS, NO_UPDATE, THREAD_MAX, THREAD_ENTRIES_MAX, DROPPED_MAX, DRAFT_FIELDS, BIG_FIELDS,
   FIELD_MAX, COMMENT_MAX,
-  pickUnit, resolveRow, loadEnrich, relayThreadText, fleetEvidenceText, buildCommentDraftPrompt,
+  pickUnit, resolveRow, rowForWr, loadEnrich, relayThreadText, fleetEvidenceText, buildCommentDraftPrompt,
   cleanOutput, gateDraft, draftRelayComment, draftForUnit, _setDepsForTest,
 };
