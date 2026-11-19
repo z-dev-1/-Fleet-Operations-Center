@@ -2,8 +2,11 @@
 /**
  * writes/write-gate.js — the single choke point for Relay (AAP) writes.
  *
- * Every Relay WR comment (addComment) and every work-order commit
- * (createWorkOrder -> /createRepair) goes through requestWrite(). With
+ * Every Relay WR comment (addComment), every work-order commit
+ * (createWorkOrder -> /createRepair), every gated WR escalation change
+ * (updateEscalations -> aap_api.updateEscalations) and every gated unit
+ * lifecycle change (setLifecycle -> scrapers/lifecycle_change.changeLifecycle)
+ * goes through requestWrite(). With
  * settings.writes.requireApproval (default TRUE, no env override) nothing is
  * sent until the user explicitly approves the exact content:
  *
@@ -32,7 +35,7 @@ const ADD_COMMENT_PATH = '/api/v1/addComment';
 const COMMENT_MAX = 2000;
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
-const KINDS = ['addComment', 'createWorkOrder'];
+const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle'];
 
 let _deps = {};
 let _windowGetter = null;
@@ -92,10 +95,13 @@ function _cap(items) {
 function _str(v) { return v == null ? '' : String(v); }
 function _textLen(kind, payload) {
   if (!payload) return 0;
+  if (kind === 'updateEscalations') return _str(payload.comment).length;
+  if (kind === 'setLifecycle') return 0;
   return kind === 'addComment' ? _str(payload.text).length : _str(payload.comments).trim().length;
 }
 function _target(kind, payload, spec) {
-  if (kind === 'addComment') return _str(payload.workRequestId);
+  if (kind === 'addComment' || kind === 'updateEscalations') return _str(payload.workRequestId);
+  if (kind === 'setLifecycle') return _str(payload.aaid || payload.assetUrl || payload.equipmentId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
 // Dedup key for a work-order write: the fields that define WHAT is requested.
@@ -132,6 +138,26 @@ function _normalizePayload(kind, payload) {
   if (kind === 'addComment') {
     return { workRequestId: _str(p.workRequestId), text: _str(p.text).slice(0, COMMENT_MAX) };
   }
+  if (kind === 'updateEscalations') {
+    const strs = (v) => (Array.isArray(v) ? v : []).map(_str);
+    return {
+      workRequestId: _str(p.workRequestId),
+      aaid: _str(p.aaid),
+      add: strs(p.add),
+      remove: strs(p.remove),
+      comment: _str(p.comment).slice(0, COMMENT_MAX),
+      createdBy: _str(p.createdBy),
+    };
+  }
+  if (kind === 'setLifecycle') {
+    return {
+      equipmentId: _str(p.equipmentId),
+      assetUrl: _str(p.assetUrl),
+      state: _str(p.state),
+      reason: _str(p.reason),
+      fromState: _str(p.fromState),
+    };
+  }
   return p;
 }
 
@@ -153,6 +179,30 @@ function previewOf(kind, payload, meta) {
     lines.push('Origin: ' + (m.origin || 'unknown'));
     lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
     lines.push(_str(p.text));
+    return lines.join('\n');
+  }
+  if (kind === 'updateEscalations') {
+    const wr = _str(p.workRequestId);
+    const add = Array.isArray(p.add) ? p.add.map(_str) : [];
+    const remove = Array.isArray(p.remove) ? p.remove.map(_str) : [];
+    lines.push(add.length ? 'Relay write: escalate work request' : 'Relay write: remove escalation');
+    lines.push('Unit: ' + (m.unit || '-'));
+    lines.push('Relay WR: ' + wr + '  ' + SERVICE_URL + wr);
+    lines.push('Add: ' + (add.length ? add.join(', ') : '(none)'));
+    lines.push('Remove: ' + (remove.length ? remove.join(', ') : '(none)'));
+    lines.push('Visibility: internal-only');
+    lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
+    lines.push('Origin: ' + (m.origin || 'unknown'));
+    lines.push('Comment text (exact, ' + _str(p.comment).length + ' chars):');
+    lines.push(_str(p.comment));
+    return lines.join('\n');
+  }
+  if (kind === 'setLifecycle') {
+    lines.push('AAP write: change unit lifecycle');
+    lines.push('Unit: ' + (m.unit || '-'));
+    lines.push('Change: ' + (_str(p.fromState) || '?') + ' \u2192 ' + _str(p.state));
+    lines.push('Reason: ' + (_str(p.reason) || '(none)'));
+    lines.push('Origin: ' + (m.origin || 'unknown'));
     return lines.join('\n');
   }
   const vendorDisplay = _str(p.vendor).trim() || '(none)';
@@ -217,6 +267,28 @@ async function _send(f, payload) {
       const result = await post(ADD_COMMENT_PATH, body);
       _logLine('sent', f, 'len=' + body.text.length);
       return { ok: true, outcome: 'sent', id: f.id, result: result == null ? null : result };
+    }
+    if (f.kind === 'updateEscalations') {
+      const fn = _deps.updateEscalations || ((p) => _api().updateEscalations(p));
+      const r = await fn(payload);
+      if (r && r.ok) {
+        _logLine('sent', f, 'len=' + _textLen(f.kind, payload));
+        return { ok: true, outcome: 'sent', id: f.id, result: r };
+      }
+      const err = (r && r.error) || 'escalation not updated';
+      _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
+      return { ok: false, outcome: 'send-failed', id: f.id, result: r || null, error: err };
+    }
+    if (f.kind === 'setLifecycle') {
+      const fn = _deps.setLifecycle || ((p) => require('../scrapers/lifecycle_change').changeLifecycle(p));
+      const r = await fn(payload);
+      if (r && r.success === true) {
+        _logLine('sent', f, 'len=0');
+        return { ok: true, outcome: 'sent', id: f.id, result: r };
+      }
+      const err = (r && r.message) || 'lifecycle not changed';
+      _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
+      return { ok: false, outcome: 'send-failed', id: f.id, result: r || null, error: err };
     }
     const token = {};
     _tokens.add(token);

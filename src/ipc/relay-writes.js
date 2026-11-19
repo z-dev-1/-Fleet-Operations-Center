@@ -13,6 +13,14 @@
  *   relay:draft-comment ({ workRequestId | serviceUrl, unit })
  *                                 -> { ok, aiDrafted, draft, noUpdate, dropped, droppedCount }
  *                                    AI gap draft (writes/relay-comment-draft); never sends
+ *   relay:escalate ({ workRequestId, aaid, add[], remove[], comment, unit, aiDrafted })
+ *                                 -> { ok, outcome, id, error, current } escalation change
+ *                                    via the gate's updateEscalations kind (interactive)
+ *   relay:change-lifecycle ({ equipmentId, assetUrl, state, reason, fromState, confirmed })
+ *                                 -> { ok, outcome, id, error, result } via the gate's
+ *                                    setLifecycle kind; CONFIRM_REQUIRED unless confirmed===true
+ *   relay:lifecycle-options ({ fleetId })
+ *                                 -> { ok, states, reasons } read-only, END_OF_LIFE never listed
  *
  * Main -> renderer: 'relayWrites:approval-request' { id, kind, preview, aiDrafted },
  * 'relayWrites:updated' { items }.
@@ -67,6 +75,61 @@ function registerRelayWritesIPC(ctx) {
     return require('../writes/relay-comment-draft').draftForUnit({
       workRequestId: m[0], unit: payload.unit, lastData: ctx && ctx.lastData,
     });
+  });
+  // Escalate / de-escalate a WR through the write gate (approval modal).
+  // createdBy is resolved in main from the signed-in AAP user.
+  handle('relay:escalate', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    const m = WR_UUID_RE.exec(String(payload.workRequestId || ''));
+    if (!m) throw new ConfigError('workRequestId must be a Relay WR id', 'workRequestId');
+    const aaid = requireStringMax(payload.aaid, 'aaid', 128);
+    const list = (v, name) => {
+      const arr = v == null ? [] : v;
+      if (!Array.isArray(arr) || arr.length > 20 || arr.some((x) => typeof x !== 'string')) {
+        return { error: name + ' must be an array of at most 20 strings' };
+      }
+      return { arr };
+    };
+    const a = list(payload.add, 'add');
+    if (a.error) return { ok: false, error: a.error, code: 'ESCALATION_INVALID' };
+    const r = list(payload.remove, 'remove');
+    if (r.error) return { ok: false, error: r.error, code: 'ESCALATION_INVALID' };
+    return require('../writes/relay-action-writes').escalate({
+      workRequestId: m[0],
+      aaid,
+      add: a.arr,
+      remove: r.arr,
+      comment: payload.comment == null ? '' : String(payload.comment),
+      unit: payload.unit,
+      aiDrafted: payload.aiDrafted === true,
+    });
+  });
+  // Lifecycle change: refused without an explicit confirmed:true, then gated.
+  handle('relay:change-lifecycle', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    if (payload.confirmed !== true) {
+      return { ok: false, code: 'CONFIRM_REQUIRED', error: 'Lifecycle change needs an explicit confirm' };
+    }
+    const equipmentId = requireString(payload.equipmentId, 'equipmentId');
+    const assetUrl = requireString(payload.assetUrl, 'assetUrl');
+    const state = requireString(payload.state, 'state');
+    const lc = require('../scrapers/aap_lifecycle_api');
+    const norm = state.toUpperCase().replace(/\s+/g, '_');
+    if (lc.BLOCKED_STATES.includes(norm) || !lc.ALLOWED_STATES.includes(norm)) {
+      return { ok: false, code: 'STATE_NOT_ALLOWED', error: 'Lifecycle state ' + norm + ' is not allowed' };
+    }
+    return require('../writes/relay-action-writes').changeLifecycle({
+      equipmentId,
+      assetUrl,
+      state,   // label form (Active/Unavailable/Ordered): the browser fallback matches labels
+      reason: payload.reason == null ? '' : String(payload.reason),
+      fromState: payload.fromState == null ? '' : String(payload.fromState),
+    });
+  });
+  // Read-only: lifecycle states (END_OF_LIFE never offered) + supported reasons.
+  handle('relay:lifecycle-options', async (_e, payload) => {
+    const fleetId = payload && typeof payload === 'object' && payload.fleetId ? String(payload.fleetId) : '';
+    return require('../writes/relay-action-writes').lifecycleOptions(fleetId);
   });
 
   logger.info('Relay writes IPC handlers registered');
