@@ -20,6 +20,7 @@ import { aap } from '../bridge.js';
 import { mount as mountOverview } from './fleet-overview.js';
 import rcaTodo from '../rca-todo.js';
 import { pmOverdueDays } from '../util/pm-overdue.js';
+import { collectPendingEstimates } from './pending-estimates-logic.js';
 
 // Current filter/search applied client-side
 const _filters = {};
@@ -673,6 +674,16 @@ function _loadRelayCache(rows) {
   });
 }
 
+// Count on the "⏳ Pending Est" button (empty when 0). Never lets a bad row break the table render.
+function _updatePendingEstCount(rows, syncedAt) {
+  const el = document.getElementById('fleet-pending-est-count');
+  if (!el) return;
+  try {
+    const n = collectPendingEstimates(rows, { now: Date.now(), fleetSyncedAt: syncedAt }).items.length;
+    el.textContent = n ? String(n) : '';
+  } catch (_) { el.textContent = ''; }
+}
+
 export function init(container) {
   const el = document.createElement('div');
   el.id = 'view-fleet';
@@ -691,6 +702,7 @@ export function init(container) {
         <span id="fleet-count" class="fleet-table__count">Loading...</span>
         <button id="fleet-heatmap-toggle" class="fleet-heatmap-btn" title="Toggle Risk Heatmap">\uD83C\uDF21\uFE0F Heatmap</button>
         <button id="fleet-breach-toggle" class="fleet-breach-btn" title="Toggle SLA Breach Forecast">\u26A0\uFE0F Breach</button>
+        <button id="fleet-pending-est" class="fleet-heatmap-btn" title="Estimates submitted, awaiting approval (your domiciles, DTNA excluded)">\u23F3 Pending Est <span id="fleet-pending-est-count"></span></button>
         <button id="fleet-export-csv" class="fleet-export-btn" title="Export to CSV">\uD83D\uDCE5 CSV</button>
         <button id="fleet-export-xlsx" class="fleet-export-btn fleet-export-btn--xl" title="Export to Excel">\uD83D\uDCCA Excel</button>
       </div>
@@ -758,6 +770,16 @@ export function init(container) {
     });
   }
 
+  // Pending Estimates overlay (estimates submitted, awaiting approval; DTNA excluded).
+  const peBtn = document.getElementById('fleet-pending-est');
+  if (peBtn) {
+    peBtn.addEventListener('click', () => {
+      import('./pending-estimates-panel.js')
+        .then((m) => m.openPendingEstimatesPanel({ returnFocusEl: peBtn }))
+        .catch((e) => bus.emit('ui:toast', { type: 'error', message: 'Could not open Pending Estimates: ' + ((e && e.message) || 'unknown'), duration: 3000 }));
+    });
+  }
+
   // S28: listen for SLA target changes from Settings
   bus.on('settings:sla-target', ({ days }) => {
     setSlaTarget(days);
@@ -795,6 +817,7 @@ export function init(container) {
   bus.on('state:fleet', (fleetSlice) => {
     const rows = fleetSlice.rows || [];
     _loadRelayCache(rows);
+    _updatePendingEstCount(rows, fleetSlice.syncedAt);
   });
 
   // RCA to do list changed → repaint so the RCA badges stay current.

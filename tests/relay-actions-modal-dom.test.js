@@ -221,6 +221,30 @@ describe('escalation modal', () => {
       add: [], remove: ['MCS_CARRIER_UPDATE_REQUEST'], comment: 'CARRIER UPDATED' }));
   });
 
+  it('opts.initialTarget pre-selects HVE when offered, shows the amount row, and drafts/sends nothing on its own', async () => {
+    fakeModal.st.panel = mkPanel();
+    await ra.openEscalationModal(UNIT, WR, deps, { initialTarget: 'MCS_HIGH_VALUE_ESTIMATE' });
+    expect(q('#ra-esc-target').value).toBe('MCS_HIGH_VALUE_ESTIMATE');
+    expect(q('#ra-esc-hve').hidden).toBe(false);
+    expect(window.relayWrites.draftAction).not.toHaveBeenCalled();
+    expect(window.relayWrites.escalate).not.toHaveBeenCalled();
+    expect(fakeModal.close).not.toHaveBeenCalled();
+    await type('#ra-esc-reason', 'OFFSITE EST SUBMITTED - PLEASE REVIEW');
+    await action('Submit escalation').onClick();
+    expect(window.relayWrites.escalate).toHaveBeenCalledTimes(1);
+    expect(window.relayWrites.escalate.mock.calls[0][0]).toMatchObject({ workRequestId: WR, add: ['MCS_HIGH_VALUE_ESTIMATE'], remove: [] });
+    expect(window.aapApi.updateEscalations).not.toHaveBeenCalled();
+  });
+
+  it('opts.initialTarget is ignored when AAP does not offer that target', async () => {
+    window.aapApi.escalationOptions.mockImplementation(async () => ({ ok: true, enabled: true,
+      options: LIVE.filter((o) => o.value !== 'MCS_HIGH_VALUE_ESTIMATE'), current: [] }));
+    fakeModal.st.panel = mkPanel();
+    await ra.openEscalationModal(UNIT, WR, deps, { initialTarget: 'MCS_HIGH_VALUE_ESTIMATE' });
+    expect(q('#ra-esc-target').value).toBe('');
+    expect(q('#ra-esc-hve').hidden).toBe(true);
+  });
+
   it('not enabled for the user → an explanation modal with only Close', async () => {
     window.aapApi.escalationOptions.mockImplementation(async () => ({ ok: true, enabled: false, options: [], current: [] }));
     fakeModal.st.panel = mkPanel();

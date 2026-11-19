@@ -541,11 +541,25 @@ function estimateModel(facts) {
   const ls = sub[sub.length - 1] || null;
   const status = lastEntry ? lastEntry.h.status : null;
   const approvedAfterReject = !!(lr && flat.some((x) => x.h.status === 'approved' && flat.indexOf(x) > flat.indexOf(lr)));
+  // Pending version: earliest `at` across the trailing run of submitted entries, so a
+  // re-observed submission (e.g. estimateUpdatedAt moving) does not reset the age.
+  let pendingSubmittedAt = null;
+  if (status === 'submitted') {
+    let best = null;
+    for (let i = flat.length - 1; i >= 0 && flat[i].h.status === 'submitted'; i--) {
+      const ms = _ms(flat[i].h.at);
+      if (ms != null && (best == null || ms < best.ms)) best = { ms, at: flat[i].h.at };
+    }
+    pendingSubmittedAt = best ? best.at : null;
+  }
+  const pendingAmount = status === 'submitted' && lastEntry ? lastEntry.ver.amount : null;
   for (const v of versions) delete v._c;
   return {
     versions, status, approvedTotal,
     latestSubmitted: ls ? ls.ver.amount : null,
     pendingSince: status === 'submitted' && lastEntry ? lastEntry.h.at : null,
+    pendingSubmittedAt,
+    pendingAmount,
     latestRejectReason,
     approvedAfterReject,
     latestVersion: versions.length ? versions.reduce((m, x) => (x.v > m.v ? x : m), versions[0]).v : null,
@@ -958,6 +972,8 @@ function rowMirrors(fs) {
     estimateStatus: est.status || '',
     estimateVersion: est.latestVersion != null ? est.latestVersion : '',
     estimateRejectReason: est.latestRejectReason && est.latestRejectReason.reason ? est.latestRejectReason.reason : '',
+    estimateSubmittedAt: est.pendingSubmittedAt || '',
+    estimateSubmittedAmount: est.pendingAmount != null ? est.pendingAmount : '',
     vendorDelayReason: fs.vendorDelayReason || '',
     pmAddedToRo: !!fs.pmAddedToRo,
     leadTime: fs.leadTime || '',

@@ -340,8 +340,11 @@ function _draftErr(r) {
   return 'AI draft failed: ' + c;
 }
 
-export async function openEscalationModal(unit, wrId, deps) {
+// opts.initialTarget: an RG target key to pre-select when AAP offers it (e.g. the Pending
+// Estimates overlay passes MCS_HIGH_VALUE_ESTIMATE). Pre-selecting never drafts or sends.
+export async function openEscalationModal(unit, wrId, deps, opts = {}) {
   const d = _deps(deps);
+  const o0 = opts || {};
   const u = unit || {};
   const title = 'Escalate WR ' + String(wrId || '').slice(0, 8);
   const aaid = aaidOf(u);
@@ -459,6 +462,11 @@ export async function openEscalationModal(unit, wrId, deps) {
         if (hve) hve.hidden = tEl.value !== HVE_KEY;
         if (rh) rh.hidden = tEl.value !== REACT_KEY;
       });
+      if (tEl && o0.initialTarget && targets.some((t) => t.key === o0.initialTarget && !t.disabled)) {
+        tEl.value = o0.initialTarget;
+        if (hve) hve.hidden = tEl.value !== HVE_KEY;
+        if (rh) rh.hidden = tEl.value !== REACT_KEY;
+      }
       const aEl = q('#ra-esc-amount');
       if (aEl) aEl.addEventListener('input', () => { amountTyped = true; });
       const rEl = q('#ra-esc-reason');
