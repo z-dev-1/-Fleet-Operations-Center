@@ -13,6 +13,10 @@
  *   relay:draft-comment ({ workRequestId | serviceUrl, unit })
  *                                 -> { ok, aiDrafted, draft, noUpdate, dropped, droppedCount }
  *                                    AI gap draft (writes/relay-comment-draft); never sends
+ *   relay:draft-action ({ workRequestId | serviceUrl, kind:'escalation'|'comment', target, template,
+ *                         unit, userInputs:{ estAmount } })
+ *                                 -> { ok, draft, placeholders, freshness, aiUsed, replaced, sources, note }
+ *                                    grounded <FILL: …> draft (writes/relay-action-draft); never sends
  *   relay:escalate ({ workRequestId, aaid, add[], remove[], comment, unit, aiDrafted })
  *                                 -> { ok, outcome, id, error, current } escalation change
  *                                    via the gate's updateEscalations kind (interactive)
@@ -74,6 +78,34 @@ function registerRelayWritesIPC(ctx) {
     requireObject(payload.unit, 'unit');
     return require('../writes/relay-comment-draft').draftForUnit({
       workRequestId: m[0], unit: payload.unit, lastData: ctx && ctx.lastData,
+    });
+  });
+  // Grounded draft for the Escalate reason / Relay comment templates. Text only; nothing
+  // is staged or sent from here (submit goes through relay:escalate / relay:add-comment).
+  handle('relay:draft-action', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    const m = WR_UUID_RE.exec(String(payload.workRequestId || '')) || WR_UUID_RE.exec(String(payload.serviceUrl || ''));
+    if (!m) throw new ConfigError('workRequestId must be a Relay WR id', 'workRequestId');
+    const policy = require('../writes/relay-action-policy');
+    const kind = payload.kind;
+    if (kind !== 'escalation' && kind !== 'comment') throw new ConfigError('kind must be escalation or comment', 'kind');
+    if (kind === 'escalation' && !policy.ESCALATION_TARGETS.some((t) => t.key === payload.target)) {
+      throw new ConfigError('target must be an RG escalation type', 'target');
+    }
+    if (kind === 'comment' && payload.template !== 'offsite-update' && payload.template !== 'update-request') {
+      throw new ConfigError('template must be offsite-update or update-request', 'template');
+    }
+    requireObject(payload.unit, 'unit');
+    const ui = payload.userInputs && typeof payload.userInputs === 'object' ? payload.userInputs : {};
+    const amt = Number(ui.estAmount);
+    return require('../writes/relay-action-draft').draftAction({
+      kind,
+      target: kind === 'escalation' ? payload.target : undefined,
+      template: kind === 'comment' ? payload.template : undefined,
+      workRequestId: m[0],
+      unit: payload.unit,
+      userInputs: { estAmount: Number.isFinite(amt) && amt >= 0 ? amt : 0 },
+      lastData: ctx && ctx.lastData,
     });
   });
   // Escalate / de-escalate a WR through the write gate (approval modal).

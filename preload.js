@@ -203,6 +203,7 @@ expose('relayWrites', {
   escalate:         (p) => ipcRenderer.invoke('relay:escalate', p || {}),
   changeLifecycle:  (p) => ipcRenderer.invoke('relay:change-lifecycle', p || {}),
   lifecycleOptions: (a) => ipcRenderer.invoke('relay:lifecycle-options', a || {}),
+  draftAction:      (p) => ipcRenderer.invoke('relay:draft-action', p || {}),
 });
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────

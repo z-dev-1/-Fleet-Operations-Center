@@ -23,6 +23,14 @@ require.cache[electronPath] = {
   },
 };
 
+// ── AI lane stub (relay.askWithTimeout) for relay:draft-action ──────────────
+const askCalls = [];
+const relayPath = require.resolve('../src/orcha/relay');
+require.cache[relayPath] = {
+  id: relayPath, filename: relayPath, loaded: true,
+  exports: { askWithTimeout: async (p, o) => { askCalls.push({ p, o }); return '{"reason":"VENDOR NOT RESPONDING. PLEASE PUSH FOR ETA."}'; } },
+};
+
 const tmpDir = path.join(os.tmpdir(), 'relay-actions-ipc-' + process.pid);
 fs.mkdirSync(tmpDir, { recursive: true });
 require('../src/config/paths').setDataDir(tmpDir);
@@ -183,5 +191,44 @@ describe('relay:lifecycle-options', () => {
     const r = await call('relay:lifecycle-options', {});
     expect(r.states).toEqual(lcApi.ALLOWED_STATES);
     expect(r.states).not.toContain('END_OF_LIFE');
+  });
+});
+
+describe('relay:draft-action', () => {
+  const actionDraft = require('../src/writes/relay-action-draft');
+  const UNIT = { equipmentId: 'B62020', workRequestId: WR, vendor: 'Cox', created: '2026-11-17T12:00:00.000Z' };
+  beforeEach(() => { askCalls.length = 0; actionDraft._setDepsForTest({ store: memStore(), now: () => new Date(2026, 10, 19, 12, 0, 0) }); });
+  afterEach(() => actionDraft._setDepsForTest({}));
+
+  it('returns a draft through the AI lane and stages nothing', async () => {
+    const r = await call('relay:draft-action', { workRequestId: WR, kind: 'escalation', target: 'FAS', unit: UNIT, userInputs: { estAmount: 'x' } });
+    expect(r).toMatchObject({ ok: true, aiUsed: true, draft: 'VENDOR NOT RESPONDING. PLEASE PUSH FOR ETA.' });
+    expect(r.freshness.stale).toBe(true);
+    expect(askCalls).toHaveLength(1);
+    expect(askCalls[0].o).toMatchObject({ source: 'relay_action_draft', isolated: true, preferAki: true, timeoutMs: 150000 });
+    const c = await call('relay:draft-action', { workRequestId: WR, kind: 'comment', template: 'update-request', unit: UNIT });
+    expect(c.ok).toBe(true);
+    expect(c.draft.split('\n')[0]).toBe('UPDATE REQUEST - COX - B62020 - <FILL: component>');
+    expect(gate.list().items).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+    expect(fakeEsc).not.toHaveBeenCalled();
+  });
+
+  it('a bad kind / target / template / WR / unit -> error, no AI call', async () => {
+    for (const p of [
+      { workRequestId: WR, kind: 'comment', template: 'free-form', unit: UNIT },
+      { workRequestId: WR, kind: 'comment', template: 'bogus', unit: UNIT },
+      { workRequestId: WR, kind: 'escalation', target: 'TOWING', unit: UNIT },
+      { workRequestId: WR, kind: 'send', unit: UNIT },
+      { workRequestId: 'WR-1', kind: 'escalation', target: 'FAS', unit: UNIT },
+      { workRequestId: WR, kind: 'escalation', target: 'FAS' },
+    ]) {
+      const r = await call('relay:draft-action', p);
+      expect(r.ok).toBe(false);
+      expect(r.code).toBeTruthy();
+    }
+    expect(askCalls).toHaveLength(0);
+    expect(gate.list().items).toHaveLength(0);
+    expect(sent).toHaveLength(0);
   });
 });
