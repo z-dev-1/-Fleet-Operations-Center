@@ -593,8 +593,9 @@ describe('static: QuickSight UI retired', () => {
   it('daily-call.js has no quicksight reference and no old panel functions', () => {
     expect(dc).not.toMatch(/quicksight/i);
     for (const n of ['_dbrAfpPrompt', '_dbrDspPrompt', '_openDbrPanel', '_dbrPanelHtml', '_dbrRenderTables', '_dbrHeaderGet']) expect(dc).not.toContain(n);
-    expect(dc).toContain("import { openFleetDbrPanel } from './fleet-dbr-panel.js';");
-    expect(dc).toContain('openFleetDbrPanel({ returnFocusEl: e.currentTarget })');
+    // DBR DATA now routes to the first-class DBR tab (views/dbr-view.js), not the modal.
+    expect(dc).toContain("bus.emit('ui:select-tab', { key: 'dbr' })");
+    expect(dc).not.toContain('openFleetDbrPanel(');
     expect(dc).toContain('\ud83d\udcca DBR DATA</button>');
   });
   it('the new panel files have no quicksight reference and no send path besides the clipboard', () => {

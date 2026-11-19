@@ -65,7 +65,6 @@
 import bus   from '../bus.js';
 import state from '../state.js';
 import { wbr as wbrBridge } from '../bridge.js';
-import { openFleetDbrPanel } from './fleet-dbr-panel.js';
 import { extractJsonObject } from '../util/ai-json.js';
 
 let _el = null;
@@ -358,7 +357,7 @@ function _viewHtml() {
         <span class="an-subtitle">DBR DATA builds the 24-column Fleet Health DBR from your live fleet data. WBR below is generated from live fleet data.</span>
       </div>
       <div class="an-header__actions">
-        <button id="dc-dbr-data" class="detail-panel__btn detail-panel__btn--secondary" title="Fleet Health DBR — built from your fleet data (24 columns)">📊 DBR DATA</button>
+        <button id="dc-dbr-data" class="detail-panel__btn detail-panel__btn--secondary" title="Open the DBR tab (Fleet Health DBR from your fleet data)">📊 DBR DATA</button>
         <button id="dc-refresh" class="detail-panel__btn detail-panel__btn--secondary">↺ Refresh</button>
         <button id="dc-back" class="detail-panel__btn">Back to Fleet</button>
       </div>
@@ -703,7 +702,7 @@ export function init(container) {
     _update(state.slice('fleet').rows || []);
   });
 
-  _el.querySelector('#dc-dbr-data').addEventListener('click', (e) => { openFleetDbrPanel({ returnFocusEl: e.currentTarget }); });
+  _el.querySelector('#dc-dbr-data').addEventListener('click', () => { bus.emit('ui:select-tab', { key: 'dbr' }); });
 
   bus.on('fleet:data', (data) => {
     _update((data && data.rows) ? data.rows : []);

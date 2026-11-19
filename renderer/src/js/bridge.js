@@ -491,7 +491,7 @@ export const aap = {
   attachToWR:        (wrId, attachments)   => window.aap.attachToWR(wrId, attachments),
   getLifecycle:      (id, url)             => window.aap.getLifecycle(id, url),
   onWRProgress:      (cb)                  => window.aap.onWRProgress(cb),
-  openUrl:           (url)                 => window.aap.openUrl(url),
+  openUrl:           (url, opts)           => window.aap.openUrl(url, opts),
 };
 
 // ── Zoom Meetings tab (zoom.enabled, default OFF) ───────────────────────────

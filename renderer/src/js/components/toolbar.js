@@ -25,6 +25,7 @@ const TAB_VIEW = {
   scheduler:  'schedulers',
   'email-composer': 'email-composer',
   'daily-call': 'daily-call',
+  dbr:        'dbr',
   meetings:   'meetings',
   'workflow-intel': 'workflow-intel',
 };
@@ -111,6 +112,9 @@ export function init(container) {
         </button>
         <button class="tb-tab" data-view="email-composer">
           <span class="tb-tab-icon">📧</span> Email</button><button class="tb-tab" data-view="daily-call"><span class="tb-tab-icon">📞</span> Daily Call
+        </button>
+        <button class="tb-tab" data-view="dbr">
+          <span class="tb-tab-icon">📊</span> DBR
         </button>
         <!-- Meetings (zoom.enabled): hidden until views/meetings.js confirms the flag is on -->
         <button class="tb-tab" data-view="meetings" id="tb-tab-meetings" style="display:none">
@@ -201,6 +205,13 @@ export function init(container) {
   // ── Nav tabs ────────────────────────────────────────────────────────────
   el.querySelectorAll('.tb-tab').forEach((btn) => {
     btn.addEventListener('click', () => _onTabClick(btn));
+  });
+  // Programmatic tab navigation (e.g. Daily Call "DBR DATA" -> DBR tab) that also
+  // moves the active-tab highlight.
+  bus.on('ui:select-tab', ({ key } = {}) => {
+    const b = key ? el.querySelector('.tb-tab[data-view="' + key + '"]') : null;
+    if (b) _onTabClick(b);
+    else if (key) bus.emit('ui:view-change', { from: 'fleet', to: TAB_VIEW[key] || key, tab: key });
   });
 
   // ── Window controls (minimize, maximize, close) ─────────────────────────

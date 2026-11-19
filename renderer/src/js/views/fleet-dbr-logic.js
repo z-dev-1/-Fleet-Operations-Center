@@ -384,6 +384,32 @@ export function bannerHtml(show) {
     + '<button type="button" class="detail-panel__btn detail-panel__btn--secondary fdbr-mini" data-fdbr-action="build">\u21ba Build</button> to refresh</div>';
 }
 
+// ── First-class DBR view (auto-build when stale) ────────────────────────────
+// True when the fleet sync timestamp is newer than the one the cached build was made
+// from (model.fleetSyncedAt) — the same comparison the live "Fleet data updated" banner makes.
+export function isFleetNewer(modelFleetSyncedAt, fleetSyncedAt) {
+  if (!fleetSyncedAt) return false;
+  if (!modelFleetSyncedAt) return true;
+  const a = Date.parse(modelFleetSyncedAt);
+  const b = Date.parse(fleetSyncedAt);
+  if (Number.isFinite(a) && Number.isFinite(b)) return b > a;
+  return String(modelFleetSyncedAt) !== String(fleetSyncedAt);
+}
+
+// Local HH:MM, or '' when the timestamp is missing/invalid.
+export function fmtClock(iso) { return _hhmm(iso); }
+
+export function refreshingBannerHtml() {
+  return '<div class="fdbr-banner fdbr-banner--loading" role="status" aria-live="polite">\u23f3 Fleet data updated \u2014 Building DBR\u2026</div>';
+}
+
+export function fallbackBannerHtml(builtAt) {
+  const t = fmtClock(builtAt);
+  return '<div class="fdbr-banner fdbr-banner--fallback" role="alert">Couldn\'t refresh \u2014 showing data from '
+    + (t ? esc(t) : 'the last build') + ' \u00b7 '
+    + '<button type="button" class="detail-panel__btn detail-panel__btn--secondary fdbr-mini" data-fdbr-action="build">\u21ba Rebuild</button></div>';
+}
+
 // ── Panel frame ─────────────────────────────────────────────────────────────
 // The overlay is appended to document.body (outside #view-daily-call), so it
 // carries its own rules for the shared dc-* classes. The first block is copied
@@ -423,6 +449,13 @@ export const PANEL_CSS = `
     #dbr-overlay .fdbr-scac label { display: flex; align-items: center; gap: 3px; }
 `;
 
+// The same rules scoped to the first-class view container (#view-dbr), plus view-only rules.
+export const VIEW_CSS = PANEL_CSS.replace(/#dbr-overlay/g, '#view-dbr') + `
+    #view-dbr .fdbr-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+    #view-dbr .fdbr-banner--fallback { border-color: #f85149; }
+    #view-dbr .fdbr-banner--loading { border-color: #58a6ff; }
+`;
+
 // Multi-select SCAC filter: one checkbox per SCAC (no selection = all rows).
 function _scacHtml(options, selected) {
   const opts = Array.isArray(options) ? options : [];
@@ -439,10 +472,11 @@ function _scacHtml(options, selected) {
 //          fasName, hideZero, message, conflicts:[{id}], scacOptions:[], scacs:[] }
 export function panelHtml(state = {}) {
   const s = state || {};
-  const header = '<style>' + PANEL_CSS + '</style>'
+  const isView = s.mode === 'view';
+  const header = '<style>' + (isView ? VIEW_CSS : PANEL_CSS) + '</style>'
     + '<div class="wr-modal__header"><div class="wr-modal__title-row">'
     + '<span class="wr-modal__title" id="fdbr-title">' + esc(TITLE) + '</span></div>'
-    + '<button type="button" class="wr-modal__close" data-fdbr-action="close" aria-label="Close">\u00d7</button></div>';
+    + (isView ? '' : '<button type="button" class="wr-modal__close" data-fdbr-action="close" aria-label="Close">\u00d7</button>') + '</div>';
   if (s.status === 'off') return header + '<div class="wr-modal__body"><div class="dc-empty" role="note">' + esc(OFF_NOTICE) + '</div></div>';
   if (s.status === 'unavailable') return header + '<div class="wr-modal__body"><div class="dc-empty" role="note">' + esc(UNAVAILABLE_NOTICE) + '</div></div>';
   if (s.status === 'error') return header + '<div class="wr-modal__body"><div class="dc-empty" role="note">' + esc(s.message || 'Fleet DBR could not load.') + '</div></div>';
@@ -456,7 +490,7 @@ export function panelHtml(state = {}) {
     + '<label style="font-size:11px;display:flex;align-items:center;gap:6px;">FAS Name:'
     + '<input type="text" class="dc-input" style="width:180px;display:inline-block;" data-fdbr-field="fasName" maxlength="120"'
     + ' placeholder="Enter your FAS name" value="' + esc(fas) + '"></label>'
-    + btn('build', '\u21ba Build from fleet data')
+    + btn('build', isView ? '\u21ba Rebuild' : '\u21ba Build from fleet data')
     + ai
     + btn('copy', '\ud83d\udccb Copy rows', ' detail-panel__btn--secondary')
     + btn('copy-header', '\ud83d\udccb Copy with header', ' detail-panel__btn--secondary')

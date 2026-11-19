@@ -403,8 +403,11 @@ function registerMiscIPC(ctx) {
     }
   });
 
-  handle('aap:open-url', async (_e, url) => {
+  handle('aap:open-url', async (_e, url, opts) => {
     if (!url || !/^https?:\/\//i.test(url)) return { ok: false, error: 'invalid url' };
+    // Opt-in zoom (unit-detail ID links pass { zoom: true }): keyboard/Ctrl+wheel zoom
+    // + an on-window –/100%/+ overlay. Other callers get the window unchanged.
+    const _zoom = !!(opts && typeof opts === 'object' && opts.zoom === true);
     const { BrowserWindow, session } = require('electron');
     // Partition-aware: a vendor URL (e.g. fleet.uptake.com) must open under its
     // own persisted session (persist:vendor-uptake) where its SSO login already
@@ -444,9 +447,11 @@ function registerMiscIPC(ctx) {
         nodeIntegration: false,
         contextIsolation: true,
         session: _openSession,  // vendor partition when applicable, else Midway default
+        ...(_zoom ? { preload: require('../window/zoom-controls').ZOOM_PRELOAD } : {}),
       },
     });
     win.setMenuBarVisibility(false);
+    if (_zoom) require('../window/zoom-controls').attachZoom(win.webContents);
 
     // Intercept SPA pushState navigation to capture WR tab URLs
     win.webContents.on('did-finish-load', () => {

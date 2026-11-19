@@ -582,6 +582,87 @@ function _isAmazonHost(url) {
   try { return /(^|\.)amazon\.(com|dev)$/i.test(new URL(url).hostname); } catch (_) { return false; }
 }
 
+// ── Clickable WR ID fields (pure) ───────────────────────────────────────────
+// SF Case / AMZ ID / WR ID / Vendor WO open one in-app zoomable window
+// (window.aap.openUrl(url, { zoom: true }) -> aap:open-url). A field is only
+// linked when a URL resolves AND passes these host checks.
+const _SF_HOSTS = new Set(['amazonfreightpartner.lightning.force.com', 'amazonfreightpartner.my.salesforce.com']);
+export function isSafeIdLinkUrl(url) {
+  if (isSafeHistoryUrl(url)) return true;
+  if (typeof url !== 'string' || !url || /[\s"'<>]/.test(url)) return false;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return false;
+    return _isAmazonHost(url) || _SF_HOSTS.has(u.hostname.toLowerCase());
+  } catch (_) { return false; }
+}
+
+// Renderer port of src/utils/salesforce-url.js buildSalesforceUrl (same JSON, btoa
+// instead of Buffer). Only plain case numbers are accepted.
+export function buildSalesforceCaseUrl(caseNo) {
+  const c = String(caseNo == null ? '' : caseNo).trim();
+  if (!/^[A-Za-z0-9-]{1,40}$/.test(c)) return '';
+  const sfJson = JSON.stringify({
+    componentDef: 'forceSearch:searchPageDesktop',
+    attributes: {
+      term: c,
+      scopeMap: { type: 'TOP_RESULTS' },
+      context: { FILTERS: {}, disableIntentQuery: false, disableSpellCorrection: false },
+      groupId: 'DEFAULT'
+    },
+    state: {}
+  });
+  return 'https://amazonfreightpartner.lightning.force.com/one/one.app#' + btoa(sfJson);
+}
+
+const _ID_LINK_KEY = { 'WR ID': 'wr', 'AMZ ID': 'amz', 'SF Case': 'sf', 'Vendor WO': 'vendor-wo' };
+const _firstSafe = (list) => list.find((u) => u && isSafeIdLinkUrl(u)) || '';
+
+// URL for a WR field label on WO object `o` (unit or planned/secondary WR), or ''.
+export function idLinkUrl(label, o) {
+  const w = o || {};
+  if (label === 'WR ID' || label === 'AMZ ID') {
+    const uuid = String(w._serviceUUID || '');
+    return _firstSafe([w.serviceUrl, w._relayUrl,
+      /^[A-Za-z0-9-]+$/.test(uuid) ? 'https://aap-na.corp.amazon.com/v2/service/' + uuid : '']);
+  }
+  if (label === 'SF Case') {
+    return _firstSafe([w.savedSalesforceCaseUrl, w.salesforceCaseUrl, buildSalesforceCaseUrl(w.salesforceCase || w.savedSalesforceCase)]);
+  }
+  if (label === 'Vendor WO') {
+    // The unit's offsite link may belong to another WR (_offsiteWrId): link only when this WR owns it.
+    if (w._offsiteWrId && w.workRequestId && String(w._offsiteWrId) !== String(w.workRequestId)) return '';
+    return _firstSafe([w.offsiteShopEventUrl, w.savedOffsiteUrl, w.asistSrUrl]);
+  }
+  return '';
+}
+
+// One `.dp-wo-field` chip. Unlinked output is byte-identical to the old inline map;
+// linked fields keep the same inner spans and carry the URL on the outer span.
+export function woFieldHtml(f, o) {
+  const inner = '<span class="dp-wo-field__k">' + esc(f[0]) + '</span><span class="dp-wo-field__v">' + esc(f[1]) + '</span>';
+  const key = _ID_LINK_KEY[f[0]];
+  const url = key ? idLinkUrl(f[0], o) : '';
+  if (!url) return '<span class="dp-wo-field">' + inner + '</span>';
+  return '<span class="dp-wo-field dp-wo-field--link" role="link" tabindex="0" data-id-link="' + escAttr(url) + '"'
+    + ' data-id-link-field="' + key + '" title="Open in app window">' + inner + '</span>';
+}
+
+// Click / Enter / Space on a [data-id-link] chip -> openFn(url, { zoom: true }).
+export function wireIdLinks(root, openFn) {
+  if (!root || typeof root.querySelectorAll !== 'function' || typeof openFn !== 'function') return;
+  root.querySelectorAll('[data-id-link]').forEach(function (el) {
+    const go = function (e) {
+      if (e) { if (typeof e.preventDefault === 'function') e.preventDefault(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
+      const url = el.getAttribute('data-id-link');
+      if (!isSafeIdLinkUrl(url)) return;
+      try { Promise.resolve(openFn(url, { zoom: true })).catch(function () {}); } catch (_) { /* opener unavailable */ }
+    };
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', function (e) { if (e && (e.key === 'Enter' || e.key === ' ')) go(e); });
+  });
+}
+
 // Webview partition for the split view's right pane. Amazon pages need the
 // default (Midway) session → ''. Same chain the split view always used.
 export function splitPartitionFor(url) {
@@ -2327,7 +2408,7 @@ export function plannedWrCardHtml(unit){
         '</div>'+
         (p.issueDetails?'<div class="dp-wo-card__desc">'+esc(p.issueDetails)+'</div>':'')+
         (pFields.length?'<div class="dp-wo-card__fields">'+pFields.map(function(f){
-          return '<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';
+          return woFieldHtml(f, p);
         }).join('')+'</div>':'')+
         (p.created||p.completed?'<div class="dp-wo-card__dates">'+
           (p.created?'<span>Opened '+fmtDate(p.created)+'</span>':'')+
@@ -2384,8 +2465,7 @@ export function secondaryWrCardsHtml(unit){
           '</div>' +
           (p.issueDetails ? '<div class="dp-wo-card__desc">' + esc(p.issueDetails) + '</div>' : '') +
           (pFields.length ? '<div class="dp-wo-card__fields">' + pFields.map(function(f) {
-            return '<span class="dp-wo-field"><span class="dp-wo-field__k">' + esc(f[0]) + '</span>' +
-                   '<span class="dp-wo-field__v">' + esc(f[1]) + '</span></span>';
+            return woFieldHtml(f, p);
           }).join('') + '</div>' : '') +
           ((p.created || p.completed) ? '<div class="dp-wo-card__dates">' +
             (p.created   ? '<span>Opened ' + fmtDate(p.created)   + '</span>' : '') +
@@ -2464,7 +2544,7 @@ export function renderRepairPane(unit){
       '</div>':'')+
       ((unit.issueSummary||unit.issueDetails)?'<div class="dp-wo-card__desc">'+(unit.issueSummary?'<span class="dp-orcha-badge">\uD83E\uDDE0</span> '+esc((unit.issueSummary||'').split('TIMELINE:')[0].split('\\n')[0].substring(0,200)):esc(unit.issueDetails))+'</div>':'')+
       cause+correction+
-      (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return'<span class="dp-wo-field"><span class="dp-wo-field__k">'+esc(f[0])+'</span><span class="dp-wo-field__v">'+esc(f[1])+'</span></span>';}).join('')+'</div>':'')+
+      (fields.length?'<div class="dp-wo-card__fields">'+fields.map(function(f){return woFieldHtml(f, unit);}).join('')+'</div>':'')+
       (unit.created||unit.completed?'<div class="dp-wo-card__dates">'+
         (unit.created?'<span>Opened '+fmtDate(unit.created)+'</span>':'')+
         (unit.completed?'<span>Closed '+fmtDate(unit.completed)+'</span>':'')+
@@ -3164,6 +3244,9 @@ function _renderUnit(unit) {
   _panel.querySelectorAll('[data-inapp-url]').forEach(function(b) {
     b.addEventListener('click', function(e){ e.preventDefault(); var u=b.dataset.inappUrl||b.getAttribute('data-inapp-url'); if(u&&window.aap&&window.aap.openUrl) window.aap.openUrl(u).catch(function(){}); });
   });
+  // Clickable WR ID fields (WR ID / AMZ ID / SF Case / Vendor WO): one in-app
+  // window per link, same opener as data-inapp-url, with zoom opted in.
+  wireIdLinks(_panel, function(u, o) { if (window.aap && window.aap.openUrl) return window.aap.openUrl(u, o); });
 
   // Copy-insight-text button (Intel pane): copy the full insight text block.
   _panel.querySelectorAll('.dp-insight-copy__btn').forEach(function(btn) {

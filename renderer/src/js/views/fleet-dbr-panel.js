@@ -25,6 +25,7 @@ const BUSY_RETRIES = 3;
 const STATUS_TICK_MS = 30000;
 const HIDE_ZERO_KEY = 'fleetDbr__hideZero';
 const SCAC_KEY = 'fleetDbr__scacs';
+const BUILD_TIMEOUT_MS = 60000;
 
 // Persisted SCAC selection: JSON array of strings; anything else -> [] (show all).
 function _readScacs(storage) {
@@ -46,6 +47,17 @@ export async function openFleetDbrPanel({ returnFocusEl } = {}) {
   });
   _active = ctl;
   await ctl.open();
+}
+
+// First-class DBR view: same controller mounted inside `container`; on open it
+// auto-builds (fleet-dbr:build) when getFleetSyncedAt() is newer than the cached build.
+export async function openFleetDbrView(container, { getFleetSyncedAt } = {}) {
+  const ctl = createController({
+    api: fleetDbrBridge, doc: document, clipboard: _defaultClipboard(), storage: _safeStorage(), bus,
+    mode: 'view', container, getFleetSyncedAt,
+  });
+  ctl.open().catch((err) => console.warn('[fleet-dbr] view open failed', err));
+  return ctl;
 }
 
 function _safeStorage() {
@@ -82,8 +94,13 @@ function createController(deps) {
   const setT = deps.setTimeout || ((fn, ms) => setTimeout(fn, ms));
   const clrT = deps.clearTimeout || ((id) => clearTimeout(id));
   const now = deps.now || (() => Date.now());
+  const isView = deps.mode === 'view';
+  const getFleetSyncedAt = typeof deps.getFleetSyncedAt === 'function' ? deps.getFleetSyncedAt : () => null;
+  const buildTimeoutMs = Number(deps.buildTimeoutMs) > 0 ? Number(deps.buildTimeoutMs) : BUILD_TIMEOUT_MS;
 
   const st = {
+    refreshing: false,      // view mode: auto-build on open in progress (cached model shown meanwhile)
+    refreshFailed: null,    // view mode: { builtAt, code } when a build failed and the cached build is shown
     status: 'loading', aiDraft: false, model: null, note: '',
     hideZero: false, stale: false, closed: false, building: false,
     drafting: false, stopped: false, queue: [], inFlight: new Set(), retrying: new Set(),
@@ -105,7 +122,30 @@ function createController(deps) {
   const later = (fn, ms) => { const id = setT(() => { timers.delete(id); fn(); }, ms); timers.add(id); return id; };
 
   // ── rendering ─────────────────────────────────────────────────────────────
+  function _children(parent) {
+    frame = doc.createElement('div'); frame.id = 'fdbr-frame';
+    bannerEl = doc.createElement('div'); bannerEl.id = 'fdbr-banner';
+    statusEl = doc.createElement('div'); statusEl.id = 'fdbr-status'; statusEl.className = 'fdbr-status';
+    statusEl.setAttribute('role', 'status'); statusEl.setAttribute('aria-live', 'polite');
+    tableEl = doc.createElement('div'); tableEl.id = 'fdbr-table'; tableEl.className = 'fdbr-scroll';
+    parent.appendChild(frame); parent.appendChild(bannerEl); parent.appendChild(statusEl); parent.appendChild(tableEl);
+  }
+
+  // View mode: mount inside the view container (never document.body), no dialog semantics.
+  function mountView() {
+    overlay = doc.createElement('div');
+    overlay.id = 'fdbr-view-root';
+    overlay.className = 'fdbr-view';
+    _children(overlay);
+    overlay.addEventListener('click', onClick);
+    overlay.addEventListener('input', onInput);
+    overlay.addEventListener('change', onChange);
+    overlay.addEventListener('keydown', onKeydown);
+    deps.container.appendChild(overlay);
+  }
+
   function mount() {
+    if (isView) { mountView(); return; }
     overlay = doc.createElement('div');
     overlay.id = 'dbr-overlay';
     overlay.className = 'wr-modal-overlay';
@@ -132,6 +172,7 @@ function createController(deps) {
   function renderFrame(focusScac) {
     const m = st.model;
     const html = L.panelHtml({
+      mode: isView ? 'view' : undefined,
       status: st.status, aiDraft: st.aiDraft, drafting: st.drafting, hideZero: st.hideZero,
       fasName: m ? m.fasName : '', conflicts: m ? m.conflicts : [], message: st.note,
       scacOptions: L.scacOptions(m), scacs: L.normalizeScacs(st.scacs, m),
@@ -203,7 +244,12 @@ function createController(deps) {
   }
   function note(text) { st.note = text || ''; renderStatus(); }
 
-  function renderBanner() { if (bannerEl) bannerEl.innerHTML = L.bannerHtml(st.stale && st.status === 'ready'); }
+  function renderBanner() {
+    if (!bannerEl) return;
+    if (st.refreshing) { bannerEl.innerHTML = L.refreshingBannerHtml(); return; }
+    if (st.refreshFailed) { bannerEl.innerHTML = L.fallbackBannerHtml(st.refreshFailed.builtAt); return; }
+    bannerEl.innerHTML = L.bannerHtml(st.stale && st.status === 'ready');
+  }
 
   function renderAll() { renderFrame(); renderBanner(); renderStatus(); renderTable(); }
 
@@ -230,7 +276,7 @@ function createController(deps) {
   async function open() {
     mount();
     renderAll();
-    const btn = frame.querySelector && frame.querySelector('[data-fdbr-action="close"]');
+    const btn = !isView && frame.querySelector && frame.querySelector('[data-fdbr-action="close"]');
     if (btn && typeof btn.focus === 'function') btn.focus();
     if (evBus && typeof evBus.on === 'function') {
       unsub = evBus.on('fleet:data', (d) => {
@@ -248,18 +294,43 @@ function createController(deps) {
     const g = await _call('get');
     if (st.closed) return;
     if (!g.ok) { _failState(g); renderAll(); return; }
-    if (g.model) { setModel(g.model); st.note = ''; renderAll(); }
-    else if (!(await build())) return;
+    if (g.model) {
+      setModel(g.model); st.note = ''; renderAll();
+      // View mode: fleet data synced after this build -> rebuild now (cached rows stay visible).
+      if (isView && L.isFleetNewer(g.model.fleetSyncedAt, getFleetSyncedAt())) {
+        st.refreshing = true;
+        renderBanner();
+        if (!(await build())) return;
+      }
+    } else if (!(await build())) return;
     startDrafts(null);
+  }
+
+  // View mode only: a build that never answers resolves as a timeout, so the view can't hang.
+  function _buildCall(payload) {
+    const p = _call('build', payload);
+    if (!isView) return p;
+    let tid = null;
+    const to = new Promise((resolve) => { tid = setT(() => resolve({ ok: false, code: 'timeout' }), buildTimeoutMs); });
+    return Promise.race([p, to]).then((r) => { clrT(tid); return r; });
   }
 
   async function build() {
     if (st.building) return false;
     st.building = true;
-    note('Building from fleet data\u2026');
-    const res = await _call('build', { scacs: L.normalizeScacs(st.scacs, st.model) });
+    if (isView && st.model && st.status === 'ready') { st.refreshing = true; renderBanner(); }
+    note(isView ? 'Building DBR\u2026' : 'Building from fleet data\u2026');
+    const res = await _buildCall({ scacs: L.normalizeScacs(st.scacs, st.model) });
     st.building = false;
+    st.refreshing = false;
     if (st.closed) return false;
+    if (!res.ok && isView && st.model && st.status === 'ready') {
+      // Keep the cached build on screen with the fallback banner; never blank the view.
+      st.refreshFailed = { builtAt: st.model.builtAt || null, code: res.code || 'error' };
+      st.note = res.code === 'no-fleet-data' ? 'No fleet data yet \u2014 run a sync, then \u21ba Rebuild' : "\u26a0 Build failed (" + (res.code || 'error') + ')';
+      renderAll();
+      return false;
+    }
     if (!res.ok) {
       if (res.code === 'off' || res.code === 'unavailable') { _failState(res); renderAll(); return false; }
       note(res.code === 'no-fleet-data' ? 'No fleet data yet \u2014 run a sync, then \u21ba Build' : "\u26a0 Build failed (" + (res.code || 'error') + ')');
@@ -267,6 +338,7 @@ function createController(deps) {
     }
     setModel(res.model);
     st.stale = false;
+    st.refreshFailed = null;
     st.rowStatus = {};
     st.note = res.saved === false ? '\u26a0 Built but not saved; edits and AI drafts may not persist' : '';
     const cov = res.serverCoverage;
@@ -547,7 +619,7 @@ function createController(deps) {
   // ── events ────────────────────────────────────────────────────────────────
   function onClick(e) {
     const t = e && e.target;
-    if (t === overlay) { close(); return; }
+    if (t === overlay) { if (!isView) close(); return; }
     const el = t && typeof t.closest === 'function' ? t.closest('[data-fdbr-action]') : null;
     if (!el || !el.dataset) return;
     const key = el.dataset.key;
@@ -596,7 +668,7 @@ function createController(deps) {
   }
 
   function onKeydown(e) {
-    if (e && e.key === 'Escape') { if (typeof e.preventDefault === 'function') e.preventDefault(); close(); }
+    if (!isView && e && e.key === 'Escape') { if (typeof e.preventDefault === 'function') e.preventDefault(); close(); }
   }
 
   function close() {
@@ -622,4 +694,4 @@ function createController(deps) {
   };
 }
 
-export const __test__ = { createController, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY, SCAC_KEY };
+export const __test__ = { createController, BUILD_TIMEOUT_MS, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY, SCAC_KEY };

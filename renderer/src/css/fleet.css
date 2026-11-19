@@ -1493,6 +1493,13 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   height: 100%;
   overflow: hidden;
 }
+/* First-class DBR tab (views/dbr-view.js): same column layout. Its dc-/fdbr-
+   table rules are scoped to #view-dbr in fleet-dbr-logic.js VIEW_CSS. */
+.view--dbr {
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
 
 /* ── Header ──────────────────────────────────────────────────── */
 .an-header {
@@ -4813,6 +4820,10 @@ td:has(.pm-pills-row) {
 .dp-wo-field        { display: flex; flex-direction: column; background: var(--el); border-radius: 5px; padding: 4px 8px; }
 .dp-wo-field__k     { font-size: 8px; color: var(--mut); text-transform: uppercase; letter-spacing: .5px; }
 .dp-wo-field__v     { font-size: 11px; color: var(--txt); font-weight: 500; }
+/* Clickable WR ID fields (unit-detail.js woFieldHtml): open one in-app window. */
+.dp-wo-field--link  { cursor: pointer; }
+.dp-wo-field--link .dp-wo-field__v { color: #58a6ff; text-decoration: underline; }
+.dp-wo-field--link:focus-visible { outline: 1px solid #58a6ff; }
 .dp-wo-card__dates  { display: flex; gap: 14px; font-size: 9px; color: var(--mut); margin-top: 8px; }
 .dp-wo-stale        { font-size: 9px; color: var(--org); margin-left: auto; }
 

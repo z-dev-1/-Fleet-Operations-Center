@@ -493,7 +493,7 @@ expose('aap', {
   attachToWR:       (workRequestId, attachments) => ipcRenderer.invoke('aap:attach-to-wr', { workRequestId, attachments }),
   getLifecycle:     (id, url)                => ipcRenderer.invoke('aap:get-lifecycle', { equipmentId: id, assetUrl: url }),
   onWRProgress:     (cb)                     => on('wr:progress', cb),
-  openUrl:          (url)                    => ipcRenderer.invoke('aap:open-url', url),
+  openUrl:          (url, opts)              => ipcRenderer.invoke('aap:open-url', url, opts),
 });
 
 // ── Zoom Meetings tab (zoom.enabled, default OFF; channels return DISABLED when off) ──
