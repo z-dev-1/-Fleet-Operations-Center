@@ -109,13 +109,15 @@ function archiveAndClearTimeline(equipmentId) {
     if (!u || !u.timeline || !u.timeline.trim()) return;
 
     u.timelineArchive = Array.isArray(u.timelineArchive) ? u.timelineArchive : [];
-    u.timelineArchive.push({ timeline: u.timeline, closedAt: new Date().toISOString() });
+    u.timelineArchive.push({ timeline: u.timeline, closedAt: new Date().toISOString(), ...(u.priorHistory ? { priorHistory: u.priorHistory } : {}) });
     // Cap the archive so it can't grow unbounded.
     if (u.timelineArchive.length > 10) u.timelineArchive = u.timelineArchive.slice(-10);
 
     u.timeline = '';
     u.manualEntries = [];
     u.hiddenEntries = [];
+    delete u.priorHistory;
+    delete u.timelineDigest;
     ns[equipmentId] = u;
     store.save('notesStore', ns);
 

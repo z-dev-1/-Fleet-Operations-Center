@@ -631,7 +631,13 @@ function registerScrapersIPC(ctx) {
       if (!id || !down) return;
       const { timelineInputSignature } = require('../orcha/timeline-freshness');
       const sig = timelineInputSignature(row);
-      if (!sig || _timelineInputSig.get(id) === sig) return;
+      if (!sig) return;
+      if (_timelineInputSig.get(id) === sig) {
+        // Timeline unchanged: no-op when the digest is cached, backfills a missing one.
+        require('../orcha/timeline-digest').refreshTimelineDigests([row], { pushData: ctx.pushData })
+          .catch((e) => logger.warn('[timeline] digest refresh failed for ' + id + ': ' + e.message));
+        return;
+      }
       _timelineInputSig.set(id, sig);
       const { rebuildUnitTimeline } = require('../orcha/deep-scan');
       logger.info('[timeline] inputs changed for ' + id + ' — rebuilding its timeline now');
@@ -639,8 +645,11 @@ function registerScrapersIPC(ctx) {
         pushData: ctx.pushData,
         pushStatus: typeof ctx.pushStatus === 'function' ? ctx.pushStatus : null,
       }).then((r) => {
-        if (r && r.ok) logger.info('[timeline] rebuilt ' + id + ' (' + String(r.timeline || '').length + 'ch)');
-        else if (r && r.skipped) logger.info('[timeline] rebuild for ' + id + ' skipped: ' + r.skipped);
+        if (r && r.ok) {
+          logger.info('[timeline] rebuilt ' + id + ' (' + String(r.timeline || '').length + 'ch)');
+          require('../orcha/timeline-digest').refreshTimelineDigests([row], { pushData: ctx.pushData })
+            .catch((e) => logger.warn('[timeline] digest refresh failed for ' + id + ': ' + e.message));
+        } else if (r && r.skipped) logger.info('[timeline] rebuild for ' + id + ' skipped: ' + r.skipped);
       }).catch((e) => {
         _timelineInputSig.delete(id); // allow a retry on the next open
         logger.warn('[timeline] rebuild failed for ' + id + ': ' + e.message);

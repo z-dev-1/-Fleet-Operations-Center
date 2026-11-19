@@ -100,6 +100,11 @@ function registerOrchaIPC(ctx) {
       uptakeCount: 0,
       relayCount:  0,
     });
+    // Timeline digests for the scanned units once the scan finishes (fire-and-forget;
+    // refreshTimelineDigests pushes its own partialMerge rows).
+    scanPromise
+      .then(() => require('../orcha/timeline-digest').refreshTimelineDigests(targets, { pushData: ctx.pushData }))
+      .catch((e) => logger.warn('[orcha:deep-process] timeline digest skipped: ' + e.message));
     // Race: scan vs 120s timeout
     const result = await Promise.race([
       scanPromise,

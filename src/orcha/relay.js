@@ -268,6 +268,7 @@ const SOURCE_PRIORITY = Object.freeze({
   vision: 'normal',
   // low: background analysis
   deep_scan: 'low',
+  timeline_digest: 'low',
   repair_intel_analysis: 'low',
   'reason:tasks': 'low',
   fas_shadow: 'low',

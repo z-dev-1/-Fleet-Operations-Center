@@ -565,6 +565,8 @@ function createSyncEngine(ctx) {
         relayCount,
         durableScope: 'fleet',
       })
+        // Timeline digests after the scan (outside it: the deep-scan golden pins every scan prompt).
+        .then(() => require('../orcha/timeline-digest').refreshTimelineDigests(mergedRows, { pushData: ctx.pushData }))
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 

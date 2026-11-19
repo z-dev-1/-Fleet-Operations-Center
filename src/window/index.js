@@ -1498,6 +1498,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             relayCount: 0,
             durableScope: 'fleet',
           }));
+          try { await require('../orcha/timeline-digest').refreshTimelineDigests(rows, { pushData }); } catch (e) { logger.warn('[data-source] timeline digest error (non-fatal): ' + e.message); }
         } catch (e) {
           logger.warn('[data-source] deep-scan error (non-fatal): ' + e.message);
         } finally {

@@ -1687,6 +1687,8 @@ function mergeRelayIntoRows(aapRows, relayData, notesStore) {
       issueDetails:        r.issueDetails      || row.issueDetails      || '',
       issueSummary:        n.issueSummary      || row.issueSummary    || '',
       repairTimeline:      _activeNoWR ? '' : (n.timeline || row.repairTimeline || ''),
+      ...(!_activeNoWR && n.timelineDigest ? { timelineDigest: n.timelineDigest } : {}),
+      ...(!_activeNoWR && n.priorHistory ? { priorHistory: n.priorHistory } : {}),
       _orchaProcessed:     row._orchaProcessed || false,
       alternativeId:       r.alternativeId     || row.alternativeId     || '',
       serviceUrl:         r.pageUrl           || row.serviceUrl        || '',
