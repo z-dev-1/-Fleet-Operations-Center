@@ -449,6 +449,37 @@ describe('auto-draft on select (drafts only, never sends)', () => {
     expectNoWrites();
   });
 
+  it('(c) text typed while an auto-draft is in flight is kept unless the confirm says replace', async () => {
+    let release;
+    window.relayWrites.draftAction.mockImplementation(() => new Promise((res) => { release = () => res({ ok: true, draft: 'AI TEXT', placeholders: [] }); }));
+    deps.confirm = vi.fn(() => false);
+    await openEsc();
+    const esc = choose('#ra-esc-target', 'FAS');
+    await type('#ra-esc-reason', 'TYPED DURING DRAFT');
+    release();
+    await esc;
+    expect(deps.confirm).toHaveBeenCalledWith('Replace the reason text with an AI draft?');
+    expect(q('#ra-esc-reason').value).toBe('TYPED DURING DRAFT');
+    expect(toast.show.mock.calls.at(-1)[1]).toContain('kept your text');
+    deps.confirm.mockReturnValue(true);
+    window.relayWrites.draftAction.mockClear();
+    await openCm();
+    const cm = choose('#ra-cm-template', 'update-request');
+    await type('#ra-cm-text', 'typed during draft');
+    deps.confirm.mockReturnValue(false);
+    release();
+    await cm;
+    expect(deps.confirm).toHaveBeenCalledWith('Replace the comment text with an AI draft?');
+    expect(q('#ra-cm-text').value).toBe('typed during draft');
+    deps.confirm.mockReturnValue(true);
+    const cm2 = choose('#ra-cm-template', 'offsite-update');
+    await type('#ra-cm-text', 'more typing');
+    release();
+    await cm2;
+    expect(q('#ra-cm-text').value).toBe('AI TEXT');
+    expectNoWrites();
+  });
+
   it('(f) selection never writes; only Submit sends, via the gated bridge, after the modal closes', async () => {
     armWriteTraps();
     await openEsc();

@@ -430,6 +430,8 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
     if (!d.bridge || typeof d.bridge.draftAction !== 'function') { d.toast.show('error', 'AI draft failed: Relay writes bridge unavailable.'); return; }
     const untouchedAi = auto && lastDraft !== null && rEl && rEl.value === lastDraft;
     if (rEl && String(rEl.value || '').trim() && !untouchedAi && !d.confirm('Replace the reason text with an AI draft?')) return;
+    // Text typed while the draft is in flight is re-checked with the same confirm below.
+    const before = rEl ? rEl.value : '';
     drafting = true;
     if (btn) btn.disabled = true;
     let r;
@@ -442,6 +444,10 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
     } catch (e) { r = { ok: false, error: e && e.message }; }
     finally { drafting = false; if (btn) btn.disabled = false; }
     if (!r || !r.ok) { d.toast.show('error', _draftErr(r)); return; }
+    if (rEl && rEl.value !== before && String(rEl.value || '').trim() && !d.confirm('Replace the reason text with an AI draft?')) {
+      d.toast.show('info', 'AI draft ready, kept your text. Click Draft with AI to replace it.');
+      return;
+    }
     if (rEl) { rEl.value = String(r.draft || '').slice(0, ESC_MAX); lastDraft = rEl.value; }
     aiDrafted = true;
     userTyped = false;
@@ -518,6 +524,8 @@ export async function openCommentModal(unit, wrId, deps) {
     if (!d.bridge) { d.toast.show('error', 'AI draft failed: Relay writes bridge unavailable.'); return; }
     const untouchedAi = auto && lastDraft !== null && ta && ta.value === lastDraft;
     if (ta && String(ta.value || '').trim() && !untouchedAi && !d.confirm('Replace the comment text with an AI draft?')) return;
+    // Text typed while the draft is in flight is re-checked with the same confirm below.
+    const before = ta ? ta.value : '';
     drafting = true;
     if (btn) btn.disabled = true;
     let r;
@@ -537,6 +545,10 @@ export async function openCommentModal(unit, wrId, deps) {
     finally { drafting = false; if (btn) btn.disabled = false; }
     if (!r || !r.ok) { d.toast.show('error', _draftErr(r)); return; }
     if (!text.trim()) { d.toast.show('info', 'AI returned no draft for this WR.'); return; }
+    if (ta && ta.value !== before && String(ta.value || '').trim() && !d.confirm('Replace the comment text with an AI draft?')) {
+      d.toast.show('info', 'AI draft ready, kept your text. Click Draft with AI to replace it.');
+      return;
+    }
     if (ta) { ta.value = text.slice(0, ESC_MAX); lastDraft = ta.value; }
     aiDrafted = true;
     _renderDraftNotes(q, warnings, placeholders);
