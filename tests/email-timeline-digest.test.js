@@ -123,10 +123,18 @@ describe('322283 email timeline digest', () => {
     const git = (...a) => { try { return execFileSync('git', a, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch (_) { return null; } };
     if (git('cat-file', '-e', '12a01de^{commit}') === null) return;   // git / base unavailable: skip
     // relay-actions.js is excluded: the later auto-draft-on-select change edits it on purpose.
+    // The Pending Estimates upgrade edits the files below on purpose (Vendor WO chips, overlay);
+    // none of their changed lines may touch the timeline.
+    const upgraded = ['renderer/src/css/fleet.css', 'renderer/src/js/views/id-links.js',
+      'renderer/src/js/views/pending-estimates-logic.js', 'renderer/src/js/views/pending-estimates-panel.js',
+      'renderer/src/js/views/unit-detail.js'];
     const paths = ['renderer', 'src/orcha', 'src/scheduler', 'src/scrapers/owa-mailer.js', 'src/scrapers/relay.js',
-      ':(exclude)renderer/src/js/views/relay-actions.js'];
+      ':(exclude)renderer/src/js/views/relay-actions.js', ...upgraded.map((p) => ':(exclude)' + p)];
     expect(git('diff', '--name-only', '12a01de', '--', ...paths).trim()).toBe('');
     expect(git('diff', '--name-only', '--', ...paths).trim()).toBe('');
+    const changed = (git('diff', '-U0', '12a01de', '--', ...upgraded) || '').split('\n')
+      .filter((l) => /^[+-](?![+-])/.test(l) && /timeline/i.test(l));
+    expect(changed).toEqual([]);
     const sample = '11/10 - Christy Adriaansen - Kenworth Northeast Group (Service Advisor) confirmed, estimate $1,200.00 (ASIST case 21268757)';
     const before = redactForSharing(sample);
     build(F);
