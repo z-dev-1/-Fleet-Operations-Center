@@ -35,6 +35,7 @@ const { registerLongDwellSpIPC }   = require('./long-dwell-sp');
 const { registerFleetDbrIPC }      = require('./fleet-dbr');
 const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
+const { registerPendingEstIPC }    = require('./pending-est');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerEmailIntelIPC }    = require('./email-intel');
@@ -74,6 +75,7 @@ function registerAllIPC(ctx) {
   registerFleetDbrIPC(ctx);   // Daily Call Fleet DBR; inert unless dbr.fleetData
   registerBaseballCardIPC();
   registerFasRosterIPC();
+  registerPendingEstIPC(ctx);   // team-wide Pending Estimates (read-only)
   const { registerAapApiIPC } = require('./aap-api');
   registerAapApiIPC(ctx);
   registerSchedulerIPC(ctx);

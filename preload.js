@@ -300,6 +300,12 @@ expose('fasRoster', {
   resolve:        (pairs) => ipcRenderer.invoke('fas-roster:resolve', pairs),
 });
 
+// ── Pending Estimates (team-wide RG + Decisiv scan, read-only) ──────────────
+expose('pendingEst', {
+  get:  () => ipcRenderer.invoke('pending-est:get'),
+  scan: (opts) => ipcRenderer.invoke('pending-est:scan', opts || {}),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),
