@@ -377,6 +377,8 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
   let amountTyped = false;
   let drafting = false;
   let sending = false;
+  let lastDraft = null;
+  let lastTarget = '';
 
   async function send(add, remove, comment, what) {
     if (sending) return;
@@ -416,7 +418,9 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
     return send([], [value], comment, 'Escalation removal');
   }
 
-  async function draft() {
+  // auto: fired by a target change. It may silently replace only the untouched
+  // last AI draft; any other text still goes through the confirm below.
+  async function draft(auto) {
     const tEl = q('#ra-esc-target');
     const rEl = q('#ra-esc-reason');
     const btn = q('#ra-esc-draft');
@@ -424,7 +428,8 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
     if (!key) { d.toast.show('warn', 'Pick an escalation target first.'); return; }
     if (drafting) return;
     if (!d.bridge || typeof d.bridge.draftAction !== 'function') { d.toast.show('error', 'AI draft failed: Relay writes bridge unavailable.'); return; }
-    if (rEl && String(rEl.value || '').trim() && !d.confirm('Replace the reason text with an AI draft?')) return;
+    const untouchedAi = auto && lastDraft !== null && rEl && rEl.value === lastDraft;
+    if (rEl && String(rEl.value || '').trim() && !untouchedAi && !d.confirm('Replace the reason text with an AI draft?')) return;
     drafting = true;
     if (btn) btn.disabled = true;
     let r;
@@ -437,7 +442,7 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
     } catch (e) { r = { ok: false, error: e && e.message }; }
     finally { drafting = false; if (btn) btn.disabled = false; }
     if (!r || !r.ok) { d.toast.show('error', _draftErr(r)); return; }
-    if (rEl) rEl.value = String(r.draft || '').slice(0, ESC_MAX);
+    if (rEl) { rEl.value = String(r.draft || '').slice(0, ESC_MAX); lastDraft = rEl.value; }
     aiDrafted = true;
     userTyped = false;
     _renderDraftNotes(q, r.freshness && r.freshness.warnings, r.placeholders);
@@ -458,12 +463,20 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
       const tEl = q('#ra-esc-target');
       const hve = q('#ra-esc-hve');
       const rh = q('#ra-esc-reactivation-hint');
+      // Picking a target auto-drafts the reason (never sends). Skipped for a blank or
+      // not-offered target, an unchanged value, or while a draft is in flight.
       if (tEl) tEl.addEventListener('change', () => {
         if (hve) hve.hidden = tEl.value !== HVE_KEY;
         if (rh) rh.hidden = tEl.value !== REACT_KEY;
+        const key = tEl.value || '';
+        if (key === lastTarget || drafting) return;
+        lastTarget = key;
+        if (!targets.some((t) => t.key === key && !t.disabled)) return;
+        return draft(true);
       });
       if (tEl && o0.initialTarget && targets.some((t) => t.key === o0.initialTarget && !t.disabled)) {
         tEl.value = o0.initialTarget;
+        lastTarget = tEl.value;
         if (hve) hve.hidden = tEl.value !== HVE_KEY;
         if (rh) rh.hidden = tEl.value !== REACT_KEY;
       }
@@ -492,14 +505,19 @@ export async function openCommentModal(unit, wrId, deps) {
   let drafting = false;
   let sending = false;
   let upd = null;
+  let lastDraft = null;
+  let lastTpl = '';
 
-  async function draft() {
+  // auto: fired by a template change (never for Free-form). It may silently replace
+  // only the untouched last AI draft; any other text still goes through the confirm.
+  async function draft(auto) {
     const tpl = (q('#ra-cm-template') || {}).value || 'offsite-update';
     const ta = q('#ra-cm-text');
     const btn = q('#ra-cm-draft');
     if (drafting) return;
     if (!d.bridge) { d.toast.show('error', 'AI draft failed: Relay writes bridge unavailable.'); return; }
-    if (ta && String(ta.value || '').trim() && !d.confirm('Replace the comment text with an AI draft?')) return;
+    const untouchedAi = auto && lastDraft !== null && ta && ta.value === lastDraft;
+    if (ta && String(ta.value || '').trim() && !untouchedAi && !d.confirm('Replace the comment text with an AI draft?')) return;
     drafting = true;
     if (btn) btn.disabled = true;
     let r;
@@ -519,7 +537,7 @@ export async function openCommentModal(unit, wrId, deps) {
     finally { drafting = false; if (btn) btn.disabled = false; }
     if (!r || !r.ok) { d.toast.show('error', _draftErr(r)); return; }
     if (!text.trim()) { d.toast.show('info', 'AI returned no draft for this WR.'); return; }
-    if (ta) ta.value = text.slice(0, ESC_MAX);
+    if (ta) { ta.value = text.slice(0, ESC_MAX); lastDraft = ta.value; }
     aiDrafted = true;
     _renderDraftNotes(q, warnings, placeholders);
     if (upd) upd();
@@ -562,6 +580,17 @@ export async function openCommentModal(unit, wrId, deps) {
       upd = _wireCount(ta, q('#ra-cm-count'), () => { if (!String(ta.value || '').trim()) aiDrafted = false; });
       const db = q('#ra-cm-draft');
       if (db) db.addEventListener('click', () => draft());
+      // Picking Offsite Update / Update Request auto-drafts the comment (never sends).
+      // Free-form has nothing to draft from, so it waits for the Draft button.
+      const tplEl = q('#ra-cm-template');
+      lastTpl = (tplEl && tplEl.value) || 'offsite-update';
+      if (tplEl) tplEl.addEventListener('change', () => {
+        const tpl = tplEl.value || 'offsite-update';
+        if (tpl === lastTpl || drafting) return;
+        lastTpl = tpl;
+        if (tpl === 'free-form') return;
+        return draft(true);
+      });
     },
   });
 }

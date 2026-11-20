@@ -139,8 +139,7 @@ describe('escalation modal', () => {
     await choose('#ra-esc-target', 'MCS_REACTIVATION');
     expect(q('#ra-esc-hve').hidden).toBe(true);
     expect(q('#ra-esc-reactivation-hint').hidden).toBe(false);
-    await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
-    await q('#ra-esc-draft').fire('click');
+    // The first HVE pick auto-drafted; the not-offered Reactivation pick did not.
     expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
     const arg = window.relayWrites.draftAction.mock.calls[0][0];
     expect(arg).toMatchObject({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR, userInputs: { estAmount: 0 } });
@@ -157,7 +156,6 @@ describe('escalation modal', () => {
     expect(fakeModal.st.opts.body).toContain('id="ra-esc-amount" type="number" min="0" step="0.01" value="4850.5"');
     q('#ra-esc-amount').value = '4850.5';
     await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
-    await q('#ra-esc-draft').fire('click');
     expect(window.relayWrites.draftAction.mock.calls[0][0].userInputs).toEqual({ estAmount: 0 });
     await type('#ra-esc-amount', '3000');
     deps.confirm.mockReturnValue(true);
@@ -323,6 +321,177 @@ describe('comment modal', () => {
     await action('Submit comment').onClick();
     expect(window.relayWrites.addComment).not.toHaveBeenCalled();
     expect(fakeModal.close).not.toHaveBeenCalled();
+  });
+});
+
+describe('auto-draft on select (drafts only, never sends)', () => {
+  async function openCm() {
+    fakeModal.st.panel = mkPanel();
+    await ra.openCommentModal(UNIT, WR, deps);
+  }
+  // Every write path throws: a selection that reached any of them would fail the test.
+  function armWriteTraps() {
+    const boom = () => { throw new Error('WRITE ON SELECT'); };
+    window.relayWrites.escalate.mockImplementation(boom);
+    window.relayWrites.addComment.mockImplementation(boom);
+    window.relayWrites.changeLifecycle.mockImplementation(boom);
+  }
+  function expectNoWrites() {
+    expect(window.relayWrites.escalate).not.toHaveBeenCalled();
+    expect(window.relayWrites.addComment).not.toHaveBeenCalled();
+    expect(window.relayWrites.changeLifecycle).not.toHaveBeenCalled();
+    expect(window.aapApi.updateEscalations).not.toHaveBeenCalled();
+    expect(window.aap.setLifecycle).not.toHaveBeenCalled();
+    expect(fakeModal.close).not.toHaveBeenCalled();
+  }
+
+  it('(a) picking an escalation target with an empty reason auto-drafts it, no prompt, no write', async () => {
+    armWriteTraps();
+    await openEsc();
+    await choose('#ra-esc-target', 'FAS');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    expect(window.relayWrites.draftAction.mock.calls[0][0]).toMatchObject({ kind: 'escalation', target: 'FAS', workRequestId: WR });
+    expect(q('#ra-esc-reason').value).toBe('OFFSITE EST SUBMITTED - <FILL: vendor>');
+    expect(q('#ra-fills').textContent).toContain('<FILL: vendor>');
+    expect(deps.confirm).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('(a) re-picking another target replaces an untouched AI draft without a prompt', async () => {
+    await openEsc();
+    await choose('#ra-esc-target', 'FAS');
+    window.relayWrites.draftAction.mockImplementation(async () => ({ ok: true, draft: 'MCS LEAD PLEASE REVIEW', placeholders: [], freshness: { warnings: [] } }));
+    await choose('#ra-esc-target', 'MCS_LEAD');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(2);
+    expect(window.relayWrites.draftAction.mock.calls[1][0].target).toBe('MCS_LEAD');
+    expect(q('#ra-esc-reason').value).toBe('MCS LEAD PLEASE REVIEW');
+    expect(deps.confirm).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('(b) picking Update Request / Offsite Update auto-drafts the comment; Free-form does not', async () => {
+    armWriteTraps();
+    await openCm();
+    await choose('#ra-cm-template', 'update-request');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    expect(window.relayWrites.draftAction.mock.calls[0][0]).toMatchObject({ kind: 'comment', template: 'update-request', workRequestId: WR, userInputs: {} });
+    expect(q('#ra-cm-text').value).toBe('OFFSITE EST SUBMITTED - <FILL: vendor>');
+    await choose('#ra-cm-template', 'offsite-update');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(2);
+    expect(window.relayWrites.draftAction.mock.calls[1][0].template).toBe('offsite-update');
+    await choose('#ra-cm-template', 'free-form');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(2);
+    expect(window.relayWrites.draftComment).not.toHaveBeenCalled();
+    expect(deps.confirm).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it('(c) typed reason text is never silently replaced: the confirm fires and "no" keeps the text', async () => {
+    deps.confirm = vi.fn(() => false);
+    await openEsc();
+    await choose('#ra-esc-target', 'FAS');
+    await type('#ra-esc-reason', 'MY OWN REASON');
+    await choose('#ra-esc-target', 'MCS_LEAD');
+    expect(deps.confirm).toHaveBeenCalledWith('Replace the reason text with an AI draft?');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    expect(q('#ra-esc-reason').value).toBe('MY OWN REASON');
+    deps.confirm.mockReturnValue(true);
+    await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(2);
+    expect(q('#ra-esc-reason').value).toBe('OFFSITE EST SUBMITTED - <FILL: vendor>');
+    expectNoWrites();
+  });
+
+  it('(c) typed comment text is never silently replaced on a template change', async () => {
+    deps.confirm = vi.fn(() => false);
+    await openCm();
+    await type('#ra-cm-text', 'parts eta 11/20');
+    await choose('#ra-cm-template', 'update-request');
+    expect(deps.confirm).toHaveBeenCalledWith('Replace the comment text with an AI draft?');
+    expect(window.relayWrites.draftAction).not.toHaveBeenCalled();
+    expect(q('#ra-cm-text').value).toBe('parts eta 11/20');
+    expectNoWrites();
+  });
+
+  it('(d) re-selecting the identical target/template does not re-draft', async () => {
+    await openEsc();
+    await choose('#ra-esc-target', 'FAS');
+    await choose('#ra-esc-target', 'FAS');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    window.relayWrites.draftAction.mockClear();
+    await openCm();
+    await choose('#ra-cm-template', 'offsite-update'); // already the selected default
+    expect(window.relayWrites.draftAction).not.toHaveBeenCalled();
+    await choose('#ra-cm-template', 'update-request');
+    await choose('#ra-cm-template', 'update-request');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('(e) no auto-draft fires while a draft is in flight', async () => {
+    let release;
+    window.relayWrites.draftAction.mockImplementation(() => new Promise((res) => { release = () => res({ ok: true, draft: 'FIRST', placeholders: [] }); }));
+    await openEsc();
+    const first = choose('#ra-esc-target', 'FAS');
+    await choose('#ra-esc-target', 'MCS_LEAD');
+    await q('#ra-esc-draft').fire('click');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    expect(q('#ra-esc-reason').value).toBe('FIRST');
+    window.relayWrites.draftAction.mockClear();
+    await openCm();
+    const cmFirst = choose('#ra-cm-template', 'update-request');
+    await choose('#ra-cm-template', 'offsite-update');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(1);
+    release();
+    await cmFirst;
+    expect(q('#ra-cm-text').value).toBe('FIRST');
+    expectNoWrites();
+  });
+
+  it('(f) selection never writes; only Submit sends, via the gated bridge, after the modal closes', async () => {
+    armWriteTraps();
+    await openEsc();
+    await choose('#ra-esc-target', 'MCS_HIGH_VALUE_ESTIMATE');
+    await choose('#ra-esc-target', 'FAS');
+    expectNoWrites();
+    window.relayWrites.escalate.mockImplementation(async () => ({ ok: true, outcome: 'sent' }));
+    await action('Submit escalation').onClick();
+    expect(window.relayWrites.escalate).toHaveBeenCalledTimes(1);
+    expect(window.relayWrites.escalate.mock.calls[0][0]).toMatchObject({ add: ['FAS'], comment: 'OFFSITE EST SUBMITTED - <FILL: vendor>', aiDrafted: true });
+    expect(fakeModal.close.mock.invocationCallOrder[0]).toBeLessThan(window.relayWrites.escalate.mock.invocationCallOrder[0]);
+    expect(window.aapApi.updateEscalations).not.toHaveBeenCalled();
+
+    armWriteTraps();
+    fakeModal.close.mockClear();
+    window.relayWrites.escalate.mockClear();
+    await openCm();
+    await choose('#ra-cm-template', 'update-request');
+    await choose('#ra-cm-template', 'free-form');
+    await choose('#ra-cm-template', 'offsite-update');
+    expectNoWrites();
+    window.relayWrites.addComment.mockImplementation(async () => ({ ok: true, outcome: 'sent' }));
+    await action('Submit comment').onClick();
+    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'OFFSITE EST SUBMITTED - <FILL: vendor>', '322168', { aiDrafted: true });
+    expect(fakeModal.close.mock.invocationCallOrder[0]).toBeLessThan(window.relayWrites.addComment.mock.invocationCallOrder[0]);
+  });
+
+  it('(g) the manual Draft with AI button still re-drafts (with the replace confirm) in both modals', async () => {
+    await openEsc();
+    await choose('#ra-esc-target', 'FAS');
+    await q('#ra-esc-draft').fire('click');
+    expect(deps.confirm).toHaveBeenCalledWith('Replace the reason text with an AI draft?');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(2);
+    expect(window.relayWrites.draftAction.mock.calls[1][0]).toMatchObject({ kind: 'escalation', target: 'FAS' });
+    await openCm();
+    await q('#ra-cm-draft').fire('click');
+    expect(window.relayWrites.draftAction).toHaveBeenCalledTimes(3);
+    expect(window.relayWrites.draftAction.mock.calls[2][0]).toMatchObject({ kind: 'comment', template: 'offsite-update' });
+    await choose('#ra-cm-template', 'free-form');
+    await type('#ra-cm-text', '');
+    await q('#ra-cm-draft').fire('click');
+    expect(window.relayWrites.draftComment).toHaveBeenCalledTimes(1);
+    expectNoWrites();
   });
 });
 
