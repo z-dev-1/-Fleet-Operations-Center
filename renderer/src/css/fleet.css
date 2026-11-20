@@ -10270,3 +10270,25 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 .pe-fresh { font-size: 9px; color: var(--mut, #8b949e); font-family: var(--mono, monospace); }
 .pe-esc[disabled] { opacity: .45; cursor: not-allowed; }
 .pe-empty { font-size: 12px; color: var(--txt2, #8b949e); padding: 12px 0; }
+/* Pending Estimates upgrade: team-wide columns, filter bar, Owner toggle, mismatch badge. */
+.pe-overlay .pe-panel { width: min(1440px, 98vw); }
+.pe-refresh { margin-left: auto; background: none; border: 1px solid var(--bdr, #30363d); border-radius: 6px; color: var(--txt2, #8b949e); font-size: 10px; padding: 3px 8px; cursor: pointer; }
+.pe-refresh:hover { color: var(--txt, #e6edf3); }
+.pe-refresh + .pe-close { margin-left: 4px; }
+.pe-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--bdr, #30363d); font-size: 10px; color: var(--txt2, #8b949e); }
+.pe-owner { display: inline-flex; border: 1px solid var(--bdr, #30363d); border-radius: 6px; overflow: hidden; }
+.pe-owner button { background: none; border: none; border-right: 1px solid var(--bdr, #30363d); color: var(--txt2, #8b949e); font-size: 11px; padding: 4px 10px; cursor: pointer; }
+.pe-owner button:last-child { border-right: none; }
+.pe-owner button[aria-pressed="true"] { background: var(--acc, #58a6ff); color: #0d1117; font-weight: 700; }
+.pe-f { display: inline-flex; align-items: center; gap: 4px; }
+.pe-f select { background: var(--bg, #0d1117); color: var(--txt, #e6edf3); border: 1px solid var(--bdr, #30363d); border-radius: 4px; font-size: 10px; padding: 2px 4px; }
+.pe-f--mismatch { color: #3fb950; font-weight: 600; cursor: pointer; }
+.pe-clear { background: none; border: none; color: var(--acc, #58a6ff); font-size: 10px; cursor: pointer; padding: 0; }
+.pe-badge { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 10px; white-space: nowrap; vertical-align: middle; }
+.pe-badge--mismatch { background: #1a7f37; color: #ffffff; border: 1px solid #3fb950; }
+.pe-badge--norg { background: var(--orgd, rgba(255,166,87,.15)); color: var(--org, #ffa657); border: 1px solid rgba(255,166,87,.3); }
+.pe-row--mismatch td { background: rgba(63,185,80,.06); }
+.pe-sub2 { font-size: 9px; color: var(--mut, #8b949e); margin-top: 2px; }
+.pe-table th[data-pe-sort] { cursor: pointer; user-select: none; }
+.pe-table th[data-pe-sort]:hover { color: var(--txt, #e6edf3); }
+.pe-table .dp-wo-field { white-space: nowrap; }

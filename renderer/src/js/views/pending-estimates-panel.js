@@ -2,26 +2,35 @@
  * pending-estimates-panel.js — Fleet tab "⏳ Pending Estimates" overlay.
  *
  * Lists the user's work orders whose estimate is submitted and awaiting approval
- * (DTNA excluded), oldest-submitted first, from the rows already in the fleet slice
- * (no new IPC, no AAP call). All HTML comes from ./pending-estimates-logic.js.
+ * (DTNA excluded), oldest-submitted first, from the rows already in the fleet slice.
+ * All HTML comes from ./pending-estimates-logic.js.
+ *
+ * Upgrade: the team-wide scan (window.pendingEst.get / .scan -> src/ipc/pending-est.js)
+ * adds RG + Volvo/PACCAR offsite rows for the whole team. The Owner control
+ * (Mine · Everyone · All, default Mine) and the filter bar only filter what is shown;
+ * they never change the scan request. Without window.pendingEst the overlay shows the
+ * v1 fleet-slice rows only.
  *
  * Escalate reuses the existing WR-card Escalate modal (relay-actions.js
  * openEscalationModal) pre-targeted to MCS High Value Estimate. That modal drafts via
- * relay:draft-action only on "Draft with AI" and sends only through the gated
- * relay:escalate -> write-gate -> approval modal. Nothing here writes.
+ * relay:draft-action and sends only through the gated relay:escalate -> write-gate ->
+ * approval modal. Nothing here writes. Vendor WO chips open in-app through
+ * wireIdLinks -> window.aap.openUrl(url, { zoom: true }).
  *
  * The overlay sits at z-index 850, below the modal.js singleton (900), so the
  * Escalate and approval modals render above it. Escape is ignored while a modal.js
  * modal is open, so the first Escape closes the modal and the next one the overlay.
  *
- * The controller takes injected { doc, bus, getFleet, openEscalation, escalationDeps,
- * modal, navigate } so the DOM test drives it without jsdom (__test__.createController).
+ * The controller takes injected { doc, bus, getFleet, getScan, runScan, openUrl,
+ * openEscalation, escalationDeps, modal, navigate } so the DOM tests drive it without
+ * jsdom (__test__.createController).
  */
 import bus from '../bus.js';
 import state from '../state.js';
 import modal from '../components/modal.js';
 import toast from '../components/toast.js';
 import { openEscalationModal } from './relay-actions.js';
+import { wireIdLinks } from './id-links.js';
 import * as L from './pending-estimates-logic.js';
 
 let _active = null;
@@ -32,6 +41,9 @@ export function openPendingEstimatesPanel({ returnFocusEl } = {}) {
   const ctl = createController({
     doc: document, bus, modal,
     getFleet: () => state.slice('fleet'),
+    getScan: () => (w.pendingEst && w.pendingEst.get ? w.pendingEst.get() : null),
+    runScan: (o) => (w.pendingEst && w.pendingEst.scan ? w.pendingEst.scan(o) : null),
+    openUrl: (u, o) => (w.aap && w.aap.openUrl ? w.aap.openUrl(u, o) : undefined),
     openEscalation: openEscalationModal,
     // Same deps the unit-detail WR cards pass to the Escalate modal.
     escalationDeps: { modal, bridge: w.relayWrites, aapApi: w.aapApi, confirm: (m) => w.confirm(m), toast },
@@ -45,25 +57,46 @@ export function openPendingEstimatesPanel({ returnFocusEl } = {}) {
   return ctl;
 }
 
+const FILTER_NAMES = ['source', 'fleetStatus', 'repairStatus', 'vendor', 'fas', 'mismatch'];
+
 function createController(deps) {
   const { doc, returnFocusEl, onClose } = deps;
   const evBus = deps.bus || null;
   const now = deps.now || (() => Date.now());
   const getFleet = typeof deps.getFleet === 'function' ? deps.getFleet : () => ({});
+  const getScan = typeof deps.getScan === 'function' ? deps.getScan : null;
+  const runScan = typeof deps.runScan === 'function' ? deps.runScan : null;
   const mdl = deps.modal || { isOpen: () => false };
   const tst = deps.toast || { show() {} };
 
-  let overlay = null; let backdrop = null; let bodyEl = null;
+  let overlay = null; let backdrop = null; let bodyEl = null; let barEl = null;
   let unsub = null; let closed = false; let opening = false;
-  let byWr = new Map();
+  let byKey = new Map(); let byWr = new Map();
+  let filters = L.defaultFilters(); // Owner = Mine on open
+  let sort = { key: 'default', dir: 'asc' };
+  const scan = { rows: [], asOf: null, cached: false, scanning: false, error: null, excludedDtna: 0 };
+  let loading = Promise.resolve();
 
   function render() {
     if (!bodyEl) return;
     const f = getFleet() || {};
-    const res = L.collectPendingEstimates(f.rows || [], { now: now(), fleetSyncedAt: f.syncedAt });
-    byWr = new Map(res.items.map((it) => [it.wrId, it]));
-    bodyEl.innerHTML = L.overlayHtml({ items: res.items, excludedDtna: res.excludedDtna, asOf: f.syncedAt,
-      cached: !!(f.usedCache || f.stale) });
+    const t = now();
+    const res = L.collectPendingEstimates(f.rows || [], { now: t, fleetSyncedAt: f.syncedAt });
+    const all = L.mergeTeamRows(res.items, scan.rows, { now: t, asOf: scan.asOf });
+    const shown = L.sortItems(L.applyFilters(all, filters), sort);
+    byKey = new Map(all.map((it) => [it.key, it]));
+    byWr = new Map(all.filter((it) => it.wrId).map((it) => [it.wrId, it]));
+    const mismatch = all.filter((it) => it.statusMismatch === true).length;
+    if (barEl) {
+      barEl.innerHTML = L.filterBarHtml(filters, L.filterOptions(all), { mismatch,
+        mine: all.filter((it) => it.mine === true).length, everyone: all.filter((it) => it.mine === false).length, all: all.length });
+    }
+    const team = !!(getScan || runScan);
+    bodyEl.innerHTML = L.overlayHtml({ items: shown, excludedDtna: Math.max(res.excludedDtna, scan.excludedDtna || 0), asOf: f.syncedAt,
+      cached: !!(f.usedCache || f.stale), filtered: all.length > 0, sort,
+      meta: { shown: shown.length, total: all.length, mismatch: team ? mismatch : undefined, teamAsOf: scan.asOf,
+        teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error } });
+    wireIdLinks(bodyEl, (u, o) => (typeof deps.openUrl === 'function' ? deps.openUrl(u, o) : undefined));
   }
 
   function mount() {
@@ -80,22 +113,57 @@ function createController(deps) {
     const head = doc.createElement('div');
     head.className = 'pe-head';
     head.innerHTML = '<div id="pe-title" class="pe-title">\u23F3 Pending Estimates</div>' +
-      '<span class="pe-sub">Submitted, awaiting approval \u00B7 your domiciles \u00B7 DTNA excluded</span>' +
+      '<span class="pe-sub">RG + Volvo/PACCAR offsite \u00B7 team-wide pull \u00B7 DTNA excluded</span>' +
+      '<button type="button" class="pe-refresh" data-pe-refresh="1">\u21BB Refresh team-wide</button>' +
       '<button type="button" class="pe-close" data-pe-close="1" aria-label="Close">\u00D7</button>';
+    barEl = doc.createElement('div');
+    barEl.id = 'pe-bar';
+    barEl.className = 'pe-bar';
     bodyEl = doc.createElement('div');
     bodyEl.id = 'pe-body';
     bodyEl.className = 'pe-body';
     panel.appendChild(head);
+    panel.appendChild(barEl);
     panel.appendChild(bodyEl);
     overlay.appendChild(backdrop);
     overlay.appendChild(panel);
     overlay.addEventListener('click', onClick);
+    overlay.addEventListener('change', onChange);
     doc.addEventListener('keydown', onKeydown, true);
     doc.body.appendChild(overlay);
   }
 
-  async function escalate(wrId) {
-    const it = byWr.get(wrId);
+  function applyScan(s) {
+    if (!s || typeof s !== 'object') return;
+    if (Array.isArray(s.rows) && (s.ok !== false || s.rows.length)) {
+      scan.rows = s.rows;
+      scan.asOf = s.asOf || null;
+      scan.cached = !!s.cached;
+      scan.excludedDtna = Number(s.excludedDtna) || 0;
+    }
+    scan.error = s.ok === false ? String(s.code || 'failed') : null;
+  }
+
+  async function doScan(force) {
+    if (!runScan || scan.scanning || closed) return;
+    scan.scanning = true;
+    render();
+    try { applyScan(await runScan({ force: !!force })); } catch (e) { scan.error = (e && e.message) || 'failed'; }
+    scan.scanning = false;
+    if (!closed) render();
+  }
+
+  async function loadTeam() {
+    if (getScan) {
+      try { applyScan(await getScan()); } catch (_) { /* keep v1 rows */ }
+      if (closed) return;
+      render();
+    }
+    await doScan(false);
+  }
+
+  async function escalate(key) {
+    const it = byKey.get(key) || byWr.get(key);
     if (!it || !it.canEscalate || opening) return;
     opening = true;
     try {
@@ -111,6 +179,21 @@ function createController(deps) {
     if (t === backdrop || t === overlay) { close(); return; }
     const pick = (sel) => (typeof t.closest === 'function' ? t.closest(sel) : null);
     if (pick('[data-pe-close]')) { close(); return; }
+    const own = pick('[data-pe-owner]');
+    if (own) {
+      const v = own.getAttribute('data-pe-owner');
+      if (L.OWNER_VALUES.includes(v)) { filters = Object.assign({}, filters, { owner: v }); render(); }
+      return;
+    }
+    if (pick('[data-pe-clear]')) { filters = Object.assign(L.defaultFilters(), { owner: filters.owner }); render(); return; }
+    if (pick('[data-pe-refresh]')) return doScan(true);
+    const srt = pick('[data-pe-sort]');
+    if (srt) {
+      const k = srt.getAttribute('data-pe-sort');
+      sort = sort.key === k ? { key: k, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key: k, dir: 'asc' };
+      render();
+      return;
+    }
     const esc = pick('[data-pe-escalate]');
     if (esc) { if (!esc.disabled) return escalate(esc.getAttribute('data-pe-escalate')); return; }
     const u = pick('[data-pe-unit]');
@@ -119,6 +202,17 @@ function createController(deps) {
       close();
       if (typeof deps.navigate === 'function') deps.navigate(id);
     }
+  }
+
+  function onChange(e) {
+    const t = e && e.target;
+    const el = t && typeof t.closest === 'function' ? t.closest('[data-pe-filter]') : null;
+    if (!el) return;
+    const name = el.getAttribute('data-pe-filter');
+    if (!FILTER_NAMES.includes(name)) return;
+    const val = name === 'mismatch' ? !!el.checked : String(el.value || '');
+    filters = Object.assign({}, filters, { [name]: val });
+    render();
   }
 
   function onKeydown(e) {
@@ -132,6 +226,7 @@ function createController(deps) {
     mount();
     render();
     if (evBus && typeof evBus.on === 'function') unsub = evBus.on('fleet:data', () => render());
+    loading = loadTeam();
   }
 
   function close() {
@@ -141,12 +236,12 @@ function createController(deps) {
     unsub = null;
     doc.removeEventListener('keydown', onKeydown, true);
     if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    overlay = null; bodyEl = null;
+    overlay = null; bodyEl = null; barEl = null;
     if (returnFocusEl && typeof returnFocusEl.focus === 'function') { try { returnFocusEl.focus(); } catch (_) { /* detached */ } }
     if (typeof onClose === 'function') onClose();
   }
 
-  return { open, close, render, isClosed: () => closed };
+  return { open, close, render, isClosed: () => closed, whenLoaded: () => loading };
 }
 
 export const __test__ = { createController };
