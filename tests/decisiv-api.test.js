@@ -6,7 +6,7 @@
 // normalization, and host routing. The networked parts (warm authenticated
 // window + fetch) require a live Decisiv session and are not exercised here.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
@@ -179,5 +179,52 @@ describe('decisiv_api: API window landing page', () => {
     expect(api._caseUrl(P, '21467830', {})).toBe(P + '/fleet/estimates/21467830');
     expect(api._caseUrl(P, '21467830', { srUrl: P + '/fleet/estimates/21467830' })).toBe(P + '/fleet/estimates/21467830');
     expect(api._landingUrl(P, api._caseUrl(P, '21467830', {}))).toBe(P + '/fleet/estimates/21467830');
+  });
+});
+
+// Case page (Pending Estimates upgrade): GET /fleet/estimates/{id} HTML, never .json.
+describe('decisiv_api: getCasePage', () => {
+  afterEach(() => { api._setPageGetForTest(null); });
+  const PAGE = '<html><head><meta name="csrf-token" content="TEST_TOKEN" /></head><body>case</body></html>';
+
+  it('requests /fleet/estimates/{id} (not .json) on the estimate host and returns the html', async () => {
+    const calls = [];
+    api._setPageGetForTest(async (origin, path, landing) => {
+      calls.push({ origin, path, landing });
+      return { url: origin + path, html: PAGE };
+    });
+    const r = await api.getCasePage('21383146', { srUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146' });
+    expect(calls.length).toBe(1);
+    expect(calls[0].origin).toBe('https://volvopg.asist.decisiv.net');
+    expect(calls[0].path).toBe('/fleet/estimates/21383146');
+    expect(calls[0].path.endsWith('.json')).toBe(false);
+    expect(r).toEqual({ ok: true, html: PAGE, url: 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146' });
+  });
+
+  it('keeps the PACCAR host of the given URL', async () => {
+    const calls = [];
+    api._setPageGetForTest(async (origin, path) => { calls.push(origin + path); return { url: origin + path, html: PAGE }; });
+    await api.getCasePage('21467830', { srUrl: 'https://pssmfleet.decisiv.net/fleet/estimates/21467830' });
+    expect(calls).toEqual(['https://pssmfleet.decisiv.net/fleet/estimates/21467830']);
+  });
+
+  it('login page -> DECISIV_SESSION_INVALID', async () => {
+    api._setPageGetForTest(async () => ({ url: 'https://volvo.asist.decisiv.net/users/sign_in', html: '<form action="/users/sign_in"></form>' }));
+    expect(await api.getCasePage('21383146')).toEqual({ ok: false, code: 'DECISIV_SESSION_INVALID' });
+    api._setPageGetForTest(async (origin, path) => ({ url: origin + path, html: '<html><body>no token</body></html>' }));
+    expect(await api.getCasePage('21383146')).toEqual({ ok: false, code: 'DECISIV_SESSION_INVALID' });
+  });
+
+  it('non-numeric id -> DECISIV_NO_ESTIMATE_ID without a request', async () => {
+    let called = false;
+    api._setPageGetForTest(async () => { called = true; return ''; });
+    expect(await api.getCasePage('abc')).toEqual({ ok: false, code: 'DECISIV_NO_ESTIMATE_ID' });
+    expect(await api.getCasePage('')).toEqual({ ok: false, code: 'DECISIV_NO_ESTIMATE_ID' });
+    expect(called).toBe(false);
+  });
+
+  it('a throwing fetch -> ok:false, never throws', async () => {
+    api._setPageGetForTest(async () => { throw Object.assign(new Error('boom'), { code: 'DECISIV_LOAD_TIMEOUT' }); });
+    await expect(api.getCasePage('21383146')).resolves.toEqual({ ok: false, code: 'DECISIV_API_ERROR' });
   });
 });

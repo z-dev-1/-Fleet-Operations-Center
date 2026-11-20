@@ -273,6 +273,79 @@ async function _apiGet(origin, path, landingUrl) {
   });
 }
 
+// Same in-page fetch as _fetchScript, but for a server-rendered HTML page (the
+// case page). Keeps up to 3 MB of text instead of truncating non-JSON to 1000
+// chars, and reports the final URL so a redirect to /login is detectable.
+function _fetchTextScript(url, token) {
+  return `(async function () {
+    return await new Promise(function (resolve) {
+      try {
+        fetch(${JSON.stringify(url)}, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml',
+            'X-CSRF-Token': ${JSON.stringify(token || '')}
+          }
+        }).then(function (r) {
+          return r.text().then(function (txt) {
+            resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, url: r.url, text: String(txt).slice(0, 3000000) });
+          });
+        }).catch(function (e) { resolve({ ok: false, status: 0, error: String(e && e.message || e) }); });
+      } catch (e) { resolve({ ok: false, status: -1, error: e.message }); }
+    });
+  })();`;
+}
+
+// HTML page GET inside the warm authenticated window -> { url, html }.
+// Throws coded errors like _apiGet.
+async function _pageGet(origin, path, landingUrl) {
+  return _withLock(async () => {
+    const win = await _ensureWindow(origin, landingUrl);
+    const token = _tokens[origin] || '';
+    const url = path.startsWith('http') ? path : (origin + path);
+    const r = await win.webContents.executeJavaScript(_fetchTextScript(url, token), true);
+    _scheduleTeardown(origin);
+    if (!r || !r.ok) {
+      if (r && (r.status === 401 || r.status === 403)) {
+        delete _tokens[origin];
+        throw Object.assign(new Error('Decisiv page ' + r.status + ' (session/token rejected)'), { code: 'DECISIV_SESSION_INVALID' });
+      }
+      throw Object.assign(new Error('Decisiv page ' + (r && r.status) + ': ' + ((r && r.error) || '')), { code: 'DECISIV_API_ERROR', status: r && r.status });
+    }
+    return { url: r.url || url, html: r.text || '' };
+  });
+}
+
+// Test seam: replaces the windowed page GET for getCasePage.
+let _pageGetForTest = null;
+function _setPageGetForTest(fn) { _pageGetForTest = typeof fn === 'function' ? fn : null; }
+
+/**
+ * getCasePage(estimateId, opts) -> { ok:true, html, url } | { ok:false, code }.
+ * GET /fleet/estimates/{id} (server-rendered HTML; the .json variant answers
+ * 500 and is never used). Never throws.
+ */
+async function getCasePage(estimateId, opts = {}) {
+  const id = String(estimateId == null ? '' : estimateId).trim();
+  if (!/^\d+$/.test(id)) return { ok: false, code: 'DECISIV_NO_ESTIMATE_ID' };
+  try {
+    const origin = originFor(opts.srUrl || opts.host || opts.vendor || DEFAULT_HOST);
+    const path = '/fleet/estimates/' + id;
+    const r = await (_pageGetForTest || _pageGet)(origin, path, _caseUrl(origin, id, opts));
+    const html = typeof r === 'string' ? r : String((r && r.html) || '');
+    const url = (r && typeof r === 'object' && r.url) || (origin + path);
+    if (_isLoginUrl(url) || !/<meta[^>]+name=["']csrf-token["']/i.test(html)) {
+      logger.warn('[decisiv-api] case page est=' + id + ' not authenticated (' + String(url).split('?')[0] + ')');
+      return { ok: false, code: 'DECISIV_SESSION_INVALID' };
+    }
+    return { ok: true, html, url };
+  } catch (e) {
+    logger.warn('[decisiv-api] case page failed est=' + id + ': ' + ((e && (e.code || e.message)) || 'error'));
+    return { ok: false, code: (e && e.code === 'DECISIV_SESSION_INVALID') ? 'DECISIV_SESSION_INVALID' : 'DECISIV_API_ERROR' };
+  }
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -539,8 +612,9 @@ module.exports = {
   getActivityLogs, getEstimateContacts, getEstimateComments, getEstimateDetail,
   apiGet, withWindow,
   getCaseStatus, summarizeCaseStatus, getCaseStatusSummary, STAGES,
+  getCasePage,
   formatActivityLogs,
   dispose,
   // exported for tests
-  _plain, _noteDate, _landingUrl, _caseUrl, _setApiGetForTest,
+  _plain, _noteDate, _landingUrl, _caseUrl, _setApiGetForTest, _setPageGetForTest,
 };
