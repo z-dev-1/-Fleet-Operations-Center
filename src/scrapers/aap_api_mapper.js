@@ -553,6 +553,7 @@ function toSecondaryWR(wo, serviceDetail, opts) {
   const _st = woStatus(wo);
   return {
     workRequestId:   id,
+    vendorWorkOrderId: Array.isArray(wo.vendorWorkOrderIds) ? wo.vendorWorkOrderIds.join('; ') : '',
     vendor:          mapVendor(wo.vendor),
     serviceState:    _st.displayText || _st.value || '',
     subState:        wo.subStatus || '',

@@ -114,6 +114,49 @@ describe('cards', () => {
   });
 });
 
+describe('universal Vendor WO', () => {
+  const DEC = 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146';
+  const valueOf = (h) => {
+    const mm = h.match(/data-id-link-field="vendor-wo"[^>]*><span class="dp-wo-field__k">Vendor WO<\/span><span class="dp-wo-field__v">([^<]*)<\/span>/);
+    return mm ? mm[1] : null;
+  };
+  it('main card: Decisiv estimate URL without vendorWorkOrderId -> linked chip 21383146', () => {
+    vi.useFakeTimers();
+    const hadWindow = 'window' in globalThis;
+    if (!hadWindow) globalThis.window = {};
+    try {
+      const h = m.renderRepairPane(wo({ equipmentId: 'U9', relaySynced: true, offsiteShopEventUrl: DEC, _secondaryWRs: [], _plannedWRData: null }));
+      expect(linkOf(h, 'vendor-wo')).toBe(DEC);
+      expect(valueOf(h)).toBe('21383146');
+      const both = m.renderRepairPane(wo({ equipmentId: 'U9', relaySynced: true, offsiteShopEventUrl: DEC, vendorWorkOrderId: 'VWO-9',
+        _secondaryWRs: [], _plannedWRData: null }));
+      expect(valueOf(both)).toBe('21383146');
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      if (!hadWindow) delete globalThis.window;
+    }
+  });
+  it('planned card owning the unit offsite (workRequestId === unit._offsiteWrId) -> linked chip', () => {
+    const p = wo({ workRequestId: 'svc-p1', _serviceUUID: 'svc-p1' });
+    const h = m.plannedWrCardHtml({ lifecycleReason: 'PM Failed', _plannedWRData: p, _offsiteWrId: 'svc-p1', offsiteShopEventUrl: DEC });
+    expect(linkOf(h, 'vendor-wo')).toBe(DEC);
+    expect(valueOf(h)).toBe('21383146');
+    const notOwned = m.plannedWrCardHtml({ lifecycleReason: 'PM Failed', _plannedWRData: p, _offsiteWrId: 'svc-other', offsiteShopEventUrl: DEC });
+    expect(notOwned).not.toContain('Vendor WO');
+  });
+  it('secondary card with vendorWorkOrderId RO-1 and no URL -> plain chip', () => {
+    const h = m.secondaryWrCardsHtml({ lifecycleReason: 'Offsite Shop Repair', _secondaryWRs: [wo({ workRequestId: 'svc-3', vendorWorkOrderId: 'RO-1' })] });
+    expect(h).toContain('<span class="dp-wo-field"><span class="dp-wo-field__k">Vendor WO</span><span class="dp-wo-field__v">RO-1</span></span>');
+    expect(h).not.toContain('data-id-link-field="vendor-wo"');
+  });
+  it('woFieldHtml uses the tuple URL only when safe', () => {
+    expect(m.woFieldHtml(['Vendor WO', '21383146', DEC], {})).toContain('data-id-link="' + DEC + '" data-id-link-field="vendor-wo"');
+    expect(m.woFieldHtml(['Vendor WO', 'X', 'https://evil.example.com/x'], { offsiteShopEventUrl: OFFSITE }))
+      .toBe('<span class="dp-wo-field"><span class="dp-wo-field__k">Vendor WO</span><span class="dp-wo-field__v">X</span></span>');
+  });
+});
+
 describe('wireIdLinks', () => {
   function fakeRoot(urls) {
     const els = urls.map((u) => ({

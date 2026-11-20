@@ -25,6 +25,7 @@ vi.mock('../renderer/src/js/views/dealer-wo-modal.js', () => ({ open() {} }));
 vi.mock('../renderer/src/js/views/wr-modal.js', () => ({ open() {}, readFileAsAttachment: async () => null }));
 vi.mock('../renderer/src/js/components/modal.js', () => ({ default: fakeModal }));
 
+const { createMiniDocument } = await import('./fixtures/mini-dom.js');
 const ra = await import('../renderer/src/js/views/relay-actions.js');
 const m = await import('../renderer/src/js/views/unit-detail.js');
 
@@ -688,4 +689,55 @@ describe('card and header buttons', () => {
     expect(ra.outcomeMessage({ outcome: 'skipped-not-approved' }).text).toBe('Not sent.');
     expect(ra.outcomeMessage({ outcome: 'send-failed', error: 'x' }, 'Escalation').text).toBe('Escalation failed: x');
   });
+});
+
+describe('universal Vendor WO in the drafter modals', () => {
+  const DEC = 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146';
+  const UNIT_DEC = Object.assign({}, UNIT, { offsiteShopEventUrl: DEC });
+  // Real parsed panel: the body HTML goes into a mini-dom element before onMount.
+  function mountMini() {
+    fakeModal.show.mockImplementationOnce((o) => {
+      fakeModal.st.opts = o;
+      const p = createMiniDocument().createElement('div');
+      p.innerHTML = o.body;
+      fakeModal.st.panel = p;
+      if (o.onMount) o.onMount(p);
+    });
+  }
+  beforeEach(() => {
+    window.aap.openUrl = vi.fn(async () => ({ ok: true }));
+    window.files = { openExternal: vi.fn() };
+  });
+
+  it('escalation and comment bodies carry the linked Vendor WO chip (estimate id), none without one', async () => {
+    fakeModal.st.panel = mkPanel();
+    await ra.openEscalationModal(UNIT_DEC, WR, deps);
+    expect(fakeModal.st.opts.body).toContain('class="ra-vendor-wo"');
+    expect(fakeModal.st.opts.body).toContain('data-id-link="' + DEC + '" data-id-link-field="vendor-wo"');
+    expect(fakeModal.st.opts.body).toContain('<span class="dp-wo-field__v">21383146</span>');
+    fakeModal.st.panel = mkPanel();
+    await ra.openCommentModal(UNIT_DEC, WR, deps);
+    expect(fakeModal.st.opts.body).toContain('data-id-link="' + DEC + '" data-id-link-field="vendor-wo"');
+    expect(ra.commentModalBody()).not.toContain('ra-vendor-wo');
+    expect(ra.escalationModalBody({})).not.toContain('ra-vendor-wo');
+    expect(ra.commentModalBody({ vendorWo: { id: 'RO-1', url: '' } })).toContain('<span class="dp-wo-field"><span class="dp-wo-field__k">Vendor WO</span><span class="dp-wo-field__v">RO-1</span></span>');
+  });
+
+  for (const which of ['escalation', 'comment']) {
+    it(which + ' modal: clicking the chip opens the case in-app (aap.openUrl, zoom), never openExternal, never a write', async () => {
+      mountMini();
+      if (which === 'escalation') await ra.openEscalationModal(UNIT_DEC, WR, deps);
+      else await ra.openCommentModal(UNIT_DEC, WR, deps);
+      const chip = fakeModal.st.panel.querySelector('[data-id-link-field="vendor-wo"]');
+      expect(chip).toBeTruthy();
+      chip.click();
+      await Promise.resolve();
+      expect(window.aap.openUrl).toHaveBeenCalledTimes(1);
+      expect(window.aap.openUrl).toHaveBeenCalledWith(DEC, { zoom: true });
+      expect(window.files.openExternal).not.toHaveBeenCalled();
+      expect(window.relayWrites.escalate).not.toHaveBeenCalled();
+      expect(window.relayWrites.addComment).not.toHaveBeenCalled();
+      expect(window.relayWrites.draftAction).not.toHaveBeenCalled();
+    });
+  }
 });

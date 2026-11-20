@@ -28,6 +28,8 @@ import { redactForSharing } from '../util/redact.js';
 import { pmOverdueDays } from '../util/pm-overdue.js';
 import modal         from '../components/modal.js';
 import { wrCardActionRowHtml, headerLifecycleButtonHtml, wireRelayActions } from './relay-actions.js';
+import { isSafeHistoryUrl, isAmazonHost as _isAmazonHost, isSafeIdLinkUrl, wireIdLinks, vendorWoOf } from './id-links.js';
+export { isSafeHistoryUrl, isSafeIdLinkUrl, wireIdLinks } from './id-links.js';
 
 let _panel    = null;
 let _unit     = null;
@@ -315,36 +317,8 @@ function escAttr(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Only https URLs on the AAP / Decisiv / DTNA hosts may reach the split view
-// (_openInlineSplit writes src unescaped).
-export function isSafeHistoryUrl(url) {
-  if (typeof url !== 'string' || !url || /[\s"'<>]/.test(url)) return false;
-  try {
-    const u = new URL(url);
-    if (u.protocol !== 'https:') return false;
-    const h = u.hostname.toLowerCase();
-    return h === 'aap-na.corp.amazon.com' || h.endsWith('.decisiv.net') || h === 'dtna.my.site.com';
-  } catch (_) { return false; }
-}
-
-function _isAmazonHost(url) {
-  try { return /(^|\.)amazon\.(com|dev)$/i.test(new URL(url).hostname); } catch (_) { return false; }
-}
-
-// ── Clickable WR ID fields (pure) ───────────────────────────────────────────
-// SF Case / AMZ ID / WR ID / Vendor WO open one in-app zoomable window
-// (window.aap.openUrl(url, { zoom: true }) -> aap:open-url). A field is only
-// linked when a URL resolves AND passes these host checks.
-const _SF_HOSTS = new Set(['amazonfreightpartner.lightning.force.com', 'amazonfreightpartner.my.salesforce.com']);
-export function isSafeIdLinkUrl(url) {
-  if (isSafeHistoryUrl(url)) return true;
-  if (typeof url !== 'string' || !url || /[\s"'<>]/.test(url)) return false;
-  try {
-    const u = new URL(url);
-    if (u.protocol !== 'https:') return false;
-    return _isAmazonHost(url) || _SF_HOSTS.has(u.hostname.toLowerCase());
-  } catch (_) { return false; }
-}
+// isSafeHistoryUrl / isSafeIdLinkUrl / wireIdLinks live in ./id-links.js (re-exported
+// above) so relay-actions.js can use them without an import cycle.
 
 // Renderer port of src/utils/salesforce-url.js buildSalesforceUrl (same JSON, btoa
 // instead of Buffer). Only plain case numbers are accepted.
@@ -391,25 +365,11 @@ export function idLinkUrl(label, o) {
 export function woFieldHtml(f, o) {
   const inner = '<span class="dp-wo-field__k">' + esc(f[0]) + '</span><span class="dp-wo-field__v">' + esc(f[1]) + '</span>';
   const key = _ID_LINK_KEY[f[0]];
-  const url = key ? idLinkUrl(f[0], o) : '';
+  // A Vendor WO tuple from vendorWoOf carries its own URL as f[2].
+  const url = key === 'vendor-wo' && f.length > 2 ? (isSafeIdLinkUrl(f[2]) ? f[2] : '') : key ? idLinkUrl(f[0], o) : '';
   if (!url) return '<span class="dp-wo-field">' + inner + '</span>';
   return '<span class="dp-wo-field dp-wo-field--link" role="link" tabindex="0" data-id-link="' + escAttr(url) + '"'
     + ' data-id-link-field="' + key + '" title="Open in app window">' + inner + '</span>';
-}
-
-// Click / Enter / Space on a [data-id-link] chip -> openFn(url, { zoom: true }).
-export function wireIdLinks(root, openFn) {
-  if (!root || typeof root.querySelectorAll !== 'function' || typeof openFn !== 'function') return;
-  root.querySelectorAll('[data-id-link]').forEach(function (el) {
-    const go = function (e) {
-      if (e) { if (typeof e.preventDefault === 'function') e.preventDefault(); if (typeof e.stopPropagation === 'function') e.stopPropagation(); }
-      const url = el.getAttribute('data-id-link');
-      if (!isSafeIdLinkUrl(url)) return;
-      try { Promise.resolve(openFn(url, { zoom: true })).catch(function () {}); } catch (_) { /* opener unavailable */ }
-    };
-    el.addEventListener('click', go);
-    el.addEventListener('keydown', function (e) { if (e && (e.key === 'Enter' || e.key === ' ')) go(e); });
-  });
 }
 
 // Webview partition for the split view's right pane. Amazon pages need the
@@ -2147,6 +2107,7 @@ export function plannedWrCardHtml(unit){
     var pFields=[
       p.workRequestId?['WR ID',p.workRequestId]:null,
       (p.alternativeId||p.altId)?['AMZ ID',p.alternativeId||p.altId]:null,
+      (function(){var vw=vendorWoOf(p, unit);return vw?['Vendor WO',vw.id,vw.url]:null;})(),
       p.salesforceCase?['SF Case',p.salesforceCase]:null,
       p.serviceCategory?['Category',p.serviceCategory]:null,
       p.totalCost?['Total Cost',p.totalCost]:null,
@@ -2205,6 +2166,7 @@ export function secondaryWrCardsHtml(unit){
       var pFields = [
         p.workRequestId          ? ['WR ID',      p.workRequestId]          : null,
         (p.alternativeId||p.altId)?['AMZ ID',     p.alternativeId||p.altId] : null,
+        (function(){ var vw = vendorWoOf(p, unit); return vw ? ['Vendor WO', vw.id, vw.url] : null; })(),
         p.salesforceCase         ? ['SF Case',    p.salesforceCase]         : null,
         p.serviceCategory        ? ['Category',   p.serviceCategory]        : null,
         p.totalCost              ? ['Total Cost', p.totalCost]              : null,
@@ -2272,7 +2234,7 @@ export function renderRepairPane(unit){
     var fields=[
       unit.workRequestId?['WR ID',unit.workRequestId]:null,
       (unit.alternativeId||unit.altId)?['AMZ ID',unit.alternativeId||unit.altId]:null,
-      unit.vendorWorkOrderId?['Vendor WO',unit.vendorWorkOrderId]:null,
+      (function(){var vw=vendorWoOf(unit);return vw?['Vendor WO',vw.id,vw.url]:null;})(),
       unit.salesforceCase?['SF Case',unit.salesforceCase]:null,
       unit.createdBy?['Created By',unit.createdBy]:null,
       unit.needBy?['Need By',unit.needBy]:null,

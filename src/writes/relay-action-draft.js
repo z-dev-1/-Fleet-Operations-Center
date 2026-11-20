@@ -11,8 +11,12 @@
  * relay-comment-draft) only fills prose slots (notes, next, repair, reason) as JSON, and
  * guardSlot() replaces any $ amount, URL, RO#, clock time or M/D date in a slot that the
  * evidence does not contain with a literal <FILL: …> placeholder. Any missing value is
- * also a <FILL: …> placeholder. On an AI failure the deterministic draft is still
- * returned (aiUsed:false).
+ * also a <FILL: …> placeholder, except ETR (reads N/A) and the HVE EST amount / (city, st)
+ * (left out). On an AI failure the deterministic draft is still returned (aiUsed:false).
+ *
+ * Offsite values (EST status / AS OF, est amount, ETR, EST/RO link, RO# = Vendor WO,
+ * dealer) come from the scraped Decisiv case first (decisivCaseCache, keyed by the
+ * estimate id of the WR's owned offsite URL; read-only, no network), then RG / AAP.
  *
  * This module only returns text. It never sends anything: the renderer shows the draft,
  * the user edits it, and the submit goes through the gated relay:escalate /
@@ -154,6 +158,41 @@ function _etrText(ymd) {
   return m ? m[2] + '/' + m[3] : (_s(ymd) || null);
 }
 
+// ── offsite Decisiv case (read-only cache lookup, no network) ──────────────
+
+// The row's offsite links, only when this WR owns them (same _offsiteWrId rule as the
+// renderer's id-links.js vendorWoOf).
+function _ownedOffsiteUrls(r) {
+  if (r._offsiteWrId && r.workRequestId && String(r._offsiteWrId) !== String(r.workRequestId)) return [];
+  return [r.offsiteShopEventUrl, r.savedOffsiteUrl, r.asistSrUrl].map((v) => _s(v).trim()).filter(Boolean);
+}
+// https Decisiv host, no characters the renderer's isSafeIdLinkUrl rejects.
+function _isSafeDecisivUrl(url) {
+  if (/[\s"'<>]/.test(url)) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && u.hostname.toLowerCase().endsWith('.decisiv.net');
+  } catch (_) { return false; }
+}
+// First owned Volvo/PACCAR estimate URL -> { id, url }, else null.
+function _ownedEstimate(r) {
+  const { estimateIdFromUrl } = require('../scrapers/decisiv_case_page');
+  for (const url of _ownedOffsiteUrls(r)) {
+    const id = estimateIdFromUrl(url);
+    if (id && _isSafeDecisivUrl(url)) return { id, url };
+  }
+  return null;
+}
+// decisivCaseCache[estimateId] (written by the Pending Estimates scan), or null.
+function _decisivFor(est) {
+  if (!est) return null;
+  try {
+    const c = _store().load('decisivCaseCache', {});
+    const rec = _isObj(c) ? c[est.id] : null;
+    return _isObj(rec) && rec.ok !== false ? rec : null;
+  } catch (_) { return null; }
+}
+
 // ── facts (plain values or null, never an invented default) ────────────────
 
 function collectFacts(row, { now, factSet, evidenceText } = {}) {
@@ -179,27 +218,38 @@ function collectFacts(row, { now, factSet, evidenceText } = {}) {
   { const t = _ms(r.offsiteStageSince); if (t != null) stamps.push(t); }
   if (stamps.length) lastStatusAt = Math.max(...stamps);
 
-  const etr = fs && _isObj(fs.etc) && _isObj(fs.etc.currentEtc) ? first(fs.etc.currentEtc.date) : null;
+  const fsEtr = fs && _isObj(fs.etc) && _isObj(fs.etc.currentEtc) ? first(fs.etc.currentEtc.date) : null;
   const created = _ms(r.created);
   const downtimeMs = created != null && nowMs >= created ? nowMs - created : null;
   const sinceUpdateMs = lastStatusAt != null && nowMs >= lastStatusAt ? nowMs - lastStatusAt : null;
   const ev = _s(evidenceText);
   const ros = fs && Array.isArray(fs.ros) ? fs.ros : [];
+  // Offsite Decisiv first (owned estimate URL + its scraped case), then RG / AAP.
+  const offEst = _ownedEstimate(r);
+  const dc = _decisivFor(offEst) || {};
+  const dcEtrMs = _ms(dc.etr);
+  const etr = dcEtrMs != null ? _ymd(new Date(dcEtrMs)) : fsEtr;
+  const city = first(r.dealerCity) && first(r.dealerState) ? first(r.dealerCity) + ', ' + first(r.dealerState)
+    : (first(dc.dealerCity) && first(dc.dealerState) ? first(dc.dealerCity) + ', ' + first(dc.dealerState) : null);
+  const vendorWo = first(offEst && offEst.id, r.vendorWorkOrderId);
 
   return {
     unit: first(r.equipmentId),
-    vendor: first(fs && _isObj(fs.dealer) ? fs.dealer.name : '', r.dealerName, r.vendor),
-    cityState: first(r.dealerCity) && first(r.dealerState) ? first(r.dealerCity) + ', ' + first(r.dealerState) : null,
+    vendor: first(fs && _isObj(fs.dealer) ? fs.dealer.name : '', r.dealerName, dc.dealerShortName, r.vendor),
+    cityState: city,
     location: first(r.geofence, r.domicileSite),
     component: first(r.savedPrimaryComponent, r.level1, r.serviceCategory),
-    estAmount: formatMoney(est.latestSubmitted) || formatMoney(r.estimatePendingCost),
-    estStatus: first(est.status, r.offsiteStage),
-    estLink: offsiteUrl && /estimate/i.test(offsiteUrl) ? offsiteUrl : null,
+    estAmount: formatMoney(dc.total) || formatMoney(est.latestSubmitted) || formatMoney(r.estimatePendingCost),
+    estStatus: first(dc.fleetStatus, est.status, r.offsiteStage, r.serviceState),
+    estAsOf: _ms(dc.updatedAt) != null ? _ms(dc.updatedAt) : lastStatusAt,
+    estLink: offEst ? offEst.url : (offsiteUrl && /estimate/i.test(offsiteUrl) ? offsiteUrl : null),
     estSubmittedAt: first(est.pendingSince),
-    roNumber: first(fs ? fs.dealerRo : '', ros[0], r.vendorWorkOrderId),
-    roLink: first(r.offsiteShopEventUrl, r.savedOffsiteUrl, r.asistSrUrl),
+    roNumber: first(vendorWo, fs ? fs.dealerRo : '', ros[0]),
+    roLink: first(offEst && offEst.url, r.offsiteShopEventUrl, r.savedOffsiteUrl, r.asistSrUrl),
     lastStatus: first(r.offsiteStageDetail, r.offsiteStage, r.savedRepairStatus, r.serviceState),
     lastStatusAt,
+    vendorWo,
+    decisiv: Object.keys(dc).length ? dc : null,
     etr,
     etrMissed: !!(etr && etr < today),
     partsPending: !!(fs && /^(ordered|backorder)$/i.test(_s(fs.partsStatus))),
@@ -280,10 +330,12 @@ function _slot(slots, k) { return _isObj(slots) ? _s(slots[k]).trim() : ''; }
 function renderOffsiteUpdate(facts, slots) {
   const f = facts || {};
   return _out([
-    'OFFSITE - ' + _head(f) + ' - EST ' + fill(f.estStatus, 'est status') + ' AS OF ' + fill(formatAsOf(f.lastStatusAt), 'as of'),
+    'OFFSITE - ' + _head(f) + ' - EST ' + fill(f.estStatus, 'est status') + ' AS OF '
+      + fill(formatAsOf(f.estAsOf !== undefined ? f.estAsOf : f.lastStatusAt), 'as of'),
+    // RO# is the Vendor WO (offsite estimate id, else the RG vendorWorkOrderId).
     'RO#: ' + fill(f.roNumber, 'RO#') + ' | RO link: ' + fill(f.roLink, 'link'),
     'NOTES: ' + fill(_slot(slots, 'notes'), 'notes'),
-    'NEXT: ' + fill(_slot(slots, 'next'), 'next step + ETA') + ' | ETR: ' + fill(_etrText(f.etr), 'etr'),
+    'NEXT: ' + fill(_slot(slots, 'next'), 'next step + ETA') + ' | ETR: ' + (_etrText(f.etr) || 'N/A'),
     'DOWNTIME: ' + fill(formatDowntime(f.downtimeMs), 'downtime'),
   ]);
 }
@@ -300,27 +352,34 @@ function renderUpdateRequest(facts) {
   let reason = '<FILL: reason>';
   if (f.urgent) reason = 'URGENT';
   else if (f.unavailable) reason = 'UNIT DOWN';
-  return _out([
+  return _out(_withVendorWo([
     'UPDATE REQUEST - ' + _head(f),
     'LAST STATUS: ' + fill(f.lastStatus, 'status') + ' AS OF ' + fill(formatAsOf(f.lastStatusAt), 'as of'),
     'NO UPDATE IN ' + fill(formatDowntime(f.sinceUpdateMs), 'X HOURS Y MINUTES') + '.' + tail,
     'NEED: ' + (need.length ? need.join(' / ') : '<FILL: need>'),
     'REASON: ' + reason,
     'DOWNTIME: ' + fill(formatDowntime(f.downtimeMs), 'downtime'),
-  ]);
+  ], f));
+}
+// Appends 'VENDOR WO: <id>' when the WR has one (never a placeholder).
+function _withVendorWo(lines, f) {
+  if (f && _s(f.vendorWo).trim()) lines.push('VENDOR WO: ' + _s(f.vendorWo).trim());
+  return lines;
 }
 
-// EST amount: the amount the user typed (> 0), else the unit's estimate (offsite / Relay
-// Garage fact set, then AAP estimatePendingCost). With neither, the EST part is left out
+// EST amount: the amount the user typed (> 0), else the unit's estimate (scraped Decisiv
+// Total, then the offsite / Relay Garage fact set, then AAP estimatePendingCost). With neither, the EST part is left out
 // (no $0 and no <FILL: est amount>); every other unknown value is still a <FILL: …>.
 function renderHveEstSubmitted(facts, slots, { estAmountInput } = {}) {
   const f = facts || {};
   const amount = formatMoney(Number(estAmountInput) > 0 ? Number(estAmountInput) : null) || f.estAmount;
   const lines = [
-    'OFFSITE EST SUBMITTED - ' + fill(f.vendor, 'vendor') + ' (' + fill(f.cityState, 'city, st') + ')',
+    // The (city, st) suffix is left out entirely when either is unknown.
+    'OFFSITE EST SUBMITTED - ' + fill(f.vendor, 'vendor') + (f.cityState ? ' (' + f.cityState + ')' : ''),
     'UNIT: ' + fill(f.unit, 'unit') + (amount ? ' | EST ' + amount : ''),
-    'REPAIR: ' + fill(_slot(slots, 'repair'), 'repair'),
   ];
+  _withVendorWo(lines, f);
+  lines.push('REPAIR: ' + fill(_slot(slots, 'repair'), 'repair'));
   if (f.lineItemsMatchPics && f.laborWithinGuidebook) lines.push('LINE ITEMS MATCH PICS. LABOR WITHIN GUIDEBOOK.');
   lines.push(
     'EST LINK: ' + fill(f.estLink, 'est link'),
@@ -332,8 +391,8 @@ function renderHveEstSubmitted(facts, slots, { estAmountInput } = {}) {
 
 function renderEscalationReason(targetKey, facts, slots) {
   const reason = _slot(slots, 'reason');
-  if (reason) return _out([reason]);
   const f = facts || {};
+  if (reason) return _out(_withVendorWo([reason], f));
   const unit = fill(f.unit, 'unit');
   const vendor = fill(f.vendor, 'vendor');
   const down = fill(formatDowntime(f.downtimeMs), 'downtime');
@@ -348,7 +407,7 @@ function renderEscalationReason(targetKey, facts, slots) {
     MCS_RECOVERY_SIM_POST_REPAIR: unit + ' REPAIR COMPLETE AT ' + vendor + '. NEED RECOVERY SIM POST REPAIR: <FILL: pickup details>.',
     MCS_CARRIER_UPDATE_REQUEST: 'CARRIER UPDATE REQUEST FOR ' + unit + ': <FILL: update needed>.',
   };
-  return _out([fallback[targetKey] || '<FILL: reason>']);
+  return _out(_withVendorWo([fallback[targetKey] || '<FILL: reason>'], f));
 }
 
 // ── prompt ──────────────────────────────────────────────────────────────────
@@ -360,6 +419,10 @@ function _factsText(f) {
   add('component', f.component); add('estimate amount', f.estAmount); add('estimate status', f.estStatus);
   add('estimate link', f.estLink); add('estimate submitted', formatAsOf(f.estSubmittedAt) || f.estSubmittedAt); add('RO#', f.roNumber);
   add('RO link', f.roLink); add('last status', f.lastStatus); add('last status as of', formatAsOf(f.lastStatusAt));
+  add('vendor WO', f.vendorWo);
+  const dc = _isObj(f.decisiv) ? f.decisiv : {};
+  add('fleet status', _s(dc.fleetStatus)); add('repair status', _s(dc.repairStatus));
+  add('decisiv total', formatMoney(dc.total)); add('updated', formatAsOf(dc.updatedAt));
   add('ETR', _etrText(f.etr)); add('ETR missed', f.etrMissed ? 'yes' : ''); add('parts pending', f.partsPending ? 'yes' : '');
   add('downtime', formatDowntime(f.downtimeMs)); add('no update in', formatDowntime(f.sinceUpdateMs));
   add('urgent', f.urgent ? 'yes' : ''); add('lifecycle unavailable', f.unavailable ? 'yes' : '');

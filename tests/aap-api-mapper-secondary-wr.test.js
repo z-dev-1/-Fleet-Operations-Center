@@ -9,7 +9,7 @@ import { mkWo } from './fixtures/fleet-build/aap-fleet-fixture.js';
 const require = createRequire(import.meta.url);
 const mapper = require('../src/scrapers/aap_api_mapper');
 
-const KEYS = ['workRequestId', 'vendor', 'serviceState', 'subState', 'serviceCategory', 'issueDetails', 'level1', 'level2',
+const KEYS = ['workRequestId', 'vendorWorkOrderId', 'vendor', 'serviceState', 'subState', 'serviceCategory', 'issueDetails', 'level1', 'level2',
   'created', 'completed', 'totalCost', 'fullConversation', 'repairTimeline', '_wrType', '_serviceUUID', '_relayUrl'];
 
 describe('toSecondaryWR', () => {

@@ -3,7 +3,7 @@
 // every missing value, the guardrail replacing invented $ / links / RO# / times, freshness
 // warnings, the HVE first-class template, and the AI-failure fallback. The AI lane is a fake
 // injected through _setDepsForTest; nothing is ever sent.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 
@@ -91,9 +91,9 @@ describe('templates with real values', () => {
     expect(lines[0]).toBe('OFFSITE - COX TRUCK CENTER - B62020 - TURBO - EST APPROVAL AS OF ' + D.formatAsOf(NOW.getTime() - (26 * H + 7 * M)));
     expect(lines[1]).toBe('RO#: RO-12345 | RO LINK: ' + EST_URL);
     expect(lines[2]).toBe('NOTES: EST SUBMITTED, WAITING APPROVAL');
-    expect(lines[3]).toBe('NEXT: APPROVAL | ETR: <FILL: etr>');
+    expect(lines[3]).toBe('NEXT: APPROVAL | ETR: N/A');
     expect(lines[4]).toBe('DOWNTIME: 50 HOURS 12 MINUTES');
-    expect(r.placeholders).toEqual(['etr']);
+    expect(r.placeholders).toEqual([]);
   });
 
   it('Update Request has LAST STATUS AS OF, NO UPDATE IN, NEED and REASON', () => {
@@ -185,6 +185,7 @@ describe('High Value Estimate (first-class template)', () => {
     expect(r.draft.split('\n')).toEqual([
       'OFFSITE EST SUBMITTED - COX TRUCK CENTER (DALLAS, TX)',
       'UNIT: B62020 | EST $4,850',
+      'VENDOR WO: RO-12345',
       'REPAIR: TURBO REPLACEMENT',
       'LINE ITEMS MATCH PICS. LABOR WITHIN GUIDEBOOK.',
       'EST LINK: ' + EST_URL,
@@ -226,7 +227,9 @@ describe('High Value Estimate (first-class template)', () => {
     expect(none.draft.split('\n')[1]).toBe('UNIT: B70000');
     expect(none.draft).not.toMatch(/\$0|<FILL: est amount>/);
     expect(none.placeholders).not.toContain('est amount');
-    expect(none.placeholders).toEqual(expect.arrayContaining(['vendor', 'city, st', 'est link']));
+    expect(none.placeholders).toEqual(expect.arrayContaining(['vendor', 'est link']));
+    expect(none.placeholders).not.toContain('city, st');
+    expect(none.draft.split('\n')[0]).toBe('OFFSITE EST SUBMITTED - <FILL: vendor>');
   });
 });
 
@@ -263,7 +266,7 @@ describe('AI failure and request checks', () => {
     setAsk(() => { throw new Error('lane down'); });
     const r = await draft({ kind: 'escalation', target: 'FAS', workRequestId: WR, unit: { equipmentId: 'B62020' } });
     expect(r).toMatchObject({ ok: true, aiUsed: false, note: 'ai-failed' });
-    expect(r.draft).toBe('VENDOR NO UPDATE IN 26 HOURS 7 MINUTES. UNIT DOWN. PLEASE PUSH VENDOR FOR ETA.');
+    expect(r.draft).toBe('VENDOR NO UPDATE IN 26 HOURS 7 MINUTES. UNIT DOWN. PLEASE PUSH VENDOR FOR ETA.\nVENDOR WO: RO-12345');
     setAsk(() => Promise.reject(Object.assign(new Error('t'), { code: 'AI_TIMEOUT' })));
     const t = await draft({ kind: 'comment', template: 'offsite-update', workRequestId: WR, unit: { equipmentId: 'B62020' } });
     expect(t).toMatchObject({ ok: true, aiUsed: false, note: 'ai-timeout' });
@@ -285,7 +288,7 @@ describe('AI failure and request checks', () => {
     await new Promise((r) => setImmediate(r));
     expect(await draft({ kind: 'escalation', target: 'FAS', workRequestId: WR, unit: { equipmentId: 'B62020' } })).toEqual({ ok: false, code: 'busy' });
     release('{"reason":"VENDOR NOT RESPONDING"}');
-    expect((await p1).draft).toBe('VENDOR NOT RESPONDING');
+    expect((await p1).draft).toBe('VENDOR NOT RESPONDING\nVENDOR WO: RO-12345');
   });
 });
 
@@ -346,5 +349,96 @@ describe('policy', () => {
       D.renderHveEstSubmitted(D.collectFacts(SPARSE, { now: NOW }), {}).text].join('\n');
     expect(hve.sop).toContain(P.HVE_HINT);
     expect(text).not.toMatch(/2,?500|1,?000|5,?000/);
+  });
+});
+
+describe('Decisiv-first mapping (offsite case cache, then RG / AAP)', () => {
+  const DEC_URL = 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146';
+  const WR3 = '0a1b2c3d-1111-2222-3333-121212121212';
+  const WR4 = '0a1b2c3d-1111-2222-3333-343434343434';
+  const UPDATED = '2026-10-29T13:12:00.000Z';
+  const CASE = { ok: true, estimateId: '21383146', total: 8735.97, fleetStatus: 'Approved', repairStatus: 'Waiting', updatedAt: UPDATED,
+    etr: '2026-10-26T16:00:00.000Z', dealerCity: 'Dunmore', dealerState: 'PA', dealerShortName: 'M & K Truck Centers' };
+  const DROW = { equipmentId: '39351', workRequestId: WR3, vendor: 'Volvo (ASIST)', offsiteShopEventUrl: DEC_URL,
+    vendorWorkOrderId: 'VWO-77', savedPrimaryComponent: 'Aftertreatment', offsiteStage: 'approval',
+    created: iso(NOW.getTime() - 5 * H) };
+  const RGROW = { equipmentId: '40000', workRequestId: WR4, vendor: 'Rush', dealerName: 'Rush Truck Center',
+    vendorWorkOrderId: 'RO-555', savedPrimaryComponent: 'Brakes', created: iso(NOW.getTime() - 5 * H) };
+  let st;
+  let gateSpies;
+  beforeEach(() => {
+    st = memStore();
+    st.data.decisivCaseCache = { 21383146: CASE };
+    D._setDepsForTest({ store: st, now: () => new Date(NOW), ask: async () => '{}' });
+    const gate = require('../src/writes/write-gate');
+    gateSpies = ['requestWrite', 'approve', 'respond'].map((k) => vi.spyOn(gate, k));
+  });
+  afterEach(() => { gateSpies.forEach((s) => s.mockRestore()); });
+  const dd = (o) => D.draftAction(Object.assign({ lastData: { rows: [DROW, RGROW] } }, o));
+
+  it('collectFacts reads the cached case for the owned estimate URL', () => {
+    const f = D.collectFacts(DROW, { now: NOW });
+    expect(f).toMatchObject({ estLink: DEC_URL, roLink: DEC_URL, roNumber: '21383146', vendorWo: '21383146',
+      estStatus: 'Approved', estAmount: '$8,735.97', cityState: 'Dunmore, PA', vendor: 'M & K Truck Centers', etr: '2026-10-26' });
+    expect(f.estAsOf).toBe(Date.parse(UPDATED));
+    expect(f.decisiv).toMatchObject({ repairStatus: 'Waiting' });
+  });
+
+  it('Offsite Update: EST APPROVED AS OF <updatedAt>, RO# = case id, RO link = Decisiv URL, ETR from the case', async () => {
+    const r = await dd({ kind: 'comment', template: 'offsite-update', workRequestId: WR3, unit: { equipmentId: '39351' } });
+    expect(r.ok).toBe(true);
+    const lines = r.draft.split('\n');
+    expect(lines[0]).toBe('OFFSITE - M & K TRUCK CENTERS - 39351 - AFTERTREATMENT - EST APPROVED AS OF ' + D.formatAsOf(UPDATED));
+    expect(lines[1]).toBe('RO#: 21383146 | RO LINK: ' + DEC_URL);
+    expect(lines[3]).toMatch(/\| ETR: 10\/26$/);
+    expect(r.draft).not.toContain('<FILL: etr>');
+  });
+
+  it('HVE: dealer + (city, st) from the case, EST from the scraped Total, VENDOR WO line, EST LINK = Decisiv URL', async () => {
+    const r = await dd({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR3, unit: { equipmentId: '39351' }, userInputs: { estAmount: 0 } });
+    const lines = r.draft.split('\n');
+    expect(lines[0]).toBe('OFFSITE EST SUBMITTED - M & K TRUCK CENTERS (DUNMORE, PA)');
+    expect(lines[1]).toBe('UNIT: 39351 | EST $8,735.97');
+    expect(lines[2]).toBe('VENDOR WO: 21383146');
+    expect(r.draft).toContain('EST LINK: ' + DEC_URL);
+  });
+
+  it('Update Request and escalation reasons end with the VENDOR WO line', async () => {
+    const u = await dd({ kind: 'comment', template: 'update-request', workRequestId: WR3, unit: { equipmentId: '39351' } });
+    expect(u.draft.split('\n').at(-1)).toBe('VENDOR WO: 21383146');
+    const e = await dd({ kind: 'escalation', target: 'FAS', workRequestId: WR3, unit: { equipmentId: '39351' } });
+    expect(e.draft.split('\n').at(-1)).toBe('VENDOR WO: 21383146');
+  });
+
+  it('RG-only row: RO# and VENDOR WO = vendorWorkOrderId; no amount -> no EST part; no ETR -> N/A; no city/state -> no parens', async () => {
+    const off = await dd({ kind: 'comment', template: 'offsite-update', workRequestId: WR4, unit: { equipmentId: '40000' } });
+    expect(off.draft).toContain('RO#: RO-555 | RO LINK: <FILL: link>');
+    expect(off.draft).toContain('ETR: N/A');
+    expect(off.draft).not.toContain('<FILL: etr>');
+    const hve = await dd({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR4, unit: { equipmentId: '40000' }, userInputs: { estAmount: 0 } });
+    const lines = hve.draft.split('\n');
+    expect(lines[0]).toBe('OFFSITE EST SUBMITTED - RUSH TRUCK CENTER');
+    expect(lines[0]).not.toMatch(/[()]/);
+    expect(lines[1]).toBe('UNIT: 40000');
+    expect(lines[2]).toBe('VENDOR WO: RO-555');
+    expect(hve.draft).not.toMatch(/EST \$|\| EST/);
+    expect(hve.placeholders).not.toContain('city, st');
+    expect(hve.placeholders).not.toContain('est amount');
+  });
+
+  it('an offsite URL owned by another WR is not used; a cache miss falls back to RG / AAP values', () => {
+    const other = D.collectFacts(Object.assign({}, DROW, { _offsiteWrId: 'other-wr' }), { now: NOW });
+    expect(other).toMatchObject({ roNumber: 'VWO-77', vendorWo: 'VWO-77', estAmount: null, estStatus: 'approval', decisiv: null });
+    st.data.decisivCaseCache = {};
+    const miss = D.collectFacts(DROW, { now: NOW });
+    expect(miss).toMatchObject({ estLink: DEC_URL, roNumber: '21383146', estStatus: 'approval', etr: null, cityState: null, vendor: 'Volvo (ASIST)' });
+    st.data.decisivCaseCache = { 21383146: { ok: false, error: 'DECISIV_SESSION_INVALID', total: 1 } };
+    expect(D.collectFacts(DROW, { now: NOW }).estAmount).toBeNull();
+  });
+
+  it('drafting never reaches the write gate', async () => {
+    await dd({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR3, unit: { equipmentId: '39351' }, userInputs: { estAmount: 0 } });
+    await dd({ kind: 'comment', template: 'offsite-update', workRequestId: WR3, unit: { equipmentId: '39351' } });
+    for (const s of gateSpies) expect(s).not.toHaveBeenCalled();
   });
 });

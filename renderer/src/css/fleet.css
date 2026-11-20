@@ -4919,6 +4919,7 @@ td:has(.pm-pills-row) {
 .dp-ra-btn { font-size: 10px; padding: 3px 10px; }
 .ra-stale { color: var(--warn, var(--ylw)); font-size: 11px; }
 .ra-hint, .ra-fill-note { color: var(--txt2); font-size: 11px; }
+.ra-vendor-wo { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .dp-offsite-card__ts    { font-size: 9px; color: var(--mut); margin-top: 2px; }
 .dp-offsite-card__src-badge { font-size: 9px; padding: 1px 6px; border-radius: 4px; background: var(--adim); color: var(--acc2); }
 

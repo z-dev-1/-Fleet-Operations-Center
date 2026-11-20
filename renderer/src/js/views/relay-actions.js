@@ -19,6 +19,7 @@
  */
 
 import modalDefault from '../components/modal.js';
+import { vendorWoOf, vendorWoChipHtml, wireIdLinks } from './id-links.js';
 
 // ── constants ───────────────────────────────────────────────────────────────
 // Same keys/labels as src/writes/relay-action-policy.js ESCALATION_TARGETS.
@@ -224,7 +225,13 @@ export function wrUnitOf(unit, wrId) {
 // ── body builders ───────────────────────────────────────────────────────────
 const NOTE_APPROVE = '<p class="ra-hint">You approve the exact text before anything is sent.</p>';
 
-export function escalationModalBody({ targets, current, labelOf, estAmount } = {}) {
+// Universal Vendor WO chip (in-app link via wireIdLinks in onMount); '' without one.
+function _vendorWoRow(vendorWo) {
+  const chip = vendorWo ? vendorWoChipHtml(vendorWo) : '';
+  return chip ? '<div class="ra-vendor-wo"><span class="ra-hint">Vendor WO</span> ' + chip + '</div>' : '';
+}
+
+export function escalationModalBody({ targets, current, labelOf, estAmount, vendorWo } = {}) {
   const amt = Number(estAmount) > 0 ? String(Number(estAmount)) : '0';
   const ts = Array.isArray(targets) ? targets : resolveTargetOptions([]);
   const cur = Array.isArray(current) ? current : [];
@@ -236,7 +243,7 @@ export function escalationModalBody({ targets, current, labelOf, estAmount } = {
     ? cur.map((v) => '<span class="dp-escalate__chip">' + escAttr(lab(v)) +
         ' <button type="button" class="dp-ra-btn" data-ra-remove="' + escAttr(v) + '">Remove</button></span>').join(' ')
     : '<span class="ra-hint">No current escalations.</span>';
-  return '<div class="ra-modal ra-modal--esc">' +
+  return '<div class="ra-modal ra-modal--esc">' + _vendorWoRow(vendorWo) +
     '<label>Escalate to <select id="ra-esc-target" class="detail-panel__select">' + opts + '</select></label>' +
     '<div id="ra-esc-current" class="ra-current">Current: ' + chips + '</div>' +
     '<div id="ra-esc-hve" hidden>Est amount $ <input id="ra-esc-amount" type="number" min="0" step="0.01" value="' + escAttr(amt) + '"> ' +
@@ -252,8 +259,8 @@ export function escalationModalBody({ targets, current, labelOf, estAmount } = {
   '</div>';
 }
 
-export function commentModalBody() {
-  return '<div class="ra-modal ra-modal--cm">' +
+export function commentModalBody({ vendorWo } = {}) {
+  return '<div class="ra-modal ra-modal--cm">' + _vendorWoRow(vendorWo) +
     '<label>Template <select id="ra-cm-template" class="detail-panel__select">' +
       COMMENT_TEMPLATES.map((t) => '<option value="' + escAttr(t.id) + '">' + escAttr(t.label) + '</option>').join('') +
     '</select></label>' +
@@ -314,6 +321,8 @@ function _deps(deps) {
     confirm: d.confirm || ((m) => (typeof w.confirm === 'function' ? w.confirm(m) : false)),
     toast: d.toast || { show() {} },
     verifyLifecycle: d.verifyLifecycle || null,
+    // In-app zoomable window (aap:open-url), never the external browser.
+    openUrl: d.openUrl || ((url, o) => (w.aap && w.aap.openUrl ? w.aap.openUrl(url, o) : undefined)),
   };
 }
 
@@ -459,13 +468,14 @@ export async function openEscalationModal(unit, wrId, deps, opts = {}) {
   let upd = null;
   d.modal.show({
     title, width: 560,
-    body: escalationModalBody({ targets, current, labelOf, estAmount: _wrEstAmount(u, wrId) }),
+    body: escalationModalBody({ targets, current, labelOf, estAmount: _wrEstAmount(u, wrId), vendorWo: vendorWoOf(wrUnitOf(u, wrId), u) }),
     actions: [
       { label: 'Cancel', cls: '', onClick: () => d.modal.close() },
       { label: 'Submit escalation', cls: 'primary', onClick: () => submit() },
     ],
     onMount(panel) {
       q = (s) => (panel && panel.querySelector ? panel.querySelector(s) : null);
+      wireIdLinks(panel, (url, o) => d.openUrl(url, o));
       const tEl = q('#ra-esc-target');
       const hve = q('#ra-esc-hve');
       const rh = q('#ra-esc-reactivation-hint');
@@ -581,13 +591,14 @@ export async function openCommentModal(unit, wrId, deps) {
   d.modal.show({
     title: 'Add Relay comment \u2014 WR ' + String(wrId || '').slice(0, 8),
     width: 560,
-    body: commentModalBody(),
+    body: commentModalBody({ vendorWo: vendorWoOf(wrUnitOf(u, wrId), u) }),
     actions: [
       { label: 'Cancel', cls: '', onClick: () => d.modal.close() },
       { label: 'Submit comment', cls: 'primary', onClick: () => submit() },
     ],
     onMount(panel) {
       q = (s) => (panel && panel.querySelector ? panel.querySelector(s) : null);
+      wireIdLinks(panel, (url, o) => d.openUrl(url, o));
       const ta = q('#ra-cm-text');
       upd = _wireCount(ta, q('#ra-cm-count'), () => { if (!String(ta.value || '').trim()) aiDrafted = false; });
       const db = q('#ra-cm-draft');
