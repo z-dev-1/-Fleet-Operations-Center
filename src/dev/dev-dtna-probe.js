@@ -34,7 +34,7 @@ const WINDOW_TITLE = 'DTNA discovery probe (dev, read-only)';
 const OVERALL_TIMEOUT_MS = 10 * 60e3;
 const SETTLE_MS = 8000;
 const LOAD_TIMEOUT_MS = 30e3;
-const BODY_MAX = 5 * 1024 * 1024;
+const BODY_MAX = 25 * 1024 * 1024;
 const HIT_WINDOW = 400;
 const D2_CAP = 15;
 const D3_CAP = 250;
@@ -273,6 +273,7 @@ function createCensus() {
   const page = new Map();
   const postSites = [];
   const postCalls = [];
+  const postImports = [];
   const scripts = { seen: 0, scanned: 0, skippedLarge: 0, failed: 0 };
 
   function _addBundle(cls, meth, win) {
@@ -283,7 +284,7 @@ function createCensus() {
     for (const k of _paramKeysIn(win)) if (!e.paramKeys.includes(k) && e.paramKeys.length < 20) e.paramKeys.push(k);
   }
 
-  function _addPostSite(win) {
+  function _addPostSite(win, before) {
     if (postSites.length >= 20) return;
     const valueSources = [];
     const vre = /["']?([A-Za-z_$][\w$]{0,39})["']?\s*:\s*([A-Za-z_$][\w$.]{0,79})/g;
@@ -295,7 +296,7 @@ function createCensus() {
     const typeLiterals = [];
     const lre = /["']([A-Z][\w \-/]{1,59})["']/g;
     while ((m = lre.exec(win)) && typeLiterals.length < 20) if (!/^E2E_/.test(m[1]) && !typeLiterals.includes(m[1])) typeLiterals.push(_cap(m[1], 60));
-    postSites.push({ paramKeys: _paramKeysIn(win), valueSources, maxLength, typeLiterals });
+    postSites.push({ paramKeys: _paramKeysIn(win), valueSources, maxLength, typeLiterals, excerpt: before ? _cap(before.replace(/\s+/g, ' '), 400) + ' ⟨@⟩ ' + _cap(win.replace(/\s+/g, ' '), HIT_WINDOW) : '' });
   }
 
   /** scan(text) — extract @salesforce/apex imports, classname/method literals and postComment call sites. */
@@ -316,7 +317,12 @@ function createCensus() {
     }
     const pre = /\bpostComment\b/g;
     let m;
-    while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW));
+    while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW), t.slice(Math.max(0, m.index - 400), m.index));
+    let ix = 0;
+    while ((ix = t.indexOf(POST_IMPORT, ix)) >= 0 && postImports.length < 12) {
+      postImports.push({ len: t.length, at: ix, excerpt: _excerpt(t, ix, 400, 900) });
+      ix += POST_IMPORT.length;
+    }
     if (t.includes(POST_IMPORT) && postCalls.length < 20) {
       for (const r of analyzeImportCalls(t)) if (postCalls.length < 20) postCalls.push(r);
     }
@@ -355,7 +361,7 @@ function createCensus() {
     };
   }
 
-  return { scan, notePageCall, all, result, postSites, postCalls, scripts, page, bundle };
+  return { scan, notePageCall, all, result, postSites, postCalls, postImports, scripts, page, bundle };
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -593,6 +599,8 @@ async function run(deps) {
   if (!out.d0) out.d0 = census.result();
   if (!out.p1.sites.length) out.p1.sites = census.postSites.slice();
   out.p1b = census.postCalls.slice();
+  out.p1imports = census.postImports.slice();
+  out.winClosedAtMs = state.closedAt ? state.closedAt - Date.parse(at) : null;
   if (code) out.code = code;
 
   let written = false;
@@ -647,6 +655,7 @@ async function _steps(D, state, census, out) {
     webPreferences: { partition: C.PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
   state.win = win;
+  try { win.on('closed', () => { if (!state.aborted) state.closedAt = Date.now(); }); } catch (_) {}
   const wc = win.webContents;
   try { win.on('page-title-updated', (e) => { try { e.preventDefault(); } catch (_) {} }); } catch (_) {}
   try { wc.setWindowOpenHandler(() => ({ action: 'deny' })); } catch (_) {}
