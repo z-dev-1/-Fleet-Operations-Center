@@ -257,7 +257,49 @@ describe('output file and logs', () => {
     expect(text).toContain('s***@example.test');
     const done = log.lines.filter((l) => l.startsWith('[dtna-probe] done'));
     expect(done.length).toBe(1);
-    expect(done[0]).toMatch(/^\[dtna-probe\] done d0=\d+ d1=2 d2=\d+ d3=2\/4 p1=\d+ p2=2 file=dtna-probe-\d{4}-\d{2}-\d{2}\.json$/);
+    expect(done[0]).toMatch(/^\[dtna-probe\] done d0=\d+ d1=2 d2=\d+ d3=2\/4 p1=\d+ p1b=\d+ p2=2 file=dtna-probe-\d{4}-\d{2}-\d{2}\.json$/);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+});
+
+describe('P1b: postComment call sites from the module factory', () => {
+  const MIN = 'x;define("c/utpComments",["exports","lwc","@salesforce/apex/E2E_UTP_CommentController.postComment",'
+    + '"@salesforce/apex/E2E_UTP_CommentController.getCommentsByCaseRepairOrder"],(function(e,t,n,o){'
+    + 'function i(e){return e&&e.__esModule?e:{default:e}}var a=i(n);class C{handlePost(){'
+    + 'const r={caseId:this.recordId,"commentBody":this.text.trim(),type:"General"};a.default(r).then(()=>{});'
+    + 'n({recordId:this.recordId,body})}}}));define("c/other",[],function(n){n(1)})';
+
+  it('maps the import to its factory param, follows the interop alias, reads object and variable args', () => {
+    const r = probe.analyzeImportCalls(MIN);
+    expect(r.length).toBe(1);
+    expect(r[0]).toMatchObject({ ident: 'n', aliases: ['a'], pos: 2 });
+    const keys = r[0].calls.map((c) => c.keys);
+    expect(keys).toContainEqual(['recordId', 'body']);
+    expect(keys).toContainEqual(['caseId', 'commentBody', 'type']);
+    const v = r[0].calls.find((c) => c.argKind === 'var:r');
+    expect(v.entries.find((e) => e.key === 'type').value).toBe('"General"');
+    // The next module's `n(1)` is out of scope.
+    expect(r[0].calls.length).toBe(2);
+  });
+
+  it('ignores the apex module own define (name, not a dependency entry)', () => {
+    expect(probe.analyzeImportCalls('define("@salesforce/apex/E2E_UTP_CommentController.postComment",["exports"],function(e){e.default=1})')).toEqual([]);
+  });
+
+  it("mode 'post' loads only the RO case, makes no Apex calls and writes dtna-post-probe-<date>.json", async () => {
+    const { fx, deps, dataDir } = setup();
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log, mode: 'post' }, deps));
+    expect(r.ok).toBe(true);
+    expect(r.file).toBe('dtna-post-probe-' + new Date().toISOString().slice(0, 10) + '.json');
+    expect(fx.windows[0].loads).toEqual([C.LIST_URL, C.caseUrl(CASE1), C.caseUrl(CASE1) + '?tabset-032e7=5194e']);
+    expect(deps.aura.calls).toEqual([]);
+    expect(deps.client.calls).toEqual([]);
+    const out = JSON.parse(fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8'));
+    expect(out.mode).toBe('post');
+    expect(out.targets).toEqual(['4U5AAK']);
+    expect(out.p2.length).toBe(1);
+    expect(out.p1b[0].ident).toBe('p');
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 });

@@ -27,6 +27,9 @@ const { safeJson } = require('../dtna/safe-json');
 const { stripHtml } = require('../dtna/thread');
 
 const ENV_FLAG = 'FLEET_DEV_DTNA_PROBE';
+// FLEET_DEV_DTNA_PROBE_MODE=post: postComment discovery only (P1b call sites + P2 composer on the RO
+// test case). The probe itself makes no Apex calls in this mode; output dtna-post-probe-<date>.json.
+const MODE_FLAG = 'FLEET_DEV_DTNA_PROBE_MODE';
 const WINDOW_TITLE = 'DTNA discovery probe (dev, read-only)';
 const OVERALL_TIMEOUT_MS = 10 * 60e3;
 const SETTLE_MS = 8000;
@@ -56,7 +59,10 @@ const APEX_DESCRIPTOR = 'aura://ApexActionController/ACTION$execute';
 // READ-ONLY composer inspection (P2). Reads tags, attributes and text only.
 const P2_SCRIPT = [
   '(function(){',
-  '  var out = { fields: [], labels: [], options: [], buttons: [], roots: 0 };',
+  '  var out = { fields: [], labels: [], options: [], buttons: [], hosts: [], roots: 0 };',
+  '  function hostChain(el){ var n = el, chain = []; for (var k = 0; k < 60 && n; k++) { var tg = String(n.tagName || "").toLowerCase();',
+  '    if (tg.indexOf("-") > 0 && chain.indexOf(tg) < 0 && chain.length < 12) chain.push(tg);',
+  '    n = n.parentNode || null; if (n && n.nodeType === 11) n = n.host || null; } return chain.join(" < "); }',
   '  var seen = 0;',
   '  function txt(s){ return String(s == null ? "" : s).replace(/\\s+/g, " ").trim().slice(0, 120); }',
   '  function add(arr, v){ if (v && arr.indexOf(v) < 0 && arr.length < 80) arr.push(v); }',
@@ -69,6 +75,7 @@ const P2_SCRIPT = [
   '      var el = els[i]; seen++;',
   '      var tag = String(el.tagName || "").toLowerCase();',
   '      if (tag === "label" || tag === "legend") add(out.labels, txt(el.textContent));',
+  '      if (tag === "textarea" || (tag === "button" && txt(el.textContent) === "Post")) add(out.hosts, tag + ": " + hostChain(el));',
   '      if (tag === "textarea" || tag === "input" || tag === "select" || /combobox|textarea|rich-text|input-field/.test(tag)) {',
   '        if (out.fields.length < 80) out.fields.push({ tag: tag, type: attr(el, "type"), name: attr(el, "name"),',
   '          label: txt(attr(el, "label") || attr(el, "aria-label") || attr(el, "placeholder")),',
@@ -139,10 +146,133 @@ function _paramKeysIn(win) {
   return keys;
 }
 
+// ── P1b: map the postComment import to its factory parameter and read the call sites (zero calls) ──
+const POST_IMPORT = '@salesforce/apex/E2E_UTP_CommentController.postComment';
+
+function _balanced(t, open) {
+  const o = t[open];
+  const cl = o === '{' ? '}' : o === '(' ? ')' : ']';
+  let depth = 0;
+  let q = '';
+  for (let i = open; i < t.length && i < open + 20000; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '\\') i++; else if (ch === q) q = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if (ch === o) depth++;
+    else if (ch === cl) { depth--; if (depth === 0) return t.slice(open, i + 1); }
+  }
+  return '';
+}
+
+/** _entries('{a:x,b,"c":y}') -> [{ key, value }] at depth 0 (value = code expression, capped). */
+function _entries(obj) {
+  const body = obj.slice(1, -1);
+  const parts = [];
+  let depth = 0;
+  let q = '';
+  let cur = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (q) { cur += ch; if (ch === '\\') { cur += body[i + 1] || ''; i++; } else if (ch === q) q = ''; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; cur += ch; continue; }
+    if ('{[('.includes(ch)) depth++;
+    if ('}])'.includes(ch)) depth--;
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  if (cur.trim()) parts.push(cur);
+  const out = [];
+  for (const p of parts.slice(0, 20)) {
+    const m = /^\s*["']?([\w$]{1,60})["']?\s*(?::\s*([\s\S]*))?$/.exec(p);
+    if (m) out.push({ key: m[1], value: _cap((m[2] == null ? m[1] : m[2]).replace(/\s+/g, ' ').trim(), 160) });
+  }
+  return out;
+}
+
+function _excerpt(t, at, before, after) {
+  return _cap(t.slice(Math.max(0, at - before), at + after).replace(/\s+/g, ' '), before + after);
+}
+
+/**
+ * analyzeImportCalls(text, spec?) -> [{ ident, aliases, calls:[{ argKind, keys, entries, excerpt }] }]
+ * Finds module dependency arrays that list `spec`, maps it to the factory parameter at the same index,
+ * then reads every call of that identifier (or an interop alias of it) in the module body.
+ */
+function analyzeImportCalls(text, spec) {
+  const t = String(text || '');
+  const imp = spec || POST_IMPORT;
+  const out = [];
+  let idx = 0;
+  while ((idx = t.indexOf(imp, idx)) >= 0 && out.length < 10) {
+    const at = idx;
+    idx += imp.length;
+    const open = t.lastIndexOf('[', at);
+    if (open < 0 || at - open > 4000) continue;
+    if (!/^(\s*["'][^"']*["']\s*,)*\s*["']$/.test(t.slice(open + 1, at))) continue;
+    const arr = _balanced(t, open);
+    if (!arr) continue;
+    const deps = Array.from(arr.matchAll(/["']([^"']+)["']/g)).map((m) => m[1]);
+    const pos = deps.indexOf(imp);
+    const close = open + arr.length;
+    const fm = /^\s*,\s*\(?\s*(?:function\s*[\w$]*\s*\(([^)]*)\)|\(([^)]*)\)\s*=>|([\w$]+)\s*=>)/.exec(t.slice(close, close + 400));
+    if (!fm || pos < 0) { out.push({ ident: '', deps: deps.length, pos, calls: [] }); continue; }
+    const params = String(fm[1] != null ? fm[1] : fm[2] != null ? fm[2] : fm[3]).split(',').map((s) => s.trim());
+    const ident = params[pos] || '';
+    if (!/^[\w$]{1,40}$/.test(ident)) { out.push({ ident: '', deps: deps.length, pos, calls: [] }); continue; }
+    const bodyStart = close + fm[0].length;
+    let bodyEnd = Math.min(t.length, bodyStart + 400000);
+    for (const marker of ['define(', 'addModule(']) {
+      const n = t.indexOf(marker, bodyStart);
+      if (n > 0 && n < bodyEnd) bodyEnd = n;
+    }
+    const body = t.slice(bodyStart, bodyEnd);
+    const esc = (s) => s.replace(/\$/g, '\\$');
+    const names = [ident];
+    const are = new RegExp('([\\w$]{1,40})\\s*=\\s*[\\w$.]{1,60}\\(\\s*' + esc(ident) + '\\s*\\)', 'g');
+    let am;
+    while ((am = are.exec(body)) && names.length < 6) if (!names.includes(am[1])) names.push(am[1]);
+    const calls = [];
+    for (const name of names) {
+      const cre = new RegExp('(?<![\\w$.])' + esc(name) + '(?:\\.default)?\\s*\\(', 'g');
+      let cm;
+      while ((cm = cre.exec(body)) && calls.length < 12) {
+        const argAt = cm.index + cm[0].length;
+        const rest = body.slice(argAt).replace(/^\s+/, '');
+        const lead = body.length - argAt - rest.length;
+        const rec = { via: name, argKind: 'other', keys: [], entries: [], excerpt: _excerpt(body, cm.index, 500, 700) };
+        if (rest[0] === '{') {
+          const obj = _balanced(body, argAt + lead);
+          rec.argKind = 'object';
+          rec.entries = obj ? _entries(obj) : [];
+        } else {
+          const v = /^([\w$]{1,40})\s*[,)]/.exec(rest);
+          if (v) {
+            rec.argKind = 'var:' + v[1];
+            const back = body.slice(Math.max(0, cm.index - 6000), cm.index);
+            const vre = new RegExp('(?<![\\w$.])' + esc(v[1]) + '\\s*=\\s*\\{', 'g');
+            let vm;
+            let last = -1;
+            while ((vm = vre.exec(back))) last = vm.index + vm[0].length - 1;
+            if (last >= 0) {
+              const obj = _balanced(back, last);
+              if (obj) rec.entries = _entries(obj);
+            }
+          }
+        }
+        rec.keys = rec.entries.map((e) => e.key);
+        calls.push(rec);
+      }
+    }
+    out.push({ ident, aliases: names.slice(1), deps: deps.length, pos, calls });
+  }
+  return out;
+}
+
 function createCensus() {
   const bundle = new Map(); // 'cls.method' -> { classname, method, kind, paramKeys, hits }
   const page = new Map();
   const postSites = [];
+  const postCalls = [];
   const scripts = { seen: 0, scanned: 0, skippedLarge: 0, failed: 0 };
 
   function _addBundle(cls, meth, win) {
@@ -187,6 +317,9 @@ function createCensus() {
     const pre = /\bpostComment\b/g;
     let m;
     while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW));
+    if (t.includes(POST_IMPORT) && postCalls.length < 20) {
+      for (const r of analyzeImportCalls(t)) if (postCalls.length < 20) postCalls.push(r);
+    }
   }
 
   /** notePageCall(classname, method, paramKeys) — an Apex call the page itself made (names only). */
@@ -222,7 +355,7 @@ function createCensus() {
     };
   }
 
-  return { scan, notePageCall, all, result, postSites, scripts, page, bundle };
+  return { scan, notePageCall, all, result, postSites, postCalls, scripts, page, bundle };
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -382,6 +515,7 @@ function _resolveDeps(d) {
     settleMs: Number.isFinite(x.settleMs) ? x.settleMs : SETTLE_MS,
     loadTimeoutMs: Number.isFinite(x.loadTimeoutMs) ? x.loadTimeoutMs : LOAD_TIMEOUT_MS,
     timeoutMs: Number.isFinite(x.timeoutMs) ? x.timeoutMs : OVERALL_TIMEOUT_MS,
+    mode: x.mode === 'post' ? 'post' : 'full',
   };
 }
 
@@ -406,7 +540,7 @@ function start(opts) {
     stopped = true;
     _ran = true;
     try { if (unsub) unsub(); } catch (_) {}
-    _lastRun = run(Object.assign({}, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
+    _lastRun = run(Object.assign({ mode: env[MODE_FLAG] === 'post' ? 'post' : 'full' }, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
   };
   unsub = session.onStatus(onStatus);
   if (stopped) { try { unsub(); } catch (_) {} }
@@ -422,11 +556,11 @@ async function run(deps) {
   const D = _resolveDeps(deps);
   const at = new Date(D.now()).toISOString();
   const date = at.slice(0, 10);
-  const fileName = 'dtna-probe-' + date + '.json';
+  const fileName = (D.mode === 'post' ? 'dtna-post-probe-' : 'dtna-probe-') + date + '.json';
   const out = {
-    version: 1, at, targets: TARGETS.map(caseTag),
+    version: 1, at, mode: D.mode, targets: (D.mode === 'post' ? TARGETS.slice(0, 1) : TARGETS).map(caseTag),
     d0: null, d1: [], d2: { repairOrders: [], calls: [], skipped: [], needsConfirmation: [] },
-    d3: null, d4: null, p1: { sites: [] }, p2: [], classes: {},
+    d3: null, d4: null, p1: { sites: [] }, p1b: [], p2: [], classes: {},
   };
   const state = { aborted: false, win: null, cap: null, net: null };
   const census = createCensus();
@@ -458,6 +592,7 @@ async function run(deps) {
 
   if (!out.d0) out.d0 = census.result();
   if (!out.p1.sites.length) out.p1.sites = census.postSites.slice();
+  out.p1b = census.postCalls.slice();
   if (code) out.code = code;
 
   let written = false;
@@ -475,7 +610,7 @@ async function run(deps) {
   const d3 = out.d3 || { cases: 0, comments: 0 };
   const line = '[dtna-probe] done d0=' + census.all().length + ' d1=' + out.d1.filter((x) => x.code === 'OK').length
     + ' d2=' + out.d2.calls.filter((x) => x.code === 'OK').length + ' d3=' + (d3.cases || 0) + '/' + (d3.comments || 0)
-    + ' p1=' + out.p1.sites.length + ' p2=' + out.p2.reduce((n, x) => n + ((x.fields && x.fields.length) || 0), 0)
+    + ' p1=' + out.p1.sites.length + ' p1b=' + out.p1b.reduce((n, x) => n + x.calls.length, 0) + ' p2=' + out.p2.reduce((n, x) => n + ((x.fields && x.fields.length) || 0), 0)
     + ' file=' + (written ? fileName : '-') + (code ? ' code=' + code : '');
   if (code) log.warn(line); else log.info(line);
   _running = false;
@@ -497,7 +632,8 @@ async function _p2(D, state, id) {
     const fields = (Array.isArray(r.fields) ? r.fields.slice(0, 80) : []).filter((f) => f && typeof f === 'object').map((f) => ({
       tag: _cap(f.tag, 60), type: _cap(f.type, 40), name: _cap(f.name, 80), label: _cap(f.label, 120), maxlength: _cap(f.maxlength, 10), required: !!f.required,
     }));
-    return { caseTag: caseTag(id), code: 'OK', roots: Number(r.roots) || 0, fields, labels: list(r.labels, 80), options: list(r.options, 80), buttons: list(r.buttons, 80) };
+    const hosts = (Array.isArray(r.hosts) ? r.hosts.slice(0, 20) : []).map((x) => _cap(x, 600));
+    return { caseTag: caseTag(id), code: 'OK', roots: Number(r.roots) || 0, fields, labels: list(r.labels, 80), options: list(r.options, 80), buttons: list(r.buttons, 80), hosts };
   } catch (e) {
     return { caseTag: caseTag(id), code: 'DTNA_PROBE_SCRIPT:' + _errName(e) };
   }
@@ -522,6 +658,17 @@ async function _steps(D, state, census, out) {
   state.net = _attachNetwork(wc, census);
 
   await _load(D, state, C.LIST_URL);
+  if (D.mode === 'post') {
+    // postComment discovery only: the RO test case's Comments tab, DOM read + bundle call sites. No Apex calls.
+    const id = TARGETS[0];
+    await _load(D, state, C.caseUrl(id));
+    await _load(D, state, C.caseUrl(id) + COMMENTS_TAB_QS);
+    if (!state.aborted) out.p2.push(await _p2(D, state, id));
+    if (state.net.pending.size) await Promise.allSettled(Array.from(state.net.pending));
+    out.d0 = census.result();
+    out.p1 = { sites: census.postSites.slice(), sources: census.all().filter((m) => m.method === 'postComment').map((m) => ({ classname: m.classname, paramKeys: m.paramKeys })) };
+    return { code: capCode };
+  }
   for (const id of TARGETS) {
     if (state.aborted) break;
     await _load(D, state, C.caseUrl(id));
@@ -668,6 +815,6 @@ function _resetForTests() { _armed = false; _ran = false; _running = false; _las
 function _lastRunForTests() { return _lastRun; }
 
 module.exports = {
-  start, run, ENV_FLAG, WINDOW_TITLE, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT,
+  start, run, ENV_FLAG, MODE_FLAG, WINDOW_TITLE, analyzeImportCalls, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT,
   createCensus, _isSafeRead, _decide, _scrubDeep, _resetForTests, _lastRunForTests,
 };
