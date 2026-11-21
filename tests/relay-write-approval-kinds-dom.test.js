@@ -39,4 +39,11 @@ describe('approval titles', () => {
     expect(respond).toHaveBeenCalledTimes(4);
     expect(respond.mock.calls.every((c) => c[1] === false)).toBe(true);
   });
+
+  it('a DTNA comment says it is dealer-visible', () => {
+    respond.mockClear();
+    expect(titleFor('dtnaComment')).toBe('Approve DTNA comment (dealer-visible)');
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(respond.mock.calls[0][1]).toBe(false);
+  });
 });

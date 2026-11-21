@@ -91,7 +91,7 @@ beforeEach(() => {
 });
 
 describe('Pending Estimates overlay', () => {
-  it('mounts a dialog overlay with the pending rows only (DTNA and approved absent) and the as-of stamp', () => {
+  it('mounts a dialog overlay with the pending rows only (DTNA listed, approved absent) and the as-of stamp', () => {
     setup();
     expect(overlay().id).toBe('pe-overlay');
     expect(overlay().className).toBe('pe-overlay');
@@ -100,10 +100,11 @@ describe('Pending Estimates overlay', () => {
     expect(h).toContain('data-pe-unit="A100"');
     expect(h).toContain('$4,200.00');
     expect(h).toContain('submitted 3h 0m ago');
-    expect(h).not.toContain('D999');
+    expect(h).toContain('data-pe-unit="D999"');
     expect(h).not.toContain('C300');
     expect(h).toContain('as of 11/19 12:55');
-    expect(h).toContain('1 DTNA excluded');
+    expect(h).toContain('DTNA not pulled');
+    expect(h).not.toContain('DTNA excluded');
   });
 
   it('Escalate calls the existing Escalate modal opener once, pre-targeted to HVE; nothing writes directly', async () => {

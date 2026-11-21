@@ -20,7 +20,9 @@ describe('case predicates', () => {
     expect(P.isCaseClosed({ caseStatus: 'Cancelled' })).toBe(true);
     expect(P.isCaseDone(CLOSED)).toBe(true);
     expect(P.isCaseDone({ caseStatus: 'Ready for Pickup' })).toBe(true);
-    expect(P.isCaseDone({ caseStatus: 'Arrived', offsiteStage: 'ready' })).toBe(true);
+    // A pipeline stage wins over the text-derived offsiteStage; off-pipeline text falls back to it.
+    expect(P.isCaseDone({ caseStatus: 'Arrived', offsiteStage: 'ready' })).toBe(false);
+    expect(P.isCaseDone({ caseStatus: 'Waiting on dealer', offsiteStage: 'ready' })).toBe(true);
     expect(P.isCaseDone(ENTRY)).toBe(false);
     expect(P.isAwaitingApproval(ENTRY)).toBe(true);
     expect(P.isAwaitingApproval(CLOSED)).toBe(false);
@@ -35,12 +37,50 @@ describe('case predicates', () => {
   });
 });
 
+describe('the portal stage pipeline (Pre-Repair > Arrived > In-Repair > Post-Repair > Ready for Pickup > Closed)', () => {
+  const C = require('../src/dtna/constants');
+  const thread = require('../src/dtna/thread');
+  it('caseStageOf normalizes status and stepper labels', () => {
+    expect(C.CASE_STAGES).toEqual(['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed']);
+    expect(C.caseStageOf('Closed - Current Stage')).toEqual({ name: 'Closed', index: 5 });
+    expect(C.caseStageOf('Ready for Pick Up')).toEqual({ name: 'Ready for Pickup', index: 4 });
+    expect(C.caseStageOf('Post Repair - Stage Complete')).toEqual({ name: 'Post-Repair', index: 3 });
+    expect(C.caseStageOf('In Repair')).toEqual({ name: 'In-Repair', index: 2 });
+    expect(C.caseStageOf('Arrived')).toEqual({ name: 'Arrived', index: 1 });
+    expect(C.caseStageOf('Pre-Repair')).toEqual({ name: 'Pre-Repair', index: 0 });
+    expect(C.caseStageOf('Dealer Accepted')).toBeNull();
+    expect(C.caseStageOf('')).toBeNull();
+  });
+  it('the stepper Current Stage wins over the case status', () => {
+    const e = { caseId: CASE_ID, caseStatus: 'Arrived', steps: [{ name: 'Arrived', status: 'Stage Complete' }, { name: 'Post-Repair', status: 'Current Stage' }] };
+    expect(P.currentStage(e)).toEqual({ name: 'Post-Repair', index: 3 });
+    expect(P.offsiteRecord(e).repairStatus).toBe('Post-Repair');
+    expect(P.offsiteRecord({ caseId: CASE_ID, caseStatus: 'Dealer Accepted' })).toMatchObject({ repairStatus: 'Dealer Accepted', stageIndex: null });
+  });
+  it('Ready for Pickup and Closed are done offsite; earlier stages are not; done cases are not awaiting approval', () => {
+    const at = (s) => ({ caseId: CASE_ID, caseStatus: s });
+    for (const s of ['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair']) {
+      expect(P.mismatch(at(s), true), s).toEqual({ offsiteDone: false, statusMismatch: false });
+      expect(P.isAwaitingApproval(at(s)), s).toBe(true);
+    }
+    for (const s of ['Ready for Pickup', 'Closed']) {
+      expect(P.mismatch(at(s), true), s).toEqual({ offsiteDone: true, statusMismatch: true });
+      expect(P.isAwaitingApproval(at(s)), s).toBe(false);
+    }
+  });
+  it('timeline buckets: Pre-Repair/Arrived -> arrival, In-Repair/Post-Repair -> repair, Ready for Pickup/Closed -> ready', () => {
+    const b = (s) => thread.stageFromCase({ caseStatus: s }).stage;
+    expect(['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed'].map(b))
+      .toEqual(['arrival', 'arrival', 'repair', 'repair', 'ready', 'ready']);
+  });
+});
+
 describe('offsiteRecord', () => {
   it('Total null, status from the case, no estimate amount anywhere', () => {
     const r = P.offsiteRecord(ENTRY);
     expect(r).toEqual({
       source: 'dtna', caseId: CASE_ID, url: 'https://dtna.my.site.com/Servicetracker/s/case/' + CASE_ID + '/detail',
-      dealerName: 'HORWITH FREIGHTLINER', fleetStatus: '', repairStatus: 'In Repair', stage: 'repair', stageStatus: '',
+      dealerName: 'HORWITH FREIGHTLINER', fleetStatus: '', repairStatus: 'In-Repair', stageIndex: 2, stage: 'repair', stageStatus: '',
       stageSince: ENTRY.stageSince, total: null, totalSource: 'none', updatedAt: ENTRY.lastCommentAt, scrapedAt: ENTRY.pulledAt,
       roNumber: 'R101048154', ok: true,
     });

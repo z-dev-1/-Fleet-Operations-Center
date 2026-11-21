@@ -42,6 +42,7 @@ export function _esc(s) {
 }
 
 function _title(kind) {
+  if (kind === 'dtnaComment') return 'Approve DTNA comment (dealer-visible)';
   if (kind === 'updateEscalations') return 'Approve Relay escalation';
   if (kind === 'setLifecycle') return 'Approve AAP lifecycle change';
   return kind === 'createWorkOrder' ? 'Approve Relay work request' : 'Approve Relay comment';

@@ -19,6 +19,24 @@ const CASE_ID_RE = /^500[A-Za-z0-9]{15}$/;
 const COMMENT_ID_RE = /^[A-Za-z0-9]{15,18}$/;
 const DTNA_CASE_URL_RE = /https?:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/([A-Za-z0-9]+)/i;
 
+// The case stage stepper on the portal's case page, in order (user-confirmed 2026-11-21). The portal marks
+// finished stages 'Stage Complete' and the active one 'Current Stage' (e.g. 'Closed - Current Stage').
+const CASE_STAGES = Object.freeze(['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed']);
+const _STAGE_MATCH = [
+  [5, /^closed\b/i],
+  [4, /^ready\s*for\s*pick\s*-?\s*up\b/i],
+  [3, /^post[-\s]?repair\b/i],
+  [2, /^in[-\s]?repair\b/i],
+  [1, /^arrived\b/i],
+  [0, /^pre[-\s]?repair\b/i],
+];
+/** caseStageOf(text) -> { name, index } on CASE_STAGES | null. Accepts 'Closed - Current Stage', 'In Repair', ... */
+function caseStageOf(text) {
+  const s = String(text == null ? '' : text).replace(/\s*[-\u2013\u2014:]\s*(current stage|stage complete)\s*$/i, '').trim();
+  for (const [i, re] of _STAGE_MATCH) if (re.test(s)) return { name: CASE_STAGES[i], index: i };
+  return null;
+}
+
 /** caseUrl(id) -> canonical case detail URL (matches DTNA_CASE_RE in src/scrapers/dtna_enrich.js). */
 function caseUrl(id) { return BASE + '/s/case/' + id + '/detail'; }
 
@@ -99,5 +117,5 @@ module.exports = {
   READ_METHODS, APEX_CLASS, WRITE_RE,
   CONTEXT_MAX_AGE_MS, HIDDEN_WAIT_MS, SIGNIN_WINDOW_MS, CALL_TIMEOUT_MS, CONCURRENCY, BATCH_GAP_MS,
   THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
-  WRITE_METHODS, POST_COMMENT_MAX,
+  WRITE_METHODS, POST_COMMENT_MAX, CASE_STAGES, caseStageOf,
 };

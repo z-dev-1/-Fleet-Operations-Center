@@ -11,8 +11,11 @@
  * event time). Sync / scrape times are never used as a stand-in; AAP-only pending
  * WOs show "submitted time unknown".
  *
- * DTNA work orders are excluded (findings §2). Scope is whatever rows the fleet
- * slice holds (the user's settings.domiciles build); nothing here widens it.
+ * DTNA work orders are listed (Phase B, findings §6b): DTNA exposes no estimate amount,
+ * so a DTNA row's Total is '—' and its status is the case status from the user's last
+ * "Pull DTNA". excludedDtna stays in the result for shape compat and is always 0.
+ * Scope is whatever rows the fleet slice holds (the user's settings.domiciles build);
+ * nothing here widens it.
  *
  * Upgrade (team-wide): mergeTeamRows joins those v1 items with the main-process team
  * scan rows (window.pendingEst, src/scrapers/pending_est_sources.js) on the WR id.
@@ -178,7 +181,7 @@ export function collectPendingEstimates(rows, { now, fleetSyncedAt } = {}) {
   const t = Number.isFinite(now) ? now : Date.now();
   const syncedMs = _ms(fleetSyncedAt);
   const items = [];
-  let excludedDtna = 0;
+  const excludedDtna = 0;   // DTNA is listed now; kept for shape compat
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row || typeof row !== 'object') continue;
     const seen = new Set();
@@ -194,7 +197,6 @@ export function collectPendingEstimates(rows, { now, fleetSyncedAt } = {}) {
       if (!_isOpen(e)) continue;
       const sig = pendingSignal(e, { primary });
       if (!sig.pending) continue;
-      if (isDtna(row, primary ? null : e)) { excludedDtna++; continue; }
       items.push(_item(row, e, primary, sig, t, syncedMs));
     }
   }
@@ -216,8 +218,9 @@ export const OWNER_VALUES = ['mine', 'everyone', 'all'];
 export const UNKNOWN = '__unknown__';
 export const MISMATCH_LABEL = '\u2714 Done offsite \u00B7 RG WO still open';
 export const SORT_KEYS = ['default', 'mismatch', 'updated', 'total', 'unit', 'fas'];
-const SRC_LABEL = { rg: 'RG', decisiv: 'Decisiv', both: 'both' };
-const VENDOR_OPTIONS = [['volvo', 'Volvo'], ['paccar', 'PACCAR'], ['other', 'Other']];
+const SRC_LABEL = { rg: 'RG', decisiv: 'Decisiv', dtna: 'DTNA', both: 'both' };
+const VENDOR_OPTIONS = [['volvo', 'Volvo'], ['paccar', 'PACCAR'], ['dtna', 'DTNA'], ['other', 'Other']];
+export const DTNA_NO_TOTAL_HINT = 'DTNA does not expose an estimate amount';
 
 const _lc = (s) => String(s == null ? '' : s).trim().toLowerCase();
 const _str = (s) => (s == null ? '' : String(s).trim());
@@ -229,10 +232,12 @@ function _vendorKindOfUnit(unit) {
     const s = String(u[k] || '');
     if (/^https?:\/\/volvopg\.asist\.decisiv\.net\//i.test(s)) return 'volvo';
     if (/^https?:\/\/(pssmfleet|paccarpg)\.decisiv\.net\//i.test(s)) return 'paccar';
+    if (DTNA_HOST_RE.test(s)) return 'dtna';
   }
   const toks = _norm(u.vendor).split('_');
   if (toks.includes('VOLVO')) return 'volvo';
   if (['KENWORTH', 'PETERBILT', 'PACCAR'].some((k) => toks.includes(k))) return 'paccar';
+  if (_vendorIsDtna(u.vendor) || String(u.asistSource || '').toLowerCase() === 'dtna') return 'dtna';
   return 'other';
 }
 
@@ -298,6 +303,8 @@ function _teamUnit(r) {
     estimatePendingCost: _num(r.rgPendingCost),
     domicileSite: _str(r.domicileSite),
     _offsiteWrId: url && wrId ? wrId : '',
+    dtnaRepairOrderNo: _str(r.dtnaRepairOrderNo),
+    dtnaCaseId: _str(r.dtnaCaseId),
   };
 }
 
@@ -353,9 +360,11 @@ export function mergeTeamRows(v1Items, scanRows, { now, asOf } = {}) {
     Object.assign(it, f);
     // Same order as the drafter (relay-action-draft collectFacts + _withOffsite): the WR's
     // own Decisiv estimate, then the scan row's estimate for this WR, then the RG Vendor WO.
+    // A DTNA case chip (scan rows only) ranks like a Decisiv estimate.
     const own = _vendorWoOfItem(it);
     const fromScan = r ? vendorWoOf(_teamUnit(r)) : null;
-    it.vendorWo = (own && own.kind === 'decisiv') ? own : ((fromScan && fromScan.kind === 'decisiv') ? fromScan : (own || fromScan));
+    const strong = (x) => !!x && (x.kind === 'decisiv' || x.kind === 'dtna');
+    it.vendorWo = strong(own) ? own : (strong(fromScan) ? fromScan : (own || fromScan));
     return it;
   };
   for (const v of Array.isArray(v1Items) ? v1Items : []) {
@@ -410,10 +419,19 @@ export function defaultFilters() {
   return { owner: 'mine', source: '', fleetStatus: '', repairStatus: '', mismatch: false, vendor: '', fas: '' };
 }
 
+// The DTNA case stage pipeline (same order as src/dtna/constants.js CASE_STAGES): these
+// Repair Status values sort by pipeline order, ahead of the other (alphabetical) values.
+export const DTNA_STAGES = ['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed'];
+function _stageCmp(a, b) {
+  const ia = DTNA_STAGES.indexOf(a); const ib = DTNA_STAGES.indexOf(b);
+  if (ia >= 0 || ib >= 0) return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  return a.localeCompare(b);
+}
+
 function _distinct(items, k) {
   const vals = new Set(); let unknown = false;
   for (const it of items) { const v = _str(it[k]); if (v) vals.add(v); else unknown = true; }
-  const out = [...vals].sort((a, b) => a.localeCompare(b));
+  const out = [...vals].sort(k === 'repairStatus' ? _stageCmp : (a, b) => a.localeCompare(b));
   if (unknown) out.push(UNKNOWN);
   return out;
 }
@@ -495,7 +513,7 @@ export function filterBarHtml(filters, options, counts) {
     '<button type="button" data-pe-owner="' + v + '" aria-pressed="' + (f.owner === v ? 'true' : 'false') + '"' +
     (c[v] != null ? ' title="' + escAttr(String(c[v])) + ' rows"' : '') + '>' + ownerLabel[v] + '</button>').join('') + '</div>';
   return owner +
-    _select('source', 'Source', f.source, [['', 'Any'], ['rg', 'RG'], ['decisiv', 'Decisiv'], ['both', 'both']]) +
+    _select('source', 'Source', f.source, [['', 'Any'], ['rg', 'RG'], ['decisiv', 'Decisiv'], ['dtna', 'DTNA'], ['both', 'both']]) +
     _select('fleetStatus', 'Fleet Status', f.fleetStatus, _valOpts(o.fleetStatus)) +
     _select('repairStatus', 'Repair Status', f.repairStatus, _valOpts(o.repairStatus)) +
     _select('vendor', 'Vendor', f.vendor, [['', 'Any']].concat(VENDOR_OPTIONS)) +
@@ -529,7 +547,9 @@ export function rowHtml(item) {
     '<td>' + _dash(it.fas) + '</td>' +
     '<td>' + _dash(it.fleetStatus) + '</td>' +
     '<td>' + _dash(it.repairStatus) + stage + '</td>' +
-    '<td class="pe-amt">' + escAttr(formatMoney(it.total)) + '</td>' +
+    (it.vendorKind === 'dtna' && it.total == null
+      ? '<td class="pe-amt" title="' + escAttr(DTNA_NO_TOTAL_HINT) + '">\u2014</td>'
+      : '<td class="pe-amt">' + escAttr(formatMoney(it.total)) + '</td>') +
     '<td class="pe-amt">' + escAttr(formatMoney(it.amount)) + '</td>' +
     '<td title="' + escAttr(submittedTitle + ' \u00B7 ' + (SOURCE_LABEL[it.source] || '')) + '">' + escAttr(it.ageText) + '</td>' +
     '<td' + (it.updatedAt ? ' title="Updated ' + escAttr(formatAsOf(it.updatedAt)) + '"' : '') + '>' + escAttr(it.updatedText || '\u2014') + '</td>' +
@@ -539,13 +559,14 @@ export function rowHtml(item) {
   '</tr>';
 }
 
-export function metaHtml({ count, excludedDtna, asOf, cached, shown, total, mismatch, teamAsOf, scanning, teamCached, teamError } = {}) {
+// excludedDtna is accepted for shape compat and no longer shown (DTNA is listed).
+export function metaHtml({ count, asOf, cached, shown, total, mismatch, teamAsOf, scanning, teamCached, teamError, dtnaAsOf } = {}) {
   const hasTeam = shown != null || total != null;
   let h = '<span class="pe-asof">as of ' + escAttr(formatAsOf(asOf)) + (cached ? ' (cached)' : '') + '</span>';
   if (hasTeam) h += ' \u00B7 <span class="pe-count">' + escAttr(String(shown || 0)) + ' shown of ' + escAttr(String(total || 0)) + '</span>';
   else h += ' \u00B7 <span class="pe-count">' + escAttr(String(count || 0)) + ' pending</span>';
   if (mismatch != null) h += ' \u00B7 <span class="pe-mismatch">' + escAttr(String(mismatch || 0)) + ' done offsite / RG open</span>';
-  h += ' \u00B7 <span class="pe-dtna">' + escAttr(String(excludedDtna || 0)) + ' DTNA excluded</span>';
+  h += ' \u00B7 <span class="pe-dtna">' + (dtnaAsOf ? 'DTNA as of ' + escAttr(formatAsOf(dtnaAsOf)) : 'DTNA not pulled') + '</span>';
   if (teamAsOf) h += ' \u00B7 <span class="pe-team">team as of ' + escAttr(formatAsOf(teamAsOf)) + (teamCached ? ' (cached)' : '') + '</span>';
   if (teamError) h += ' \u00B7 <span class="pe-stale">team scan: ' + escAttr(teamError) + '</span>';
   if (scanning) h += ' \u00B7 <span class="pe-scanning">scanning\u2026</span>';

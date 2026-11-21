@@ -28,6 +28,7 @@ import { redactForSharing } from '../util/redact.js';
 import { pmOverdueDays } from '../util/pm-overdue.js';
 import modal         from '../components/modal.js';
 import { wrCardActionRowHtml, headerLifecycleButtonHtml, wireRelayActions } from './relay-actions.js';
+import { dtnaPostButtonHtml } from './dtna-actions.js';
 import { isSafeHistoryUrl, isAmazonHost as _isAmazonHost, isSafeIdLinkUrl, wireIdLinks, vendorWoOf } from './id-links.js';
 export { isSafeHistoryUrl, isSafeIdLinkUrl, wireIdLinks } from './id-links.js';
 
@@ -2374,6 +2375,8 @@ export function renderRepairPane(unit){
     stageHtml='<div class="dp-stage" role="note"><div class="dp-stage__detail">'+esc(unit.offsiteStageDetail)+'</div></div>';
   }
   var dtnaBtn=dtnaPullButtonHtml(unit, offsiteUrl);
+  // "Post to DTNA" only when the offsite is a DTNA case (dealer-visible, approval-gated).
+  var dtnaPostBtn=offsiteUrl?dtnaPostButtonHtml(unit, offsiteUrl):'';
   var offsiteHtml=offsiteUrl?
     '<div class="dp-section-title">Offsite Event</div>'+
     '<div class="dp-offsite-card">'+
@@ -2382,7 +2385,7 @@ export function renderRepairPane(unit){
         '<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(offsiteUrl)+'">'+esc(offsiteLabel||offsiteUrl)+' \u2197</a>'+
         (staleOffsite?'<span class="dp-offsite-card__stale">\u26a0 stale</span>':'')+
       '</div>'+
-      dtnaBtn+
+      dtnaBtn+dtnaPostBtn+
       (unit.dealerName?'<div class="dp-offsite-card__dealer">'+esc(unit.dealerName)+'</div>':'')+
       (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
     '</div>':(dtnaBtn?'<div class="dp-section-title">Offsite Event</div><div class="dp-offsite-card">'+dtnaBtn+'</div>':'');
@@ -2573,7 +2576,11 @@ export function renderRepairPane(unit){
         dBtn.textContent = 'Pulling\u2026';
         try {
           var r = await dt.pullUnit({ equipmentId: unit.equipmentId });
-          if (r && r.ok) {
+          if (r && r.ok && r.commentsStale) {
+            toast.show('warn', 'DTNA: comment read failed; kept the ' + (r.commentCount || 0) + ' comments from your last pull', 5000);
+          } else if (r && r.ok && r.commentsCode) {
+            toast.show('info', 'DTNA case pulled; no comments readable', 4000);
+          } else if (r && r.ok) {
             toast.show('success', 'DTNA: ' + (r.commentCount || 0) + ' comments pulled', 3000);
           } else if (r && r.code === 'DTNA_SIGNIN_REQUIRED') {
             toast.show('warn', 'DTNA sign-in needed \u2014 opening the sign-in window', 4000);
@@ -2591,6 +2598,21 @@ export function renderRepairPane(unit){
           dBtn.disabled = false;
           dBtn.textContent = '\u2b07 Pull DTNA';
         }
+      });
+    });
+
+    // "Post to DTNA" (Offsite Event card): opens the compose modal; the post itself
+    // always goes through the write gate's approval modal (dealer-visible).
+    document.querySelectorAll('[data-dtna-post]').forEach(function(pBtn) {
+      if (pBtn._dtnaPostWired) return;
+      pBtn._dtnaPostWired = true;
+      pBtn.addEventListener('click', function() {
+        var dt = (typeof window !== 'undefined' && window.dtna) || null;
+        if (!dt || typeof dt.postComment !== 'function') { toast.show('warn', 'DTNA is not available in this build', 4000); return; }
+        var caseId = pBtn.getAttribute('data-dtna-case');
+        import('./dtna-actions.js').then(function(m) {
+          m.openDtnaCommentModal(unit, { caseId: caseId }, { modal: modal, toast: toast, bridge: dt, confirm: function(msg) { return window.confirm(msg); } });
+        }).catch(function(e) { toast.show('error', 'Could not open: ' + ((e && e.message) || 'unknown'), 4000); });
       });
     });
   }, 100);

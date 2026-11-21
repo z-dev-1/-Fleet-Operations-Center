@@ -92,7 +92,8 @@ const STAGE_RE = {
   ready: /closed|complete|ready/i,
   // Decision 11 says /in-?repair|post-?repair/; a space is accepted too ('In Repair').
   repair: /in[-\s]?repair|post[-\s]?repair/i,
-  arrival: /arriv/i,
+  // Pre-Repair is the stepper's first stage (before Arrived): the arrival bucket.
+  arrival: /arriv|pre[-\s]?repair/i,
 };
 
 /**

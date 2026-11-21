@@ -92,7 +92,7 @@ describe('Pending Estimates upgrade overlay (mini DOM)', () => {
     expect(runScan).toHaveBeenCalledTimes(1);
     expect(runScan).toHaveBeenCalledWith({ force: false });
     expect(q('#pe-body').textContent).toContain('team as of 11/19 12:45');
-    expect(q('.pe-sub').textContent).toBe('RG + Volvo/PACCAR offsite \u00B7 team-wide pull \u00B7 DTNA excluded');
+    expect(q('.pe-sub').textContent).toBe('RG + Volvo/PACCAR + DTNA offsite \u00B7 team-wide pull');
     // bar sits between the head and the body
     const panel = q('.pe-panel');
     expect(panel.children.map((c) => c.className)).toEqual(['pe-head', 'pe-bar', 'pe-body']);
@@ -106,8 +106,8 @@ describe('Pending Estimates upgrade overlay (mini DOM)', () => {
     expect(q('[data-pe-filter="mismatch"]').getAttribute('type')).toBe('checkbox');
     expect(doc.querySelectorAll('#pe-bar [data-pe-owner]').map((b) => b.textContent)).toEqual(['Mine', 'Everyone', 'All']);
     const vendorOpts = doc.querySelectorAll('[data-pe-filter="vendor"] option').map((o) => o.textContent);
-    expect(vendorOpts).toEqual(['Any', 'Volvo', 'PACCAR', 'Other']);
-    expect(doc.querySelectorAll('[data-pe-filter="source"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'rg', 'decisiv', 'both']);
+    expect(vendorOpts).toEqual(['Any', 'Volvo', 'PACCAR', 'DTNA', 'Other']);
+    expect(doc.querySelectorAll('[data-pe-filter="source"] option').map((o) => o.getAttribute('value'))).toEqual(['', 'rg', 'decisiv', 'dtna', 'both']);
     expect(doc.querySelectorAll('[data-pe-filter="fas"] option').map((o) => o.textContent)).toEqual(['Any', 'Bob Roe', 'Jane Doe', 'Unknown']);
     expect(doc.querySelectorAll('[data-pe-filter="repairStatus"] option').map((o) => o.textContent))
       .toEqual(['Any', 'Complete (here)', 'Waiting', 'Working', 'Unknown']);

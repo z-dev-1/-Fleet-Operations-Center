@@ -5,7 +5,9 @@
  *
  * Works on dtnaCaseCache entries only: no network, no session. Requires only ./constants and ./join.
  * DTNA exposes no estimate amount and no approval status (discovery D2/D4): a DTNA offsite record has
- * total null, fleetStatus '' and the case status as repairStatus.
+ * total null, fleetStatus '' and the current stage of the portal's pipeline (constants.CASE_STAGES:
+ * Pre-Repair > Arrived > In-Repair > Post-Repair > Ready for Pickup > Closed) as repairStatus.
+ * Ready for Pickup and Closed count as done offsite.
  */
 const C = require('./constants');
 const J = require('./join');
@@ -22,32 +24,62 @@ const DTNA_VENDOR_RE = /FREIGHTLINER|DAIMLER/i;
 
 function _valid(e) { return !!e && typeof e === 'object' && C.CASE_ID_RE.test(_str(e.caseId)); }
 
-/** isCaseClosed(entry) -> the case status says closed / cancelled. */
-function isCaseClosed(entry) { return CLOSED_RE.test(_str(entry && entry.caseStatus)); }
+const READY_INDEX = C.CASE_STAGES.indexOf('Ready for Pickup');
+const CLOSED_INDEX = C.CASE_STAGES.indexOf('Closed');
 
-/** isCaseDone(entry) -> the dealer is done: closed / complete / ready for pickup, or stage 'ready'. */
+/**
+ * currentStage(entry) -> { name, index } on the portal's stage pipeline (constants.CASE_STAGES) | null.
+ * The stepper's 'Current Stage' step wins when the entry has one, then the case status.
+ */
+function currentStage(entry) {
+  const e = entry || {};
+  for (const s of (Array.isArray(e.steps) ? e.steps : [])) {
+    if (!s || typeof s !== 'object') continue;
+    if (/current/i.test(_str(s.status)) || /current stage/i.test(_str(s.name))) {
+      const st = C.caseStageOf(s.name);
+      if (st) return st;
+    }
+  }
+  return C.caseStageOf(e.caseStatus);
+}
+
+/** isCaseClosed(entry) -> the case is at the Closed stage, or its status says closed / cancelled. */
+function isCaseClosed(entry) {
+  const st = currentStage(entry);
+  return (st && st.index === CLOSED_INDEX) || CLOSED_RE.test(_str(entry && entry.caseStatus));
+}
+
+/**
+ * isCaseDone(entry) -> the dealer is done: stage Ready for Pickup or Closed. When the status is not on the
+ * pipeline, falls back to the status text (closed / complete / ready for pickup) or offsiteStage 'ready'.
+ */
 function isCaseDone(entry) {
   if (!entry) return false;
+  const st = currentStage(entry);
+  if (st) return st.index >= READY_INDEX;
   return DONE_RE.test(_str(entry.caseStatus)) || _str(entry.offsiteStage) === 'ready';
 }
 
-/** isAwaitingApproval(entry) -> no approval status exists, so: the case is not closed / complete / cancelled. */
+/** isAwaitingApproval(entry) -> no approval status exists, so: the case is not done, closed or cancelled. */
 function isAwaitingApproval(entry) {
   if (!_valid(entry)) return false;
-  return !isCaseClosed(entry) && !/complete/i.test(_str(entry.caseStatus));
+  return !isCaseClosed(entry) && !isCaseDone(entry) && !/complete/i.test(_str(entry.caseStatus));
 }
 
 /** offsiteRecord(entry) -> the Pending Estimates offsite record for a DTNA case (findings §5.3). */
 function offsiteRecord(entry) {
   const e = entry || {};
   const caseId = _str(e.caseId);
+  const st = currentStage(e);
   return {
     source: 'dtna',
     caseId,
     url: C.CASE_ID_RE.test(caseId) ? C.caseUrl(caseId) : '',
     dealerName: _str(e.dealerName),
     fleetStatus: '',
-    repairStatus: _str(e.caseStatus),
+    // The current stage on the portal's pipeline; the raw status when it is not a pipeline stage.
+    repairStatus: st ? st.name : _str(e.caseStatus),
+    stageIndex: st ? st.index : null,
     stage: _str(e.offsiteStage),
     stageStatus: '',
     stageSince: _str(e.stageSince),
@@ -135,4 +167,4 @@ function joinCasesToWrs(o) {
   return { byWr, unjoined };
 }
 
-module.exports = { isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, DTNA_VENDOR_RE };
+module.exports = { currentStage, isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, DTNA_VENDOR_RE };

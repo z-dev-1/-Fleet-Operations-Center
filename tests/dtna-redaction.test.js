@@ -41,7 +41,10 @@ function headers() {
 }
 function resp(status, body) { return { status, type: 'basic', headers: headers(), text: async () => body }; }
 
+let fetchCount = 0;
+let postCalls = [];
 async function fetchImpl(_url, init) {
+  fetchCount++;
   if (mode === 'reject') throw Object.assign(new Error('net::ERR_FAILED ' + SENTINEL_LOGIN_URL + ' ' + SENTINEL_COOKIE + ' ' + SENTINEL_TOKEN), { code: 'ERR_FAILED' });
   if (mode === 'redirect') return resp(302, '');
   if (mode === 'invalid') return resp(200, invalidSession());
@@ -58,6 +61,7 @@ async function fetchImpl(_url, init) {
   }
   if (method === 'getRepairOrderId') return resp(200, success(isMain ? RO_LIST : []));
   if (method === 'getCommentsByCaseRepairOrder') return resp(200, success(isMain ? SENT_COMMENTS : NO_RO_COMMENTS));
+  if (method === 'postComment') { postCalls.push(params); return resp(200, success({ Id: 'a1Agx0000000099AAA' })); }
   return resp(200, success(null));
 }
 
@@ -219,7 +223,105 @@ describe('DTNA redaction', () => {
   });
 });
 
+// ── Phase B: AI draft + the approval-gated, dealer-visible post (findings §4, §10) ──
+describe('DTNA redaction: draft-comment and post-comment', () => {
+  const gate = require('../src/writes/write-gate');
+  const POST_CFG = { classname: 'E2E_UTP_CommentController', params: { caseId: '$caseId', roId: '$repairOrderId', body: '$text' } };
+  const TEXT = 'Please share the ETA ' + SENTINEL_COMMENT;
+  let approvals; let prompts;
+
+  async function phaseBSetup({ configured = true } = {}) {
+    setup();
+    approvals = [];
+    prompts = [];
+    postCalls = [];
+    gate._setDepsForTest({
+      flags: { requireApproval: false },   // dealer-visible: must still be gated
+      notify: () => {},
+      log: (m) => logger.lines.push({ ns: 'write-gate', level: 'info', args: [m] }),
+    });
+    gate.setWindowGetter(() => ({ isDestroyed: () => false, webContents: { send: (ch, d) => { if (ch === 'relayWrites:approval-request') approvals.push(d); } } }));
+    require('../src/dtna/writes')._setDeps(configured ? { config: POST_CFG } : {});
+    require('../src/dtna/comment-draft')._setDepsForTest({ ask: async (p) => { prompts.push(p); return 'Could you share an ETA for the repair?'; } });
+    await signIn();
+    const p = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(p.ok).toBe(true);
+    logger.clear();
+    fetchCount = 0;
+  }
+
+  afterEach(() => { gate._setDepsForTest({}); gate.setWindowGetter(null); });
+
+  it('(a) draft-comment: the AI sees the cached thread, logs carry none of it, result keys are text-only', async () => {
+    await phaseBSetup();
+    const r = await call('dtna:draft-comment', { equipmentId: '122269', caseId: CASE_ID });
+    expect(Object.keys(r).sort()).toEqual(['aiDrafted', 'draft', 'droppedCount', 'noUpdate', 'ok']);
+    expect(r).toMatchObject({ ok: true, aiDrafted: true, draft: 'Could you share an ETA for the repair?' });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(SENTINEL_COMMENT);           // the DTNA thread went to the AI lane
+    expect(containsSentinel(prompts[0], AUTH_SENTINELS)).toBe(null);
+    expect(fetchCount).toBe(0);                              // drafting makes no DTNA call
+    expect(containsSentinel(logger.text())).toBe(null);
+    expect(logger.text()).not.toContain('Could you share');
+    expect(r).not.toHaveProperty('error');
+    expect(r).not.toHaveProperty('message');
+    expect(r).not.toHaveProperty('stack');
+  });
+
+  it('(b) post-comment: gated even with requireApproval:false; one aura POST after approval; logs carry len and caseTag only', async () => {
+    await phaseBSetup();
+    const pending = call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT, aiDrafted: true });
+    await until(() => approvals.length === 1);
+    expect(postCalls).toHaveLength(0);                       // nothing sent before approval
+    expect(approvals[0].kind).toBe('dtnaComment');
+    expect(approvals[0].preview).toContain('Visibility: VISIBLE TO THE DEALER (DTNA)');
+    expect(approvals[0].preview).toContain(TEXT);            // the user approves the exact text
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: approvals[0].id, commentId: 'a1Agx0000000099AAA' });
+    expect(postCalls).toHaveLength(1);
+    expect(postCalls[0]).toEqual({ caseId: CASE_ID, roId: 'a0Xgx0000012345AAA', body: TEXT });
+    const t = logger.text();
+    expect(t).toContain('len=' + TEXT.length);
+    expect(t).toContain(CASE_ID.slice(-6));
+    expect(t).not.toContain(SENTINEL_COMMENT);
+    expect(t).not.toContain('Please share the ETA');
+    assertClean([r]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('(c) unconfigured POST_COMMENT_PARAMS -> DTNA_POST_NOT_CONFIGURED, no approval prompt, zero fetches', async () => {
+    await phaseBSetup({ configured: false });
+    const r = await call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    expect(r).toEqual({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
+    expect(approvals).toHaveLength(0);
+    expect(fetchCount).toBe(0);
+    assertClean([r]);
+  });
+
+  it('(d) an Apex ERROR with sentinels -> send-failed with the DTNA_APEX_ERROR code only', async () => {
+    await phaseBSetup();
+    mode = 'apexError';
+    const pending = call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    await until(() => approvals.length === 1);
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toEqual({ ok: false, outcome: 'send-failed', id: approvals[0].id, code: 'DTNA_APEX_ERROR' });
+    expect(logger.text()).not.toContain('Please share the ETA');
+    assertClean([r]);
+    assertStoresHaveNoAuth();
+  });
+});
+
 describe('DTNA static guards', () => {
+  it('the Pending Estimates collector and src/dtna/pending.js never require a DTNA network module', () => {
+    const RE = /require\(\s*['"][^'"]*dtna\/(client|aura|session|capture)(\.js)?['"]\s*\)/;
+    for (const f of [['scrapers', 'pending_est_sources.js'], ['dtna', 'pending.js'], ['dtna', 'comment-draft.js']]) {
+      expect(fs.readFileSync(path.join(WT_ROOT, 'src', ...f), 'utf8'), f.join('/')).not.toMatch(RE);
+    }
+    expect(fs.readFileSync(path.join(WT_ROOT, 'src', 'dtna', 'pending.js'), 'utf8')).not.toMatch(/require\(\s*['"]\.\/(aura|client|session|capture|writes)['"]\s*\)/);
+  });
+
   const SRC = path.join(WT_ROOT, 'src');
   const files = (d) => {
     const out = [];

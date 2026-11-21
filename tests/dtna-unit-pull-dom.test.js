@@ -8,7 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../renderer/src/js/bridge.js', () => ({ notes: {}, ai: {}, aap: {}, relay: {}, vendor: {}, files: {} }));
 vi.mock('../renderer/src/js/bus.js', () => ({ default: { on() {}, emit() {}, off() {} } }));
 vi.mock('../renderer/src/js/state.js', () => ({ default: { get() {}, set() {}, on() {} } }));
-vi.mock('../renderer/src/js/components/toast.js', () => ({ default: { show() {} } }));
+const toastSpy = vi.hoisted(() => ({ show: vi.fn() }));
+vi.mock('../renderer/src/js/components/toast.js', () => ({ default: toastSpy }));
 vi.mock('../renderer/src/js/views/vendor-review-modal.js', () => ({ open() {} }));
 vi.mock('../renderer/src/js/views/dealer-wo-modal.js', () => ({ open() {} }));
 vi.mock('../renderer/src/js/views/wr-modal.js', () => ({ open() {}, readFileAsAttachment: async () => null }));
@@ -92,5 +93,82 @@ describe('renderRepairPane Offsite Event card', () => {
     const none = m.renderRepairPane(base({ make: 'Volvo' }));
     expect(none).not.toContain('dp-offsite-card');
     expect(none).not.toContain('data-dtna-pull');
+  });
+});
+
+describe('Post to DTNA button (Phase B)', () => {
+  let hadWindow;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    hadWindow = 'window' in globalThis;
+    if (!hadWindow) globalThis.window = {};
+    globalThis.window.dtna = { pullUnit: vi.fn(), postComment: vi.fn(), draftComment: vi.fn() };
+  });
+  afterEach(() => {
+    const dt = globalThis.window.dtna;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    expect(dt.pullUnit).not.toHaveBeenCalled();
+    expect(dt.postComment).not.toHaveBeenCalled();
+    expect(dt.draftComment).not.toHaveBeenCalled();
+    if (!hadWindow) delete globalThis.window; else delete globalThis.window.dtna;
+  });
+  const base = (extra) => ({ equipmentId: '122269', relaySynced: true, workRequestId: 'svc-1', vendor: 'Amerit',
+    _secondaryWRs: [], _plannedWRData: null, ...extra });
+
+  it('a DTNA-offsite unit shows both Pull DTNA and Post to DTNA; a Decisiv-offsite unit shows neither', () => {
+    const h = m.renderRepairPane(base({ offsiteShopEventUrl: DTNA, asistSource: 'dtna' }));
+    expect(h).toContain('data-dtna-pull="122269"');
+    expect(h).toContain('data-dtna-post="122269" data-dtna-case="500gx000002E4U5AAK"');
+    expect(h).toContain('\uD83D\uDCAC Post to DTNA</button>');
+    const dec = m.renderRepairPane(base({ offsiteShopEventUrl: DECISIV, make: 'Freightliner' }));
+    expect(dec).not.toContain('data-dtna-pull');
+    expect(dec).not.toContain('data-dtna-post');
+    // Freightliner without an offsite case: Pull only (there is no case to post to yet).
+    const fl = m.renderRepairPane(base({ make: 'Freightliner' }));
+    expect(fl).toContain('data-dtna-pull');
+    expect(fl).not.toContain('data-dtna-post');
+  });
+});
+
+describe('Pull DTNA toast when a comment read failed (Phase A review #1)', () => {
+  let prevDoc;
+  let prevWin;
+  beforeEach(() => { vi.useFakeTimers(); prevDoc = globalThis.document; prevWin = globalThis.window; toastSpy.show.mockClear(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); globalThis.document = prevDoc; globalThis.window = prevWin; });
+
+  async function clickPull(result) {
+    const { createMiniDocument } = await import('./fixtures/mini-dom.js');
+    const doc = createMiniDocument();
+    globalThis.document = doc;
+    globalThis.window = Object.assign({}, prevWin || {}, { dtna: { pullUnit: vi.fn(async () => result), login: vi.fn() } });
+    const unit = { equipmentId: '122269', relaySynced: true, workRequestId: 'svc-1', vendor: 'Amerit', _secondaryWRs: [], _plannedWRData: null,
+      offsiteShopEventUrl: DTNA, asistSource: 'dtna' };
+    const html = m.renderRepairPane(unit);
+    const host = doc.createElement('div');
+    host.innerHTML = html;
+    doc.body.appendChild(host);
+    try { vi.advanceTimersByTime(150); } catch (_) { /* other wiring in the timer may need more DOM */ }
+    const btn = doc.querySelector('[data-dtna-pull]');
+    btn.click();
+    vi.useRealTimers();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    return window.dtna.pullUnit;
+  }
+
+  it('commentsStale -> warn toast that the last-good comments were kept', async () => {
+    const pull = await clickPull({ ok: true, caseId: 'x', commentCount: 3, commentsStale: true, commentsCode: 'DTNA_APEX_ERROR' });
+    expect(pull).toHaveBeenCalledTimes(1);
+    expect(toastSpy.show).toHaveBeenCalledWith('warn', 'DTNA: comment read failed; kept the 3 comments from your last pull', 5000);
+  });
+
+  it('commentsCode without a kept thread -> info toast', async () => {
+    await clickPull({ ok: true, caseId: 'x', commentCount: 0, commentsCode: 'DTNA_APEX_ERROR' });
+    expect(toastSpy.show).toHaveBeenCalledWith('info', 'DTNA case pulled; no comments readable', 4000);
+  });
+
+  it('a clean pull keeps the existing success toast', async () => {
+    await clickPull({ ok: true, caseId: 'x', commentCount: 4 });
+    expect(toastSpy.show).toHaveBeenCalledWith('success', 'DTNA: 4 comments pulled', 3000);
   });
 });

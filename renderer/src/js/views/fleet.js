@@ -702,7 +702,7 @@ export function init(container) {
         <span id="fleet-count" class="fleet-table__count">Loading...</span>
         <button id="fleet-heatmap-toggle" class="fleet-heatmap-btn" title="Toggle Risk Heatmap">\uD83C\uDF21\uFE0F Heatmap</button>
         <button id="fleet-breach-toggle" class="fleet-breach-btn" title="Toggle SLA Breach Forecast">\u26A0\uFE0F Breach</button>
-        <button id="fleet-pending-est" class="fleet-heatmap-btn" title="Estimates submitted, awaiting approval (your domiciles, DTNA excluded)">\u23F3 Pending Est <span id="fleet-pending-est-count"></span></button>
+        <button id="fleet-pending-est" class="fleet-heatmap-btn" title="Estimates submitted, awaiting approval (your domiciles; RG + Volvo/PACCAR + DTNA)">\u23F3 Pending Est <span id="fleet-pending-est-count"></span></button>
         <button id="fleet-dtna-pull" class="fleet-heatmap-btn" title="Pull DTNA Service Tracker cases to TSV / Excel (runs only when you press Start)">\uD83D\uDE9A DTNA Pull</button>
         <button id="fleet-export-csv" class="fleet-export-btn" title="Export to CSV">\uD83D\uDCE5 CSV</button>
         <button id="fleet-export-xlsx" class="fleet-export-btn fleet-export-btn--xl" title="Export to Excel">\uD83D\uDCCA Excel</button>
@@ -771,7 +771,7 @@ export function init(container) {
     });
   }
 
-  // Pending Estimates overlay (estimates submitted, awaiting approval; DTNA excluded).
+  // Pending Estimates overlay (estimates submitted, awaiting approval; RG + Volvo/PACCAR + DTNA).
   const peBtn = document.getElementById('fleet-pending-est');
   if (peBtn) {
     peBtn.addEventListener('click', () => {

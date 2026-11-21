@@ -1,12 +1,15 @@
 /**
  * pending-estimates-panel.js — Fleet tab "⏳ Pending Estimates" overlay.
  *
- * Lists the user's work orders whose estimate is submitted and awaiting approval
- * (DTNA excluded), oldest-submitted first, from the rows already in the fleet slice.
+ * Lists the user's work orders whose estimate is submitted and awaiting approval,
+ * oldest-submitted first, from the rows already in the fleet slice.
  * All HTML comes from ./pending-estimates-logic.js.
  *
  * Upgrade: the team-wide scan (window.pendingEst.get / .scan -> src/ipc/pending-est.js)
- * adds RG + Volvo/PACCAR offsite rows for the whole team. The Owner control
+ * adds RG + Volvo/PACCAR + DTNA offsite rows for the whole team. DTNA rows come from
+ * the DTNA case cache only: open, auto-scan and Refresh never make a DTNA call. The
+ * header "Pull DTNA" button (window.dtna.bulkPull, user click only) refreshes that
+ * cache, then runs one forced team scan. The Owner control
  * (Mine · Everyone · All, default Mine) and the filter bar only filter what is shown;
  * they never change the scan request. On open the cached scan (get) renders first; if
  * its asOf is 15+ min old one background non-forced scan runs and repaints on resolve.
@@ -25,7 +28,7 @@
  * modal is open, so the first Escape closes the modal and the next one the overlay.
  *
  * The controller takes injected { doc, bus, getFleet, getScan, runScan, openUrl,
- * openEscalation, escalationDeps, modal, navigate } so the DOM tests drive it without
+ * openEscalation, escalationDeps, modal, navigate, dtna } so the DOM tests drive it without
  * jsdom (__test__.createController).
  */
 import bus from '../bus.js';
@@ -52,6 +55,7 @@ export function openPendingEstimatesPanel({ returnFocusEl } = {}) {
     escalationDeps: { modal, bridge: w.relayWrites, aapApi: w.aapApi, confirm: (m) => w.confirm(m), toast },
     navigate: (id) => bus.emit('navigate:unit', id),
     toast,
+    dtna: w.dtna || null,
     returnFocusEl,
     onClose: () => { _active = null; },
   });
@@ -64,6 +68,7 @@ const FILTER_NAMES = ['source', 'fleetStatus', 'repairStatus', 'vendor', 'fas', 
 const SCAN_TTL_MS = 15 * 60 * 1000;
 const REFRESH_LABEL = '\u21BB Refresh team-wide';
 const REFRESHING_LABEL = '\u21BB Refreshing\u2026';
+const DTNA_PULL_LABEL = '\u2B07 Pull DTNA';
 
 function createController(deps) {
   const { doc, returnFocusEl, onClose } = deps;
@@ -74,13 +79,17 @@ function createController(deps) {
   const runScan = typeof deps.runScan === 'function' ? deps.runScan : null;
   const mdl = deps.modal || { isOpen: () => false };
   const tst = deps.toast || { show() {} };
+  // DTNA bulk pull: only from the header button (a user click). Needs progress events
+  // to know when the pull finished.
+  const dtna = deps.dtna && typeof deps.dtna.bulkPull === 'function' && typeof deps.dtna.onProgress === 'function' ? deps.dtna : null;
+  const pull = { active: false, done: 0, total: 0, unsub: null };
 
   let overlay = null; let backdrop = null; let bodyEl = null; let barEl = null; let headEl = null;
   let unsub = null; let closed = false; let opening = false;
   let byKey = new Map(); let byWr = new Map();
   let filters = L.defaultFilters(); // Owner = Mine on open
   let sort = { key: 'default', dir: 'asc' };
-  const scan = { rows: [], asOf: null, cached: false, scanning: false, error: null, excludedDtna: 0 };
+  const scan = { rows: [], asOf: null, cached: false, scanning: false, error: null, excludedDtna: 0, dtnaAsOf: null };
   let loading = Promise.resolve();
 
   function render() {
@@ -101,13 +110,79 @@ function createController(deps) {
     bodyEl.innerHTML = L.overlayHtml({ items: shown, excludedDtna: Math.max(res.excludedDtna, scan.excludedDtna || 0), asOf: f.syncedAt,
       cached: !!(f.usedCache || f.stale), filtered: all.length > 0, sort,
       meta: { shown: shown.length, total: all.length, mismatch: team ? mismatch : undefined, teamAsOf: scan.asOf,
-        teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error } });
+        teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error, dtnaAsOf: scan.dtnaAsOf } });
     wireIdLinks(bodyEl, (u, o) => (typeof deps.openUrl === 'function' ? deps.openUrl(u, o) : undefined));
     const btn = headEl && typeof headEl.querySelector === 'function' ? headEl.querySelector('[data-pe-refresh]') : null;
     if (btn) {
       btn.disabled = !!scan.scanning;
       btn.setAttribute('aria-busy', scan.scanning ? 'true' : 'false');
       btn.textContent = scan.scanning ? REFRESHING_LABEL : REFRESH_LABEL;
+    }
+    renderPullBtn();
+  }
+
+  function renderPullBtn() {
+    const b = headEl && typeof headEl.querySelector === 'function' ? headEl.querySelector('[data-pe-dtna-pull]') : null;
+    if (!b) return;
+    b.disabled = pull.active;
+    b.setAttribute('aria-busy', pull.active ? 'true' : 'false');
+    b.textContent = pull.active ? 'Pulling DTNA\u2026 ' + pull.done + '/' + (pull.total || '?') : DTNA_PULL_LABEL;
+  }
+
+  function stopPull() {
+    pull.active = false;
+    if (typeof pull.unsub === 'function') { try { pull.unsub(); } catch (_) { /* gone */ } }
+    pull.unsub = null;
+    if (!closed) renderPullBtn();
+  }
+
+  function dtnaSignIn(msg) {
+    tst.show('warn', msg || 'DTNA sign-in needed \u2014 opening the sign-in window', 4000);
+    try { if (typeof dtna.login === 'function') Promise.resolve(dtna.login()).catch(() => {}); } catch (_) { /* no login */ }
+  }
+
+  // "Pull DTNA": one user-initiated bulk pull (with comments), then exactly one forced
+  // team scan so the DTNA rows read the fresh cache. Ignored while a pull is running.
+  async function pullDtna() {
+    if (!dtna || pull.active || closed) return;
+    pull.active = true; pull.done = 0; pull.total = 0;
+    renderPullBtn();
+    let jobId = null;
+    const early = [];
+    let finish;
+    const finished = new Promise((r) => { finish = r; });
+    const onEv = (ev) => {
+      if (!ev || typeof ev !== 'object') return;
+      if (jobId == null) { early.push(ev); return; }
+      if (ev.jobId !== jobId) return;
+      pull.done = Number(ev.done) || 0;
+      pull.total = Number(ev.total) || 0;
+      if (ev.finished) { finish(ev); return; }
+      if (!closed) renderPullBtn();
+    };
+    try { pull.unsub = dtna.onProgress(onEv); } catch (_) { pull.unsub = null; }
+    let r;
+    try { r = await dtna.bulkPull({ includeComments: true }); } catch (_) { r = { ok: false, code: 'DTNA_INTERNAL' }; }
+    if (!r || !r.ok || !r.jobId) {
+      stopPull();
+      const code = String((r && r.code) || 'unknown');
+      if (code === 'DTNA_BUSY') tst.show('warn', 'A DTNA pull is already running', 4000);
+      else if (code === 'DTNA_SIGNIN_REQUIRED') dtnaSignIn();
+      else tst.show('warn', 'DTNA pull failed (' + code + ')', 4000);
+      return;
+    }
+    jobId = r.jobId;
+    early.splice(0).forEach(onEv);
+    const fin = await finished;
+    stopPull();
+    if (closed) return;
+    if (fin.code === 'DTNA_SIGNIN_REQUIRED') dtnaSignIn();
+    else tst.show(fin.failed ? 'warn' : 'success', 'DTNA: ' + (Number(fin.done) || 0) + ' cases pulled (' + (Number(fin.failed) || 0) + ' failed)', 4000);
+    if ((Number(fin.done) || 0) > 0) {
+      try { await loading; } catch (_) { /* scan errors are shown in meta */ }
+      if (closed) return;
+      loading = doScan(true);
+      await loading;
     }
   }
 
@@ -126,8 +201,9 @@ function createController(deps) {
     head.className = 'pe-head';
     headEl = head;
     head.innerHTML = '<div id="pe-title" class="pe-title">\u23F3 Pending Estimates</div>' +
-      '<span class="pe-sub">RG + Volvo/PACCAR offsite \u00B7 team-wide pull \u00B7 DTNA excluded</span>' +
+      '<span class="pe-sub">RG + Volvo/PACCAR + DTNA offsite \u00B7 team-wide pull</span>' +
       '<button type="button" class="pe-refresh" data-pe-refresh="1">' + REFRESH_LABEL + '</button>' +
+      (dtna ? '<button type="button" class="pe-refresh" data-pe-dtna-pull="1" title="Pull every DTNA Service Tracker case (with comments), then refresh">' + DTNA_PULL_LABEL + '</button>' : '') +
       '<button type="button" class="pe-close" data-pe-close="1" aria-label="Close">\u00D7</button>';
     barEl = doc.createElement('div');
     barEl.id = 'pe-bar';
@@ -153,6 +229,7 @@ function createController(deps) {
       scan.asOf = s.asOf || null;
       scan.cached = !!s.cached;
       scan.excludedDtna = Number(s.excludedDtna) || 0;
+      scan.dtnaAsOf = s.dtnaAsOf || null;
     }
     // Per-case Decisiv failures (e.g. an expired session) explain blank offsite columns.
     const dec = (Array.isArray(s.errors) ? s.errors : [])
@@ -223,6 +300,11 @@ function createController(deps) {
       loading = doScan(true);
       return loading;
     }
+    const dp = pick('[data-pe-dtna-pull]');
+    if (dp) {
+      if (dp.disabled || pull.active) return;
+      return pullDtna();
+    }
     const srt = pick('[data-pe-sort]');
     if (srt) {
       const k = srt.getAttribute('data-pe-sort');
@@ -270,6 +352,8 @@ function createController(deps) {
     closed = true;
     if (typeof unsub === 'function') unsub();
     unsub = null;
+    if (typeof pull.unsub === 'function') { try { pull.unsub(); } catch (_) { /* gone */ } }
+    pull.unsub = null;
     doc.removeEventListener('keydown', onKeydown, true);
     if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
     overlay = null; bodyEl = null; barEl = null; headEl = null;

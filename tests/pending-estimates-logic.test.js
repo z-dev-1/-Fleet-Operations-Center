@@ -11,7 +11,7 @@ const iso = (ms) => new Date(ms).toISOString();
 const ASSET = (id) => 'https://aap-na.corp.amazon.com/v2/asset/AAID-' + id;
 const wr = (n) => '0a1b2c3d-1111-2222-3333-' + String(n).padStart(12, '0');
 
-// A..J per the plan: only A, B, I, J are pending + non-DTNA.
+// A..J per the plan: A, B, I, J are pending non-DTNA; F, G, H are pending DTNA (listed since Phase B).
 const A = { equipmentId: 'A100', workRequestId: wr(1), assetUrl: ASSET('A'), vendor: 'TA', dealerName: 'TA Petro Gary',
   serviceState: 'Work in progress', estimateStatus: 'submitted', estimateSubmittedAt: iso(NOW - 30 * H),
   estimateSubmittedAmount: 4200, extractedAt: iso(NOW - 30 * H), created: iso(NOW - 5 * 24 * H) };
@@ -38,6 +38,8 @@ const J = { equipmentId: 'J010', workRequestId: wr(10), assetUrl: ASSET('J'), ve
   estimateStatus: 'submitted', estimateSubmittedAt: iso(NOW - (2 * H + 5 * 60000)), estimateSubmittedAmount: 87.18,
   scrapedAt: iso(NOW - 10 * 60000), extractedAt: iso(NOW - 20 * 60000), created: iso(NOW - 24 * H) };
 const FLEET = [A, B, C, D, E, F, G, Hrow, I, J];
+// The team-merge tests below run on the non-DTNA rows; DTNA merge rows have their own tests.
+const FLEET_NO_DTNA = [A, B, C, D, E, I, J];
 const SYNCED = iso(NOW - 5 * 60000);
 const run = (rows, synced = SYNCED) => L.collectPendingEstimates(rows, { now: NOW, fleetSyncedAt: synced });
 
@@ -45,14 +47,14 @@ describe('collectPendingEstimates', () => {
   const res = run(FLEET);
   const by = (u) => res.items.find((x) => x.unitId === u);
 
-  it('lists only submitted-not-approved, non-DTNA WRs; approved/rejected/no-estimate/closed are out', () => {
-    expect(res.items.map((x) => x.unitId).sort()).toEqual(['A100', 'B200', 'I900', 'J010']);
+  it('lists only submitted-not-approved WRs (DTNA included); approved/rejected/no-estimate/closed are out', () => {
+    expect(res.items.map((x) => x.unitId).sort()).toEqual(['A100', 'B200', 'F600', 'G700', 'H800', 'I900', 'J010']);
     expect(res.items.find((x) => x.wrId === wr(29))).toBeUndefined();
   });
 
-  it('DTNA pending ests are excluded (case source, Freightliner vendor, dtna URL) and counted', () => {
-    expect(res.excludedDtna).toBe(3);
-    for (const u of ['F600', 'G700', 'H800']) expect(by(u)).toBeUndefined();
+  it('DTNA pending ests are listed (case source, Freightliner vendor, dtna URL); excludedDtna stays 0', () => {
+    expect(res.excludedDtna).toBe(0);
+    for (const u of ['F600', 'G700', 'H800']) expect(by(u)).toBeTruthy();
     expect(L.isDtna({ vendor: 'Freightliner (DAIMLER)' })).toBe(true);
     expect(L.isDtna({ savedOffsiteUrl: 'https://dtna.my.site.com/Servicetracker/s/case/x' })).toBe(true);
     expect(L.isDtna({ vendor: 'TA' }, { vendor: 'Rush' })).toBe(false);
@@ -67,7 +69,7 @@ describe('collectPendingEstimates', () => {
   });
 
   it('sorts oldest-submitted first, then unknown-time rows by longest down', () => {
-    expect(res.items.map((x) => x.unitId)).toEqual(['A100', 'J010', 'B200', 'I900']);
+    expect(res.items.map((x) => x.unitId)).toEqual(['G700', 'F600', 'A100', 'J010', 'B200', 'I900', 'H800']);
   });
 
   it('amount: fact-set submitted amount, else AAP pending cost; secondary WR uses its totalCost', () => {
@@ -116,8 +118,9 @@ describe('overlay HTML', () => {
     const res = run(FLEET);
     const h = L.overlayHtml({ items: res.items, excludedDtna: res.excludedDtna, asOf: '2026-11-19T18:09:21Z', cached: true });
     expect(h).toContain('as of 11/19 13:09 (cached)');
-    expect(h).toContain('4 pending');
-    expect(h).toContain('3 DTNA excluded');
+    expect(h).toContain('7 pending');
+    expect(h).toContain('DTNA not pulled');
+    expect(h).not.toContain('DTNA excluded');
     expect(L.overlayHtml({ items: [], excludedDtna: 0, asOf: null })).toContain('No pending estimates in your domiciles.');
     expect(L.overlayHtml({ items: [], asOf: null })).toContain('as of unknown');
   });
@@ -158,7 +161,7 @@ const S6 = scanRow({ key: 'wr:' + wr(54), workRequestId: wr(54), equipmentId: 'T
 const S7 = scanRow({ key: 'wr:' + wr(55), workRequestId: wr(55), equipmentId: 'T550', fas: 'Jane Doe', source: 'both', rgPending: true,
   offsiteShopEventUrl: VOLVO_URL('550'), offsite: off(DONE), offsiteDone: true, statusMismatch: true });
 const SCAN = [S1, S2, S3, S4, S5, S6, S7];
-const merged = () => L.mergeTeamRows(run(FLEET).items, SCAN, { now: NOW, asOf: iso(NOW - 15 * 60000) });
+const merged = () => L.mergeTeamRows(run(FLEET_NO_DTNA).items, SCAN, { now: NOW, asOf: iso(NOW - 15 * 60000) });
 const ids = (list) => list.map((x) => x.unitId).sort();
 const ALL = (f) => L.applyFilters(merged(), Object.assign({ owner: 'all' }, f));
 
@@ -211,7 +214,7 @@ describe('mergeTeamRows', () => {
   });
 
   it('without scan rows it returns the v1 items (all mine, RG)', () => {
-    const m = L.mergeTeamRows(run(FLEET).items, null, { now: NOW });
+    const m = L.mergeTeamRows(run(FLEET_NO_DTNA).items, null, { now: NOW });
     expect(ids(m)).toEqual(['A100', 'B200', 'I900', 'J010']);
     expect(m.every((x) => x.mine === true && x.src === 'rg')).toBe(true);
   });
@@ -331,5 +334,71 @@ describe('sortItems / mismatch badge / new columns', () => {
     expect(h).toContain('4 done offsite / RG open');
     expect(h).toContain('team as of 11/19 12:45 (cached)');
     expect(h).toContain('scanning\u2026');
+    expect(h).toContain('DTNA not pulled');
+    expect(h).not.toContain('DTNA excluded');
+    expect(L.metaHtml({ asOf: null, dtnaAsOf: '2026-11-19T17:30:00Z' })).toContain('DTNA as of 11/19 12:30');
+  });
+});
+
+// ── DTNA rows (Phase B): Total '—', status from the case, Source DTNA, case chip ──
+describe('DTNA in the merge', () => {
+  const CASE = '500gx000002E4U5AAK';
+  const DURL = 'https://dtna.my.site.com/Servicetracker/s/case/' + CASE + '/detail';
+  const dOff = { source: 'dtna', caseId: CASE, url: DURL, dealerName: 'HORWITH FREIGHTLINER', fleetStatus: '', repairStatus: 'Arrived',
+    stage: 'arrival', stageStatus: '', stageSince: '', total: null, totalSource: 'none', updatedAt: iso(NOW - 2 * H), scrapedAt: iso(NOW - H), roNumber: 'R101048154', ok: true };
+  const D1 = scanRow({ key: 'wr:' + wr(70), workRequestId: wr(70), equipmentId: 'D700', aaid: 'AAID-D7', vendor: 'Freightliner', vendorKind: 'dtna',
+    source: 'dtna', offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaRepairOrderNo: 'R101048154' });
+  const D2 = scanRow({ key: 'dtna:' + CASE.replace('AAK', 'AAL'), workRequestId: '', equipmentId: 'D710', vendorKind: 'dtna', source: 'dtna', rgOpen: false, notInRg: true,
+    offsiteShopEventUrl: DURL.replace(CASE, CASE.replace('AAK', 'AAL')), offsite: Object.assign({}, dOff, { caseId: CASE.replace('AAK', 'AAL') }),
+    dtnaCaseId: CASE.replace('AAK', 'AAL'), dtnaRepairOrderNo: '' });
+  const D3 = scanRow({ key: 'wr:' + wr(71), workRequestId: wr(71), equipmentId: 'D720', vendorKind: 'dtna', source: 'both', rgPending: true, rgPendingCost: 300,
+    offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaRepairOrderNo: 'R2' });
+  const m = () => L.mergeTeamRows([], [D1, D2, D3], { now: NOW });
+
+  it('Total is null and renders a dash with the hint; Repair Status is the case status; Source DTNA / both', () => {
+    const d = m().find((x) => x.unitId === 'D700');
+    expect(d).toMatchObject({ src: 'dtna', vendorKind: 'dtna', total: null, fleetStatus: '', repairStatus: 'Arrived' });
+    const h = L.rowHtml(d);
+    expect(h).toContain('<td class="pe-amt" title="DTNA does not expose an estimate amount">\u2014</td>');
+    expect(h).toContain('<td>DTNA</td>');
+    expect(h).toContain('<td>Arrived<div class="pe-sub2">arrival</div></td>');
+    expect(h).not.toContain('$');
+    expect(L.rowHtml(m().find((x) => x.unitId === 'D720'))).toContain('<td>both</td>');
+  });
+
+  it('the Vendor WO chip is the RO number linked to the case URL; no RO -> no DTNA chip', () => {
+    const d = m().find((x) => x.unitId === 'D700');
+    expect(d.vendorWo).toEqual({ id: 'R101048154', url: DURL, kind: 'dtna' });
+    expect(L.rowHtml(d)).toContain('data-id-link="' + DURL + '"');
+    expect(m().find((x) => x.unitId === 'D710').vendorWo).toBeNull();
+  });
+
+  it('a v1 DTNA item merged with its scan row takes the DTNA chip; vendorKind dtna from the fleet row', () => {
+    const fleetRow = Object.assign({}, G, { workRequestId: wr(70) });
+    const res = L.mergeTeamRows(run([fleetRow, F, Hrow]).items, [D1], { now: NOW });
+    const g = res.find((x) => x.unitId === 'G700');
+    expect(g).toMatchObject({ src: 'dtna', vendorWo: { kind: 'dtna', id: 'R101048154' } });
+    expect(res.find((x) => x.unitId === 'F600').vendorKind).toBe('dtna');
+    expect(res.find((x) => x.unitId === 'H800').vendorKind).toBe('dtna');
+  });
+
+  it('Vendor and Source filters take dtna; the bar lists DTNA', () => {
+    expect(ids(L.applyFilters(m(), { owner: 'all', vendor: 'dtna' }))).toEqual(['D700', 'D710', 'D720']);
+    expect(ids(L.applyFilters(m(), { owner: 'all', source: 'dtna' }))).toEqual(['D700', 'D710']);
+    const bar = L.filterBarHtml({}, L.filterOptions(m()), {});
+    expect(bar).toContain('<option value="dtna">DTNA</option>');
+    expect((bar.match(/<option value="dtna">DTNA<\/option>/g) || []).length).toBe(2);
+  });
+
+  it('Repair Status options list DTNA stages in pipeline order, ahead of other values', () => {
+    const at = (u, s) => scanRow(Object.assign({}, D1, { key: 'wr:' + u, workRequestId: '', equipmentId: u, offsite: Object.assign({}, dOff, { repairStatus: s }) }));
+    const list = L.mergeTeamRows([], [at('X1', 'Closed'), at('X2', 'Arrived'), at('X3', 'Waiting'), at('X4', 'In-Repair'), at('X5', 'Ready for Pickup')], { now: NOW });
+    expect(L.filterOptions(list).repairStatus).toEqual(['Arrived', 'In-Repair', 'Ready for Pickup', 'Closed', 'Waiting']);
+    expect(L.DTNA_STAGES).toEqual(['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed']);
+  });
+
+  it('a done DTNA case keeps the scan mismatch flag', () => {
+    const done = scanRow(Object.assign({}, D1, { offsiteDone: true, statusMismatch: true, offsite: Object.assign({}, dOff, { repairStatus: 'Closed' }) }));
+    expect(L.mergeTeamRows([], [done], { now: NOW })[0]).toMatchObject({ offsiteDone: true, statusMismatch: true, repairStatus: 'Closed' });
   });
 });

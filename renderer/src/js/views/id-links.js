@@ -59,13 +59,17 @@ export function estimateIdFromUrl(url) {
   const m = _EST_RE.exec(String(url || ''));
   return m ? m[1] : '';
 }
+const _DTNA_CASE_RE = /^https:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/500[A-Za-z0-9]{15}/;
 function _isDecisivHost(url) {
   try { return new URL(url).hostname.toLowerCase().endsWith('.decisiv.net'); } catch (_) { return false; }
 }
 
 // Vendor WO of WO object `o` (unit, or planned/secondary WR of `unit`):
 // owned Decisiv estimate URL -> { id: estimate id, url, kind: 'decisiv' };
+// else (Pending Estimates scan rows only) dtnaRepairOrderNo + an owned DTNA case URL ->
+// { id: RO number (or case number), url: case URL, kind: 'dtna' };
 // else vendorWorkOrderId -> { id, url: first safe owned offsite URL or '', kind: 'rg' }; else null.
+// Fleet rows never carry dtnaRepairOrderNo, so the main-side mirror is unchanged for them.
 // "Owned" keeps the _offsiteWrId rule; a planned/secondary WR owns the unit's offsite
 // when unit._offsiteWrId === its workRequestId. Mirrored main-side in relay-action-draft.js.
 export function vendorWoOf(o, unit) {
@@ -80,6 +84,11 @@ export function vendorWoOf(o, unit) {
   for (const c of list) {
     const id = estimateIdFromUrl(c);
     if (id && isSafeIdLinkUrl(c) && _isDecisivHost(c)) return { id, url: c, kind: 'decisiv' };
+  }
+  const dtnaNo = String(w.dtnaRepairOrderNo == null ? '' : w.dtnaRepairOrderNo).trim();
+  if (dtnaNo) {
+    const c = list.find((x) => _DTNA_CASE_RE.test(x) && isSafeIdLinkUrl(x));
+    if (c) return { id: dtnaNo, url: c, kind: 'dtna' };
   }
   const vwo = String(w.vendorWorkOrderId == null ? '' : w.vendorWorkOrderId).trim();
   if (vwo) return { id: vwo, url: list.find((c) => isSafeIdLinkUrl(c)) || '', kind: 'rg' };

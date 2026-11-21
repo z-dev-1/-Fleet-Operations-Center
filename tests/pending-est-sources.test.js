@@ -423,6 +423,15 @@ describe('pending_est_sources: DTNA (findings §6b, §5.3)', () => {
     expect(scan.counts.mismatch).toBe(2);
   });
 
+  it('Repair Status is the current pipeline stage; Ready for Pickup on an open WR is a mismatch', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry({ caseStatus: 'Ready for Pick Up', offsiteStage: 'ready',
+      steps: [{ name: 'In-Repair', status: 'Stage Complete', at: '' }, { name: 'Ready for Pickup', status: 'Current Stage', at: '' }] })] });
+    const scan = await src.scanTeamPending({}, deps);
+    const g = byKey(scan)['wr:WR_G'];
+    expect(g.offsite).toMatchObject({ repairStatus: 'Ready for Pickup', stageIndex: 4, total: null });
+    expect(g).toMatchObject({ offsiteDone: true, statusMismatch: true });
+  });
+
   it('dtnaAsOf is the newest pulledAt', async () => {
     const { deps } = makeDeps({ loadDtnaCases: () => [
       dtnaEntry({ caseId: DCASE(5), pulledAt: '2026-11-19T10:00:00.000Z' }),
