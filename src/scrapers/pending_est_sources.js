@@ -300,6 +300,10 @@ async function _scan(opts, d) {
       rec.ok = false;
       rec.error = pageErr;
     }
+    // A failed or empty scrape (e.g. an expired Decisiv session) keeps the last good
+    // record and its scrapedAt, so the stalest-first order retries it next scan.
+    const keep = rec.ok === false && hit && hit.ok !== false ? hit : null;
+    if (keep) rec = Object.assign({}, keep, { lastError: rec.error || pageErr || 'DECISIV_PARSE_EMPTY', lastAttemptAt: nowIso });
     const fr = fleetByEst.get(estId);
     if (fr && fr.offsiteStage && _ageOk(fr._stageReadAt, nowMs, STAGE_FRESH_MS)) {
       rec = d.mergeCaseStatus(rec, { ok: true, stage: fr.offsiteStage, status: fr.offsiteStageDetail || '', since: fr.offsiteStageSince || '' }, { now: nowIso });
@@ -310,7 +314,7 @@ async function _scan(opts, d) {
         else err('getCaseStatusSummary', (s && s.code) || 'DECISIV_API_ERROR');
       } catch (e) { err('getCaseStatusSummary', codeOf(e, 'DECISIV_API_ERROR')); }
     }
-    rec = Object.assign({}, rec, { estimateId: estId, url: rec.url || url, scrapedAt: nowIso });
+    rec = Object.assign({}, rec, { estimateId: estId, url: rec.url || url, scrapedAt: keep ? keep.scrapedAt : nowIso });
     caseCache[estId] = rec;
     cases.set(estId, rec);
   }

@@ -10274,6 +10274,7 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 .pe-overlay .pe-panel { width: min(1440px, 98vw); }
 .pe-refresh { margin-left: auto; background: none; border: 1px solid var(--bdr, #30363d); border-radius: 6px; color: var(--txt2, #8b949e); font-size: 10px; padding: 3px 8px; cursor: pointer; }
 .pe-refresh:hover { color: var(--txt, #e6edf3); }
+.pe-refresh:disabled { opacity: 0.6; cursor: progress; }
 .pe-refresh + .pe-close { margin-left: 4px; }
 .pe-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--bdr, #30363d); font-size: 10px; color: var(--txt2, #8b949e); }
 .pe-owner { display: inline-flex; border: 1px solid var(--bdr, #30363d); border-radius: 6px; overflow: hidden; }

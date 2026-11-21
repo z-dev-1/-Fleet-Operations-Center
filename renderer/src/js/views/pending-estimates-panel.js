@@ -8,7 +8,10 @@
  * Upgrade: the team-wide scan (window.pendingEst.get / .scan -> src/ipc/pending-est.js)
  * adds RG + Volvo/PACCAR offsite rows for the whole team. The Owner control
  * (Mine · Everyone · All, default Mine) and the filter bar only filter what is shown;
- * they never change the scan request. Without window.pendingEst the overlay shows the
+ * they never change the scan request. On open the cached scan (get) renders first; if
+ * its asOf is 15+ min old one background non-forced scan runs and repaints on resolve.
+ * The Refresh button runs a forced scan and is disabled while any scan is in flight.
+ * There is no timer or poll. Without window.pendingEst the overlay shows the
  * v1 fleet-slice rows only.
  *
  * Escalate reuses the existing WR-card Escalate modal (relay-actions.js
@@ -58,6 +61,9 @@ export function openPendingEstimatesPanel({ returnFocusEl } = {}) {
 }
 
 const FILTER_NAMES = ['source', 'fleetStatus', 'repairStatus', 'vendor', 'fas', 'mismatch'];
+const SCAN_TTL_MS = 15 * 60 * 1000;
+const REFRESH_LABEL = '\u21BB Refresh team-wide';
+const REFRESHING_LABEL = '\u21BB Refreshing\u2026';
 
 function createController(deps) {
   const { doc, returnFocusEl, onClose } = deps;
@@ -69,7 +75,7 @@ function createController(deps) {
   const mdl = deps.modal || { isOpen: () => false };
   const tst = deps.toast || { show() {} };
 
-  let overlay = null; let backdrop = null; let bodyEl = null; let barEl = null;
+  let overlay = null; let backdrop = null; let bodyEl = null; let barEl = null; let headEl = null;
   let unsub = null; let closed = false; let opening = false;
   let byKey = new Map(); let byWr = new Map();
   let filters = L.defaultFilters(); // Owner = Mine on open
@@ -97,6 +103,12 @@ function createController(deps) {
       meta: { shown: shown.length, total: all.length, mismatch: team ? mismatch : undefined, teamAsOf: scan.asOf,
         teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error } });
     wireIdLinks(bodyEl, (u, o) => (typeof deps.openUrl === 'function' ? deps.openUrl(u, o) : undefined));
+    const btn = headEl && typeof headEl.querySelector === 'function' ? headEl.querySelector('[data-pe-refresh]') : null;
+    if (btn) {
+      btn.disabled = !!scan.scanning;
+      btn.setAttribute('aria-busy', scan.scanning ? 'true' : 'false');
+      btn.textContent = scan.scanning ? REFRESHING_LABEL : REFRESH_LABEL;
+    }
   }
 
   function mount() {
@@ -112,9 +124,10 @@ function createController(deps) {
     panel.className = 'pe-panel';
     const head = doc.createElement('div');
     head.className = 'pe-head';
+    headEl = head;
     head.innerHTML = '<div id="pe-title" class="pe-title">\u23F3 Pending Estimates</div>' +
       '<span class="pe-sub">RG + Volvo/PACCAR offsite \u00B7 team-wide pull \u00B7 DTNA excluded</span>' +
-      '<button type="button" class="pe-refresh" data-pe-refresh="1">\u21BB Refresh team-wide</button>' +
+      '<button type="button" class="pe-refresh" data-pe-refresh="1">' + REFRESH_LABEL + '</button>' +
       '<button type="button" class="pe-close" data-pe-close="1" aria-label="Close">\u00D7</button>';
     barEl = doc.createElement('div');
     barEl.id = 'pe-bar';
@@ -160,13 +173,23 @@ function createController(deps) {
     if (!closed) render();
   }
 
+  // Same rule as the main-process throttle (pending_est_sources SCAN_TTL_MS): a
+  // non-forced scan only runs when the stored scan is at least 15 min old.
+  function cacheStale() {
+    const t = Date.parse(scan.asOf || '');
+    const age = now() - t;
+    return !Number.isFinite(t) || age < 0 || age >= SCAN_TTL_MS;
+  }
+
   async function loadTeam() {
     if (getScan) {
-      try { applyScan(await getScan()); } catch (_) { /* keep v1 rows */ }
+      // A non-promise result is applied before open() returns (no await, no wait).
+      try { let s = getScan(); if (s && typeof s.then === 'function') s = await s; applyScan(s); } catch (_) { /* keep v1 rows */ }
       if (closed) return;
       render();
     }
-    await doScan(false);
+    // Open-triggered only: one background non-forced scan when the cache is stale.
+    if (cacheStale()) await doScan(false);
   }
 
   async function escalate(key) {
@@ -193,7 +216,13 @@ function createController(deps) {
       return;
     }
     if (pick('[data-pe-clear]')) { filters = Object.assign(L.defaultFilters(), { owner: filters.owner }); render(); return; }
-    if (pick('[data-pe-refresh]')) return doScan(true);
+    const ref = pick('[data-pe-refresh]');
+    if (ref) {
+      // Manual refresh overrides the 15-min throttle; ignored while any scan is in flight.
+      if (ref.disabled || scan.scanning) return;
+      loading = doScan(true);
+      return loading;
+    }
     const srt = pick('[data-pe-sort]');
     if (srt) {
       const k = srt.getAttribute('data-pe-sort');
@@ -243,7 +272,7 @@ function createController(deps) {
     unsub = null;
     doc.removeEventListener('keydown', onKeydown, true);
     if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    overlay = null; bodyEl = null; barEl = null;
+    overlay = null; bodyEl = null; barEl = null; headEl = null;
     if (returnFocusEl && typeof returnFocusEl.focus === 'function') { try { returnFocusEl.focus(); } catch (_) { /* detached */ } }
     if (typeof onClose === 'function') onClose();
   }

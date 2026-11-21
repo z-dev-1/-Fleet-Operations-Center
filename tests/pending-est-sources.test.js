@@ -305,6 +305,48 @@ describe('pending_est_sources: team scan', () => {
     expect(sleep).toHaveBeenCalledWith(1500);
   });
 
+  it('a failed or empty case scrape keeps the last good cached record; a later good scrape updates it', async () => {
+    const { deps, store, setNow } = makeDeps();
+    await src.scanTeamPending({}, deps);
+    const good = store.data.decisivCaseCache['21383146'];
+    expect(good).toMatchObject({ ok: true, total: 8735.97, fleetStatus: 'Approved', repairStatus: 'Waiting', scrapedAt: new Date(T0).toISOString() });
+
+    // Expired session: getCasePage fails for 21383146, and 21467830 returns an empty page.
+    const T1 = T0 + 20 * 60 * 1000;
+    setNow(T1);
+    deps.getCasePage.mockImplementation(async (id) => {
+      if (id === '21383146') return { ok: false, code: 'DECISIV_SESSION_INVALID' };
+      if (id === '21467830') return { ok: true, html: '<html><body></body></html>' };
+      return { ok: true, html: HTML.split('21383146').join(String(id)) };
+    });
+    const scan = await src.scanTeamPending({}, deps);
+    expect(scan.errors).toContainEqual({ stage: 'getCasePage', code: 'DECISIV_SESSION_INVALID', n: 1 });
+    const kept = store.data.decisivCaseCache['21383146'];
+    expect(kept).toMatchObject({ ok: true, total: 8735.97, fleetStatus: 'Approved', repairStatus: 'Waiting',
+      scrapedAt: new Date(T0).toISOString(), lastError: 'DECISIV_SESSION_INVALID', lastAttemptAt: new Date(T1).toISOString() });
+    expect(byKey(scan)['wr:WR_A'].offsite).toMatchObject({ ok: true, total: 8735.97, fleetStatus: 'Approved' });
+    const keptEmpty = store.data.decisivCaseCache['21467830'];
+    expect(keptEmpty).toMatchObject({ ok: true, total: 8735.97, lastError: 'DECISIV_PARSE_EMPTY', scrapedAt: new Date(T0).toISOString() });
+
+    // Session restored: the next scrape replaces the record and clears lastError.
+    const T2 = T1 + 20 * 60 * 1000;
+    setNow(T2);
+    deps.getCasePage.mockImplementation(async (id) => ({ ok: true,
+      html: HTML.split('21383146').join(String(id)).split('8,735.97').join('9,100.00') }));
+    await src.scanTeamPending({}, deps);
+    const fresh = store.data.decisivCaseCache['21383146'];
+    expect(fresh.ok).toBe(true);
+    expect(fresh.total).toBe(9100);
+    expect(fresh.scrapedAt).toBe(new Date(T2).toISOString());
+    expect(fresh.lastError).toBeUndefined();
+  });
+
+  it('a failed case scrape with no previous good record still stores ok:false', async () => {
+    const { deps, store } = makeDeps({ getCasePage: vi.fn(async () => ({ ok: false, code: 'DECISIV_SESSION_INVALID' })) });
+    await src.scanTeamPending({}, deps);
+    expect(store.data.decisivCaseCache['21383146']).toMatchObject({ ok: false, error: 'DECISIV_SESSION_INVALID' });
+  });
+
   it('predicates', () => {
     expect(src._isOpenWo(wo({ id: 'x', status: st('ESTIMATE_APPROVED') }))).toBe(true);
     expect(src._isOpenWo(wo({ id: 'x', status: st('COMPLETED', 'Complete') }))).toBe(false);

@@ -221,3 +221,149 @@ describe('Pending Estimates upgrade overlay (mini DOM)', () => {
     expect(runScan.mock.calls[1]).toEqual([{ force: true }]);
   });
 });
+
+// Auto-scan on open when the cached scan is stale + manual Refresh (added requirement).
+describe('Pending Estimates overlay: auto-scan on open when stale, manual Refresh', () => {
+  const FRESH_AS_OF = '2026-11-19T17:55:00Z';   // 5 min before NOW: inside the 15-min window
+  const STALE_AS_OF = '2026-11-19T17:30:00Z';   // 30 min before NOW
+  const NEW_ROW = row({ key: 'wr:' + wr(69), workRequestId: wr(69), equipmentId: 'T690', mine: true, source: 'rg', rgPending: true, rgPendingCost: 900 });
+  const deferred = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  const btn = () => q('[data-pe-refresh]');
+  function make({ asOf, get, run }) {
+    doc = createMiniDocument();
+    getScan = vi.fn(get || (() => Object.assign({}, SCAN, { asOf, cached: true })));
+    runScan = vi.fn(run || (async () => Object.assign({}, SCAN, { asOf: iso(NOW), cached: false })));
+    ctl = P.__test__.createController({ doc, modal: fakeModal, getFleet: () => ({ rows: [UNIT_A], syncedAt: '2026-11-19T17:55:00Z' }),
+      getScan, runScan, openUrl: vi.fn(), openEscalation: vi.fn(), navigate: vi.fn(), now: () => NOW });
+  }
+
+  it('(a) renders the cached rows from get immediately on open, before any scan resolves', async () => {
+    const d = deferred();
+    make({ asOf: STALE_AS_OF, run: () => d.p });
+    ctl.open();
+    // get returned synchronously: the cached rows are already painted when open() returns.
+    expect(getScan).toHaveBeenCalledTimes(1);
+    expect(units()).toEqual(['A100', 'T610', 'T620']);
+    expect(q('#pe-body').textContent).toContain('team as of 11/19 12:30 (cached)');
+    d.resolve(Object.assign({}, SCAN, { cached: false }));
+    await ctl.whenLoaded();
+  });
+
+  it('(a) an async get also paints the cached rows while the background scan is still in flight', async () => {
+    const d = deferred();
+    make({ asOf: STALE_AS_OF, get: async () => Object.assign({}, SCAN, { asOf: STALE_AS_OF, cached: true }), run: () => d.p });
+    ctl.open();
+    await flush();
+    expect(units()).toEqual(['A100', 'T610', 'T620']);
+    expect(runScan).toHaveBeenCalledTimes(1);
+    expect(q('#pe-meta').textContent).toContain('scanning\u2026');
+    d.resolve(Object.assign({}, SCAN, { cached: false }));
+    await ctl.whenLoaded();
+  });
+
+  it('(b) a stale cache kicks one non-forced scan; the overlay shows it in flight and repaints on resolve', async () => {
+    const d = deferred();
+    make({ asOf: STALE_AS_OF, run: () => d.p });
+    ctl.open();
+    await flush();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    expect(runScan).toHaveBeenCalledWith({ force: false });
+    expect(q('#pe-meta').textContent).toContain('scanning\u2026');
+    expect(btn().disabled).toBe(true);
+    expect(btn().getAttribute('aria-busy')).toBe('true');
+    expect(btn().textContent).toBe('\u21BB Refreshing\u2026');
+    expect(units()).not.toContain('T690');
+    d.resolve(Object.assign({}, SCAN, { asOf: iso(NOW), cached: false, rows: SCAN.rows.concat([NEW_ROW]) }));
+    await ctl.whenLoaded();
+    expect(units()).toEqual(['A100', 'T610', 'T620', 'T690']);
+    expect(q('#pe-meta').textContent).toContain('team as of 11/19 13:00');
+    expect(q('#pe-meta').textContent).not.toContain('scanning\u2026');
+    expect(btn().disabled).toBe(false);
+    expect(btn().getAttribute('aria-busy')).toBe('false');
+    expect(btn().textContent).toBe('\u21BB Refresh team-wide');
+    expect(runScan).toHaveBeenCalledTimes(1);
+  });
+
+  it('(b) a cache with no asOf (never scanned) also auto-scans once, non-forced', async () => {
+    make({ get: () => ({ ok: true, asOf: null, rows: [], cached: true }) });
+    ctl.open();
+    await ctl.whenLoaded();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    expect(runScan).toHaveBeenCalledWith({ force: false });
+  });
+
+  it('(c) a fresh cache (inside the 15-min window) does not scan on open', async () => {
+    make({ asOf: FRESH_AS_OF });
+    ctl.open();
+    await ctl.whenLoaded();
+    await flush();
+    expect(getScan).toHaveBeenCalledTimes(1);
+    expect(runScan).not.toHaveBeenCalled();
+    expect(units()).toEqual(['A100', 'T610', 'T620']);
+    expect(q('#pe-meta').textContent).toContain('team as of 11/19 12:55 (cached)');
+    expect(q('#pe-meta').textContent).not.toContain('scanning\u2026');
+    expect(btn().disabled).toBe(false);
+  });
+
+  it('(d) Refresh scans with force:true, is busy while in flight, and extra clicks do not stack', async () => {
+    const d = deferred();
+    make({ asOf: FRESH_AS_OF, run: () => d.p });
+    ctl.open();
+    await ctl.whenLoaded();
+    expect(runScan).not.toHaveBeenCalled();
+    btn().click();
+    await flush();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    expect(runScan).toHaveBeenCalledWith({ force: true });
+    expect(btn().disabled).toBe(true);
+    expect(btn().getAttribute('aria-busy')).toBe('true');
+    btn().click();
+    btn().click();
+    await flush();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    d.resolve(Object.assign({}, SCAN, { asOf: iso(NOW), cached: false, rows: SCAN.rows.concat([NEW_ROW]) }));
+    await ctl.whenLoaded();
+    expect(units()).toContain('T690');
+    expect(btn().disabled).toBe(false);
+    runScan.mockImplementation(async () => Object.assign({}, SCAN, { asOf: iso(NOW), cached: false }));
+    btn().click();
+    await ctl.whenLoaded();
+    expect(runScan).toHaveBeenCalledTimes(2);
+    expect(runScan.mock.calls[1]).toEqual([{ force: true }]);
+  });
+
+  it('(d) Refresh clicked during the automatic stale scan does not start a second scan', async () => {
+    const d = deferred();
+    make({ asOf: STALE_AS_OF, run: () => d.p });
+    ctl.open();
+    await flush();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    btn().click();
+    await flush();
+    expect(runScan).toHaveBeenCalledTimes(1);
+    expect(runScan.mock.calls[0]).toEqual([{ force: false }]);
+    d.resolve(Object.assign({}, SCAN, { cached: false }));
+    await ctl.whenLoaded();
+  });
+
+  it('(e) the Owner toggle and every filter are display-only: no scan, no extra get', async () => {
+    make({ asOf: FRESH_AS_OF });
+    ctl.open();
+    await ctl.whenLoaded();
+    q('[data-pe-owner="everyone"]').click();
+    q('[data-pe-owner="all"]').click();
+    q('[data-pe-owner="mine"]').click();
+    change('source', (el) => { el.value = 'decisiv'; });
+    change('fleetStatus', (el) => { el.value = 'Approved'; });
+    change('repairStatus', (el) => { el.value = 'Waiting'; });
+    change('vendor', (el) => { el.value = 'volvo'; });
+    change('fas', (el) => { el.value = 'Jane Doe'; });
+    change('mismatch', (el) => { el.checked = true; });
+    q('[data-pe-clear]').click();
+    q('th[data-pe-sort="mismatch"]').click();
+    await flush();
+    expect(runScan).not.toHaveBeenCalled();
+    expect(getScan).toHaveBeenCalledTimes(1);
+  });
+});
