@@ -34,11 +34,12 @@ const READ_METHODS = Object.freeze({
 });
 
 // Default Apex class per read method. A class the page itself is seen calling (capture.classFor) wins.
+// dtna-probe 2026-11-21: first three seen in the page's own aura calls, getComment from the bundle only.
 const APEX_CLASS = Object.freeze({
-  getCaseRecord: 'E2E_CaseDetailsLWCController',            // verify in D0
-  getRepairOrderId: 'E2E_UTP_CommentController',            // verify in D0
-  getCommentsByCaseRepairOrder: 'E2E_UTP_CommentController', // verify in D0
-  getComment: 'E2E_UTP_CommentController',                  // verify in D0
+  getCaseRecord: 'E2E_CaseDetailsLWCController',
+  getRepairOrderId: 'E2E_CaseDetailsLWCController',
+  getCommentsByCaseRepairOrder: 'E2E_UTP_CommentController',
+  getComment: 'E2E_UTP_CommentController',
 });
 
 const WRITE_RE = /^(post|save|update|create|delete|insert|upsert|submit|send|set|change|close|reopen|assign|approve|reject)/i;
@@ -53,21 +54,31 @@ const THREAD_MAX = 20000;
 const OFFSITE_TEXT_MAX = 8000;
 const COMMENT_MAX = 1500;
 
-// Ordered candidate keys on the getCaseRecord value (dotted = nested). verify in D1.
+// Ordered candidate keys on the getCaseRecord value (dotted = nested).
+// dtna-probe 2026-11-21 (D1): unit 122269 at E2E_AssetAccountParticipant__r.E2E_Unit_Id__c, serial NP6923 at
+// E2E_AssetAccountParticipant__r.Asset.SerialNumber, status at Status (also Category_Status__c, E2E_Repair_Status__c),
+// dealer = E2E_Repair_Location__r.Name (Account.Name is the customer fleet). No dealer code, VIN, CaseNumber or
+// steps array on the record; the stage path is only in the page DOM. Older candidates kept as fallbacks.
 const CASE_FIELDS = Object.freeze({
-  unitId: Object.freeze(['Unit_Id__c', 'UnitId__c', 'Unit_ID__c', 'E2E_Unit_Id__c', 'Unit_Number__c', 'UnitNumber__c', 'unitId', 'UnitId']),
-  serial: Object.freeze(['Serial_Number__c', 'SerialNumber__c', 'Serial_No__c', 'E2E_Serial_Number__c', 'serialNumber', 'SerialNumber']),
+  unitId: Object.freeze(['E2E_AssetAccountParticipant__r.E2E_Unit_Id__c', 'Unit_Id__c', 'UnitId__c', 'Unit_ID__c', 'E2E_Unit_Id__c', 'Unit_Number__c', 'UnitNumber__c', 'unitId', 'UnitId']),
+  serial: Object.freeze(['E2E_AssetAccountParticipant__r.Asset.SerialNumber', 'Serial_Number__c', 'SerialNumber__c', 'Serial_No__c', 'E2E_Serial_Number__c', 'serialNumber', 'SerialNumber']),
   vin: Object.freeze(['VIN__c', 'Vin__c', 'E2E_VIN__c', 'VIN', 'vin']),
   caseNumber: Object.freeze(['CaseNumber', 'caseNumber']),
   caseStatus: Object.freeze(['Status', 'status', 'E2E_Status__c', 'caseStatus']),
   dealerCode: Object.freeze(['Dealer_Code__c', 'DealerCode__c', 'E2E_Dealer_Code__c', 'dealerCode', 'Account.Dealer_Code__c']),
-  dealerName: Object.freeze(['Dealer_Name__c', 'DealerName__c', 'E2E_Dealer_Name__c', 'dealerName', 'Account.Name']),
+  dealerName: Object.freeze(['E2E_Repair_Location__r.Name', 'Dealer_Name__c', 'DealerName__c', 'E2E_Dealer_Name__c', 'dealerName', 'Account.Name']),
   steps: Object.freeze(['steps', 'Steps', 'caseSteps', 'statusSteps', 'milestones']),
 });
 
-// Filled by live discovery (dev-dtna-probe D4 / P1). Phase B reads these.
+// dtna-probe 2026-11-21: D2/D4 found no estimate amount on 2026-11-21 (D4 source 'none'; no money-looking
+// field on getCaseRecord, getRepairOrderId or getCommentsByCaseRepairOrder; the bundle exposes no estimate/EA
+// read method). Phase B ships DTNA Total = '—' with status from case (CASE_FIELDS.caseStatus).
 const ESTIMATE_FIELDS = null;
-// Filled by live discovery (dev-dtna-probe D4 / P1). Phase B reads these.
+// dtna-probe 2026-11-21 (P1/P2): postComment is E2E_UTP_CommentController.postComment (write, not called).
+// P1 could not read its param keys: the minified LWC import binds it as a bare function, so no key literals
+// sit next to the call site. P2 composer on the Comments tab: one textarea ("Write a message to the repair
+// facility:"), no maxlength, no comment-type picklist, a file uploader and a "Post" button. The no-RO case
+// shows no composer. Param keys stay unknown until a Phase B capture of the page's own Post click.
 const POST_COMMENT_PARAMS = null;
 
 module.exports = {
