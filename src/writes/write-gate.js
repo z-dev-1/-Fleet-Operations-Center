@@ -18,6 +18,10 @@
  *   - otherwise             queued as 'pending-approval' (relayWritesPending);
  *                           nothing is sent until approve(id) from the list.
  *
+ * dtnaComment (a DTNA Service Tracker case comment, src/dtna/writes.js) is
+ * dealer-visible: it is in EXTERNAL_KINDS, so it ALWAYS waits for the user's
+ * approval, even with requireApproval === false, and approvedBy is ignored.
+ *
  * The preview is built from the stored payload only, and approve(id) sends that
  * same stored payload once, so the text shown is the text sent.
  *
@@ -35,7 +39,11 @@ const ADD_COMMENT_PATH = '/api/v1/addComment';
 const COMMENT_MAX = 2000;
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
-const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle'];
+const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment'];
+// Dealer-visible writes outside Relay: ALWAYS approved by the user on the exact text.
+// settings.writes.requireApproval === false and approvedBy never bypass these.
+const EXTERNAL_KINDS = new Set(['dtnaComment']);
+const DTNA_CASE_URL = 'https://dtna.my.site.com/Servicetracker/s/case/';
 
 let _deps = {};
 let _windowGetter = null;
@@ -97,11 +105,12 @@ function _textLen(kind, payload) {
   if (!payload) return 0;
   if (kind === 'updateEscalations') return _str(payload.comment).length;
   if (kind === 'setLifecycle') return 0;
-  return kind === 'addComment' ? _str(payload.text).length : _str(payload.comments).trim().length;
+  return (kind === 'addComment' || kind === 'dtnaComment') ? _str(payload.text).length : _str(payload.comments).trim().length;
 }
 function _target(kind, payload, spec) {
   if (kind === 'addComment' || kind === 'updateEscalations') return _str(payload.workRequestId);
   if (kind === 'setLifecycle') return _str(payload.aaid || payload.assetUrl || payload.equipmentId);
+  if (kind === 'dtnaComment') return _str(payload.caseId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
 // Dedup key for a work-order write: the fields that define WHAT is requested.
@@ -147,6 +156,14 @@ function _normalizePayload(kind, payload) {
       remove: strs(p.remove),
       comment: _str(p.comment).slice(0, COMMENT_MAX),
       createdBy: _str(p.createdBy),
+    };
+  }
+  if (kind === 'dtnaComment') {
+    return {
+      caseId: _str(p.caseId),
+      repairOrderId: _str(p.repairOrderId),
+      repairOrderNo: _str(p.repairOrderNo),
+      text: _str(p.text).slice(0, COMMENT_MAX),
     };
   }
   if (kind === 'setLifecycle') {
@@ -195,6 +212,20 @@ function previewOf(kind, payload, meta) {
     lines.push('Origin: ' + (m.origin || 'unknown'));
     lines.push('Comment text (exact, ' + _str(p.comment).length + ' chars):');
     lines.push(_str(p.comment));
+    return lines.join('\n');
+  }
+  if (kind === 'dtnaComment') {
+    const cid = _str(p.caseId);
+    lines.push('DTNA write: post comment to Service Tracker case');
+    lines.push('Unit: ' + (m.unit || '-'));
+    lines.push('DTNA case: ' + cid + '  ' + DTNA_CASE_URL + cid + '/detail');
+    lines.push('Repair order: ' + (_str(p.repairOrderNo) || '(none)'));
+    lines.push('Comment type: (none)');
+    lines.push('Visibility: VISIBLE TO THE DEALER (DTNA)');
+    lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
+    lines.push('Origin: ' + (m.origin || 'unknown'));
+    lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
+    lines.push(_str(p.text));
     return lines.join('\n');
   }
   if (kind === 'setLifecycle') {
@@ -290,6 +321,25 @@ async function _send(f, payload) {
       _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
       return { ok: false, outcome: 'send-failed', id: f.id, result: r || null, error: err };
     }
+    if (f.kind === 'dtnaComment') {
+      // Single-use token: src/dtna/aura.js callWrite refuses a write without it.
+      const token = {};
+      _tokens.add(token);
+      let r;
+      try {
+        const post = _deps.dtnaPostComment || ((p, t) => require('../dtna/writes').postApprovedComment(p, t));
+        r = await post(payload, token);
+      } finally {
+        _tokens.delete(token);
+      }
+      if (r && r.ok) {
+        _logLine('sent', f, 'len=' + _textLen(f.kind, payload));
+        return { ok: true, outcome: 'sent', id: f.id, result: { commentId: _str(r.commentId) } };
+      }
+      const code = _str((r && r.code) || 'DTNA_INTERNAL').replace(/[^A-Z0-9_]/g, '').slice(0, 40) || 'DTNA_INTERNAL';
+      _logLine('send-failed', f, 'error=' + code);
+      return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
+    }
     const token = {};
     _tokens.add(token);
     const commit = _deps.commitWorkOrder || ((o, t) => _api()._commitApprovedWorkOrder(o, t));
@@ -303,11 +353,15 @@ async function _send(f, payload) {
     _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
     return { ok: false, outcome: 'send-failed', id: f.id, result: result || null, error: err };
   } catch (e) {
-    const err = (e && e.message) || String(e);
+    // A DTNA failure never carries an error message (it could echo request or response content).
+    const err = f.kind === 'dtnaComment' ? 'DTNA_INTERNAL' : ((e && e.message) || String(e));
     _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
     return { ok: false, outcome: 'send-failed', id: f.id, error: err };
   }
 }
+
+// Where a write goes, for the "nothing was sent to …" messages.
+function _dest(kind) { return EXTERNAL_KINDS.has(kind) ? 'DTNA' : 'Relay'; }
 
 function isApprovalToken(token) {
   if (!token || typeof token !== 'object' || !_tokens.has(token)) return false;
@@ -445,14 +499,16 @@ async function requestWrite(spec) {
 
   let flags;
   try { flags = _flags() || {}; } catch (_) { flags = {}; }
-  if (flags.requireApproval === false) {
+  const external = EXTERNAL_KINDS.has(kind);
+  if (flags.requireApproval === false && !external) {
     _logLine('approved', f, 'by=setting-requireApproval-false');
     return _send(f, payload);
   }
-  if (s.approvedBy) {
+  if (s.approvedBy && !external) {
     _logLine('approved', f, 'by=' + _str(s.approvedBy).slice(0, 60));
     return _send(f, payload);
   }
+  if (s.approvedBy) _logLine('approvedBy-ignored', f, 'reason=dealer-visible');
 
   const win = s.interactive ? _window() : null;
   const staged = _stageItem(f, payload);
@@ -461,7 +517,7 @@ async function requestWrite(spec) {
   if (!win) {
     _logLine('gated', f, 'status=pending-approval' + (staged.reused ? ' reused=1' : ''));
     _notify('relayWrites:updated', { items: _load().items.map(_publicItem) });
-    return { ok: false, outcome: 'pending-approval', id: f.id, error: 'pending-approval: queued for your approval; nothing was sent to Relay' };
+    return { ok: false, outcome: 'pending-approval', id: f.id, error: 'pending-approval: queued for your approval; nothing was sent to ' + _dest(kind) };
   }
 
   _logLine('gated', f, 'status=awaiting-user');
@@ -486,7 +542,7 @@ async function requestWrite(spec) {
   if (answer === true) return _sendPending(f.id, 'user-prompt');
   _setState(f.id, 'not-approved');
   _logLine('rejected', f, 'reason=cancel-or-timeout');
-  return { ok: false, outcome: 'skipped-not-approved', id: f.id, error: 'Not approved; nothing was sent to Relay' };
+  return { ok: false, outcome: 'skipped-not-approved', id: f.id, error: 'Not approved; nothing was sent to ' + _dest(kind) };
 }
 
 async function approve(id, by) {
@@ -504,7 +560,7 @@ function reject(id) {
   _setState(id, 'rejected');
   _logLine('rejected', { kind: it.kind, origin: it.origin, unit: it.unit, id }, 'reason=user');
   const w = _waiters.get(id);
-  if (w) w.resolve({ result: { ok: false, outcome: 'skipped-not-approved', id, error: 'Rejected; nothing was sent to Relay' } });
+  if (w) w.resolve({ result: { ok: false, outcome: 'skipped-not-approved', id, error: 'Rejected; nothing was sent to ' + _dest(it.kind) } });
   return { ok: true };
 }
 
@@ -540,6 +596,7 @@ module.exports = {
   onSent,
   setWindowGetter,
   isApprovalToken,
+  EXTERNAL_KINDS,
   APPROVAL_WAIT_MS,
   PENDING_TTL_MS,
   COMMENT_MAX,

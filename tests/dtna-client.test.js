@@ -156,6 +156,50 @@ describe('pullCase', () => {
     expect(await client.pullCase(CASE_ID)).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
   });
 
+  it('a failed comment read keeps the last-good cached thread (commentsStale)', async () => {
+    useAura(fakeAura());
+    const first = await client.pullCase(CASE_ID);
+    expect(first.entry.commentCount).toBe(3);
+    expect(first.commentsStale).toBeUndefined();
+    useAura(fakeAura({ fail: (n) => (n === 'getCommentsByCaseRepairOrder' ? { ok: false, code: 'DTNA_APEX_ERROR' } : null) }));
+    const r = await client.pullCase(CASE_ID);
+    expect(r).toMatchObject({ ok: true, commentsStale: true, commentsCode: 'DTNA_APEX_ERROR' });
+    const stored = dstore.get(CASE_ID);
+    expect(stored.commentCount).toBe(3);
+    expect(stored.thread).toBe(first.entry.thread);
+    expect(stored.comments).toEqual(first.entry.comments);
+  });
+
+  it('an ok but empty comment read over a cached thread keeps it (DTNA_COMMENTS_EMPTY)', async () => {
+    useAura(fakeAura());
+    const first = await client.pullCase(CASE_ID);
+    useAura(fakeAura({ fail: (n) => (n === 'getCommentsByCaseRepairOrder' ? { ok: true, value: [] } : null) }));
+    const r = await client.pullCase(CASE_ID);
+    expect(r).toMatchObject({ ok: true, commentsStale: true, commentsCode: 'DTNA_COMMENTS_EMPTY' });
+    expect(dstore.get(CASE_ID).commentCount).toBe(3);
+    expect(dstore.get(CASE_ID).thread).toBe(first.entry.thread);
+  });
+
+  it('no previous entry and a failed comment read -> empty thread, commentsCode set, not stale', async () => {
+    useAura(fakeAura({ fail: (n) => (n === 'getCommentsByCaseRepairOrder' ? { ok: false, code: 'DTNA_APEX_ERROR' } : null) }));
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(r.entry.commentCount).toBe(0);
+    expect(r.commentsCode).toBe('DTNA_APEX_ERROR');
+    expect(r.commentsStale).toBeFalsy();
+  });
+
+  it('bulkPull over a case with a failing comment read keeps that case\'s cached thread', async () => {
+    useAura(fakeAura({ ids: [CASE_ID] }));
+    const first = await client.pullCase(CASE_ID);
+    client._resetForTests();
+    useAura(fakeAura({ ids: [CASE_ID], fail: (n) => (n === 'getCommentsByCaseRepairOrder' ? { ok: false, code: 'DTNA_APEX_ERROR' } : null) }));
+    const r = await client.bulkPull({ includeComments: true });
+    expect(r.ok).toBe(true);
+    expect(dstore.get(CASE_ID).commentCount).toBe(3);
+    expect(dstore.get(CASE_ID).thread).toBe(first.entry.thread);
+  });
+
   it('invalid case id -> DTNA_INVALID_INPUT with zero calls', async () => {
     const a = useAura(fakeAura());
     expect(await client.pullCase('nope')).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });

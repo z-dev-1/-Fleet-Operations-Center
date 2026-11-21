@@ -79,7 +79,19 @@ const ESTIMATE_FIELDS = null;
 // sit next to the call site. P2 composer on the Comments tab: one textarea ("Write a message to the repair
 // facility:"), no maxlength, no comment-type picklist, a file uploader and a "Post" button. The no-RO case
 // shows no composer. Param keys stay unknown until a Phase B capture of the page's own Post click.
+// Shape to fill (src/dtna/writes.js buildPostParams resolves the '$' placeholders):
+//   { classname: 'E2E_UTP_CommentController',
+//     params: { <apexKey>: '$caseId' | '$repairOrderId' | '$text' | <literal string|boolean|null>, ... },
+//     maxLen?: number }
+// It needs a '$text' key and a '$caseId' or '$repairOrderId' key. While null, the post-comment IPC returns
+// { ok:false, code:'DTNA_POST_NOT_CONFIGURED' } with no approval prompt and no network.
 const POST_COMMENT_PARAMS = null;
+// The only Apex write aura.callWrite accepts (behind a single-use write-gate approval token).
+const WRITE_METHODS = Object.freeze({
+  postComment: Object.freeze({ classname: 'E2E_UTP_CommentController' }),
+});
+// The composer has no maxlength (P2); the app caps a posted comment at the write gate's COMMENT_MAX.
+const POST_COMMENT_MAX = 2000;
 
 module.exports = {
   HOST, BASE, AURA_PATH, AURA_URL, PARTITION, LIST_URL, DEFAULT_LIST_FILTER,
@@ -87,4 +99,5 @@ module.exports = {
   READ_METHODS, APEX_CLASS, WRITE_RE,
   CONTEXT_MAX_AGE_MS, HIDDEN_WAIT_MS, SIGNIN_WINDOW_MS, CALL_TIMEOUT_MS, CONCURRENCY, BATCH_GAP_MS,
   THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
+  WRITE_METHODS, POST_COMMENT_MAX,
 };

@@ -5,6 +5,7 @@
  * Form-encoded POSTs through the persist:vendor-dtna session with the context/token/pageURI the
  * capture took from the page's own requests. Never throws; returns {ok:true, value} | {ok:false, code}.
  * Only READ_METHODS reach callApex; _callApexRaw (dev probe only) refuses anything write-like.
+ * WRITE_METHODS reach only callWrite, and only with a single-use write-gate approval token.
  * One log line per call: { method, caseTag, code, status, ms }. No bodies, URLs or messages are logged.
  */
 const C = require('./constants');
@@ -138,7 +139,10 @@ async function _run(send, info) {
       r = { ok: false, code: (e && e.code) || 'DTNA_SIGNIN_REQUIRED' };
     } else {
       r = await send();
-      if (!r.ok && RETRY_CODES.has(r.code)) {
+      if (!r.ok && RETRY_CODES.has(r.code) && info.noRetry) {
+        capture.clear();
+        r = { ok: false, code: 'DTNA_SIGNIN_REQUIRED', status: r.status };
+      } else if (!r.ok && RETRY_CODES.has(r.code)) {
         capture.clear();
         const e2 = await S.ensureContext({ force: true });
         if (!e2 || !e2.ok) r = { ok: false, code: 'DTNA_SIGNIN_REQUIRED' };
@@ -208,6 +212,37 @@ async function callApex(name, params) {
   return _run(_send(classname, name, clean), { method: name, caseTag: caseTag(p.caseId) });
 }
 
+/**
+ * callWrite(name, params, token) — the ONLY DTNA write path (src/dtna/writes.js postApprovedComment).
+ * name must be in WRITE_METHODS, and token a live single-use write-gate approval token, else zero
+ * requests. No retry: a dealer-visible write is sent at most once per approval.
+ */
+async function callWrite(name, params, token) {
+  const spec = typeof name === 'string' && Object.prototype.hasOwnProperty.call(C.WRITE_METHODS, name) ? C.WRITE_METHODS[name] : null;
+  if (!spec) {
+    log.info('[dtna] apex', { method: 'refused', code: 'DTNA_METHOD_NOT_ALLOWED' });
+    return { ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' };
+  }
+  const isToken = typeof _deps.isApprovalToken === 'function' ? _deps.isApprovalToken : require('../writes/write-gate').isApprovalToken;
+  let approved = false;
+  try { approved = isToken(token) === true; } catch (_) { approved = false; }
+  if (!approved) {
+    log.info('[dtna] apex', { method: name, code: 'DTNA_WRITE_NOT_APPROVED' });
+    return { ok: false, code: 'DTNA_WRITE_NOT_APPROVED' };
+  }
+  const p = _isPlainObject(params) ? params : null;
+  const keys = p ? Object.keys(p) : [];
+  const valid = p && keys.length > 0 && keys.length <= 10 && keys.every((k) => /^\w{1,60}$/.test(k))
+    && keys.every((k) => p[k] === null || typeof p[k] === 'string' || typeof p[k] === 'boolean')
+    && keys.every((k) => !/caseid/i.test(k) || C.CASE_ID_RE.test(String(p[k])));
+  if (!valid) {
+    log.info('[dtna] apex', { method: name, code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  const caseKey = keys.find((k) => /caseid/i.test(k));
+  return _run(_send(spec.classname, name, Object.assign({}, p)), { method: name, caseTag: caseTag(caseKey ? p[caseKey] : ''), noRetry: true });
+}
+
 /** replayGetItems(mutate) — re-send the page's captured list action (deep copy), mutate(params) first. */
 async function replayGetItems(mutate) {
   const send = () => {
@@ -239,4 +274,4 @@ async function _callApexRaw(classname, method, params) {
 
 function _resetForTests() { _deps = {}; _seq = 0; }
 
-module.exports = { parseEnvelope, classify, callApex, replayGetItems, _callApexRaw, _post, _setDeps, _resetForTests };
+module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, _callApexRaw, _post, _setDeps, _resetForTests };

@@ -184,24 +184,37 @@ async function pullCase(caseId, opts) {
   else if (FATAL.has(r1.code)) return { ok: false, code: r1.code };
   let comments = [];
   let prev = null;
+  let commentsCode = '';
   if (includeComments) {
     const r2 = await getComments(caseId);
     if (r2.ok) comments = r2.value;
     else if (FATAL.has(r2.code)) return { ok: false, code: r2.code };
+    else commentsCode = _str(r2.code) || 'DTNA_APEX_ERROR';
+    const last = _store().get(caseId);
+    const hadThread = !!last && Number(last.commentCount) > 0;
+    // A failed read, or an empty read over a cached thread, keeps the last-good thread (Phase A review #1).
+    if (commentsCode && hadThread) prev = last;
+    else if (!commentsCode && !comments.length && hadThread) { prev = last; commentsCode = 'DTNA_COMMENTS_EMPTY'; }
   } else {
     prev = _store().get(caseId);
   }
   const entry = normalizeCase(rec.value, ro, comments, { caseId, now: _now() });
   if (prev) {
-    // Case-only pull: keep the comments a previous pull read.
+    // Case-only pull, or a failed/empty comment read: keep the comments a previous pull read.
     for (const k of ['comments', 'thread', 'offsiteText', 'commentCount', 'lastCommentAt', 'lastCommentType', 'repairOrderNo', 'estimateNo']) {
       if (prev[k] !== undefined && prev[k] !== '') entry[k] = prev[k];
     }
   }
   const saved = _store().put(entry, { now: _now() }) || entry;
   try { _session().notePulled(saved.pulledAt); } catch (e) { log.warn('[dtna] status', safeErr(e)); }
-  log.info('[dtna] pull', { caseTag: caseTag(caseId), comments: saved.commentCount, hasRo: !!saved.repairOrderId, ms: _now() - t0 });
-  return { ok: true, entry: saved };
+  const stale = includeComments && !!prev;
+  const info = { caseTag: caseTag(caseId), comments: saved.commentCount, hasRo: !!saved.repairOrderId, ms: _now() - t0 };
+  if (commentsCode) { info.commentsKept = stale; info.code = commentsCode; }
+  log.info('[dtna] pull', info);
+  const out = { ok: true, entry: saved };
+  if (stale) out.commentsStale = true;
+  if (commentsCode) out.commentsCode = commentsCode;
+  return out;
 }
 
 // ── List ───────────────────────────────────────────────────────────────────

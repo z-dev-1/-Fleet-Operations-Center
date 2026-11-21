@@ -44,7 +44,7 @@ describe('pending-est IPC', () => {
   it('get returns the empty shape when no scan is stored', async () => {
     store.save('pendingEstScan', {});
     const r = await call('pending-est:get');
-    expect(r).toEqual({ ok: true, asOf: null, rows: [], excludedDtna: 0, counts: {}, cached: true });
+    expect(r).toEqual({ ok: true, asOf: null, rows: [], excludedDtna: 0, dtnaAsOf: null, counts: {}, cached: true });
   });
 
   it('get returns the stored scan with cached:true and without internal caches', async () => {

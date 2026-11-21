@@ -309,3 +309,125 @@ describe('review fixes: preview completeness, aiDrafted tri-state, dedup, onSent
     } finally { gate.onSent('daily-tasks', null); }
   });
 });
+
+describe('dtnaComment (dealer-visible DTNA case comment, findings §10)', () => {
+  const CASE = '500gx000002E4U5AAK';
+  const DTEXT = 'Hi team, can you share the ETA for unit 122269?';
+  const dspec = (o = {}) => Object.assign({
+    kind: 'dtnaComment', origin: 'unit-detail-dtna', unit: '122269', aiDrafted: true,
+    payload: { caseId: CASE, repairOrderId: 'a0Xgx0000012345AAA', repairOrderNo: 'R101048154', text: DTEXT }, interactive: false,
+  }, o);
+  let post;
+  let tokens;
+  function dsetup(over = {}) {
+    tokens = [];
+    post = vi.fn(async (_p, t) => { tokens.push(t); return { ok: true, commentId: 'a1Agx0000000099AAA' }; });
+    setup(Object.assign({ dtnaPostComment: post }, over));
+  }
+
+  it('previewOf shows the exact case, RO, dealer visibility and text', () => {
+    const pv = gate.previewOf('dtnaComment', { caseId: CASE, repairOrderNo: 'R101048154', text: DTEXT }, { unit: '122269', origin: 'unit-detail-dtna', aiDrafted: true });
+    expect(pv).toBe([
+      'DTNA write: post comment to Service Tracker case',
+      'Unit: 122269',
+      'DTNA case: ' + CASE + '  https://dtna.my.site.com/Servicetracker/s/case/' + CASE + '/detail',
+      'Repair order: R101048154',
+      'Comment type: (none)',
+      'Visibility: VISIBLE TO THE DEALER (DTNA)',
+      'AI-drafted: yes',
+      'Origin: unit-detail-dtna',
+      'Text (exact, ' + DTEXT.length + ' chars):',
+      DTEXT,
+    ].join('\n'));
+    expect(gate.previewOf('dtnaComment', { caseId: CASE, text: 'x' }, {})).toContain('Repair order: (none)');
+  });
+
+  it('is gated even with requireApproval:false (no window -> pending-approval, nothing sent)', async () => {
+    dsetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(dspec());
+    expect(r.outcome).toBe('pending-approval');
+    expect(r.error).toContain('nothing was sent to DTNA');
+    expect(post).not.toHaveBeenCalled();
+    expect(logs.some((l) => /approved .*by=setting-requireApproval-false/.test(l))).toBe(false);
+    const it0 = gate.list().items.find((i) => i.id === r.id);
+    expect(it0.kind).toBe('dtnaComment');
+    expect(it0.preview).toContain('Visibility: VISIBLE TO THE DEALER (DTNA)');
+  });
+
+  it('approvedBy does not bypass approval (logged approvedBy-ignored)', async () => {
+    dsetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(dspec({ approvedBy: 'some-modal' }));
+    expect(r.outcome).toBe('pending-approval');
+    expect(post).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.startsWith('[write] approvedBy-ignored kind=dtnaComment'))).toBe(true);
+  });
+
+  it('interactive approve sends exactly once; a second approve is refused', async () => {
+    dsetup({ flags: { requireApproval: false } });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec({ interactive: true }));
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].data.kind).toBe('dtnaComment');
+    expect(sent[0].data.preview).toContain('VISIBLE TO THE DEALER (DTNA)');
+    expect(post).not.toHaveBeenCalled();
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, outcome: 'sent', result: { commentId: 'a1Agx0000000099AAA' } });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][0]).toEqual({ caseId: CASE, repairOrderId: 'a0Xgx0000012345AAA', repairOrderNo: 'R101048154', text: DTEXT });
+    const again = await gate.approve(r.id);
+    expect(again.outcome).toBe('skipped-not-approved');
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('interactive deny -> nothing sent', async () => {
+    dsetup();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec({ interactive: true }));
+    await flush();
+    gate.respond(sent[0].data.id, false);
+    const r = await p;
+    expect(r).toMatchObject({ ok: false, outcome: 'skipped-not-approved', error: 'Not approved; nothing was sent to DTNA' });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('the token passed to the DTNA post is a single-use approval token', async () => {
+    let accepted = null;
+    let second = null;
+    dsetup({ dtnaPostComment: vi.fn(async (_p, t) => { accepted = gate.isApprovalToken(t); second = gate.isApprovalToken(t); return { ok: true, commentId: '' }; }) });
+    const r = await gate.requestWrite(dspec());
+    await gate.approve(r.id);
+    expect(accepted).toBe(true);
+    expect(second).toBe(false);
+    expect(gate.isApprovalToken({})).toBe(false);
+  });
+
+  it('a failed post -> send-failed with the code only; logs carry len= and never the text', async () => {
+    dsetup({ dtnaPostComment: vi.fn(async () => ({ ok: false, code: 'DTNA_APEX_ERROR', message: 'secret ' + DTEXT })) });
+    const r = await gate.requestWrite(dspec());
+    const s = await gate.approve(r.id);
+    expect(s).toEqual({ ok: false, outcome: 'send-failed', id: r.id, result: null, error: 'DTNA_APEX_ERROR' });
+    dsetup();
+    const r2 = await gate.requestWrite(dspec());
+    await gate.approve(r2.id);
+    expect(logs.some((l) => l.startsWith('[write] sent kind=dtnaComment') && l.includes('len=' + DTEXT.length))).toBe(true);
+    expect(logs.join('\n')).not.toContain(DTEXT);
+  });
+
+  it('a throwing post -> DTNA_INTERNAL, no message', async () => {
+    dsetup({ dtnaPostComment: vi.fn(async () => { throw new Error('boom ' + DTEXT); }) });
+    const r = await gate.requestWrite(dspec());
+    const s = await gate.approve(r.id);
+    expect(s).toMatchObject({ ok: false, outcome: 'send-failed', error: 'DTNA_INTERNAL' });
+    expect(logs.join('\n')).not.toContain(DTEXT);
+  });
+
+  it('EXTERNAL_KINDS holds only dtnaComment; addComment with requireApproval:false still sends directly', async () => {
+    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment']);
+    dsetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(spec());
+    expect(r.outcome).toBe('sent');
+    expect(apiPost).toHaveBeenCalledTimes(1);
+  });
+});

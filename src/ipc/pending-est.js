@@ -13,7 +13,7 @@ const logger  = require('../utils/logger')('ipc:pending-est');
 const { handle } = require('./_safe');
 const sources = require('../scrapers/pending_est_sources');
 
-const EMPTY = () => ({ ok: true, asOf: null, rows: [], excludedDtna: 0, counts: {}, cached: true });
+const EMPTY = () => ({ ok: true, asOf: null, rows: [], excludedDtna: 0, dtnaAsOf: null, counts: {}, cached: true });
 
 function _fleetRows(ctx) {
   if (ctx && ctx.lastData && Array.isArray(ctx.lastData.rows) && ctx.lastData.rows.length) return ctx.lastData.rows;

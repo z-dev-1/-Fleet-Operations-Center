@@ -329,3 +329,72 @@ describe('static', () => {
     }
   });
 });
+
+describe('callWrite (the only DTNA write path)', () => {
+  const PARAMS = { caseId: CASE_ID, commentBody: 'Hello dealer' };
+  function gateTokens() {
+    const live = new WeakSet();
+    return {
+      mint: () => { const t = {}; live.add(t); return t; },
+      isApprovalToken: (t) => { if (!t || typeof t !== 'object' || !live.has(t)) return false; live.delete(t); return true; },
+    };
+  }
+
+  it('no / bad / reused token -> DTNA_WRITE_NOT_APPROVED with zero fetches', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ Id: 'a1Agx0000000099AAA' })));
+    const g = gateTokens();
+    const session = fakeSession();
+    aura._setDeps({ fetch, session, isApprovalToken: g.isApprovalToken });
+    expect(await aura.callWrite('postComment', PARAMS)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(await aura.callWrite('postComment', PARAMS, {})).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    const t = g.mint();
+    expect((await aura.callWrite('postComment', PARAMS, t)).ok).toBe(true);
+    expect(await aura.callWrite('postComment', PARAMS, t)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('the real write-gate token check refuses a forged token', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    aura._setDeps({ fetch, session: fakeSession() });
+    expect((await aura.callWrite('postComment', PARAMS, {})).code).toBe('DTNA_WRITE_NOT_APPROVED');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('unknown name -> DTNA_METHOD_NOT_ALLOWED; bad params -> DTNA_INVALID_INPUT; zero fetches', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
+    expect((await aura.callWrite('deleteComment', PARAMS, g.mint())).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect((await aura.callWrite('getCaseRecord', PARAMS, g.mint())).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect((await aura.callWrite('postComment', { caseId: 'nope', t: 'x' }, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    expect((await aura.callWrite('postComment', { caseId: CASE_ID, n: { a: 1 } }, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    expect((await aura.callWrite('postComment', null, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('a valid token sends one POST to E2E_UTP_CommentController.postComment; logs carry no text', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ Id: 'a1Agx0000000099AAA' })));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
+    const r = await aura.callWrite('postComment', PARAMS, g.mint());
+    expect(r).toMatchObject({ ok: true, value: { Id: 'a1Agx0000000099AAA' } });
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0].params).toMatchObject({ classname: 'E2E_UTP_CommentController', method: 'postComment', params: PARAMS });
+    expect(logger.text()).not.toContain('Hello dealer');
+    expect(logger.text()).not.toContain(TOK);
+  });
+
+  it('an expired session is not retried for a write', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, invalidSession()));
+    const g = gateTokens();
+    const session = fakeSession();
+    aura._setDeps({ fetch, session, isApprovalToken: g.isApprovalToken });
+    expect(await aura.callWrite('postComment', PARAMS, g.mint())).toMatchObject({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});

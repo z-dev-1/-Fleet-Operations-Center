@@ -12,7 +12,11 @@
  *      parseCasePage) with the stage from getCaseStatusSummary.
  *   4. User fleet rows whose offsite estimate is not on an open WR in the pull
  *      are still listed, flagged notInRg.
- *   5. DTNA is excluded entirely (dropped and counted).
+ *   5. DTNA (findings §6b, §5.3): read from the dtnaCaseCache ONLY (filled by the
+ *      user's "Pull DTNA"); this module never makes a DTNA network call. Cases
+ *      join open WRs by unit (src/dtna/pending.joinCasesToWrs). DTNA has no
+ *      estimate amount: total null, status from the case. An unjoined case that
+ *      is not closed is listed notInRg. excludedDtna stays 0 (shape compat).
  *
  * Operator / FAS / "mine": operator from fleetData -> longDwellCsv -> getAsset;
  * fas = roster-lookup.fasFor(operator, site); mine = the existing DBR rule
@@ -37,6 +41,12 @@ const CASE_RETAIN_MS = 24 * 60 * 60 * 1000;   // the drafter ignores cases older
 const AAP_CONCURRENCY = 6;
 
 const DECISIV_VENDORS = new Set(['VOLVO', 'KENWORTH', 'PETERBILT', 'PACCAR']);
+const DTNA_VENDOR_RE = /FREIGHTLINER|DAIMLER/;
+
+// Pure DTNA helpers (cache data only; neither module makes a network call).
+const DP = require('../dtna/pending');
+const DJ = require('../dtna/join');
+const DC = require('../dtna/constants');
 
 let _inflight = null;
 
@@ -72,6 +82,13 @@ function _deps(d) {
     fleetRows: pick('fleetRows', () => () => {
       const fd = store.load('fleetData', {}) || {};
       return Array.isArray(fd.rows) ? fd.rows : [];
+    }),
+    // DTNA cache read through the injected store (never a DTNA network module).
+    loadDtnaCases: pick('loadDtnaCases', () => () => {
+      const ds = require('../dtna/store');
+      const raw = store.load(ds.KEY, null);
+      const cases = raw && typeof raw === 'object' && raw.cases && typeof raw.cases === 'object' ? Object.values(raw.cases) : [];
+      return cases.map((e) => ds.sanitize(e)).filter(Boolean);
     }),
     log: pick('log', () => {
       try { const l = require('../utils/logger')('pending-est'); return { info: (m) => l.info(m), warn: (m) => l.warn(m) }; }
@@ -198,29 +215,31 @@ async function _scan(opts, d) {
     return Object.assign(base, { ok: false, code: codeOf(e, 'AAP_SEARCH_FAILED'), cached: true });
   }
 
-  // (c) open only; (e) DTNA dropped
-  let excludedDtna = 0;
+  // (c) open only; DTNA WRs are kept (tagged by vendor / case URL, never dropped)
+  const excludedDtna = 0;
   const open = [];
   for (const wo of wos) {
     if (!_wrIdOf(wo) || !_isOpenWo(wo, d.woStatus)) continue;
-    if (_isDtnaWo(wo, '')) { excludedDtna++; continue; }
     open.push(wo);
   }
   const openById = new Map(open.map((wo) => [_wrIdOf(wo), wo]));
 
-  // (f) offsite discovery from WR comments (Volvo / PACCAR vendors only)
+  // (f) offsite discovery from WR comments (Volvo / PACCAR vendors first, then DTNA vendors)
   const prevWrEst = (prev && prev.wrEst && typeof prev.wrEst === 'object') ? prev.wrEst : {};
   const wrEst = {};
   const wrOffsite = new Map();   // wrId -> estimate url
-  const dtnaWr = new Set();
-  const candidates = open.filter((wo) => DECISIV_VENDORS.has(_up(wo.vendor))).slice(0, MAX_SERVICE_CALLS);
+  const wrDtnaCase = new Map();  // wrId -> DTNA case id named in its comments
+  const candidates = open.filter((wo) => DECISIV_VENDORS.has(_up(wo.vendor)))
+    .concat(open.filter((wo) => DTNA_VENDOR_RE.test(_up(wo.vendor))))
+    .slice(0, MAX_SERVICE_CALLS);
   const needFetch = [];
   for (const wo of candidates) {
     const id = _wrIdOf(wo);
     const mod = String(wo.modifiedTimestamp == null ? '' : wo.modifiedTimestamp);
     const hit = prevWrEst[id];
-    if (hit && hit.mod === mod) {
-      wrEst[id] = { mod, url: hit.url || '', dtna: !!hit.dtna };
+    // A DTNA hit from before the case id was kept is re-read once.
+    if (hit && hit.mod === mod && !(hit.dtna && hit.dtnaCase === undefined)) {
+      wrEst[id] = { mod, url: hit.url || '', dtna: !!hit.dtna, dtnaCase: hit.dtnaCase || '' };
     } else {
       needFetch.push({ wo, id, mod, old: hit || null });
     }
@@ -231,21 +250,18 @@ async function _scan(opts, d) {
       const off = d.extractOffsiteFromComments(detail);
       let url = '';
       let dtna = false;
+      let dtnaCase = '';
       if (off && off.source === 'estimate' && d.estimateIdFromUrl(off.url)) url = off.url;
-      else if (off && off.source === 'dtna') dtna = true;
-      wrEst[id] = { mod, url, dtna };
+      else if (off && off.source === 'dtna') { dtna = true; dtnaCase = DJ.caseIdFromUrl(off.url); }
+      wrEst[id] = { mod, url, dtna, dtnaCase };
     } catch (e) {
       err('getService', codeOf(e, 'AAP_API_ERROR'));
-      if (old) wrEst[id] = { mod: '', url: old.url || '', dtna: !!old.dtna };   // retry next scan
+      if (old) wrEst[id] = { mod: '', url: old.url || '', dtna: !!old.dtna, dtnaCase: old.dtnaCase || '' };   // retry next scan
     }
   });
   for (const [id, v] of Object.entries(wrEst)) {
-    if (v.dtna) { dtnaWr.add(id); continue; }
+    if (v.dtna) { if (v.dtnaCase) wrDtnaCase.set(id, v.dtnaCase); continue; }
     if (v.url) wrOffsite.set(id, v.url);
-  }
-  if (dtnaWr.size) {
-    excludedDtna += dtnaWr.size;
-    for (const id of dtnaWr) openById.delete(id);
   }
 
   // (g) user fleet rows: estimates not discovered above
@@ -327,16 +343,34 @@ async function _scan(opts, d) {
   }
   try { d.store.save('decisivCaseCache', caseCache); } catch (e) { err('store', 'CASE_CACHE_SAVE'); }
 
+  // (g2) DTNA cases from the dtnaCaseCache (cache only; refreshed by the user's "Pull DTNA")
+  let dtnaEntries = [];
+  try { const e = d.loadDtnaCases(); dtnaEntries = Array.isArray(e) ? e : []; } catch (_) { err('dtna', 'DTNA_CACHE_READ'); dtnaEntries = []; }
+  let dtnaJoin = { byWr: new Map(), unjoined: [] };
+  try {
+    dtnaJoin = DP.joinCasesToWrs({ entries: dtnaEntries, openWos: [...openById.values()], wrDtnaCase, blockedWrIds: new Set(wrOffsite.keys()), fleetRows: fleet });
+  } catch (_) { err('dtna', 'DTNA_JOIN'); }
+
   // Build the row candidates (j)
   const drafts = [];
   for (const wo of openById.values()) {
     const wrId = _wrIdOf(wo);
     const rgPending = _isRgPending(wo, d.woStatus);
     const url = wrOffsite.get(wrId) || '';
-    if (!rgPending && !url) continue;
-    drafts.push({ kind: 'wr', wo, wrId, rgPending, url, row: null });
+    const dtna = url ? null : (dtnaJoin.byWr.get(wrId) || null);
+    const dtnaUrl = !url && wrDtnaCase.has(wrId) ? DC.caseUrl(wrDtnaCase.get(wrId)) : '';
+    if (!rgPending && !url && !dtna) continue;
+    drafts.push({ kind: 'wr', wo, wrId, rgPending, url, row: null, dtna, dtnaUrl });
   }
   for (const c of extraCases) drafts.push({ kind: 'est', wo: null, wrId: '', rgPending: false, url: c.url, row: c.row });
+  for (const entry of dtnaJoin.unjoined) {
+    if (!DP.isAwaitingApproval(entry)) continue;
+    const u = DJ.normUnit(entry.unitId);
+    const vt = DJ.normUnit(entry.serial);
+    const row = fleet.find((r) => r && u && DJ.normUnit(r.equipmentId) === u)
+      || fleet.find((r) => r && vt && DJ.vinTail(r.vin) === vt) || null;
+    drafts.push({ kind: 'dtna', wo: null, wrId: '', rgPending: false, url: '', row, dtna: entry, dtnaUrl: '' });
+  }
 
   // (i) operator / site / fas / mine
   const prevAsset = (prev && prev.assetCache && typeof prev.assetCache === 'object') ? prev.assetCache : {};
@@ -363,7 +397,8 @@ async function _scan(opts, d) {
 
   const ident = (dr) => {
     const aaid = dr.wo ? String(dr.wo.aaid || '') : String((dr.row && (dr.row.assetId || dr.row.aaid)) || '');
-    const eq = dr.wo ? String(dr.wo.assetDisplayName || '') : String((dr.row && dr.row.equipmentId) || '');
+    const eq = dr.wo ? String(dr.wo.assetDisplayName || '')
+      : (dr.kind === 'dtna' ? String((dr.row && dr.row.equipmentId) || dr.dtna.unitId || '') : String((dr.row && dr.row.equipmentId) || ''));
     return { aaid, eq };
   };
   const needAsset = new Set();
@@ -406,12 +441,12 @@ async function _scan(opts, d) {
   try { mine = d.loadMine() || mine; } catch (e) { err('mine', 'LOAD_MINE_FAILED'); }
 
   const rows = [];
-  const counts = { rg: 0, decisiv: 0, both: 0, mismatch: 0, notInRg: 0 };
+  const counts = { rg: 0, decisiv: 0, both: 0, dtna: 0, mismatch: 0, notInRg: 0 };
   for (const dr of drafts) {
     try {
       const wo = dr.wo;
       const estId = dr.url ? d.estimateIdFromUrl(dr.url) : '';
-      const offsite = estId ? (cases.get(estId) || null) : null;
+      const offsite = dr.dtna ? DP.offsiteRecord(dr.dtna) : (estId ? (cases.get(estId) || null) : null);
       const site = String((wo && wo.assetDomicileSite) || dr.site || '').trim();
       const operator = dr.operator || '';
       let fas = '';
@@ -420,16 +455,27 @@ async function _scan(opts, d) {
       try { isMine = !!d.rowIsMine('scac', { scac: operator, domicile: site }, mine.mySites, mine.myCarriers); } catch (_) { isMine = false; }
       const rgOpen = dr.kind === 'wr';
       const hasOffsite = !!dr.url;
-      const source = dr.rgPending && hasOffsite ? 'both' : (hasOffsite ? 'decisiv' : 'rg');
-      const cls = d.classifyStatusMismatch({ offsite, rgOpen }) || {};
       const raw = wo ? wo.vendor : '';
-      const vendorKind = (dr.url && d.vendorKindOfUrl(dr.url)) || _vendorKindOfRaw(raw) || 'other';
+      let source;
+      let cls;
+      let vendorKind;
+      if (dr.dtna) {
+        source = dr.rgPending ? 'both' : 'dtna';
+        cls = DP.mismatch(dr.dtna, rgOpen);
+        vendorKind = 'dtna';
+      } else {
+        source = dr.rgPending && hasOffsite ? 'both' : (hasOffsite ? 'decisiv' : 'rg');
+        cls = d.classifyStatusMismatch({ offsite, rgOpen }) || {};
+        vendorKind = (dr.url && d.vendorKindOfUrl(dr.url)) || (dr.dtnaUrl ? 'dtna' : '') || _vendorKindOfRaw(raw)
+          || (wo && _isDtnaWo(wo, '') ? 'dtna' : '') || 'other';
+      }
+      const dtnaCaseId = dr.dtna ? String(dr.dtna.caseId) : '';
       const st = wo ? _woStatusOf(wo, d.woStatus) : null;
       const fr = dr.row || {};
       const wrId = wo ? dr.wrId : String(fr.workRequestId || '');
       const cost = wo ? Number(wo.totalEstimatePendingApprovalCost) : NaN;
       const row = {
-        key: wo ? 'wr:' + dr.wrId : 'est:' + estId,
+        key: wo ? 'wr:' + dr.wrId : (dr.kind === 'dtna' ? 'dtna:' + dtnaCaseId : 'est:' + estId),
         workRequestId: wrId,
         aaid: dr.aaid,
         equipmentId: dr.equipmentId,
@@ -447,13 +493,17 @@ async function _scan(opts, d) {
         rgPendingCost: Number.isFinite(cost) ? cost : null,
         created: wo ? _epochIso(wo.scheduledDateTime) : String(fr.created || ''),
         vendorWorkOrderId: wo ? (Array.isArray(wo.vendorWorkOrderIds) ? wo.vendorWorkOrderIds.join('; ') : '') : String(fr.vendorWorkOrderId || ''),
-        offsiteShopEventUrl: dr.url || '',
+        offsiteShopEventUrl: dr.url || (dtnaCaseId ? DC.caseUrl(dtnaCaseId) : (dr.dtnaUrl || '')),
         offsite,
         source,
         offsiteDone: !!cls.offsiteDone,
         statusMismatch: !!cls.statusMismatch,
         notInRg: !rgOpen,
       };
+      if (dr.dtna) {
+        row.dtnaCaseId = dtnaCaseId;
+        row.dtnaRepairOrderNo = String(dr.dtna.repairOrderNo || dr.dtna.caseNumber || '');
+      }
       rows.push(row);
       counts[source]++;
       if (row.statusMismatch) counts.mismatch++;
@@ -462,10 +512,11 @@ async function _scan(opts, d) {
   }
 
   const errors = [...errCounts.entries()].map(([k, n]) => { const [stage, code] = k.split('|'); return { stage, code, n }; });
-  const scan = { ok: true, asOf: nowIso, rows, excludedDtna, counts, errors, wrEst, assetCache };
+  const dtnaAsOf = DP.latestPulledAt(dtnaEntries);
+  const scan = { ok: true, asOf: nowIso, rows, excludedDtna, dtnaAsOf, counts, errors, wrEst, assetCache };
   try { d.store.save('pendingEstScan', scan); } catch (_) { errors.push({ stage: 'store', code: 'SCAN_SAVE', n: 1 }); }
   d.log.info('[pending-est] team scan: ' + open.length + ' open WRs, ' + rows.length + ' rows (rg=' + counts.rg + ' decisiv=' + counts.decisiv
-    + ' both=' + counts.both + ' mismatch=' + counts.mismatch + ' notInRg=' + counts.notInRg + '), dtna excluded=' + excludedDtna
+    + ' both=' + counts.both + ' dtna=' + counts.dtna + ' mismatch=' + counts.mismatch + ' notInRg=' + counts.notInRg + '), dtnaCases=' + dtnaEntries.length
     + (errors.length ? ', errors=' + errors.map((x) => x.stage + ':' + x.code + 'x' + x.n).join(',') : ''));
   return Object.assign(_strip(scan), { cached: false });
 }

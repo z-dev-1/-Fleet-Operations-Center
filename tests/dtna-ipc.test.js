@@ -71,20 +71,20 @@ beforeEach(() => {
   ctx.lastData = { rows: [] };
 });
 
-const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:export', 'dtna:list-cases', 'dtna:login', 'dtna:pull-unit', 'dtna:status'];
+const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:draft-comment', 'dtna:export', 'dtna:list-cases', 'dtna:login', 'dtna:post-comment', 'dtna:pull-unit', 'dtna:status'];
 
 describe('registration and preload', () => {
-  it('registers exactly the seven dtna:* channels', () => {
+  it('registers exactly the nine dtna:* channels', () => {
     expect(Object.keys(handlers).filter((k) => k.startsWith('dtna:')).sort()).toEqual(CHANNELS);
     expect(Object.keys(handlers).sort()).toEqual(CHANNELS);
   });
 
-  it('preload exposes dtna with exactly the nine keys on their channels', () => {
+  it('preload exposes dtna with exactly the eleven keys on their channels', () => {
     const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8');
     const m = pre.match(/expose\('dtna',\s*\{([\s\S]*?)\n\}\);/);
     expect(m).toBeTruthy();
     const keys = [...m[1].matchAll(/^\s*(\w+)\s*:/gm)].map((x) => x[1]);
-    expect(keys).toEqual(['status', 'login', 'pullUnit', 'listCases', 'bulkPull', 'bulkCancel', 'exportBulk', 'onStatus', 'onProgress']);
+    expect(keys).toEqual(['status', 'login', 'pullUnit', 'listCases', 'bulkPull', 'bulkCancel', 'exportBulk', 'draftComment', 'postComment', 'onStatus', 'onProgress']);
     const b = m[1];
     expect(b).toMatch(/status:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:status'\)/);
     expect(b).toMatch(/login:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:login'\)/);
@@ -95,21 +95,21 @@ describe('registration and preload', () => {
     expect(b).toMatch(/exportBulk:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:export',\s*p \|\| \{\}\)/);
     expect(b).toMatch(/onStatus:\s*\(cb\)\s*=>\s*on\('dtna:status-changed',\s*cb\)/);
     expect(b).toMatch(/onProgress:\s*\(cb\)\s*=>\s*on\('dtna:progress',\s*cb\)/);
-    expect(b).not.toMatch(/draftComment|postComment/);
-    expect(pre).not.toMatch(/dtna:post-comment|dtna:draft-comment/);
+    expect(b).toMatch(/draftComment:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:draft-comment',\s*p \|\| \{\}\)/);
+    expect(b).toMatch(/postComment:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:post-comment',\s*p \|\| \{\}\)/);
   });
 
-  it('no dtna:draft-comment / dtna:post-comment anywhere under src/', () => {
+  it('only src/ipc/dtna.js contains dtna:draft-comment / dtna:post-comment under src/', () => {
     const hits = [];
     const walk = (d) => {
       for (const f of fs.readdirSync(d, { withFileTypes: true })) {
         const p = path.join(d, f.name);
         if (f.isDirectory()) walk(p);
-        else if (f.name.endsWith('.js') && /dtna:(draft|post)-comment/.test(fs.readFileSync(p, 'utf8'))) hits.push(p);
+        else if (f.name.endsWith('.js') && /dtna:(draft|post)-comment/.test(fs.readFileSync(p, 'utf8'))) hits.push(path.relative(path.join(ROOT, 'src'), p).replace(/\\/g, '/'));
       }
     };
     walk(path.join(ROOT, 'src'));
-    expect(hits).toEqual([]);
+    expect(hits).toEqual(['ipc/dtna.js']);
   });
 
   it('src/ipc/index.js registers it exactly once and no longer starts the warm scheduler', () => {
@@ -313,5 +313,91 @@ describe('invalid inputs', () => {
     }
     expect(clientCalls()).toBe(0);
     expect(session.setPulling).not.toHaveBeenCalled();
+  });
+});
+
+describe('dtna:pull-unit carry-over (Phase A review #1)', () => {
+  it('passes commentsStale / commentsCode through; the row keeps the kept thread', async () => {
+    store.save('fleetData', { rows: [{ equipmentId: '122269', workRequestId: 'WR1', vendor: 'HORWITH FREIGHTLINER' }] });
+    client.pullCase.mockResolvedValueOnce({ ok: true, entry: ENTRY, commentsStale: true, commentsCode: 'DTNA_APEX_ERROR' });
+    const r = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(r).toMatchObject({ ok: true, commentsStale: true, commentsCode: 'DTNA_APEX_ERROR', commentCount: ENTRY.commentCount });
+    expect(store.load('fleetData', {}).rows[0].asistNotes).toBe(ENTRY.offsiteText);
+  });
+});
+
+describe('dtna:draft-comment / dtna:post-comment', () => {
+  const h2 = {};
+  const writeGate = { requestWrite: vi.fn(async () => ({ ok: true, outcome: 'sent', id: 'rw_1', result: { commentId: 'a1Agx0000000099AAA' } })) };
+  const commentDraft = { draftForCase: vi.fn(async () => ({ ok: true, aiDrafted: true, draft: 'Hello', noUpdate: false, droppedCount: 1 })) };
+  const cache = { [CASE_ID]: ENTRY, [NO_RO_CASE_ID]: ENTRY2 };
+  const dtnaStore = { get: vi.fn((id) => cache[id] || null) };
+  let configured = true;
+  const fakeWrites = { isPostConfigured: vi.fn(() => configured) };
+  const ctx2 = { lastData: { rows: [{ equipmentId: '122269' }] }, sendToWindow: vi.fn() };
+  // Own session stub so the top-level status listener is not replaced.
+  const session2 = Object.assign({}, session, { onStatus: () => () => {} });
+  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h2[ch] = fn; }, client, session: session2, deepScan, writeGate, writes: fakeWrites, commentDraft, dtnaStore });
+  const h3 = {};
+  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h3[ch] = fn; }, client, session: session2, deepScan, writeGate, commentDraft, dtnaStore });
+  const c2 = (ch, p) => h2[ch]({}, p);
+  const OK = { equipmentId: '122269', caseId: CASE_ID, text: 'Please send an ETA', aiDrafted: true };
+  beforeEach(() => { configured = true; });
+
+  it('real (unconfigured) writes -> DTNA_POST_NOT_CONFIGURED, no approval request, no cache read', async () => {
+    expect(await h3['dtna:post-comment']({}, OK)).toEqual({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+    expect(dtnaStore.get).not.toHaveBeenCalled();
+    expect(clientCalls()).toBe(0);
+  });
+
+  it('configured: not pulled -> DTNA_NOT_PULLED; no RO -> DTNA_NO_REPAIR_ORDER; nothing requested', async () => {
+    expect(await c2('dtna:post-comment', Object.assign({}, OK, { caseId: '500gx0000000000ZZZ' }))).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
+    expect(await c2('dtna:post-comment', Object.assign({}, OK, { caseId: NO_RO_CASE_ID }))).toEqual({ ok: false, code: 'DTNA_NO_REPAIR_ORDER' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('configured + pulled: one interactive dtnaComment request with the RO from the cache', async () => {
+    const r = await c2('dtna:post-comment', Object.assign({}, OK, { repairOrderId: 'a0Xgx0000099999ZZZ' }));
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: 'rw_1', commentId: 'a1Agx0000000099AAA' });
+    expect(writeGate.requestWrite).toHaveBeenCalledTimes(1);
+    expect(writeGate.requestWrite.mock.calls[0][0]).toEqual({
+      kind: 'dtnaComment', origin: 'unit-detail-dtna', unit: '122269', interactive: true, aiDrafted: true,
+      payload: { caseId: CASE_ID, repairOrderId: ENTRY.repairOrderId, repairOrderNo: ENTRY.repairOrderNo, text: 'Please send an ETA' },
+    });
+    expect(JSON.stringify(r)).not.toContain('Please send an ETA');
+  });
+
+  it('gate outcomes pass through; a DTNA_* gate error becomes code', async () => {
+    writeGate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'pending-approval', id: 'rw_2', error: 'pending-approval: queued for your approval; nothing was sent to DTNA' });
+    expect(await c2('dtna:post-comment', OK)).toEqual({ ok: false, outcome: 'pending-approval', id: 'rw_2' });
+    writeGate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'send-failed', id: 'rw_3', result: null, error: 'DTNA_APEX_ERROR' });
+    expect(await c2('dtna:post-comment', OK)).toEqual({ ok: false, outcome: 'send-failed', id: 'rw_3', code: 'DTNA_APEX_ERROR' });
+  });
+
+  it('invalid inputs -> DTNA_INVALID_INPUT with the field, nothing requested', async () => {
+    const cases = [
+      [{ caseId: CASE_ID, text: 'x' }, 'equipmentId'],
+      [Object.assign({}, OK, { caseId: 'bad' }), 'caseId'],
+      [Object.assign({}, OK, { text: '   ' }), 'text'],
+      [Object.assign({}, OK, { text: 'x'.repeat(2001) }), 'text'],
+      [Object.assign({}, OK, { text: 5 }), 'text'],
+      [Object.assign({}, OK, { aiDrafted: 'yes' }), 'aiDrafted'],
+    ];
+    for (const [p, field] of cases) expect(await c2('dtna:post-comment', p)).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field });
+    expect(await c2('dtna:post-comment', 'x')).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'payload' });
+    expect(await c2('dtna:draft-comment', { equipmentId: '122269', caseId: 'bad' })).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'caseId' });
+    expect(await c2('dtna:draft-comment', { caseId: CASE_ID })).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'equipmentId' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+    expect(commentDraft.draftForCase).not.toHaveBeenCalled();
+  });
+
+  it('draft-comment forwards to draftForCase with ctx.lastData and returns text only', async () => {
+    const r = await c2('dtna:draft-comment', { equipmentId: ' 122269 ', caseId: CASE_ID });
+    expect(r).toEqual({ ok: true, aiDrafted: true, draft: 'Hello', noUpdate: false, droppedCount: 1 });
+    expect(commentDraft.draftForCase).toHaveBeenCalledWith({ equipmentId: '122269', caseId: CASE_ID, lastData: ctx2.lastData });
+    commentDraft.draftForCase.mockResolvedValueOnce({ ok: false, code: 'DTNA_NOT_PULLED' });
+    expect(await c2('dtna:draft-comment', { equipmentId: '122269', caseId: CASE_ID })).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
   });
 });

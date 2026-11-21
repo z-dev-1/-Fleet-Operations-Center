@@ -3,7 +3,10 @@
  * ipc/dtna.js — DTNA Service Tracker IPC (user-initiated Aura reads only).
  *
  * Channels: dtna:status, dtna:login, dtna:pull-unit, dtna:list-cases, dtna:bulk-pull (+ dtna:progress
- * events), dtna:bulk-cancel, dtna:export. Session status changes are pushed on dtna:status-changed.
+ * events), dtna:bulk-cancel, dtna:export, dtna:draft-comment (AI text only, no network to DTNA) and
+ * dtna:post-comment (the one DTNA write: dealer-visible, ALWAYS through the write gate's approval
+ * modal; returns DTNA_POST_NOT_CONFIGURED until constants.POST_COMMENT_PARAMS is filled).
+ * Session status changes are pushed on dtna:status-changed.
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Results carry ids, counts and codes only: comment text stays in dtnaCaseCache / fleetData rows and
  * in a file the user exports. Nothing here runs on a timer.
@@ -26,7 +29,7 @@ function _payload(p) {
 
 /**
  * registerDtnaIPC(ctx, deps)
- * deps (tests): { handle, client, session, store, electron, rowApply, deepScan }
+ * deps (tests): { handle, client, session, store, electron, rowApply, deepScan, writeGate, writes, commentDraft, dtnaStore }
  */
 function registerDtnaIPC(ctx, deps) {
   const d = deps || {};
@@ -37,7 +40,12 @@ function registerDtnaIPC(ctx, deps) {
   const electron = () => d.electron || require('electron');
   const rowApply = () => d.rowApply || require('../dtna/row-apply');
   const deepScan = () => d.deepScan || require('../orcha/deep-scan');
+  const writeGate = () => d.writeGate || require('../writes/write-gate');
+  const writes = () => d.writes || require('../dtna/writes');
+  const commentDraft = () => d.commentDraft || require('../dtna/comment-draft');
+  const dtnaStore = () => d.dtnaStore || require('../dtna/store');
   const join = require('../dtna/join');
+  const C = require('../dtna/constants');
 
   const send = (ch, payload) => {
     try { if (ctx && typeof ctx.sendToWindow === 'function') ctx.sendToWindow(ch, payload); } catch (e) { log.warn('[dtna] send', safeErr(e)); }
@@ -113,7 +121,10 @@ function registerDtnaIPC(ctx, deps) {
       } catch (e) { log.warn('[dtna] rebuild', safeErr(e)); }
 
       log.info('[dtna] pull-unit', { caseTag: caseTag(entry.caseId), comments: entry.commentCount, code: 'OK', ms: Date.now() - t0 });
-      return { ok: true, caseId: entry.caseId, commentCount: entry.commentCount, updatedAt: entry.pulledAt, joinedWr: next._offsiteWrId || '' };
+      const res = { ok: true, caseId: entry.caseId, commentCount: entry.commentCount, updatedAt: entry.pulledAt, joinedWr: next._offsiteWrId || '' };
+      if (pr.commentsStale) res.commentsStale = true;
+      if (pr.commentsCode) res.commentsCode = String(pr.commentsCode).slice(0, 40);
+      return res;
     } finally {
       try { S.setPulling(false); } catch (e) { log.warn('[dtna] status', safeErr(e)); }
     }
@@ -182,6 +193,56 @@ function registerDtnaIPC(ctx, deps) {
     if (typeof p.jobId !== 'string' || !JOB_ID_RE.test(p.jobId)) return _bad('jobId');
     if (_running && _running.jobId === p.jobId) { try { _running.ac.abort(); } catch (_) {} }
     return { ok: true };
+  });
+
+  // ── comment: AI draft (text only) and the approval-gated, dealer-visible post ──
+  const _equipment = (p) => {
+    if (typeof p.equipmentId !== 'string') return '';
+    const id = p.equipmentId.trim();
+    return id && id.length <= EQUIPMENT_MAX ? id : '';
+  };
+
+  wrap('dtna:draft-comment', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    const equipmentId = _equipment(p);
+    if (!equipmentId) return _bad('equipmentId');
+    if (typeof p.caseId !== 'string' || !C.CASE_ID_RE.test(p.caseId)) return _bad('caseId');
+    const r = await commentDraft().draftForCase({ equipmentId, caseId: p.caseId, lastData: ctx && ctx.lastData });
+    if (!r || !r.ok) return { ok: false, code: String((r && r.code) || 'DTNA_INTERNAL').slice(0, 40) };
+    return { ok: true, aiDrafted: true, draft: String(r.draft || ''), noUpdate: !!r.noUpdate, droppedCount: Number(r.droppedCount) || 0 };
+  });
+
+  wrap('dtna:post-comment', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    const equipmentId = _equipment(p);
+    if (!equipmentId) return _bad('equipmentId');
+    if (typeof p.caseId !== 'string' || !C.CASE_ID_RE.test(p.caseId)) return _bad('caseId');
+    if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > C.POST_COMMENT_MAX) return _bad('text');
+    if (p.aiDrafted !== undefined && typeof p.aiDrafted !== 'boolean') return _bad('aiDrafted');
+    const caseId = p.caseId;
+    const tag = caseTag(caseId);
+    const len = p.text.length;
+    const done = (r) => { log.info('[dtna] post-comment', { caseTag: tag, code: r.code || r.outcome || 'OK', len }); return r; };
+    // Not configured: no approval prompt, no network.
+    if (!writes().isPostConfigured()) return done({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
+    const entry = dtnaStore().get(caseId);
+    if (!entry) return done({ ok: false, code: 'DTNA_NOT_PULLED' });
+    // The repair order comes from the cache, never from the renderer.
+    if (!entry.repairOrderId) return done({ ok: false, code: 'DTNA_NO_REPAIR_ORDER' });
+    const r = await writeGate().requestWrite({
+      kind: 'dtnaComment',
+      payload: { caseId, repairOrderId: String(entry.repairOrderId), repairOrderNo: String(entry.repairOrderNo || ''), text: p.text },
+      origin: 'unit-detail-dtna',
+      unit: equipmentId,
+      interactive: true,
+      aiDrafted: p.aiDrafted === true,
+    });
+    const out = { ok: !!(r && r.ok), outcome: String((r && r.outcome) || 'send-failed'), id: (r && r.id) || null };
+    if (r && r.ok && r.result && r.result.commentId) out.commentId = String(r.result.commentId);
+    if (r && !r.ok && typeof r.error === 'string' && /^DTNA_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
+    return done(out);
   });
 
   // ── export ───────────────────────────────────────────────────────────────

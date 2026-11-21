@@ -110,20 +110,21 @@ describe('pending_est_sources: team scan', () => {
     expect(scan.assetCache).toBeUndefined();
   });
 
-  it('drops closed / cancelled WRs and DTNA; RG pending by status and by cost', async () => {
+  it('drops closed / cancelled WRs, keeps DTNA (tagged); RG pending by status and by cost', async () => {
     const { deps } = makeDeps();
     const scan = await src.scanTeamPending({}, deps);
     const k = byKey(scan);
     expect(k['wr:WR_E']).toBeUndefined();
     expect(k['wr:WR_F']).toBeUndefined();
-    expect(k['wr:WR_G']).toBeUndefined();
     expect(k['wr:WR_H']).toBeUndefined();          // open, no estimate link, not pending
-    expect(scan.excludedDtna).toBe(1);
+    expect(scan.excludedDtna).toBe(0);
+    expect(scan.dtnaAsOf).toBeNull();
     expect(k['wr:WR_C']).toMatchObject({ source: 'rg', rgPending: true, rgPendingCost: 512.5, offsite: null });
     expect(k['wr:WR_D']).toMatchObject({ source: 'rg', rgPending: true });
-    expect(scan.rows.some((r) => /dtna/i.test(r.offsiteShopEventUrl) || /FREIGHTLINER/i.test(r.vendor))).toBe(false);
-    // getService only for Volvo / PACCAR vendors
-    expect(deps.getService.mock.calls.map((c) => c[0]).sort()).toEqual(['WR_A', 'WR_B', 'WR_H']);
+    // The FREIGHTLINER WR is now listed: RG pending, no DTNA cache entry -> source rg, vendorKind dtna.
+    expect(k['wr:WR_G']).toMatchObject({ source: 'rg', vendorKind: 'dtna', rgPending: true, offsite: null });
+    // getService for Volvo / PACCAR vendors, then DTNA vendors
+    expect(deps.getService.mock.calls.map((c) => c[0]).sort()).toEqual(['WR_A', 'WR_B', 'WR_G', 'WR_H']);
   });
 
   it('follows comment links to Decisiv and scrapes each case once', async () => {
@@ -159,7 +160,7 @@ describe('pending_est_sources: team scan', () => {
     expect(b.statusMismatch).toBe(true);           // done offsite, RG WR still open
 
     expect(store.data.decisivCaseCache['21383146'].total).toBe(8735.97);
-    expect(scan.counts).toMatchObject({ rg: 2, decisiv: 2, both: 1, mismatch: 1, notInRg: 1 });
+    expect(scan.counts).toEqual({ rg: 3, decisiv: 2, both: 1, dtna: 0, mismatch: 1, notInRg: 1 });
   });
 
   it('a fleet-row estimate not in the team pull is listed as notInRg', async () => {
@@ -194,7 +195,7 @@ describe('pending_est_sources: team scan', () => {
     expect(deps.fasFor).toHaveBeenCalledWith('OPASSET', 'DCS1');
     expect(deps.fasFor).toHaveBeenCalledWith('OPASSET', 'SASSET'); // WR_D has no WR domicile
     expect(k['wr:WR_A'].fas).toBe('FAS-OPFLEET-DAS1');
-    expect(deps.getAsset.mock.calls.map((c) => c[0]).sort()).toEqual(['aaid-C', 'aaid-D']);
+    expect(deps.getAsset.mock.calls.map((c) => c[0]).sort()).toEqual(['aaid-C', 'aaid-D', 'aaid-WR_G']);
   });
 
   it('mine comes from the injected DBR rule with sectionKind scac', async () => {
@@ -230,14 +231,14 @@ describe('pending_est_sources: team scan', () => {
   it('an unchanged modifiedTimestamp skips getService on the next forced scan', async () => {
     const { deps } = makeDeps();
     await src.scanTeamPending({}, deps);
-    expect(deps.getService).toHaveBeenCalledTimes(3);
+    expect(deps.getService).toHaveBeenCalledTimes(4);   // WR_A, WR_B, WR_H + the FREIGHTLINER WR_G
     const scan = await src.scanTeamPending({ force: true }, deps);
-    expect(deps.getService).toHaveBeenCalledTimes(3);
+    expect(deps.getService).toHaveBeenCalledTimes(4);
     expect(byKey(scan)['wr:WR_A'].offsiteShopEventUrl).toBe(VOLVO_URL);
     deps.searchAllPages.mockImplementation(async () => WOS().map((w) => (w.workRequestId === 'WR_A' ? Object.assign(w, { modifiedTimestamp: 2000 }) : w)));
     await src.scanTeamPending({ force: true }, deps);
-    expect(deps.getService).toHaveBeenCalledTimes(4);
-    expect(deps.getService.mock.calls[3][0]).toBe('WR_A');
+    expect(deps.getService).toHaveBeenCalledTimes(5);
+    expect(deps.getService.mock.calls[4][0]).toBe('WR_A');
   });
 
   it('a getService rejection is counted in errors and the scan still succeeds', async () => {
@@ -347,6 +348,103 @@ describe('pending_est_sources: team scan', () => {
     expect(store.data.decisivCaseCache['21383146']).toMatchObject({ ok: false, error: 'DECISIV_SESSION_INVALID' });
   });
 
+});
+
+// ── DTNA from the dtnaCaseCache (cache only) ────────────────────────────────
+const DCASE = (n) => '500gx00000000' + String(n).padStart(4, '0') + 'A';
+const DURL = (id) => 'https://dtna.my.site.com/Servicetracker/s/case/' + id + '/detail';
+const dtnaEntry = (o) => Object.assign({
+  caseId: DCASE(1), caseNumber: '', unitId: 'EQ-WR_G', serial: 'NP6923', vinTail: '', dealerCode: '', dealerName: 'HORWITH FREIGHTLINER',
+  caseStatus: 'Arrived', steps: [], repairOrderId: 'a0Xgx0000012345AAA', repairOrderNo: 'R101048154', estimateNo: '', comments: [],
+  thread: '', offsiteText: '', offsiteStage: 'arrival', stageSince: '2026-11-18T12:00:00.000Z', commentCount: 2,
+  lastCommentAt: '2026-11-19T15:00:00.000Z', lastCommentType: 'General', pulledAt: '2026-11-20T16:00:00.000Z', source: 'aura',
+}, o);
+
+describe('pending_est_sources: DTNA (findings §6b, §5.3)', () => {
+  it('a joined RG-pending WR -> source both, Total null, status from the case, chip RO from the entry', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry()] });
+    const scan = await src.scanTeamPending({}, deps);
+    const g = byKey(scan)['wr:WR_G'];
+    expect(g).toMatchObject({ source: 'both', vendorKind: 'dtna', dtnaCaseId: DCASE(1), dtnaRepairOrderNo: 'R101048154', offsiteShopEventUrl: DURL(DCASE(1)), notInRg: false });
+    expect(g.offsite).toMatchObject({ source: 'dtna', total: null, totalSource: 'none', fleetStatus: '', repairStatus: 'Arrived', stage: 'arrival',
+      updatedAt: '2026-11-19T15:00:00.000Z', scrapedAt: '2026-11-20T16:00:00.000Z', roNumber: 'R101048154' });
+    expect(g.offsiteDone).toBe(false);
+    expect(g.statusMismatch).toBe(false);
+    expect(scan.dtnaAsOf).toBe('2026-11-20T16:00:00.000Z');
+    expect(scan.excludedDtna).toBe(0);
+  });
+
+  it('a joined WR that is not RG pending -> source dtna', async () => {
+    const wos = WOS().map((w) => (w.workRequestId === 'WR_G' ? Object.assign(w, { status: st('CREATED') }) : w));
+    const { deps } = makeDeps({ searchAllPages: vi.fn(async () => wos), loadDtnaCases: () => [dtnaEntry()] });
+    const scan = await src.scanTeamPending({}, deps);
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ source: 'dtna', rgPending: false, vendorKind: 'dtna' });
+    expect(scan.counts.dtna).toBe(1);
+  });
+
+  it('a Volvo WR whose comments carry a DTNA case URL is kept and joined through that URL', async () => {
+    const wos = WOS().concat([
+      wo({ id: 'WR_V', assetDisplayName: 'V700', vendor: 'VOLVO', status: st('CREATED'), scheduledDateTime: 1 }),
+      wo({ id: 'WR_V2', assetDisplayName: 'V700', vendor: 'FREIGHTLINER', status: st('CREATED'), scheduledDateTime: 2 }),
+    ]);
+    const details = Object.assign({}, DETAILS, { WR_V: comment('DTNA case ' + DURL(DCASE(7))) });
+    const { deps } = makeDeps({
+      searchAllPages: vi.fn(async () => wos),
+      getService: vi.fn(async (id) => details[id] || { workRequest: { comments: [] } }),
+      loadDtnaCases: () => [dtnaEntry({ caseId: DCASE(7), unitId: 'V700' })],
+    });
+    const scan = await src.scanTeamPending({}, deps);
+    const k = byKey(scan);
+    expect(k['wr:WR_V']).toMatchObject({ source: 'dtna', dtnaCaseId: DCASE(7), vendorKind: 'dtna' });
+    expect(k['wr:WR_V2']).toBeUndefined();
+  });
+
+  it('an unjoined open case -> kind dtna notInRg row keyed dtna:<id>; an unjoined closed case -> no row', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [
+      dtnaEntry({ caseId: DCASE(2), unitId: 'A100', serial: '' }),
+      dtnaEntry({ caseId: DCASE(3), unitId: 'ZZ999', serial: '', caseStatus: 'Closed' }),
+      dtnaEntry({ caseId: DCASE(4), unitId: 'NOPE1', serial: '', caseStatus: 'In Repair' }),
+    ] });
+    const scan = await src.scanTeamPending({}, deps);
+    const k = byKey(scan);
+    // A100 has an open WR with a Decisiv estimate: never joined to a DTNA case.
+    expect(k['wr:WR_A'].source).toBe('decisiv');
+    expect(k['wr:WR_A'].dtnaCaseId).toBeUndefined();
+    expect(k['dtna:' + DCASE(2)]).toMatchObject({ notInRg: true, rgOpen: false, source: 'dtna', vendorKind: 'dtna', equipmentId: 'A100', operator: 'OPFLEET' });
+    expect(k['dtna:' + DCASE(3)]).toBeUndefined();
+    expect(k['dtna:' + DCASE(4)]).toMatchObject({ notInRg: true, equipmentId: 'NOPE1', offsiteShopEventUrl: DURL(DCASE(4)) });
+    expect(scan.counts.notInRg).toBe(3);
+  });
+
+  it('a closed case on an open WR -> offsiteDone and statusMismatch', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry({ caseStatus: 'Closed', offsiteStage: 'ready' })] });
+    const scan = await src.scanTeamPending({}, deps);
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ offsiteDone: true, statusMismatch: true });
+    expect(scan.counts.mismatch).toBe(2);
+  });
+
+  it('dtnaAsOf is the newest pulledAt', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [
+      dtnaEntry({ caseId: DCASE(5), pulledAt: '2026-11-19T10:00:00.000Z' }),
+      dtnaEntry({ caseId: DCASE(6), unitId: 'X1', pulledAt: '2026-11-20T11:00:00.000Z' }),
+    ] });
+    const scan = await src.scanTeamPending({}, deps);
+    expect(scan.dtnaAsOf).toBe('2026-11-20T11:00:00.000Z');
+  });
+
+  it('the default cache reader uses the injected store and never loads a DTNA network module', async () => {
+    const NET = /[\\/]src[\\/]dtna[\\/](aura|client|session|capture)\.js$/;
+    const before = Object.keys(require.cache).filter((k) => NET.test(k));
+    expect(before).toEqual([]);
+    const { deps, store } = makeDeps();
+    store.data.dtnaCaseCache = { version: 1, cases: { [DCASE(1)]: dtnaEntry() } };
+    const scan = await src.scanTeamPending({}, deps);
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), source: 'both' });
+    expect(Object.keys(require.cache).filter((k) => NET.test(k))).toEqual([]);
+  });
+});
+
+describe('pending_est_sources: predicates', () => {
   it('predicates', () => {
     expect(src._isOpenWo(wo({ id: 'x', status: st('ESTIMATE_APPROVED') }))).toBe(true);
     expect(src._isOpenWo(wo({ id: 'x', status: st('COMPLETED', 'Complete') }))).toBe(false);
