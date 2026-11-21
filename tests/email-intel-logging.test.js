@@ -419,6 +419,10 @@ describe('AC-9 Phase E reply paths log no dynamic content (FEAT-006)', () => {
       await draft.draftThreadReply({ conversationKey: ck, mode: 'reply-all', guidance: S.body }, { _ask: async () => ({ ok: true, text: 'Reply ' + S.body + ' ' + S.addr }) });
       await draft.draftThreadReply({ conversationKey: ck, mode: 'reply' }, { _ask: async () => ({ ok: true, text: S.subject + ' AKIAIOSFODNN7EXAMPLE' }) });
       await draft.draftThreadReply({ conversationKey: ck, mode: 'reply' }, { _ask: async () => ({ ok: false, error: 'lane-unavailable' }) });
+      // free-write clarify branch: questions, answered draft and unusable JSON log counts only
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply', guidance: S.body, clarify: true }, { _ask: async () => ({ ok: true, text: JSON.stringify({ done: false, questions: [S.subject + '?', S.name + '?'] }) }) });
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply', guidance: S.body, clarify: true, answers: S.name }, { _ask: async () => ({ ok: true, text: JSON.stringify({ done: true, draft: 'Reply ' + S.body }) }) });
+      await draft.draftThreadReply({ conversationKey: ck, mode: 'reply', guidance: S.body, clarify: true }, { _ask: async () => ({ ok: true, text: JSON.stringify({ done: S.body }) }) });
       await call('emailIntel:draft-thread-reply', { conversationKey: ck, mode: 'reply', guidance: S.body });
       require('../src/email-intel/executors').registerAll();
       const owaReply = require('../src/email-intel/reply/owa_reply');

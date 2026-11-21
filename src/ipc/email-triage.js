@@ -58,6 +58,70 @@ function _captureEffective() {
   try { return require('../email-intel/flags').get().effective.capture === true; } catch (_) { return false; }
 }
 
+// ── Free-write reply with clarifying questions (draft-reply opts) ─────────────
+// Only clarify / answers are read; anything else in opts is ignored. Returned only when present.
+function _freeWriteOpts(opts) {
+  if (opts === undefined || opts === null) return {};
+  if (typeof opts !== 'object' || Array.isArray(opts)) throw new ConfigError('opts must be an object', 'opts');
+  const out = {};
+  if (opts.clarify !== undefined) {
+    if (typeof opts.clarify !== 'boolean') throw new ConfigError('clarify must be a boolean', 'clarify');
+    out.clarify = opts.clarify;
+  }
+  if (opts.answers !== undefined) {
+    if (typeof opts.answers !== 'string' || opts.answers.length > 1000) throw new ConfigError('answers must be a string of at most 1000 characters', 'answers');
+    const a = opts.answers.replace(FW_CTRL_RE, '').trim();
+    if (a) out.answers = a;
+  }
+  return out;
+}
+
+const FW_CTRL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u2028\u2029\u200E\u200F\u061C\u202A-\u202E\u2066-\u2069]/g;
+const FW_CONTRACT = [
+  'Before writing: if the email, the grounded context and the intent above give you enough to write a correct reply, write it. If a fact the reply needs is missing (a date, amount, unit, who approves, what to commit to), ASK 1-3 short questions instead of guessing. Never fabricate specifics.',
+  'Respond as STRICT JSON only, one of:',
+  '{"done":true,"draft":"<reply body>"}',
+  '{"done":false,"questions":["q1","q2"]}',
+  'No text outside the JSON.',
+].join('\n');
+
+// Legacy (no conversation key) free-write: the unchanged legacy reply prompt plus the answers and the JSON contract.
+// -> { questions } | { draft } | { empty:true } (AI gave nothing) | { invalid:true } | null (nothing to reply to).
+// Logs counts only, never the guidance, answers, questions or draft.
+async function _legacyClarify(email, guidance, answers) {
+  if (!email.from && !email.fromName && !email.subject) return null;
+  const lines = [actions._buildReplyPrompt(email, guidance)];
+  if (answers) { lines.push(''); lines.push('THE USER\'S ANSWERS TO YOUR QUESTIONS (follow these): ' + answers); }
+  lines.push('');
+  lines.push(FW_CONTRACT);
+  if (answers) lines.push('The user already answered your questions: ask again only if something critical is still missing.');
+  let text = '';
+  try {
+    const raw = await require('../orcha/relay').askWithTimeout(lines.join('\n'), { source: 'email_actions', timeoutMs: 45000, timeoutMessage: 'ai-timeout' });
+    text = (typeof raw === 'string') ? raw.trim() : (raw && raw.text ? String(raw.text).trim() : '');
+  } catch (_) { text = ''; }
+  if (!text) { logger.warn('[email-triage] free-write draft: AI unavailable'); return { empty: true }; }
+  const m = /\{[\s\S]*\}/.exec(text);
+  let p = null;
+  try { p = m ? JSON.parse(m[0]) : null; } catch (_) { p = null; }
+  if (p && p.done === false && Array.isArray(p.questions)) {
+    const questions = p.questions.filter((q) => typeof q === 'string')
+      .map((q) => q.replace(FW_CTRL_RE, '').replace(/\s+/g, ' ').trim().slice(0, 200)).filter(Boolean).slice(0, 3);
+    if (questions.length) { logger.info('[email-triage] free-write draft needs answers questions=' + questions.length); return { questions }; }
+  }
+  if (p && p.done === true && typeof p.draft === 'string') {
+    const draft = p.draft.replace(/\r\n/g, '\n').replace(FW_CTRL_RE, '').trim();
+    if (draft && draft.length <= 4000) return { draft };
+  }
+  if (!m) {
+    // The model ignored the contract and wrote a plain reply: use it as the draft.
+    const draft = text.replace(/\r\n/g, '\n').replace(FW_CTRL_RE, '').trim();
+    if (draft && draft.length <= 4000) return { draft };
+  }
+  logger.warn('[email-triage] free-write draft: unusable AI output chars=' + text.length);
+  return { invalid: true };
+}
+
 // True only when the My Email Actions view (actionsView) is effective: the legacy delete / delete-suggested / keep
 // channels then fail closed (F2-03); deletes go through emailIntel:prepare-action / confirm-action.
 function _actionsViewEffective() {
@@ -153,18 +217,38 @@ function registerEmailTriageIPC(_ctx) {
   });
 
   // ── Reply drafting (persists the draft + flips replyState to 'drafted') ────
-  handle('emailTriage:draft-reply', async (_e, id, guidance) => {
+  // opts (free-write, optional): { clarify?: boolean, answers?: string <= 1000 }. Without opts: unchanged.
+  handle('emailTriage:draft-reply', async (_e, id, guidance, opts) => {
     requireString(id, 'id');
+    const fw = _freeWriteOpts(opts);
     const email = _findEmail(id);
     if (!email) throw new ConfigError('email not found: ' + id, 'id');
     // threadReplies: draft through the thread-aware path (resolved-question gate, isolated lane, fenced context).
     if (_repliesEffective() && email.intel && email.intel.conversationKey) {
-      const t = await require('../email-intel/reply/draft').draftThreadReply({ conversationKey: email.intel.conversationKey, mode: 'reply', guidance: guidance ? String(guidance).slice(0, 1000) : '' });
+      const t = await require('../email-intel/reply/draft').draftThreadReply(Object.assign({ conversationKey: email.intel.conversationKey, mode: 'reply', guidance: guidance ? String(guidance).slice(0, 1000) : '' }, fw));
       if (!t.ok) return Object.assign({}, t, { error: t.code === 'ALREADY_RESOLVED' ? 'Already answered in the thread; no reply is needed.' : 'Draft not created (' + t.code + ').' });
+      if (t.needsAnswers) return { ok: true, needsAnswers: true, questions: t.questions };
       _notifyOverlay();
       return { ok: true, draft: t.draft, aiUnavailable: !!t.aiUnavailable };
     }
-    const r = await actions.draftReply(email, guidance ? String(guidance).slice(0, 1000) : '', {});
+    const g = guidance ? String(guidance).slice(0, 1000) : '';
+    if (fw.clarify === true && g) {
+      const c = await _legacyClarify(email, g, fw.answers || '');
+      if (c && c.questions) return { ok: true, needsAnswers: true, questions: c.questions };
+      if (c && c.draft) {
+        _patchEmail(id, { replyDraft: c.draft, replyState: 'drafted' });
+        return { ok: true, draft: c.draft, aiUnavailable: false };
+      }
+      if (c && c.empty) {
+        // AI unavailable: the same editable starter as actions.draftReply, without a second 45 s wait.
+        const who = email.fromName ? String(email.fromName).split(/[\s,<]/)[0] : '';
+        const fb = 'Hi' + (who ? ' ' + who : '') + ',\n\nThank you for your email.\n\n\n\nBest regards';
+        _patchEmail(id, { replyDraft: fb, replyState: 'drafted' });
+        return { ok: true, draft: fb, aiUnavailable: true };
+      }
+      // unusable JSON from the AI: the normal draft below (never stuck asking)
+    }
+    const r = await actions.draftReply(email, fw.answers ? g + '\n' + fw.answers : g, {});
     if (!r.ok) return r;
     _patchEmail(id, { replyDraft: r.draft, replyState: 'drafted' });
     return { ok: true, draft: r.draft, aiUnavailable: !!r.aiUnavailable };

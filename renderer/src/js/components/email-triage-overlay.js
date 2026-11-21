@@ -459,8 +459,132 @@ function _cardHtml(em) {
         (em.deleteSuggested && !em.deleted ? '<span class="et-del">🗑 Suggested delete (noise)</span>' : '') +
         '<div class="et-footer-actions">' + _deleteButtonsHtml(em) + _replyButtonHtml(em) + '</div>' +
       '</div>' +
-      _replyPanelHtml(em) +
+      _replyPanelHtml(em) + (_intel ? _freeWriteHtml(em) : '') +
     '</div>';
+}
+
+// ── Free-write reply (intel on only): the user types what the reply should say, the AI drafts from it plus the same
+// grounded context, or asks 1-3 short questions first. The draft lands in the normal reply panel above; nothing is
+// sent from here. The instructions box never uses data-draft / et-draft (those are what Send reads).
+const _fwUi = {};
+function _fw(id) { return _fwUi[id] || (_fwUi[id] = { open: false, text: '', questions: [], answers: '', busy: false, mode: 'reply' }); }
+
+function _freeWriteHtml(em) {
+  const state = em.replyState || 'none';
+  if (em.deleted || state === 'sent' || state === 'uncertain' || state === 'deleted') return '';
+  const id = _esc(em.id);
+  const ui = _fwUi[em.id];
+  if (!ui || !ui.open) {
+    return '<div class="et-fw"><button type="button" class="et-mini et-fw-toggle" data-fw-toggle="' + id + '" aria-expanded="false">✍️ Write my own reply</button></div>';
+  }
+  const dis = ui.busy ? ' disabled' : '';
+  let btns;
+  if (_repliesOn() && _ck(em)) {
+    const known = !!(em.intel && em.intel.recipientsKnown);
+    btns = '<button type="button" class="et-mini et-fw-go" data-fw-draft="reply" data-fw-id="' + id + '"' + dis + '>' + (ui.busy && ui.mode !== 'reply-all' ? '✍️ Drafting…' : 'Draft Reply') + '</button>' +
+      '<button type="button" class="et-mini et-fw-go" data-fw-draft="reply-all" data-fw-id="' + id + '"' +
+      (known ? dis : ' disabled aria-disabled="true" title="Reply All is unavailable: the recipients of this email are not known"') +
+      '>' + (ui.busy && ui.mode === 'reply-all' ? '✍️ Drafting…' : 'Draft Reply All') + '</button>';
+  } else {
+    btns = '<button type="button" class="et-mini et-fw-go" data-fw-draft="reply" data-fw-id="' + id + '"' + dis + '>' + (ui.busy ? '✍️ Drafting…' : 'Draft from my notes') + '</button>';
+  }
+  const qs = Array.isArray(ui.questions) ? ui.questions : [];
+  const ask = qs.length
+    ? '<div class="et-fw-ask" role="group" aria-label="The AI needs a bit more detail">' +
+        '<div class="et-fw-ask-label">💬 The AI needs a bit more:</div>' +
+        '<ul class="et-fw-qs">' + qs.map((q) => '<li>' + _esc(q) + '</li>').join('') + '</ul>' +
+        '<textarea class="et-fw-input et-fw-answers" data-fw-answers="' + id + '" rows="3" placeholder="Your answers (Ctrl+Enter to submit)"' + dis + '>' + _esc(ui.answers || '') + '</textarea>' +
+        '<div class="et-fw-btns">' +
+          '<button type="button" class="et-mini et-fw-go" data-fw-submit="' + id + '"' + dis + '>➤ Submit answers</button>' +
+          '<button type="button" class="et-mini" data-fw-skip="' + id + '"' + dis + '>Draft anyway</button>' +
+        '</div>' +
+      '</div>'
+    : '';
+  return '<div class="et-fw et-fw--open">' +
+    '<div class="et-fw-label">✍️ Write my own reply: tell the AI what to say. It uses the thread and your unit facts, and asks if it needs more. Nothing is sent from here.</div>' +
+    '<textarea class="et-fw-input" data-fw-text="' + id + '" rows="3" maxlength="1000" placeholder="Tell the AI what to say, e.g. \'confirm Friday pickup, ask for the final invoice\'"' + dis + '>' + _esc(ui.text || '') + '</textarea>' +
+    '<div class="et-fw-btns">' + btns +
+      '<button type="button" class="et-mini" data-fw-toggle="' + id + '" aria-expanded="true">Hide</button>' +
+    '</div>' +
+    ask +
+  '</div>';
+}
+
+function _wireFreeWrite(card, id) {
+  card.querySelectorAll('[data-fw-toggle]').forEach((b) => b.addEventListener('click', () => {
+    const ui = _fw(id);
+    ui.open = !ui.open;
+    _render();
+    if (ui.open) { try { const ta = document.querySelector('textarea[data-fw-text="' + CSS.escape(id) + '"]'); if (ta) ta.focus(); } catch (_) { /* focus only */ } }
+  }));
+  const text = card.querySelector('[data-fw-text]');
+  if (text) text.addEventListener('input', () => { _fw(id).text = text.value; });
+  const answers = card.querySelector('[data-fw-answers]');
+  if (answers) {
+    answers.addEventListener('input', () => { _fw(id).answers = answers.value; });
+    answers.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); _fw(id).answers = answers.value; _freeWriteDraft(id, _fw(id).mode, { submitAnswers: true }); }
+    });
+  }
+  card.querySelectorAll('[data-fw-draft]').forEach((b) => b.addEventListener('click', () => _freeWriteDraft(id, b.getAttribute('data-fw-draft'))));
+  const submit = card.querySelector('[data-fw-submit]');
+  if (submit) submit.addEventListener('click', () => _freeWriteDraft(id, _fw(id).mode, { submitAnswers: true }));
+  const skip = card.querySelector('[data-fw-skip]');
+  if (skip) skip.addEventListener('click', () => _freeWriteDraft(id, _fw(id).mode, { skip: true }));
+}
+
+// The AI answered (draft, questions or error): the free-write box is usable again.
+function _fwDone(id, extra) {
+  const ui = extra ? _fwUi[id] : null;
+  if (ui && ui.busy) { ui.busy = false; _render(); }
+}
+
+function _fwQuestions(id, questions) {
+  const ui = _fw(id);
+  ui.questions = (Array.isArray(questions) ? questions : []).slice(0, 3);
+  _render();
+  try { const ta = document.querySelector('textarea[data-fw-answers="' + CSS.escape(id) + '"]'); if (ta) ta.focus(); } catch (_) { /* focus only */ }
+  _toast('The AI needs a bit more detail — answer below.');
+}
+
+/**
+ * Draft from the user's own words. opts.submitAnswers sends the typed answers with clarify on; opts.skip ("Draft
+ * anyway") drafts now with clarify off. Intel cards reuse _intelDraft (gate, recipients, panel); legacy cards use
+ * emailTriage.draftReply. A questions result changes nothing but the questions box.
+ */
+async function _freeWriteDraft(id, mode, opts) {
+  const o = opts || {};
+  const em = (_results.emails || []).find((e) => e.id === id);
+  if (!em) return;
+  const ui = _fw(id);
+  if (ui.busy) return;
+  const text = String(ui.text || '').trim().slice(0, 1000);
+  if (!text) { _toast('Type what the reply should say first.'); return; }
+  const answers = (o.submitAnswers || o.skip) ? String(ui.answers || '').trim().slice(0, 1000) : '';
+  if (o.submitAnswers && !answers) { _toast('Type your answers first, or click Draft anyway.'); return; }
+  if (!o.submitAnswers && !o.skip) { ui.questions = []; ui.answers = ''; }
+  if (em.replyState === 'drafted') {
+    let cur = em.replyDraft || '';
+    try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) cur = ta.value; } catch (_) { /* read only */ }
+    if (cur !== (em.replyDraft || '') && !confirm('Replace the current draft with a new AI draft?')) return;
+  }
+  ui.mode = mode === 'reply-all' ? 'reply-all' : 'reply';
+  const extra = { guidance: text, clarify: !o.skip };
+  if (answers) extra.answers = answers;
+  ui.busy = true;
+  _render();
+  if (_repliesOn() && _ck(em)) { await _intelDraft(id, ui.mode, false, extra); _fwDone(id, extra); return; }
+  _toast('Drafting reply… (the AI can take a few seconds)');
+  let r;
+  try { r = await window.emailTriage.draftReply(id, text, answers ? { clarify: !o.skip, answers } : { clarify: !o.skip }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
+  ui.busy = false;
+  if (r && r.ok && r.needsAnswers) { _fwQuestions(id, r.questions); return; }
+  if (!r || !r.ok) { _render(); _toast('Draft failed: ' + ((r && r.error) || 'unknown')); return; }
+  ui.questions = []; ui.answers = '';
+  em.replyDraft = r.draft; em.replyState = 'drafted';
+  _render();
+  try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); ta.focus(); } } catch (_) { /* focus only */ }
+  _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
 }
 
 // Delete + Keep controls. Delete is always available (reversible — moves to
@@ -530,6 +654,8 @@ function _wireCard(id) {
     const rec = card.querySelector('[data-ei-reconcile]');
     if (rec) rec.addEventListener('click', () => _intelReconcile(id));
   }
+
+  if (_intel) _wireFreeWrite(card, id);
 
   const startBtn = card.querySelector('[data-reply]');
   if (startBtn) startBtn.addEventListener('click', () => _draftReply(id));
@@ -690,7 +816,8 @@ async function _sendReply(id) {
 // ── Thread-aware replies (threadReplies on): draft, confirm through prepare/confirm-action, reconcile ──
 const _FALLBACK_CODES = ['INSERT_UNVERIFIED', 'COMPOSE_NOT_INLINE', 'NO_REPLY_CONTROL'];
 
-async function _intelDraft(id, mode, force) {
+// extra (free-write only): { guidance, clarify, answers? } added to the payload. Without it the payload is unchanged.
+async function _intelDraft(id, mode, force, extra) {
   const em = _results.emails.find((e) => e.id === id);
   const ck = _ck(em);
   if (!ck) { _toast('Open the email in Outlook to reply.'); return; }
@@ -699,17 +826,21 @@ async function _intelDraft(id, mode, force) {
   const prevUi = _apiOn() ? _replyUi[id] : null;
   if (prevUi) { prevUi.resolving = true; _render(); }
   const unmark = () => { if (prevUi && prevUi.resolving) { prevUi.resolving = false; _render(); } };
+  const payload = extra ? Object.assign({ conversationKey: ck, mode, force: !!force }, extra) : { conversationKey: ck, mode, force: !!force };
   let r;
-  try { r = await window.emailIntel.draftThreadReply({ conversationKey: ck, mode, force: !!force }); } catch (e) { unmark(); _toast('Draft failed: ' + (e.message || e)); return; }
+  try { r = await window.emailIntel.draftThreadReply(payload); } catch (e) { _fwDone(id, extra); unmark(); _toast('Draft failed: ' + (e.message || e)); return; }
+  _fwDone(id, extra);
   if (r && r.code === 'ALREADY_RESOLVED') {
     unmark();
     const who = r.resolvedBy && r.resolvedBy.senderName ? r.resolvedBy.senderName : 'someone else in the thread';
     if (!confirm('This question was already answered by ' + who + '. No reply is needed from you.\n\nDraft a reply anyway?')) { _toast('No reply needed.'); return; }
-    await _intelDraft(id, mode, true);
+    await _intelDraft(id, mode, true, extra);
     return;
   }
   if (r && r.code === 'RECIPIENTS_UNKNOWN') { unmark(); _toast('Reply All is unavailable: the recipients of this email are not known.'); return; }
   if (!r || !r.ok) { unmark(); _toast('Draft failed: ' + ((r && (r.error || r.code)) || 'unknown')); return; }
+  if (extra && r.needsAnswers) { unmark(); _fwQuestions(id, r.questions); return; }
+  if (extra && _fwUi[id]) { _fwUi[id].questions = []; _fwUi[id].answers = ''; }
   em.replyDraft = r.draft; em.replyState = 'drafted';
   _replyUi[id] = { mode: r.mode, recipients: r.recipients, warnings: r.warnings || [], stale: false, replyAllAvailable: r.replyAllAvailable, basedOnMessageKey: r.basedOnMessageKey };
   if (r.recipientsSource !== undefined) {
@@ -975,6 +1106,15 @@ function _injectStyle() {
     #email-triage .et-config input[type="text"] { width:100%; background:#0d1117; border:1px solid #30363d; border-radius:5px; color:#c9d1d9; font-size:12px; padding:6px 8px; }
     #email-triage .et-config input[type="number"] { width:64px; background:#0d1117; border:1px solid #30363d; border-radius:5px; color:#c9d1d9; font-size:12px; padding:4px 6px; }
     #email-triage .et-cfg-btns { display:flex; gap:6px; margin-top:6px; }
+    #email-triage .et-fw { margin-top:8px; }
+    #email-triage .et-fw--open { padding:10px; background:#12161d; border:1px dashed rgba(210,168,255,0.35); border-radius:8px; }
+    #email-triage .et-fw-label { font-size:11px; font-weight:600; color:#d2a8ff; margin-bottom:6px; }
+    #email-triage .et-fw-input { width:100%; min-height:60px; background:#0d1117; border:1px solid #30363d; border-radius:6px; color:#e6edf3; font-size:12px; padding:8px; resize:vertical; font-family:inherit; line-height:1.45; box-sizing:border-box; }
+    #email-triage .et-fw-btns { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+    #email-triage .et-fw-go { background:rgba(210,168,255,.12); border-color:rgba(210,168,255,.35); color:#d2a8ff; }
+    #email-triage .et-fw-ask { margin-top:8px; padding:8px; background:rgba(56,139,253,.06); border:1px solid rgba(56,139,253,.25); border-radius:6px; }
+    #email-triage .et-fw-ask-label { font-size:11px; font-weight:700; color:#79c0ff; margin-bottom:4px; }
+    #email-triage .et-fw-qs { margin:0 0 6px 18px; padding:0; font-size:12px; color:#c9d1d9; line-height:1.45; }
   `;
   document.head.appendChild(style);
 }
@@ -982,4 +1122,5 @@ export const __test__ = {
   _cardHtml, _replyButtonHtml, _replyPanelHtml, _setIntelForTests: (s) => { _intel = s || null; }, _setReplyUiForTests: (id, ui) => { if (ui) _replyUi[id] = ui; else delete _replyUi[id]; },
   _sendReply, _intelReconcile, _setResultsForTests: (r) => { _results = r || { emails: [] }; }, _results: () => _results,
   _intelDraft, _intelResolve, _intelPrepareSend, _render, _replyUi: (id) => _replyUi[id],
+  _freeWriteHtml, _freeWriteDraft, _fwUi: (id) => _fwUi[id], _setFwUiForTests: (id, ui) => { if (ui) _fwUi[id] = Object.assign(_fw(id), ui); else delete _fwUi[id]; },
 };

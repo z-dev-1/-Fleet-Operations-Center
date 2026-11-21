@@ -145,7 +145,7 @@ expose('emailTriage', {
   getResults:   ()               => ipcRenderer.invoke('emailTriage:get-results'),
   run:          (opts)           => ipcRenderer.invoke('emailTriage:run', opts),
   probe:        ()               => ipcRenderer.invoke('emailTriage:probe'),
-  draftReply:   (id, guidance)   => ipcRenderer.invoke('emailTriage:draft-reply', id, guidance),
+  draftReply:   (id, guidance, opts) => ipcRenderer.invoke('emailTriage:draft-reply', id, guidance, opts),
   sendReply:    (id, bodyText)   => ipcRenderer.invoke('emailTriage:send-reply', id, bodyText),
   dismissReply: (id)             => ipcRenderer.invoke('emailTriage:dismiss-reply', id),
   deleteEmail:  (id)             => ipcRenderer.invoke('emailTriage:delete', id),

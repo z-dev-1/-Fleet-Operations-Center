@@ -81,14 +81,20 @@ const IMPLEMENTED = new Set([
 const CONV_RE = /^cv_[0-9a-f]{16}$/;
 const ATTEMPT_RE = /^sa_[0-9a-f]{16}$/;
 
-/** draft-thread-reply (design 9): { conversationKey, mode:'reply'|'reply-all', guidance? <= 1000, force? boolean }. */
+/** draft-thread-reply (design 9): { conversationKey, mode:'reply'|'reply-all', guidance? <= 1000, force? boolean, clarify? boolean, answers? <= 1000 }. */
 function validateDraftThreadReply(payload) {
   if (!_isPlain(payload)) return BAD('payload');
   if (typeof payload.conversationKey !== 'string' || !CONV_RE.test(payload.conversationKey)) return BAD('conversationKey');
   if (payload.mode !== 'reply' && payload.mode !== 'reply-all') return BAD('mode');
   if (payload.guidance !== undefined && (typeof payload.guidance !== 'string' || payload.guidance.length > 1000)) return BAD('guidance');
   if (payload.force !== undefined && typeof payload.force !== 'boolean') return BAD('force');
-  return { conversationKey: payload.conversationKey, mode: payload.mode, guidance: payload.guidance || '', force: payload.force === true };
+  if (payload.clarify !== undefined && typeof payload.clarify !== 'boolean') return BAD('clarify');
+  if (payload.answers !== undefined && (typeof payload.answers !== 'string' || payload.answers.length > 1000)) return BAD('answers');
+  const out = { conversationKey: payload.conversationKey, mode: payload.mode, guidance: payload.guidance || '', force: payload.force === true };
+  // Free-write (optional): returned only when sent, so today's callers get exactly the four fields above.
+  if (payload.clarify !== undefined) out.clarify = payload.clarify;
+  if (payload.answers !== undefined) out.answers = payload.answers;
+  return out;
 }
 
 /** resolve-reply-recipients (apiTransport): { conversationKey, mode:'reply'|'reply-all' }. */
@@ -358,7 +364,7 @@ function registerEmailIntelIPC(_ctx) {
     const v = validateDraftThreadReply(payload);
     if (v.ok === false) return v;
     const r = await require('../email-intel/reply/draft').draftThreadReply(v);
-    if (r && r.ok) { try { executors.notifyOverlay(require('../scrapers/email_triage').loadResults()); } catch (_) { /* push only */ } _notifyUpdated({ kind: 'actions' }); }
+    if (r && r.ok && !r.needsAnswers) { try { executors.notifyOverlay(require('../scrapers/email_triage').loadResults()); } catch (_) { /* push only */ } _notifyUpdated({ kind: 'actions' }); }
     return r;
   });
 

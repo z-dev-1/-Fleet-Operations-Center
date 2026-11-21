@@ -2,8 +2,9 @@
 /**
  * email-intel/reply/draft.js — thread-aware reply drafting (design 6.2; R5.1, R5.2, R5.3, AC-I).
  *
- *   draftThreadReply({ conversationKey, mode:'reply'|'reply-all', guidance?, force? }, { now, _ask, canonicalFor })
+ *   draftThreadReply({ conversationKey, mode:'reply'|'reply-all', guidance?, force?, clarify?, answers? }, { now, _ask, canonicalFor })
  *     -> { ok:true, draft, mode, aiUnavailable, warnings:[{code,label}], recipients, basedOnMessageKey, replyAllAvailable }
+ *      | { ok:true, needsAnswers:true, questions:[1..3], mode }   (clarify:true with guidance only; nothing persisted)
  *      | { ok:false, code:'NOT_FOUND'|'ALREADY_RESOLVED'|'RECIPIENTS_UNKNOWN'|'DRAFT_UNSAFE', resolvedBy? }
  *   resolvedGate(questions) -> { resolved, resolvedBy? }
  *
@@ -75,12 +76,51 @@ const RULES = [
   'If an authority decision is needed (approving a cost, authorizing work) and the facts do not settle it, write that it is under review.',
 ].join('\n');
 
-function buildDraftPrompt(ctxText, guidance, mode) {
+function buildDraftPrompt(ctxText, guidance, mode, answers) {
   const lines = [untrusted.instructionBlock(), '', RULES, '', 'REPLY MODE: ' + (mode === 'reply-all' ? 'Reply All (everyone on the thread reads it)' : 'Reply (the sender only)'), '', 'CONVERSATION CONTEXT:', ctxText];
   if (guidance) { lines.push(''); lines.push('THE USER\'S GUIDANCE FOR THIS REPLY (trusted, from the user):'); lines.push(guidance); }
+  if (answers) { lines.push(''); lines.push(ANSWERS_HEADER); lines.push(answers); }
   lines.push('');
   lines.push('Write the reply body now.');
   return lines.join('\n');
+}
+
+// Free-write with clarifying questions (opt-in: clarify:true plus the user's own guidance). Same rules, mode and
+// context as buildDraftPrompt; the model either writes the reply or asks 1-3 short questions as strict JSON
+// (the Baseball Card interviewer contract). Nothing is persisted while questions are open.
+const ANSWERS_HEADER = 'THE USER\'S ANSWERS TO YOUR QUESTIONS (trusted, from the user):';
+const QUESTION_MAX = 200;
+const CLARIFY_CONTRACT = [
+  'If the guidance and context give you enough to write a correct reply, write it. If a fact the reply needs is missing (a date, amount, unit, who approves, what to commit to), ASK 1-3 short questions instead of guessing. Never fabricate specifics.',
+  'Respond as STRICT JSON only, one of:',
+  '{"done":true,"draft":"<reply body>"}',
+  '{"done":false,"questions":["q1","q2"]}',
+  'No text outside the JSON.',
+].join('\n');
+
+function buildClarifyPrompt(ctxText, guidance, answers, mode) {
+  const lines = [untrusted.instructionBlock(), '', RULES, '', 'REPLY MODE: ' + (mode === 'reply-all' ? 'Reply All (everyone on the thread reads it)' : 'Reply (the sender only)'), '', 'CONVERSATION CONTEXT:', ctxText];
+  lines.push(''); lines.push('THE USER\'S GUIDANCE FOR THIS REPLY (trusted, from the user):'); lines.push(guidance);
+  if (answers) { lines.push(''); lines.push(ANSWERS_HEADER); lines.push(answers); }
+  lines.push('');
+  lines.push(CLARIFY_CONTRACT);
+  if (answers) lines.push('The user already answered your questions: ask again only if something critical is still missing.');
+  return lines.join('\n');
+}
+
+/** -> { questions:[1..3] } | { draft } | { invalid:true } (JSON present but unusable) | null (no JSON at all). */
+function _parseClarify(text) {
+  const m = /\{[\s\S]*\}/.exec(String(text == null ? '' : text));
+  if (!m) return null;
+  let p;
+  try { p = JSON.parse(m[0]); } catch (_) { return { invalid: true }; }
+  if (p && p.done === false && Array.isArray(p.questions)) {
+    const questions = p.questions.filter((q) => typeof q === 'string')
+      .map((q) => q.replace(CTRL_RE, '').replace(/\s+/g, ' ').trim().slice(0, QUESTION_MAX)).filter(Boolean).slice(0, 3);
+    if (questions.length) return { questions };
+  }
+  if (p && p.done === true && typeof p.draft === 'string') return { draft: p.draft };
+  return { invalid: true };
 }
 
 function _starter(latest, guidance) {
@@ -174,13 +214,25 @@ async function draftThreadReply(input, opts) {
     records, questions, units: inScopeUnits(records), me, ledgerEntries, stagedItems,
     canonicalFor: o.canonicalFor || ((u) => { try { return require('../../orcha/canonical_state').getCanonical(u); } catch (_) { return null; } }),
   });
-  const prompt = buildDraftPrompt(ctx.text, guidance, mode);
+  const answers = typeof i.answers === 'string' ? i.answers.replace(CTRL_RE, '').trim().slice(0, GUIDANCE_MAX) : '';
+  const clarify = i.clarify === true && !!guidance;
+  const prompt = clarify ? buildClarifyPrompt(ctx.text, guidance, answers, mode) : buildDraftPrompt(ctx.text, guidance, mode, answers);
   const ask = o._ask || ((p, a) => require('../understand/lane').askIsolated(p, a));
   let r;
   try { r = await ask(prompt, { trigger: 'manual', timeoutMs: DRAFT_TIMEOUT_MS }); } catch (_) { r = { ok: false, error: 'threw' }; }
 
   let draft = ''; let aiUnavailable = false;
-  if (r && r.ok) draft = _cleanOutput(r.text);
+  if (clarify && r && r.ok) {
+    // Questions: nothing is persisted, the user answers inline. A finished draft continues down the normal path;
+    // unusable JSON falls back to the editable starter (never stuck asking, never JSON in the reply box).
+    const c = _parseClarify(r.text);
+    if (c && c.questions) {
+      logger.info('[email-intel] draft needs answers mode=' + mode + ' questions=' + c.questions.length);
+      return { ok: true, needsAnswers: true, questions: c.questions, mode };
+    }
+    if (c && c.invalid) logger.warn('[email-intel] clarify output rejected chars=' + String(String(r.text || '').length));
+    else draft = _cleanOutput(c ? c.draft : r.text);
+  } else if (r && r.ok) draft = _cleanOutput(r.text);
   if (!draft || draft.length > DRAFT_MAX) {
     if (r && r.ok) logger.warn('[email-intel] draft output rejected chars=' + String(draft.length));
     draft = _starter(latest, guidance); aiUnavailable = true;
@@ -203,4 +255,4 @@ async function draftThreadReply(input, opts) {
   return out;
 }
 
-module.exports = { draftThreadReply, resolvedGate, buildDraftPrompt, DRAFT_MAX, GUIDANCE_MAX };
+module.exports = { draftThreadReply, resolvedGate, buildDraftPrompt, buildClarifyPrompt, DRAFT_MAX, GUIDANCE_MAX };
