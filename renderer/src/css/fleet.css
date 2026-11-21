@@ -4889,6 +4889,10 @@ td:has(.pm-pills-row) {
 .dp-offsite-card__link:hover { text-decoration: underline; }
 .dp-offsite-card__stale { font-size: 9px; color: var(--org); }
 .dp-offsite-card__dealer { font-size: 10px; color: var(--txt2); margin-top: 3px; }
+/* DTNA Service Tracker: user-initiated "Pull DTNA" (unit-detail.js dtnaPullButtonHtml) */
+.dp-dtna-pull-btn { margin-top: 6px; padding: 3px 10px; font-size: 10px; font-family: inherit; border-radius: 6px; border: 1px solid var(--bdr); background: var(--el, transparent); color: var(--acc2); cursor: pointer; }
+.dp-dtna-pull-btn:hover:not([disabled]) { border-color: var(--acc2); }
+.dp-dtna-pull-btn[disabled] { opacity: .55; cursor: progress; }
 /* Volvo/PACCAR case stage (Decisiv API): Arrival > Diagnosis > Approval > Repair > Ready */
 .dp-stage { margin-top: 6px; }
 .dp-stage__steps { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; font-size: 10px; }
@@ -10205,7 +10209,7 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 .ldsp-footnote { color: var(--mut); font-size: 11px; margin: 4px 0 0; }
 .ldsp-tabs { border: 1px solid var(--bdr); padding: 6px; margin-top: 6px; }
 /* ── Fleet trust indicators (fleet-refresh-trust) ── */
-.tb-fresh, .tb-auth {
+.tb-fresh, .tb-auth, .tb-dtna {
   -webkit-app-region: no-drag;
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; line-height: 1; white-space: nowrap;
@@ -10214,12 +10218,12 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
 }
 .tb-fresh { cursor: pointer; font-family: inherit; }
 .tb-fresh[disabled] { opacity: .55; cursor: progress; }
-.tb-auth { cursor: pointer; font-family: inherit; }
+.tb-auth, .tb-dtna { cursor: pointer; font-family: inherit; }
 .tb-fresh__dot, .tb-auth__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
-.tb-fresh--green, .tb-auth--green { color: var(--grn); border-color: var(--grn); }
-.tb-fresh--amber, .tb-auth--amber { color: var(--org); border-color: var(--org); }
+.tb-fresh--green, .tb-auth--green, .tb-dtna--green { color: var(--grn); border-color: var(--grn); }
+.tb-fresh--amber, .tb-auth--amber, .tb-dtna--amber { color: var(--org); border-color: var(--org); }
 .tb-fresh--red,   .tb-auth--red   { color: var(--red); border-color: var(--red); font-weight: 600; }
-.tb-fresh--grey,  .tb-auth--grey  { color: var(--txt2); border-color: var(--bdr); }
+.tb-fresh--grey,  .tb-auth--grey,  .tb-dtna--grey  { color: var(--txt2); border-color: var(--bdr); }
 .tb-auth-banner {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 6px 16px; font-size: 12px;
@@ -10244,9 +10248,9 @@ textarea.rca-input { resize: vertical; line-height: 1.4; }
   background: var(--nx-bg2); border-top: 1px solid var(--nx-border);
   -webkit-app-region: no-drag;
 }
-.sb-trust .tb-fresh, .sb-trust .tb-auth { font-size: 10px; padding: 2px 7px; border-radius: 9px; }
+.sb-trust .tb-fresh, .sb-trust .tb-auth, .sb-trust .tb-dtna { font-size: 10px; padding: 2px 7px; border-radius: 9px; }
 .sb-trust .tb-fresh__dot, .sb-trust .tb-auth__dot { width: 5px; height: 5px; }
-.sb-trust .tb-fresh:hover:not([disabled]), .sb-trust .tb-auth:hover { background: var(--el, rgba(255,255,255,.06)); }
+.sb-trust .tb-fresh:hover:not([disabled]), .sb-trust .tb-auth:hover, .sb-trust .tb-dtna:hover { background: var(--el, rgba(255,255,255,.06)); }
 /* ── Fleet tab: Pending Estimates overlay (pending-estimates-panel.js) ──
    z-index 850 keeps it BELOW the modal.js singleton (900), so the Escalate and
    Relay write approval modals open on top of it. */

@@ -27,15 +27,24 @@ const m = vi.hoisted(() => ({
     healthRetry: vi.fn(async () => ({ ok: true, state: 'HEALTHY', snapshot: { state: 'HEALTHY' } })),
     healthRunMwinit: vi.fn(async () => ({ ok: true, verified: true })),
   },
+  dtna: {
+    status: vi.fn(async () => ({ ok: true, state: 'signed-out', lastPullAt: null })),
+    onStatus: vi.fn((cb) => { m.dtnaCb = cb; return () => {}; }),
+    login: vi.fn(async () => ({ ok: true, state: 'connected' })),
+    pullUnit: vi.fn(async () => ({ ok: true })),
+    listCases: vi.fn(async () => ({ ok: true, count: 0 })),
+    bulkPull: vi.fn(async () => ({ ok: true, jobId: 'j1' })),
+  },
 }));
 vi.mock('../renderer/src/js/bridge.js', () => ({ fleet: m.fleet, auth: m.auth }));
 
 const require = createRequire(import.meta.url);
 const { deriveStatus } = require('../src/auth/auth-status.js');
 
-let doc, container, bus, panel;
+let doc, container, bus, panel, dtnaPanel, pillCb, initStatusCalls;
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const overlay = () => doc.getElementById('auth-health-overlay');
+const dtnaOverlay = () => doc.getElementById('dtna-panel-overlay');
 
 beforeAll(async () => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
@@ -43,16 +52,20 @@ beforeAll(async () => {
   globalThis.document = doc;
   if (typeof globalThis.window === 'undefined') globalThis.window = { app: { platform: 'win32' } };
   bus = (await import('../renderer/src/js/bus.js')).default;
+  globalThis.window.dtna = m.dtna;
   panel = await import('../renderer/src/js/components/auth-health-panel.js');
+  dtnaPanel = await import('../renderer/src/js/components/dtna-panel.js');
   const sb = await import('../renderer/src/js/components/status-bar.js');
   container = doc.createElement('div');
   container.id = 'status-bar-mount';
   doc.body.appendChild(container);
   sb.init(container);
   await flush();
+  pillCb = m.dtnaCb;
+  initStatusCalls = m.dtna.status.mock.calls.length;
 });
-afterAll(() => { panel.close(); vi.useRealTimers(); delete globalThis.document; });
-beforeEach(() => { panel.close(); vi.clearAllMocks(); });
+afterAll(() => { panel.close(); dtnaPanel.close(); vi.useRealTimers(); delete globalThis.document; delete globalThis.window.dtna; });
+beforeEach(() => { panel.close(); dtnaPanel.close(); vi.clearAllMocks(); });
 
 describe('trust pills placement', () => {
   it('pills + banner render in the status bar; the bar re-render keeps the same host nodes', () => {
@@ -196,5 +209,94 @@ describe('step-up banner in the status bar', () => {
     await Promise.all(btn.click());
     expect(m.auth.healthRunMwinit).toHaveBeenCalledTimes(1);
     expect(overlay()).toBeNull();
+  });
+});
+
+describe('DTNA pill -> DTNA panel (user-initiated only)', () => {
+  it('#tb-dtna is a BUTTON in .sb-trust, reads status() once on init, survives the 1 s re-render', () => {
+    expect(initStatusCalls).toBe(1);
+    const pill = container.querySelector('#tb-dtna');
+    expect(pill && pill.tagName).toBe('BUTTON');
+    expect(container.querySelector('.sb-trust #tb-dtna')).toBe(pill);
+    expect(pill.textContent).toBe('DTNA: Signed out');
+    expect(pill.className).toBe('tb-dtna tb-dtna--grey');
+    expect(pill.getAttribute('aria-haspopup')).toBe('dialog');
+    vi.advanceTimersByTime(3000);
+    expect(container.querySelector('#tb-dtna')).toBe(pill);
+  });
+
+  it('a pushed status updates the pill (connected -> green)', () => {
+    expect(typeof pillCb).toBe('function');
+    pillCb({ ok: true, state: 'connected', lastPullAt: null });
+    const pill = container.querySelector('#tb-dtna');
+    expect(pill.textContent).toBe('DTNA: Connected');
+    expect(pill.className).toBe('tb-dtna tb-dtna--green');
+    pillCb({ ok: true, state: 'signed-out', lastPullAt: null });
+  });
+
+  it('click opens #dtna-panel-overlay and calls status only (no login / pull / list)', async () => {
+    expect(dtnaOverlay()).toBeNull();
+    container.querySelector('#tb-dtna').click();
+    const ov = dtnaOverlay();
+    expect(ov).toBeTruthy();
+    expect(ov.getAttribute('role')).toBe('dialog');
+    expect(ov.getAttribute('aria-modal')).toBe('true');
+    await flush();
+    expect(m.dtna.status).toHaveBeenCalledTimes(1);
+    expect(ov.querySelector('#dtna-panel-state').textContent).toBe('DTNA: Signed out');
+    expect(ov.querySelector('#dtna-panel-last').textContent).toBe('never');
+    expect(ov.querySelector('#dtna-panel-signin')).toBeTruthy();
+    expect(ov.querySelector('#dtna-panel-pull')).toBeTruthy();
+    expect(m.dtna.login).not.toHaveBeenCalled();
+    expect(m.dtna.pullUnit).not.toHaveBeenCalled();
+    expect(m.dtna.listCases).not.toHaveBeenCalled();
+    expect(m.dtna.bulkPull).not.toHaveBeenCalled();
+    container.querySelector('#tb-dtna').click();
+    expect(doc.querySelectorAll('#dtna-panel-overlay').length).toBe(1);
+  });
+
+  it('Sign in calls login once, then re-reads status', async () => {
+    container.querySelector('#tb-dtna').click();
+    await flush();
+    m.dtna.status.mockClear();
+    const btn = dtnaOverlay().querySelector('#dtna-panel-signin');
+    btn.click();
+    expect(btn.disabled).toBe(true);
+    btn.click();
+    await flush();
+    expect(m.dtna.login).toHaveBeenCalledTimes(1);
+    expect(btn.disabled).toBe(false);
+    expect(m.dtna.status).toHaveBeenCalledTimes(1);
+  });
+
+  it('a pushed status while open updates the panel', async () => {
+    container.querySelector('#tb-dtna').click();
+    await flush();
+    m.dtnaCb({ ok: true, state: 'expired', lastPullAt: null });
+    expect(dtnaOverlay().querySelector('#dtna-panel-state').textContent).toBe('DTNA: Expired');
+  });
+
+  it('advancing fake timers 10 min never calls status again', async () => {
+    m.dtna.status.mockClear();
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    await flush();
+    expect(m.dtna.status).not.toHaveBeenCalled();
+    expect(m.dtna.login).not.toHaveBeenCalled();
+  });
+
+  it('closes on Escape, ✕ and backdrop click', () => {
+    container.querySelector('#tb-dtna').click();
+    expect(dtnaOverlay()).toBeTruthy();
+    doc.dispatchEvent({ type: 'keydown', key: 'Escape' });
+    expect(dtnaOverlay()).toBeNull();
+    expect(dtnaPanel.isOpen()).toBe(false);
+    container.querySelector('#tb-dtna').click();
+    dtnaOverlay().querySelector('#dtna-panel-close').click();
+    expect(dtnaOverlay()).toBeNull();
+    container.querySelector('#tb-dtna').click();
+    const ov = dtnaOverlay();
+    ov.dispatchEvent({ type: 'click', target: ov });
+    expect(dtnaOverlay()).toBeNull();
+    expect(m.dtna.login).not.toHaveBeenCalled();
   });
 });

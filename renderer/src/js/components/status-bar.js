@@ -19,9 +19,13 @@
 import bus   from '../bus.js';
 import state from '../state.js';
 import { fleet as fleetBridge } from '../bridge.js';
-import { absorbFleetSlice, emptyFleet, renderHtml } from './status-bar-logic.js';
+import { absorbFleetSlice, emptyFleet, renderHtml, dtnaPill } from './status-bar-logic.js';
 import { mount as mountFleetTrust } from './fleet-trust-indicator.js';
 import { open as openAuthHealthPanel } from './auth-health-panel.js';
+import { open as openDtnaPanel } from './dtna-panel.js';
+
+// DTNA bridge (preload expose('dtna')); read directly, not through bridge.js.
+const _dtna = () => (typeof window !== 'undefined' && window.dtna) || null;
 
 // Re-export the pure helpers so existing importers/tests can reach them here too.
 export { esc, deriveStatus, timeSince, renderHtml } from './status-bar-logic.js';
@@ -36,6 +40,7 @@ const SHELL_HTML =
     '<div class="sb-trust">' +
       '<button type="button" class="tb-fresh tb-fresh--grey" id="tb-fresh" title="Fleet data freshness — click to refresh">Fleet data …</button>' +
       '<button type="button" class="tb-auth tb-auth--grey" id="tb-auth" aria-haspopup="dialog">Auth …</button>' +
+      '<button type="button" class="tb-dtna tb-dtna--grey" id="tb-dtna" aria-haspopup="dialog">DTNA …</button>' +
     '</div>' +
   '</div>';
 
@@ -93,6 +98,24 @@ export function init(container) {
   const authEl = _el.querySelector('#tb-auth');
   try { mountFleetTrust({ fresh: _el.querySelector('#tb-fresh'), auth: authEl, banner: _el.querySelector('#tb-auth-banner') }); } catch (_) {}
   if (authEl) authEl.addEventListener('click', () => { try { openAuthHealthPanel(); } catch (_) {} });
+
+  // ── DTNA Service Tracker pill: one status() read now, then pushes only ──
+  // (dtna:status-changed). No timer; clicking opens the DTNA panel.
+  const dtnaEl = _el.querySelector('#tb-dtna');
+  const applyDtna = (s) => {
+    if (!dtnaEl) return;
+    const p = dtnaPill(s);
+    dtnaEl.className = p.cls;
+    dtnaEl.textContent = p.text;
+    dtnaEl.title = p.title;
+  };
+  applyDtna(null);
+  const dt = _dtna();
+  if (dt) {
+    try { Promise.resolve(dt.status()).then(applyDtna).catch(() => {}); } catch (_) {}
+    try { if (typeof dt.onStatus === 'function') dt.onStatus(applyDtna); } catch (_) {}
+  }
+  if (dtnaEl) dtnaEl.addEventListener('click', () => { try { openDtnaPanel(); } catch (_) {} });
 
   // Resolve the REAL app version dynamically (no hard-coded value).
   try {

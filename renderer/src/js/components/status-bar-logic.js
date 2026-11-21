@@ -160,6 +160,30 @@ export function deriveStatus(f, opts) {
   return { state: 'connecting', color: 'grey', label: 'Connecting', ageText };
 }
 
+/**
+ * dtnaPill(status) -> { cls, text, title }
+ *
+ * PURE. Class + label for the DTNA Service Tracker pill (#tb-dtna). `status` is
+ * the dtna:status / dtna:status-changed payload ({ state, lastPullAt, ... }).
+ * The pill only reflects pushed or requested status; it never checks DTNA.
+ */
+const _DTNA_PILL = {
+  'signed-out': ['grey', 'DTNA: Signed out'],
+  connecting:   ['grey', 'DTNA: Connecting\u2026'],
+  connected:    ['green', 'DTNA: Connected'],
+  expired:      ['amber', 'DTNA: Expired'],
+  pulling:      ['green', 'DTNA: Pulling\u2026'],
+};
+export function dtnaPill(status) {
+  const st = status && typeof status === 'object' ? status.state : null;
+  const hit = (typeof st === 'string' && Object.prototype.hasOwnProperty.call(_DTNA_PILL, st)) ? _DTNA_PILL[st] : ['grey', 'DTNA \u2026'];
+  return {
+    cls: 'tb-dtna tb-dtna--' + hit[0],
+    text: hit[1],
+    title: 'DTNA Service Tracker: click to sign in or pull cases. This pill never checks DTNA on its own.',
+  };
+}
+
 function colorClass(color) {
   return color === 'green' ? 'sb-dot--green'
        : color === 'red'   ? 'sb-dot--red'

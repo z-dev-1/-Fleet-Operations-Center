@@ -703,6 +703,7 @@ export function init(container) {
         <button id="fleet-heatmap-toggle" class="fleet-heatmap-btn" title="Toggle Risk Heatmap">\uD83C\uDF21\uFE0F Heatmap</button>
         <button id="fleet-breach-toggle" class="fleet-breach-btn" title="Toggle SLA Breach Forecast">\u26A0\uFE0F Breach</button>
         <button id="fleet-pending-est" class="fleet-heatmap-btn" title="Estimates submitted, awaiting approval (your domiciles, DTNA excluded)">\u23F3 Pending Est <span id="fleet-pending-est-count"></span></button>
+        <button id="fleet-dtna-pull" class="fleet-heatmap-btn" title="Pull DTNA Service Tracker cases to TSV / Excel (runs only when you press Start)">\uD83D\uDE9A DTNA Pull</button>
         <button id="fleet-export-csv" class="fleet-export-btn" title="Export to CSV">\uD83D\uDCE5 CSV</button>
         <button id="fleet-export-xlsx" class="fleet-export-btn fleet-export-btn--xl" title="Export to Excel">\uD83D\uDCCA Excel</button>
       </div>
@@ -777,6 +778,16 @@ export function init(container) {
       import('./pending-estimates-panel.js')
         .then((m) => m.openPendingEstimatesPanel({ returnFocusEl: peBtn }))
         .catch((e) => bus.emit('ui:toast', { type: 'error', message: 'Could not open Pending Estimates: ' + ((e && e.message) || 'unknown'), duration: 3000 }));
+    });
+  }
+
+  // DTNA Pull bulk tool (opens the modal; pulling starts only on its Start button).
+  const dtnaBtn = document.getElementById('fleet-dtna-pull');
+  if (dtnaBtn) {
+    dtnaBtn.addEventListener('click', () => {
+      import('./dtna-bulk-modal.js')
+        .then((m) => m.openDtnaBulkModal())
+        .catch((e) => bus.emit('ui:toast', { type: 'error', message: 'Could not open DTNA Pull: ' + ((e && e.message) || 'unknown'), duration: 3000 }));
     });
   }
 

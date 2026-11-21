@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveStatus, absorbFleetSlice, emptyFleet, timeSince, esc, renderHtml,
-  FRESH_MS, STALE_MS, countUnavailable,
+  FRESH_MS, STALE_MS, countUnavailable, dtnaPill,
 } from '../renderer/src/js/components/status-bar-logic.js';
 
 const NOW = 1_700_000_000_000;
@@ -203,5 +203,25 @@ describe('helpers', () => {
   });
   it('thresholds are sane (fresh < stale)', () => {
     expect(FRESH_MS).toBeLessThan(STALE_MS);
+  });
+});
+
+describe('dtnaPill (DTNA Service Tracker status pill)', () => {
+  it.each([
+    ['signed-out', 'tb-dtna tb-dtna--grey', 'DTNA: Signed out'],
+    ['connecting', 'tb-dtna tb-dtna--grey', 'DTNA: Connecting\u2026'],
+    ['connected', 'tb-dtna tb-dtna--green', 'DTNA: Connected'],
+    ['expired', 'tb-dtna tb-dtna--amber', 'DTNA: Expired'],
+    ['pulling', 'tb-dtna tb-dtna--green', 'DTNA: Pulling\u2026'],
+  ])('%s', (state, cls, text) => {
+    const p = dtnaPill({ ok: true, state, lastPullAt: null });
+    expect(p.cls).toBe(cls);
+    expect(p.text).toBe(text);
+    expect(p.title).toMatch(/never checks DTNA on its own/);
+  });
+  it('missing or unknown status -> grey placeholder', () => {
+    for (const s of [null, undefined, {}, { state: 'weird' }, { state: 'toString' }, 'connected']) {
+      expect(dtnaPill(s)).toMatchObject({ cls: 'tb-dtna tb-dtna--grey', text: 'DTNA \u2026' });
+    }
   });
 });

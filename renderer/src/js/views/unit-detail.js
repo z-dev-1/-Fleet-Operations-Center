@@ -2216,6 +2216,21 @@ export function secondaryWrCardsHtml(unit){
   return secondaryWRCards;
 }
 
+// "Pull DTNA" button for the Offsite Event card (user-initiated DTNA Service
+// Tracker read via window.dtna.pullUnit). Shown for a DTNA case URL, or with no
+// offsite URL when the unit is a Freightliner / Daimler / Western Star; else ''.
+var _DTNA_CASE_URL_RE=/^https?:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/[A-Za-z0-9]+/i;
+var _DTNA_MAKE_RE=/freightliner|daimler|western\s*star|dtna/i;
+export function dtnaPullButtonHtml(unit, offsiteUrl){
+  var u=unit||{};
+  var id=String(u.equipmentId==null?'':u.equipmentId).trim();
+  if(!id) return '';
+  var url=String(offsiteUrl||'');
+  var show=url?_DTNA_CASE_URL_RE.test(url):_DTNA_MAKE_RE.test(String(u.vendor||'')+' '+String(u.make||''));
+  if(!show) return '';
+  return '<button type="button" class="dp-dtna-pull-btn" data-dtna-pull="'+escAttr(id)+'" title="Pull this unit\'s DTNA Service Tracker case (comments, status, repair order)">\u2b07 Pull DTNA</button>';
+}
+
 // Exported for tests.
 export function renderRepairPane(unit){
   // ── WR summary card ────────────────────────────────────────────────────────
@@ -2358,6 +2373,7 @@ export function renderRepairPane(unit){
     // Decisiv API answered: the dealer hasn't set any repair status yet.
     stageHtml='<div class="dp-stage" role="note"><div class="dp-stage__detail">'+esc(unit.offsiteStageDetail)+'</div></div>';
   }
+  var dtnaBtn=dtnaPullButtonHtml(unit, offsiteUrl);
   var offsiteHtml=offsiteUrl?
     '<div class="dp-section-title">Offsite Event</div>'+
     '<div class="dp-offsite-card">'+
@@ -2366,9 +2382,10 @@ export function renderRepairPane(unit){
         '<a class="dp-offsite-card__link" href="#" data-ext-url="'+esc(offsiteUrl)+'">'+esc(offsiteLabel||offsiteUrl)+' \u2197</a>'+
         (staleOffsite?'<span class="dp-offsite-card__stale">\u26a0 stale</span>':'')+
       '</div>'+
+      dtnaBtn+
       (unit.dealerName?'<div class="dp-offsite-card__dealer">'+esc(unit.dealerName)+'</div>':'')+
       (scrapedAt?'<div class="dp-offsite-card__ts">Enriched '+fmtDate(scrapedAt)+'</div>':'')+
-    '</div>':'';
+    '</div>':(dtnaBtn?'<div class="dp-section-title">Offsite Event</div><div class="dp-offsite-card">'+dtnaBtn+'</div>':'');
 
   
   // Live timeline update: when AI or user adds to timeline, refresh instantly
@@ -2541,6 +2558,40 @@ export function renderRepairPane(unit){
         }
       } catch (_e) { window.__splitRefresh = Promise.resolve(null); }
       _openInlineSplit(rUrl, oUrl, unit.equipmentId);
+    });
+
+    // "Pull DTNA" (Offsite Event card): one user-initiated pull, no auto retry.
+    // The refreshed row arrives through the normal fleet:data partial merge.
+    document.querySelectorAll('[data-dtna-pull]').forEach(function(dBtn) {
+      if (dBtn._dtnaWired) return;
+      dBtn._dtnaWired = true;
+      dBtn.addEventListener('click', async function() {
+        var dt = (typeof window !== 'undefined' && window.dtna) || null;
+        if (!dt || typeof dt.pullUnit !== 'function') { toast.show('warn', 'DTNA is not available in this build', 4000); return; }
+        if (dBtn.disabled) return;
+        dBtn.disabled = true;
+        dBtn.textContent = 'Pulling\u2026';
+        try {
+          var r = await dt.pullUnit({ equipmentId: unit.equipmentId });
+          if (r && r.ok) {
+            toast.show('success', 'DTNA: ' + (r.commentCount || 0) + ' comments pulled', 3000);
+          } else if (r && r.code === 'DTNA_SIGNIN_REQUIRED') {
+            toast.show('warn', 'DTNA sign-in needed \u2014 opening the sign-in window', 4000);
+            try { if (typeof dt.login === 'function') Promise.resolve(dt.login()).catch(function() {}); } catch (_e) {}
+          } else if (r && r.code === 'DTNA_NON_DTNA_OFFSITE') {
+            toast.show('warn', 'This unit\'s offsite event is not a DTNA case', 4000);
+          } else if (r && r.code === 'DTNA_CASE_NOT_FOUND') {
+            toast.show('warn', 'No DTNA case found for this unit', 4000);
+          } else {
+            toast.show('warn', 'DTNA pull failed (' + String((r && r.code) || 'unknown') + ')', 4000);
+          }
+        } catch (_e) {
+          toast.show('warn', 'DTNA pull failed', 4000);
+        } finally {
+          dBtn.disabled = false;
+          dBtn.textContent = '\u2b07 Pull DTNA';
+        }
+      });
     });
   }, 100);
 
