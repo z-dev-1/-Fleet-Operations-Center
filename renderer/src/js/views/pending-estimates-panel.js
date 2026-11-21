@@ -141,7 +141,14 @@ function createController(deps) {
       scan.cached = !!s.cached;
       scan.excludedDtna = Number(s.excludedDtna) || 0;
     }
-    scan.error = s.ok === false ? String(s.code || 'failed') : null;
+    // Per-case Decisiv failures (e.g. an expired session) explain blank offsite columns.
+    const dec = (Array.isArray(s.errors) ? s.errors : [])
+      .filter((x) => x && (x.stage === 'getCasePage' || x.stage === 'getCaseStatusSummary'))
+      .map((x) => x.stage + ' ' + String(x.code || 'ERROR') + ' \u00D7' + (Number(x.n) || 1));
+    const parts = [];
+    if (s.ok === false) parts.push(String(s.code || 'failed'));
+    if (dec.length) parts.push('Decisiv errors: ' + dec.join(', '));
+    scan.error = parts.length ? parts.join(' \u00B7 ') : null;
   }
 
   async function doScan(force) {

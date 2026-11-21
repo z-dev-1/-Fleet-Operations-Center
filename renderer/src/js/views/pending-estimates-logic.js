@@ -351,7 +351,11 @@ export function mergeTeamRows(v1Items, scanRows, { now, asOf } = {}) {
   const finish = (it, r) => {
     const f = _offsiteFields(r && r.offsite, t);
     Object.assign(it, f);
-    it.vendorWo = _vendorWoOfItem(it) || (r ? vendorWoOf(_teamUnit(r)) : null);
+    // Same order as the drafter (relay-action-draft collectFacts + _withOffsite): the WR's
+    // own Decisiv estimate, then the scan row's estimate for this WR, then the RG Vendor WO.
+    const own = _vendorWoOfItem(it);
+    const fromScan = r ? vendorWoOf(_teamUnit(r)) : null;
+    it.vendorWo = (own && own.kind === 'decisiv') ? own : ((fromScan && fromScan.kind === 'decisiv') ? fromScan : (own || fromScan));
     return it;
   };
   for (const v of Array.isArray(v1Items) ? v1Items : []) {
@@ -364,7 +368,8 @@ export function mergeTeamRows(v1Items, scanRows, { now, asOf } = {}) {
       it.key = uniq(r.key || 'wr:' + v.wrId);
       it.mine = r.mine === true;
       it.fas = _str(r.fas);
-      it.src = r.offsite || r.offsiteShopEventUrl ? 'both' : 'rg';
+      // Main's own source (both = RG-pending AND offsite; decisiv = offsite only).
+      it.src = SRC_LABEL[r.source] ? r.source : (r.offsite || r.offsiteShopEventUrl ? 'both' : 'rg');
       it.vendorKind = r.vendorKind || _vendorKindOfUnit(v.unit);
       it.offsiteDone = !!r.offsiteDone;
       it.statusMismatch = !!r.statusMismatch;

@@ -167,7 +167,7 @@ describe('mergeTeamRows', () => {
     const m = merged();
     expect(ids(m)).toEqual(['A100', 'B200', 'I900', 'J010', 'T500', 'T510', 'T520', 'T530', 'T540', 'T550']);
     const a = m.find((x) => x.unitId === 'A100');
-    expect(a).toMatchObject({ key: 'wr:' + wr(1), mine: true, fas: 'Jane Doe', src: 'both', vendorKind: 'volvo', amount: 4200,
+    expect(a).toMatchObject({ key: 'wr:' + wr(1), mine: true, fas: 'Jane Doe', src: 'decisiv', vendorKind: 'volvo', amount: 4200,
       fleetStatus: 'Approved', repairStatus: 'Waiting', total: 8735.97, statusMismatch: false, notInRg: false,
       updatedText: '5h ago', offsiteStageText: 'repair \u00B7 Waiting since 11/17' });
     expect(a.unit).toBe(A); // the fleet row stays the Escalate unit
@@ -191,6 +191,25 @@ describe('mergeTeamRows', () => {
     expect(m.find((x) => x.unitId === 'A100').vendorWo).toMatchObject({ id: '21383146' });
   });
 
+  it("merged rows take main's scan source; the Vendor WO prefers the scan's Decisiv estimate when the fleet row has none", () => {
+    const Bv = Object.assign({}, B, { vendorWorkOrderId: 'RO-B2' });
+    const sB = scanRow({ key: 'wr:' + wr(2), workRequestId: wr(2), equipmentId: 'B200', mine: true, source: 'both', rgPending: true,
+      offsiteShopEventUrl: VOLVO_URL('222'), offsite: off({}), vendorWorkOrderId: 'RO-B2' });
+    const sA = scanRow({ key: 'wr:' + wr(1), workRequestId: wr(1), equipmentId: 'A100', mine: true, source: 'rg' });
+    const m = L.mergeTeamRows(run([A, Bv]).items, [sA, sB], { now: NOW });
+    const b = m.find((x) => x.unitId === 'B200');
+    expect(b.src).toBe('both');
+    expect(b.vendorWo).toMatchObject({ id: '222', url: VOLVO_URL('222'), kind: 'decisiv' });
+    expect(m.find((x) => x.unitId === 'A100').src).toBe('rg');
+    // No source on the scan row -> the old URL rule.
+    const sNo = Object.assign({}, sB);
+    delete sNo.source;
+    expect(L.mergeTeamRows(run([Bv]).items, [sNo], { now: NOW })[0].src).toBe('both');
+    // Neither side has a Decisiv URL -> the RG Vendor WO.
+    const sRg = scanRow({ key: 'wr:' + wr(2), workRequestId: wr(2), equipmentId: 'B200', mine: true, source: 'rg', rgPending: true });
+    expect(L.mergeTeamRows(run([Bv]).items, [sRg], { now: NOW })[0].vendorWo).toMatchObject({ id: 'RO-B2', kind: 'rg' });
+  });
+
   it('without scan rows it returns the v1 items (all mine, RG)', () => {
     const m = L.mergeTeamRows(run(FLEET).items, null, { now: NOW });
     expect(ids(m)).toEqual(['A100', 'B200', 'I900', 'J010']);
@@ -208,8 +227,8 @@ describe('applyFilters', () => {
   });
 
   it('each filter alone', () => {
-    expect(ids(ALL({ source: 'decisiv' }))).toEqual(['T500', 'T520', 'T530', 'T540']);
-    expect(ids(ALL({ source: 'both' }))).toEqual(['A100', 'T550']);
+    expect(ids(ALL({ source: 'decisiv' }))).toEqual(['A100', 'T500', 'T520', 'T530', 'T540']);
+    expect(ids(ALL({ source: 'both' }))).toEqual(['T550']);
     expect(ids(ALL({ source: 'rg' }))).toEqual(['B200', 'I900', 'J010', 'T510']);
     expect(ids(ALL({ fleetStatus: 'Approved' }))).toEqual(['A100', 'T500', 'T530', 'T540', 'T550']);
     expect(ids(ALL({ repairStatus: 'Complete (here)' }))).toEqual(['T500', 'T530', 'T540', 'T550']);
@@ -268,7 +287,8 @@ describe('sortItems / mismatch badge / new columns', () => {
     const a = L.rowHtml(m.find((x) => x.unitId === 'A100'));
     expect(a).toContain('data-id-link="' + VOLVO_URL('21383146') + '"');
     expect(a).toContain('data-id-link-field="vendor-wo"');
-    expect(a).toContain('<td>both</td>');
+    expect(a).toContain('<td>Decisiv</td>'); // main's scan source for A100
+    expect(L.rowHtml(m.find((x) => x.unitId === 'T550'))).toContain('<td>both</td>');
     expect(a).toContain('<td>Jane Doe</td>');
     expect(a).toContain('<td>Approved</td>');
     expect(a).toContain('Waiting<div class="pe-sub2">repair \u00B7 Waiting since 11/17</div>');

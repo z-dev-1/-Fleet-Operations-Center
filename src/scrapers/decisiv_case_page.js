@@ -220,11 +220,12 @@ function parseCasePage(html, opts) {
     // Stripped page text (scripts/styles removed) for labeled values.
     const text = _text(decoded.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' '));
     if (parts == null || labor == null || grand == null) {
-      const tre = /\b(Parts|Labor|Labour|Grand Total|Total)\b\s*:?\s*\$\s?([\d,]+\.\d{2})/gi;
+      // 'Parts Total' / 'Labor Total' are the parts / labor amounts, never the grand total.
+      const tre = /\b(Parts(?: Total)?|Labou?r(?: Total)?|Grand Total|(?<!\b(?:Parts|Labou?r)\s+)Total)\b\s*:?\s*\$\s?([\d,]+\.\d{2})/gi;
       let tm;
       while ((tm = tre.exec(text))) {
         const v = _num(tm[2]);
-        const l = tm[1].toLowerCase();
+        const l = tm[1].toLowerCase().replace(/^(parts|labou?r) total$/, '$1');
         if (l === 'parts' && parts == null) parts = v;
         else if ((l === 'labor' || l === 'labour') && labor == null) labor = v;
         else if ((l === 'grand total' || l === 'total') && grand == null) grand = v;

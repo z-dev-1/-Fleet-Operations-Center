@@ -16,7 +16,9 @@
  *
  * Offsite values (EST status / AS OF, est amount, ETR, EST/RO link, RO# = Vendor WO,
  * dealer) come from the scraped Decisiv case first (decisivCaseCache, keyed by the
- * estimate id of the WR's owned offsite URL; read-only, no network), then RG / AAP.
+ * estimate id of the WR's owned offsite URL, scraped within 24 h; read-only, no
+ * network), then RG / AAP. A WR with no owned URL in the stored row takes it from the
+ * renderer's unit or the team scan row for that WR (_withOffsite).
  *
  * This module only returns text. It never sends anything: the renderer shows the draft,
  * the user edits it, and the submit goes through the gated relay:escalate /
@@ -183,14 +185,51 @@ function _ownedEstimate(r) {
   }
   return null;
 }
-// decisivCaseCache[estimateId] (written by the Pending Estimates scan), or null.
-function _decisivFor(est) {
+// decisivCaseCache[estimateId] (written by the Pending Estimates scan), or null. A case
+// scraped more than STALE_MS ago (or with no scrape time) is ignored, so RG / AAP wins.
+function _decisivFor(est, nowMs) {
   if (!est) return null;
   try {
     const c = _store().load('decisivCaseCache', {});
     const rec = _isObj(c) ? c[est.id] : null;
-    return _isObj(rec) && rec.ok !== false ? rec : null;
+    if (!_isObj(rec) || rec.ok === false) return null;
+    const at = _ms(rec.scrapedAt);
+    if (at == null || nowMs - at > STALE_MS) return null;
+    return rec;
   } catch (_) { return null; }
+}
+
+const OFFSITE_URL_FIELDS = Object.freeze(['offsiteShopEventUrl', 'savedOffsiteUrl', 'asistSrUrl']);
+// The offsite estimate URL for a row that has none it owns. relay-comment-draft's
+// resolveRow whitelist leaves the offsite links out, so a Pending Estimates row that is
+// not in the user's fleet data (an "Everyone" row) would draft without them. Sources,
+// in order: the renderer's unit (primary WR only, empty fields only), then the team
+// scan row for this WR (pendingEstScan; its URL came from this WR's own comments).
+function _withOffsite(row, unitRow, unit, wr) {
+  const out = Object.assign({}, row);
+  const u = _isObj(unit) ? unit : {};
+  const primary = row === unitRow;
+  // pickUnit keeps strings only; a numeric pending cost from the renderer is accepted here.
+  if (primary && out.estimatePendingCost == null && typeof u.estimatePendingCost === 'number' && Number.isFinite(u.estimatePendingCost)) {
+    out.estimatePendingCost = String(u.estimatePendingCost);
+  }
+  if (_ownedEstimate(out)) return out;
+  if (primary) {
+    for (const k of OFFSITE_URL_FIELDS) {
+      if (!_s(out[k]).trim() && typeof u[k] === 'string' && u[k].trim()) out[k] = u[k].trim().slice(0, 2000);
+    }
+    if (_ownedEstimate(out)) return out;
+  }
+  try {
+    const scan = _store().load('pendingEstScan', null);
+    const rows = _isObj(scan) && Array.isArray(scan.rows) ? scan.rows : [];
+    const hit = rows.find((x) => _isObj(x) && _s(x.workRequestId).toLowerCase() === wr && _s(x.offsiteShopEventUrl).trim());
+    if (hit) {
+      const cand = Object.assign({}, out, { offsiteShopEventUrl: _s(hit.offsiteShopEventUrl).trim(), _offsiteWrId: _s(out.workRequestId) });
+      if (_ownedEstimate(cand)) return cand;
+    }
+  } catch (_) { /* no scan */ }
+  return out;
 }
 
 // ── facts (plain values or null, never an invented default) ────────────────
@@ -226,7 +265,7 @@ function collectFacts(row, { now, factSet, evidenceText } = {}) {
   const ros = fs && Array.isArray(fs.ros) ? fs.ros : [];
   // Offsite Decisiv first (owned estimate URL + its scraped case), then RG / AAP.
   const offEst = _ownedEstimate(r);
-  const dc = _decisivFor(offEst) || {};
+  const dc = _decisivFor(offEst, nowMs) || {};
   const dcEtrMs = _ms(dc.etr);
   const etr = dcEtrMs != null ? _ymd(new Date(dcEtrMs)) : fsEtr;
   const city = first(r.dealerCity) && first(r.dealerState) ? first(r.dealerCity) + ', ' + first(r.dealerState)
@@ -494,12 +533,13 @@ async function draftAction({ kind, target, template, workRequestId, unit, userIn
   const id = _s(unitRow.equipmentId).trim();
   // Same consistency check as relay-comment-draft.draftForUnit (not an authority check;
   // nothing is written on this path). A planned/secondary WR drafts from its own entry.
-  const row = D.rowForWr(unitRow, wr);
-  const m = row && (WR_UUID_RE.exec(_s(row.workRequestId)) || WR_UUID_RE.exec(_s(row.serviceUrl)));
+  const wrRow = D.rowForWr(unitRow, wr);
+  const m = wrRow && (WR_UUID_RE.exec(_s(wrRow.workRequestId)) || WR_UUID_RE.exec(_s(wrRow.serviceUrl)));
   if (!wr || !m || m[0].toLowerCase() !== wr) {
     _log('warn', 'action draft refused', { unit: id, code: 'wr-mismatch' });
     return { ok: false, code: 'wr-mismatch' };
   }
+  const row = _withOffsite(wrRow, unitRow, unit, wr);
   if (_inFlight.has(wr)) return { ok: false, code: 'busy' };
   _inFlight.add(wr);
   try {

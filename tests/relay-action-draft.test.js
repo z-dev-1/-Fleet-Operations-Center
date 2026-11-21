@@ -358,7 +358,8 @@ describe('Decisiv-first mapping (offsite case cache, then RG / AAP)', () => {
   const WR4 = '0a1b2c3d-1111-2222-3333-343434343434';
   const UPDATED = '2026-10-29T13:12:00.000Z';
   const CASE = { ok: true, estimateId: '21383146', total: 8735.97, fleetStatus: 'Approved', repairStatus: 'Waiting', updatedAt: UPDATED,
-    etr: '2026-10-26T16:00:00.000Z', dealerCity: 'Dunmore', dealerState: 'PA', dealerShortName: 'M & K Truck Centers' };
+    etr: '2026-10-26T16:00:00.000Z', dealerCity: 'Dunmore', dealerState: 'PA', dealerShortName: 'M & K Truck Centers',
+    scrapedAt: iso(NOW.getTime() - 10 * M) };
   const DROW = { equipmentId: '39351', workRequestId: WR3, vendor: 'Volvo (ASIST)', offsiteShopEventUrl: DEC_URL,
     vendorWorkOrderId: 'VWO-77', savedPrimaryComponent: 'Aftertreatment', offsiteStage: 'approval',
     created: iso(NOW.getTime() - 5 * H) };
@@ -434,6 +435,51 @@ describe('Decisiv-first mapping (offsite case cache, then RG / AAP)', () => {
     expect(miss).toMatchObject({ estLink: DEC_URL, roNumber: '21383146', estStatus: 'approval', etr: null, cityState: null, vendor: 'Volvo (ASIST)' });
     st.data.decisivCaseCache = { 21383146: { ok: false, error: 'DECISIV_SESSION_INVALID', total: 1 } };
     expect(D.collectFacts(DROW, { now: NOW }).estAmount).toBeNull();
+  });
+
+  it('a cached case scraped more than 24 h ago (or with no scrape time) is ignored: RG / AAP values win', () => {
+    st.data.decisivCaseCache = { 21383146: Object.assign({}, CASE, { scrapedAt: iso(NOW.getTime() - 25 * H) }) };
+    const old = D.collectFacts(DROW, { now: NOW });
+    expect(old).toMatchObject({ estLink: DEC_URL, roNumber: '21383146', estStatus: 'approval', estAmount: null, decisiv: null });
+    const noTime = Object.assign({}, CASE);
+    delete noTime.scrapedAt;
+    st.data.decisivCaseCache = { 21383146: noTime };
+    expect(D.collectFacts(DROW, { now: NOW }).decisiv).toBeNull();
+  });
+
+  it('team row not in lastData/fleetData: EST LINK / RO# / RO LINK / EST amount come from the overlay unit + cached case', async () => {
+    const WR5 = '0a1b2c3d-1111-2222-3333-565656565656';
+    // Same shape as pending-estimates-logic _teamUnit -> relay-actions relayActionDraftUnit.
+    const unit = { equipmentId: '77777', workRequestId: WR5, vendor: 'Volvo (ASIST)', offsiteShopEventUrl: DEC_URL,
+      vendorWorkOrderId: '', estimatePendingCost: '', created: iso(NOW.getTime() - 5 * H) };
+    const hve = await D.draftAction({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR5, unit,
+      lastData: { rows: [RGROW] }, userInputs: { estAmount: 0 } });
+    expect(hve.ok).toBe(true);
+    expect(hve.draft).toContain('EST LINK: ' + DEC_URL);
+    expect(hve.draft.split('\n')[1]).toBe('UNIT: 77777 | EST $8,735.97');
+    expect(hve.draft).toContain('VENDOR WO: 21383146');
+    const off = await D.draftAction({ kind: 'comment', template: 'offsite-update', workRequestId: WR5, unit, lastData: { rows: [RGROW] } });
+    expect(off.draft).toContain('RO#: 21383146 | RO LINK: ' + DEC_URL);
+    expect(off.draft).toContain('EST APPROVED AS OF ' + D.formatAsOf(UPDATED));
+    expect(off.placeholders).not.toContain('link');
+    expect(off.placeholders).not.toContain('RO#');
+  });
+
+  it('a numeric estimatePendingCost on the unit is accepted', async () => {
+    const WR6 = '0a1b2c3d-1111-2222-3333-676767676767';
+    const unit = { equipmentId: '88888', workRequestId: WR6, vendor: 'Rush', estimatePendingCost: 1234.5, created: iso(NOW.getTime() - 5 * H) };
+    const hve = await D.draftAction({ kind: 'escalation', target: 'MCS_HIGH_VALUE_ESTIMATE', workRequestId: WR6, unit, lastData: { rows: [] }, userInputs: { estAmount: 0 } });
+    expect(hve.draft.split('\n')[1]).toBe('UNIT: 88888 | EST $1,234.50');
+  });
+
+  it('stored row with no offsite URL: the team scan row for that WR supplies it (chip and draft agree)', async () => {
+    st.data.pendingEstScan = { ok: true, rows: [{ key: 'wr:' + WR4, workRequestId: WR4, offsiteShopEventUrl: DEC_URL }] };
+    const off = await dd({ kind: 'comment', template: 'offsite-update', workRequestId: WR4, unit: { equipmentId: '40000' } });
+    expect(off.draft).toContain('RO#: 21383146 | RO LINK: ' + DEC_URL);
+    // A scan row for another WR is not used.
+    st.data.pendingEstScan = { ok: true, rows: [{ workRequestId: WR3, offsiteShopEventUrl: DEC_URL }] };
+    const other = await dd({ kind: 'comment', template: 'offsite-update', workRequestId: WR4, unit: { equipmentId: '40000' } });
+    expect(other.draft).toContain('RO#: RO-555 | RO LINK: <FILL: link>');
   });
 
   it('drafting never reaches the write gate', async () => {

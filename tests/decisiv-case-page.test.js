@@ -86,6 +86,18 @@ describe('decisiv_case_page: variants', () => {
     expect(r.total).toBe(8735.97);
     expect(r.totalSource).toBe('version');
   });
+  it("text fallback: 'Parts Total' / 'Labor Total' labels are parts / labor, never the grand total", () => {
+    const body = '<div class="est"><span>Parts Total: $4,326.46</span> <span>Labor Total: $3,940.00</span></div>';
+    const html = '<html><body>' + body + '</body></html>';
+    const r = cp.parseCasePage(html, { estimateId: '21383146', now: NOW });
+    expect(r.partsTotal).toBe(4326.46);
+    expect(r.laborTotal).toBe(3940.0);
+    expect(r.total).toBe(8266.46);
+    expect(r.totalSource).toBe('sum');
+    const withGrand = cp.parseCasePage('<html><body>' + body + ' <span>Total: $8,735.97</span></body></html>', { estimateId: '21383146', now: NOW });
+    expect(withGrand.total).toBe(8735.97);
+    expect(withGrand.totalSource).toBe('grand');
+  });
   it('repairStatus inside an entity-encoded attribute', () => {
     const html = HTML.replace('<script>renderEstimateRepairStatusTag({repairStatus:"Waiting"});</script>',
       '<div ng-init=\'renderEstimateRepairStatusTag({&quot;repairStatus&quot;:&quot;Complete (here)&quot;})\'></div>');

@@ -270,6 +270,41 @@ describe('pending_est_sources: team scan', () => {
     expect(last.assetCache).toBeUndefined();
   });
 
+  it('decisivCaseCache is pruned: unreferenced cases older than 24 h are dropped', async () => {
+    const { deps, store } = makeDeps();
+    store.data.decisivCaseCache = {
+      111: { ok: true, estimateId: '111', scrapedAt: new Date(T0 - 48 * 3600000).toISOString() },
+      222: { ok: true, estimateId: '222', scrapedAt: new Date(T0 - 3600000).toISOString() },
+      333: { ok: true, estimateId: '333' },
+    };
+    await src.scanTeamPending({}, deps);
+    const ids = Object.keys(store.data.decisivCaseCache).sort();
+    expect(ids).toEqual(['21383146', '21467830', '21999999', '222']);
+  });
+
+  it('cases are scraped never-scraped first, then oldest, with a pause after each batch of 10', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => String(30000000 + i));
+    const urlOf = (id) => 'https://volvopg.asist.decisiv.net/fleet/estimates/' + id;
+    const sleep = vi.fn(async () => {});
+    const { deps, store } = makeDeps({
+      searchAllPages: vi.fn(async () => ids.map((id) => wo({ id: 'WR' + id, vendor: 'VOLVO', status: st('CREATED') }))),
+      getService: vi.fn(async (wr) => comment('Estimate ' + urlOf(wr.slice(2)))),
+      fleetRows: () => [],
+      sleep,
+    });
+    // ids[0] was scraped 1 h ago (stale for the 15-min TTL); ids[1] 2 h ago; the rest never.
+    store.data.decisivCaseCache = {
+      [ids[0]]: { ok: true, estimateId: ids[0], scrapedAt: new Date(T0 - 3600000).toISOString() },
+      [ids[1]]: { ok: true, estimateId: ids[1], scrapedAt: new Date(T0 - 2 * 3600000).toISOString() },
+    };
+    await src.scanTeamPending({}, deps);
+    const order = deps.getCasePage.mock.calls.map((c) => c[0]);
+    expect(order).toHaveLength(12);
+    expect(order.slice(-2)).toEqual([ids[1], ids[0]]);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(1500);
+  });
+
   it('predicates', () => {
     expect(src._isOpenWo(wo({ id: 'x', status: st('ESTIMATE_APPROVED') }))).toBe(true);
     expect(src._isOpenWo(wo({ id: 'x', status: st('COMPLETED', 'Complete') }))).toBe(false);

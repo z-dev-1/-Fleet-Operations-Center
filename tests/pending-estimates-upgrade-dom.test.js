@@ -197,6 +197,21 @@ describe('Pending Estimates upgrade overlay (mini DOM)', () => {
     expect(window.aapApi.updateEscalations).not.toHaveBeenCalled();
   });
 
+  it('per-case Decisiv errors from the scan show in the meta line; other stages do not', async () => {
+    const errors = [{ stage: 'getCasePage', code: 'DECISIV_SESSION_INVALID', n: 4 },
+      { stage: 'getCaseStatusSummary', code: 'DECISIV_SESSION_INVALID', n: 4 }, { stage: 'getService', code: 'AAP_HTTP_500', n: 1 }];
+    doc = createMiniDocument();
+    const s = Object.assign({}, SCAN, { errors });
+    ctl = P.__test__.createController({ doc, modal: fakeModal, getFleet: () => ({ rows: [UNIT_A] }), getScan: async () => s,
+      runScan: async () => s, openUrl: vi.fn(), openEscalation: vi.fn(), navigate: vi.fn(), now: () => NOW });
+    ctl.open();
+    await ctl.whenLoaded();
+    const meta = q('#pe-meta').textContent;
+    expect(meta).toContain('team scan: Decisiv errors: getCasePage DECISIV_SESSION_INVALID \u00D74, getCaseStatusSummary DECISIV_SESSION_INVALID \u00D74');
+    expect(meta).not.toContain('AAP_HTTP_500');
+    expect(units()).toEqual(['A100', 'T610', 'T620']); // rows still render
+  });
+
   it('Refresh re-runs the same team-wide scan with force:true', async () => {
     await setup();
     q('[data-pe-refresh]').click();

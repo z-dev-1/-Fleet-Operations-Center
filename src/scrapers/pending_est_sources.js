@@ -31,6 +31,9 @@ const AAP_TIMEOUT_MS = 8000;
 const DECISIV_TIMEOUT_MS = 20000;
 const MAX_SERVICE_CALLS = 300;
 const MAX_CASES = 250;
+const CASE_BATCH = 10;
+const CASE_BATCH_PAUSE_MS = 1500;
+const CASE_RETAIN_MS = 24 * 60 * 60 * 1000;   // the drafter ignores cases older than 24 h
 const AAP_CONCURRENCY = 6;
 
 const DECISIV_VENDORS = new Set(['VOLVO', 'KENWORTH', 'PETERBILT', 'PACCAR']);
@@ -65,6 +68,7 @@ function _deps(d) {
     rowIsMine: pick('rowIsMine', () => require('./dbr_pull')._rowIsMine),
     caseUrlOf: pick('caseUrlOf', () => require('../orcha/stage_refresh').caseUrlOf),
     now: pick('now', () => () => Date.now()),
+    sleep: pick('sleep', () => (ms) => new Promise((r) => { const t = setTimeout(r, ms); if (t && t.unref) t.unref(); })),
     fleetRows: pick('fleetRows', () => () => {
       const fd = store.load('fleetData', {}) || {};
       return Array.isArray(fd.rows) ? fd.rows : [];
@@ -271,10 +275,17 @@ async function _scan(opts, d) {
   try { caseCache = d.store.load('decisivCaseCache', {}) || {}; } catch (_) { caseCache = {}; }
   const cases = new Map();
   let caseN = 0;
-  for (const [estId, url] of caseUrls) {
+  // Never-scraped cases first, then the oldest scrape, so the MAX_CASES cap rotates
+  // through every case across scans instead of re-scraping the same ones.
+  const scrapedMs = (id) => { const t = Date.parse((caseCache[id] && caseCache[id].scrapedAt) || ''); return Number.isFinite(t) ? t : -Infinity; };
+  const caseOrder = [...caseUrls].sort((a, b) => scrapedMs(a[0]) - scrapedMs(b[0]));
+  for (const [estId, url] of caseOrder) {
     const hit = caseCache[estId];
     if (!force && hit && _ageOk(hit.scrapedAt, nowMs, CASE_TTL_MS)) { cases.set(estId, hit); continue; }
     if (caseN >= MAX_CASES) { if (hit) cases.set(estId, hit); continue; }
+    // Every Decisiv call takes decisiv_api's global lock on its own; a short idle gap
+    // after each batch lets stage_refresh and other Decisiv reads run between batches.
+    if (caseN > 0 && caseN % CASE_BATCH === 0) { try { await d.sleep(CASE_BATCH_PAUSE_MS); } catch (_) {} }
     caseN++;
     let rec;
     let pageErr = null;
@@ -302,6 +313,13 @@ async function _scan(opts, d) {
     rec = Object.assign({}, rec, { estimateId: estId, url: rec.url || url, scrapedAt: nowIso });
     caseCache[estId] = rec;
     cases.set(estId, rec);
+  }
+  // Prune: keep the cases this scan references (team WRs + the user's fleet rows) and
+  // anything scraped within CASE_RETAIN_MS; drop the rest so the store stays bounded.
+  for (const id of Object.keys(caseCache)) {
+    if (caseUrls.has(id)) continue;
+    const rec = caseCache[id];
+    if (!_ageOk(rec && rec.scrapedAt, nowMs, CASE_RETAIN_MS)) delete caseCache[id];
   }
   try { d.store.save('decisivCaseCache', caseCache); } catch (e) { err('store', 'CASE_CACHE_SAVE'); }
 
