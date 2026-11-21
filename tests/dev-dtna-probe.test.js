@@ -282,6 +282,21 @@ describe('P1b: postComment call sites from the module factory', () => {
     expect(r[0].calls.length).toBe(2);
   });
 
+  it('records feed-controller action literals (write ones with excerpts) and page descriptors by key name only', () => {
+    const c = probe.createCensus();
+    const FC = 'serviceComponent://ui.communities.components.aura.components.forceCommunity.controller.ForceCommunityFeedController/ACTION$';
+    c.scan('a("' + FC + 'getModel",{recordId:x});b("' + FC + 'addFeedComment",{feedElementId:f,text:t});');
+    const fa = Array.from(c.feedActions.values());
+    expect(fa.find((e) => e.action === 'getModel')).toMatchObject({ write: false, excerpts: [] });
+    const w = fa.find((e) => e.action === 'addFeedComment');
+    expect(w.write).toBe(true);
+    expect(w.excerpts[0]).toContain('feedElementId');
+    c.noteDescriptor(FC + 'getModel', { recordId: '500gx000002E4U5AAK', feedType: 'Record' });
+    const d = c.descriptors.get(FC + 'getModel');
+    expect(d.paramKeys).toEqual(['recordId', 'feedType']);
+    expect(JSON.stringify(d)).not.toContain('500gx000002E4U5AAK');
+  });
+
   it('ignores the apex module own define (name, not a dependency entry)', () => {
     expect(probe.analyzeImportCalls('define("@salesforce/apex/E2E_UTP_CommentController.postComment",["exports"],function(e){e.default=1})')).toEqual([]);
   });

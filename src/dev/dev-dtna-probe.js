@@ -148,6 +148,7 @@ function _paramKeysIn(win) {
 
 // ── P1b: map the postComment import to its factory parameter and read the call sites (zero calls) ──
 const POST_IMPORT = '@salesforce/apex/E2E_UTP_CommentController.postComment';
+const FEED_WRITE_RE = /^(post|add|create|insert|save|submit|share|update|edit)/i;
 
 function _balanced(t, open) {
   const o = t[open];
@@ -274,6 +275,33 @@ function createCensus() {
   const postSites = [];
   const postCalls = [];
   const postImports = [];
+  // Every non-Apex Aura action descriptor the page sends: descriptor + param key names (+ key types). No values.
+  const descriptors = new Map();
+  // Bundle literals of feed/community controller actions, write-like ones with a code excerpt.
+  const feedActions = new Map();
+
+  function noteDescriptor(desc, prm) {
+    if (typeof desc !== 'string' || desc.length > 300) return;
+    const e = descriptors.get(desc) || { descriptor: desc, calls: 0, paramKeys: [], paramShape: null };
+    e.calls++;
+    const p = prm && typeof prm === 'object' ? prm : {};
+    for (const k of Object.keys(p)) if (/^\w{1,60}$/.test(k) && !e.paramKeys.includes(k) && e.paramKeys.length < 30) e.paramKeys.push(k);
+    if (!e.paramShape) e.paramShape = shapeOf(p, 3);
+    descriptors.set(desc, e);
+  }
+
+  function _scanFeed(t) {
+    const re = /((?:serviceComponent|aura|apex):\/\/[\w.]{1,200}\/ACTION\$(\w{1,80}))/g;
+    let m;
+    while ((m = re.exec(t)) && feedActions.size < 200) {
+      const d = m[1];
+      if (!/Feed|Chatter|Comment|Community/i.test(d)) continue;
+      const e = feedActions.get(d) || { descriptor: d, action: m[2], write: FEED_WRITE_RE.test(m[2]), hits: 0, excerpts: [] };
+      e.hits++;
+      if (e.write && e.excerpts.length < 3) e.excerpts.push(_excerpt(t, m.index, 300, 900));
+      feedActions.set(d, e);
+    }
+  }
   const scripts = { seen: 0, scanned: 0, skippedLarge: 0, failed: 0 };
 
   function _addBundle(cls, meth, win) {
@@ -318,6 +346,7 @@ function createCensus() {
     const pre = /\bpostComment\b/g;
     let m;
     while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW), t.slice(Math.max(0, m.index - 400), m.index));
+    _scanFeed(t);
     let ix = 0;
     while ((ix = t.indexOf(POST_IMPORT, ix)) >= 0 && postImports.length < 12) {
       postImports.push({ len: t.length, at: ix, excerpt: _excerpt(t, ix, 400, 900) });
@@ -361,7 +390,7 @@ function createCensus() {
     };
   }
 
-  return { scan, notePageCall, all, result, postSites, postCalls, postImports, scripts, page, bundle };
+  return { scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, scripts, page, bundle };
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -392,6 +421,7 @@ function _attachNetwork(wc, census) {
       } else {
         const d = /^apex:\/\/(\w+)\/ACTION\$(\w+)$/.exec(a.descriptor);
         if (d) census.notePageCall(d[1], d[2], Object.keys(prm));
+        census.noteDescriptor(a.descriptor, prm);
       }
     }
   }
@@ -600,6 +630,8 @@ async function run(deps) {
   if (!out.p1.sites.length) out.p1.sites = census.postSites.slice();
   out.p1b = census.postCalls.slice();
   out.p1imports = census.postImports.slice();
+  out.pageDescriptors = Array.from(census.descriptors.values());
+  out.feedActions = Array.from(census.feedActions.values());
   out.winClosedAtMs = state.closedAt ? state.closedAt - Date.parse(at) : null;
   if (code) out.code = code;
 
