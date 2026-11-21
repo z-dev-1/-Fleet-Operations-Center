@@ -379,6 +379,63 @@ describe('renderer: free-write DOM flow', () => {
     expect(draftReply.mock.calls[1]).toEqual(['em_d1', '']);
   });
 
+  it('edits to an existing reply draft survive the toggle, Hide, and a questions or failed free-write result', async () => {
+    O._setIntelForTests({ ok: true, enabled: true, flags: { capture: true, threadReplies: true } });
+    let next = { ok: true, needsAnswers: true, questions: ['Which day?'], mode: 'reply' };
+    const draftThreadReply = vi.fn(async () => next);
+    globalThis.window = { emailIntel: { draftThreadReply } };
+    let asked = 0; globalThis.confirm = () => { asked++; return true; };
+    O._setResultsForTests({ emails: [Object.assign(EM(), { replyState: 'drafted', replyDraft: 'AI text' })] });
+    O._render();
+    const edited = 'AI text, plus my own edit';
+    d.q('textarea[data-draft="em_d1"]').value = edited;
+    d.q('[data-fw-toggle]').click();                                                   // open
+    expect(d.q('textarea[data-fw-text="em_d1"]')).not.toBeNull();
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe(edited);
+    const hide = d.document.querySelectorAll('[data-fw-toggle]').find((b) => b.getAttribute('aria-expanded') === 'true');
+    hide.click();                                                                      // Hide
+    expect(d.q('textarea[data-fw-text="em_d1"]')).toBeNull();
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe(edited);
+    expect(O._results().emails[0].replyDraft).toBe('AI text');                        // the model is not touched
+
+    d.q('[data-fw-toggle]').click();
+    const ta = d.q('textarea[data-fw-text="em_d1"]'); ta.value = 'say Friday'; ta.dispatch('input');
+    d.q('[data-fw-draft="reply"]').click();                                            // "Replace the current draft?" -> yes
+    await vi.waitFor(() => expect(d.q('[data-fw-submit]')).not.toBeNull());
+    expect(asked).toBe(1);
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe(edited);                   // questions: edits kept
+    expect(O._results().emails[0].replyDraft).toBe('AI text');
+
+    next = { ok: false, code: 'AI_FAILED', error: 'lane down' };
+    d.q('[data-fw-skip]').click();
+    await vi.waitFor(() => expect(draftThreadReply).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(d.q('[data-fw-skip]').disabled).toBe(false));
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe(edited);                   // failure: edits kept
+    expect(O._results().emails[0].replyState).toBe('drafted');
+
+    next = DRAFT;
+    d.q('[data-fw-skip]').click();
+    await vi.waitFor(() => expect(O._results().emails[0].replyDraft).toBe(DRAFT.draft));
+    expect(asked).toBe(3);
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe(DRAFT.draft);              // a new AI draft replaces the edits
+  });
+
+  it('legacy card: edits to the reply draft survive the toggle and a failed free-write draft', async () => {
+    O._setIntelForTests({ ok: true, enabled: true, flags: { capture: true } });
+    const draftReply = vi.fn(async () => ({ ok: false, error: 'AI unavailable' }));
+    globalThis.window = { emailTriage: { draftReply } };
+    O._setResultsForTests({ emails: [Object.assign(EM(), { replyState: 'drafted', replyDraft: 'AI text' })] });
+    O._render();
+    d.q('textarea[data-draft="em_d1"]').value = 'my edit';
+    d.q('[data-fw-toggle]').click();
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe('my edit');
+    const ta = d.q('textarea[data-fw-text="em_d1"]'); ta.value = 'say Friday'; ta.dispatch('input');
+    d.q('[data-fw-draft="reply"]').click();
+    await vi.waitFor(() => expect(toasts).toContain('Draft failed: AI unavailable'));
+    expect(d.q('textarea[data-draft="em_d1"]').value).toBe('my edit');
+    expect(O._results().emails[0].replyDraft).toBe('AI text');
+  });
+
   it('flags off: no free-write box is rendered or wired', () => {
     O._setIntelForTests(null);
     globalThis.window = { emailTriage: { draftReply: vi.fn() } };

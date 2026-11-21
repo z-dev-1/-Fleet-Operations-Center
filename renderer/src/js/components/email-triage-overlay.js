@@ -469,6 +469,26 @@ function _cardHtml(em) {
 const _fwUi = {};
 function _fw(id) { return _fwUi[id] || (_fwUi[id] = { open: false, text: '', questions: [], answers: '', busy: false, mode: 'reply' }); }
 
+// Re-render for a free-write control without losing what the user typed into any reply draft box. _render() rebuilds
+// textarea[data-draft] from em.replyDraft, so the edits are copied out first and put back afterwards (em.replyDraft is
+// left alone, so the "Replace the current draft?" check still sees them). A card whose draft changed meanwhile, or the
+// skipId card that just got a new AI draft, shows the new draft.
+function _fwRender(skipId) {
+  const kept = [];
+  try {
+    ((_results && _results.emails) || []).forEach((em) => {
+      if (em.id === skipId) return;
+      const ta = document.querySelector('textarea[data-draft="' + CSS.escape(em.id) + '"]');
+      if (ta && ta.value !== (em.replyDraft || '')) kept.push({ em, base: em.replyDraft, value: ta.value });
+    });
+  } catch (_) { /* read only */ }
+  _render();
+  kept.forEach((k) => {
+    if (k.em.replyDraft !== k.base) return;
+    try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(k.em.id) + '"]'); if (ta) ta.value = k.value; } catch (_) { /* restore only */ }
+  });
+}
+
 function _freeWriteHtml(em) {
   const state = em.replyState || 'none';
   if (em.deleted || state === 'sent' || state === 'uncertain' || state === 'deleted') return '';
@@ -514,7 +534,7 @@ function _wireFreeWrite(card, id) {
   card.querySelectorAll('[data-fw-toggle]').forEach((b) => b.addEventListener('click', () => {
     const ui = _fw(id);
     ui.open = !ui.open;
-    _render();
+    _fwRender();
     if (ui.open) { try { const ta = document.querySelector('textarea[data-fw-text="' + CSS.escape(id) + '"]'); if (ta) ta.focus(); } catch (_) { /* focus only */ } }
   }));
   const text = card.querySelector('[data-fw-text]');
@@ -536,13 +556,13 @@ function _wireFreeWrite(card, id) {
 // The AI answered (draft, questions or error): the free-write box is usable again.
 function _fwDone(id, extra) {
   const ui = extra ? _fwUi[id] : null;
-  if (ui && ui.busy) { ui.busy = false; _render(); }
+  if (ui && ui.busy) { ui.busy = false; _fwRender(); }
 }
 
 function _fwQuestions(id, questions) {
   const ui = _fw(id);
   ui.questions = (Array.isArray(questions) ? questions : []).slice(0, 3);
-  _render();
+  _fwRender();
   try { const ta = document.querySelector('textarea[data-fw-answers="' + CSS.escape(id) + '"]'); if (ta) ta.focus(); } catch (_) { /* focus only */ }
   _toast('The AI needs a bit more detail — answer below.');
 }
@@ -572,17 +592,17 @@ async function _freeWriteDraft(id, mode, opts) {
   const extra = { guidance: text, clarify: !o.skip };
   if (answers) extra.answers = answers;
   ui.busy = true;
-  _render();
+  _fwRender();
   if (_repliesOn() && _ck(em)) { await _intelDraft(id, ui.mode, false, extra); _fwDone(id, extra); return; }
   _toast('Drafting reply… (the AI can take a few seconds)');
   let r;
   try { r = await window.emailTriage.draftReply(id, text, answers ? { clarify: !o.skip, answers } : { clarify: !o.skip }); } catch (e) { r = { ok: false, error: e.message || String(e) }; }
   ui.busy = false;
   if (r && r.ok && r.needsAnswers) { _fwQuestions(id, r.questions); return; }
-  if (!r || !r.ok) { _render(); _toast('Draft failed: ' + ((r && r.error) || 'unknown')); return; }
+  if (!r || !r.ok) { _fwRender(); _toast('Draft failed: ' + ((r && r.error) || 'unknown')); return; }
   ui.questions = []; ui.answers = '';
   em.replyDraft = r.draft; em.replyState = 'drafted';
-  _render();
+  _fwRender(id);
   try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); ta.focus(); } } catch (_) { /* focus only */ }
   _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
 }
@@ -824,8 +844,9 @@ async function _intelDraft(id, mode, force, extra) {
   _toast('Drafting ' + (mode === 'reply-all' ? 'Reply All' : 'Reply') + '… (the AI can take a few seconds)');
   // Outlook API transport: an open panel shows "Resolving recipients…" (sending off) until the draft returns.
   const prevUi = _apiOn() ? _replyUi[id] : null;
-  if (prevUi) { prevUi.resolving = true; _render(); }
-  const unmark = () => { if (prevUi && prevUi.resolving) { prevUi.resolving = false; _render(); } };
+  const rerender = extra ? _fwRender : _render;
+  if (prevUi) { prevUi.resolving = true; rerender(); }
+  const unmark = () => { if (prevUi && prevUi.resolving) { prevUi.resolving = false; rerender(); } };
   const payload = extra ? Object.assign({ conversationKey: ck, mode, force: !!force }, extra) : { conversationKey: ck, mode, force: !!force };
   let r;
   try { r = await window.emailIntel.draftThreadReply(payload); } catch (e) { _fwDone(id, extra); unmark(); _toast('Draft failed: ' + (e.message || e)); return; }
@@ -846,7 +867,7 @@ async function _intelDraft(id, mode, force, extra) {
   if (r.recipientsSource !== undefined) {
     Object.assign(_replyUi[id], { source: r.recipientsSource || 'none', sendBlocked: r.sendable === false, unresolved: r.unresolved || null, resolving: false });
   }
-  _render();
+  if (extra) _fwRender(id); else _render();
   try { const ta = document.querySelector('textarea[data-draft="' + CSS.escape(id) + '"]'); if (ta) { ta.scrollIntoView({ behavior: 'smooth', block: 'center' }); ta.focus(); } } catch (_) { /* focus only */ }
   if (r.unresolved) _toast('Draft ready. ' + unresolvedText(r.unresolved.reason));
   else _toast(r.aiUnavailable ? 'AI was unavailable — opened an editable starter draft below.' : 'Draft ready — see the box below the email.');
