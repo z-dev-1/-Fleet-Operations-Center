@@ -306,6 +306,19 @@ expose('pendingEst', {
   scan: (opts) => ipcRenderer.invoke('pending-est:scan', opts || {}),
 });
 
+// ── DTNA Service Tracker (user-initiated reads only) ──
+expose('dtna', {
+  status:     () => ipcRenderer.invoke('dtna:status'),
+  login:      () => ipcRenderer.invoke('dtna:login'),
+  pullUnit:   (p) => ipcRenderer.invoke('dtna:pull-unit', p || {}),
+  listCases:  (p) => ipcRenderer.invoke('dtna:list-cases', p || {}),
+  bulkPull:   (p) => ipcRenderer.invoke('dtna:bulk-pull', p || {}),
+  bulkCancel: (p) => ipcRenderer.invoke('dtna:bulk-cancel', p || {}),
+  exportBulk: (p) => ipcRenderer.invoke('dtna:export', p || {}),
+  onStatus:   (cb) => on('dtna:status-changed', cb),
+  onProgress: (cb) => on('dtna:progress', cb),
+});
+
 // ── AI / Orcha ────────────────────────────────────────────────────────────────
 expose('ai', {
   suggest:          (unit)        => ipcRenderer.invoke('ai:suggest', unit),

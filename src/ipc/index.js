@@ -36,6 +36,7 @@ const { registerFleetDbrIPC }      = require('./fleet-dbr');
 const { registerBaseballCardIPC }  = require('./baseball-card');
 const { registerFasRosterIPC }     = require('./fas-roster');
 const { registerPendingEstIPC }    = require('./pending-est');
+const { registerDtnaIPC }        = require('./dtna');
 const { registerSchedulerIPC }     = require('./scheduler');
 const { registerEmailTriageIPC }   = require('./email-triage');
 const { registerEmailIntelIPC }    = require('./email-intel');
@@ -65,9 +66,6 @@ function registerAllIPC(ctx) {
   registerVendorIPC();
   registerVendorHistoryIPC();
   registerDailyTasksIPC(ctx);
-  // DTNA session pre-warm: keep the vendor portal logged in in the background
-  // (morning + on-demand) so Split View is ready without a manual sign-in.
-  try { require('../scrapers/vendor_session').startWarmScheduler(); } catch (e) { logger.warn('vendor warm scheduler start failed: ' + e.message); }
   registerLongDwellIPC();
   registerLongDwellCsvIPC();
   registerLongDwellAiIPC();   // durable AI Fill arbiter; inert unless jobs.longDwellAiFill.durable
@@ -76,6 +74,7 @@ function registerAllIPC(ctx) {
   registerBaseballCardIPC();
   registerFasRosterIPC();
   registerPendingEstIPC(ctx);   // team-wide Pending Estimates (read-only)
+  registerDtnaIPC(ctx);   // DTNA Service Tracker (user-initiated Aura reads)
   const { registerAapApiIPC } = require('./aap-api');
   registerAapApiIPC(ctx);
   registerSchedulerIPC(ctx);
