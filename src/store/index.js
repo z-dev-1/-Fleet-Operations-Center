@@ -102,15 +102,16 @@ const REGISTRY = {
   fasRoster:        () => path.join(P.dataDir, 'fas_roster.json'),    // FEATURE: scraped FAS roster snapshot (FAS personnel)
   pendingEstScan:   () => path.join(P.dataDir, 'pending_est_scan.json'),   // Pending Estimates team scan (rows + WR comment-link cache + asset operator cache); see src/scrapers/pending_est_sources.js
   decisivCaseCache: () => path.join(P.dataDir, 'decisiv_case_cache.json'), // Decisiv case-page scrape per estimate id (plan §1.1 DecisivCase, 15 min TTL)
+  dtnaCaseCache:    () => path.join(P.dataDir, 'dtna_case_cache.json'), // DTNA Service Tracker case pulls (user-initiated); see src/dtna/store.js
   slackMentionThreads: () => path.join(P.dataDir, 'slack_mention_threads.json'), // thread-continuation tracking for channel watch
   slackChannelRegistry: () => path.join(P.dataDir, 'slack_channel_registry.json'), // Phase 3: channel-role registry (feed vs conversational) + source authority
   slackIdentityMappings: () => path.join(P.dataDir, 'slack_identity_mappings.json'), // Phase 5: operator-maintained email-domain -> carrier/vendor/SCAC maps for classification
   slackIdentityChangeLog: () => path.join(P.dataDir, 'slack_identity_change_log.json'), // Phase 5: provenance log of auto identity/permission changes
   bubbleConfig:     () => path.join(P.dataDir, 'bubble_config.json'),             // floating bubble opacity setting
 
-  // DTNA (and future vendor) session pre-warm bookkeeping (2026-10). Tracks the
-  // last day we silently warmed each vendor portal so the morning pre-warm runs
-  // once/day. See src/scrapers/vendor_session.js. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
+  // Legacy: DTNA vendor session pre-warm bookkeeping (2026-10). The morning
+  // pre-warm scheduler was removed (DTNA Phase A, user-initiated only); the key
+  // stays so an existing file still resolves. Shape: { lastWarmedDay: {dtna:'YYYY-MM-DD'} }.
   vendorWarm:           () => path.join(P.dataDir, 'vendor-warm.json'),
   // Volvo ASIST vehicle-id cache (2026-10-28). ASIST forms use its own internal
   // vehicle id, not the unit number; looked up once per unit via
