@@ -669,10 +669,19 @@ async function _steps(D, state, census, out) {
   await _load(D, state, C.LIST_URL);
   if (D.mode === 'post') {
     // postComment discovery only: the RO test case's Comments tab, DOM read + bundle call sites. No Apex calls.
+    // Disable the HTTP cache for this window so the component bundles are re-downloaded and their bodies readable.
+    try { await wc.debugger.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }); } catch (_) {}
     const id = TARGETS[0];
     await _load(D, state, C.caseUrl(id));
     await _load(D, state, C.caseUrl(id) + COMMENTS_TAB_QS);
-    if (!state.aborted) out.p2.push(await _p2(D, state, id));
+    // Wait (read-only polling) until the composer textarea has rendered.
+    let p2 = null;
+    for (let i = 0; i < 15 && !state.aborted; i++) {
+      p2 = await _p2(D, state, id);
+      if (p2 && Array.isArray(p2.fields) && p2.fields.some((f) => f.tag === 'textarea')) break;
+      await _sleep(Math.min(3000, D.settleMs || 0));
+    }
+    if (p2) out.p2.push(p2);
     if (state.net.pending.size) await Promise.allSettled(Array.from(state.net.pending));
     out.d0 = census.result();
     out.p1 = { sites: census.postSites.slice(), sources: census.all().filter((m) => m.method === 'postComment').map((m) => ({ classname: m.classname, paramKeys: m.paramKeys })) };
