@@ -858,6 +858,14 @@ function _startAutoSync() {
     catch (e) { log.warn('[zoom-probe] could not start: ' + e.message); }
   }
 
+  // DEV-ONLY, READ-ONLY DTNA Service Tracker discovery probe (dev aid): FLEET_DEV_DTNA_PROBE=1.
+  // Inert unless set. Runs once after the user's own DTNA sign-in, reads only (get/list/fetch Apex,
+  // page DOM), writes <dataDir>/dev/dtna-probe-<date>.json and logs counts. Never posts a comment.
+  if (process.env.FLEET_DEV_DTNA_PROBE === '1') {
+    try { require('./dev/dev-dtna-probe').start({ log }); }
+    catch (e) { log.warn('[dtna-probe] could not start: ' + (e && e.name)); }
+  }
+
   // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
   // GETs the RCA template + that WR's saved responses through the AAP page and
   // logs the outcome. Never submits anything.
