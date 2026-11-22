@@ -129,6 +129,8 @@ describe('322283 email timeline digest', () => {
     // (status pill, Pull DTNA, bulk tool); same rule. DTNA Phase B adds the dealer-visible approval
     // title and the Post to DTNA compose modal on purpose; same rule. DTNA Phase C adds the Change Stage
     // control on purpose; same rule.
+    // Aperia v1 adds the aperia-* renderer files (pill, panel, unit tires, issues and bulk modals) on
+    // purpose; same rule.
     const upgraded = ['renderer/src/js/components/relay-write-approval.js', 'renderer/src/js/views/dtna-actions.js',
       'renderer/src/js/views/dtna-stage-actions.js',
       'renderer/src/css/fleet.css', 'renderer/src/js/views/id-links.js',
@@ -136,7 +138,10 @@ describe('322283 email timeline digest', () => {
       'renderer/src/js/views/unit-detail.js', 'renderer/src/js/components/email-triage-overlay.js',
       'renderer/src/js/views/fleet.js', 'renderer/src/js/components/status-bar.js',
       'renderer/src/js/components/status-bar-logic.js', 'renderer/src/js/components/dtna-panel.js',
-      'renderer/src/js/views/dtna-bulk-modal.js'];
+      'renderer/src/js/views/dtna-bulk-modal.js',
+      'renderer/src/js/components/aperia-panel.js', 'renderer/src/js/components/aperia-pill-logic.js',
+      'renderer/src/js/views/aperia-bulk-modal.js', 'renderer/src/js/views/aperia-issues-modal.js',
+      'renderer/src/js/views/aperia-tires.js'];
     const paths = ['renderer', 'src/orcha', 'src/scheduler', 'src/scrapers/owa-mailer.js', 'src/scrapers/relay.js',
       ':(exclude)renderer/src/js/views/relay-actions.js', ...upgraded.map((p) => ':(exclude)' + p)];
     expect(git('diff', '--name-only', '12a01de', '--', ...paths).trim()).toBe('');
