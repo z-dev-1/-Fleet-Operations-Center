@@ -297,6 +297,19 @@ describe('P1b: postComment call sites from the module factory', () => {
     expect(JSON.stringify(d)).not.toContain('500gx000002E4U5AAK');
   });
 
+  it('reads call sites from escaped module source and the compiled (0, x.default)(...) form, and records uses', () => {
+    const src = 'define("c/e2E_CaseComments",["exports","@salesforce/apex/E2E_UTP_CommentController.postComment"],function(exports,postComment){'
+      + 'var postComment__default=_interopDefaultCompat(postComment);class X{handlePost(){(0,postComment__default.default)({caseId:this.recordId,commentBody:this.msg}).then(()=>1)}}});';
+    const esc = 'x=' + JSON.stringify(src) + ';';
+    const c = probe.createCensus();
+    c.scan(esc);
+    const r = c.postCalls.find((x) => x.ident === 'postComment');
+    expect(r).toBeTruthy();
+    expect(r.calls.map((k) => k.keys)).toContainEqual(['caseId', 'commentBody']);
+    expect(c.uses.postComment__default.length).toBeGreaterThan(0);
+    expect(c.uses.handlePost.length).toBeGreaterThan(0);
+  });
+
   it('ignores the apex module own define (name, not a dependency entry)', () => {
     expect(probe.analyzeImportCalls('define("@salesforce/apex/E2E_UTP_CommentController.postComment",["exports"],function(e){e.default=1})')).toEqual([]);
   });

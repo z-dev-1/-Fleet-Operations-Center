@@ -234,7 +234,8 @@ function analyzeImportCalls(text, spec) {
     while ((am = are.exec(body)) && names.length < 6) if (!names.includes(am[1])) names.push(am[1]);
     const calls = [];
     for (const name of names) {
-      const cre = new RegExp('(?<![\\w$.])' + esc(name) + '(?:\\.default)?\\s*\\(', 'g');
+      // Matches name(...), name.default(...) and the compiled (0, name.default)(...) form.
+      const cre = new RegExp('(?<![\\w$.])' + esc(name) + '(?:\\.default)?\\s*\\)?\\s*\\(', 'g');
       let cm;
       while ((cm = cre.exec(body)) && calls.length < 12) {
         const argAt = cm.index + cm[0].length;
@@ -288,6 +289,21 @@ function createCensus() {
     for (const k of Object.keys(p)) if (/^\w{1,60}$/.test(k) && !e.paramKeys.includes(k) && e.paramKeys.length < 30) e.paramKeys.push(k);
     if (!e.paramShape) e.paramShape = shapeOf(p, 3);
     descriptors.set(desc, e);
+  }
+
+  // Code excerpts around every use of the comment/file Apex bindings and the file-upload wiring (code only).
+  const uses = {};
+  const USE_TERMS = ['postComment__default', 'getFileDetails__default', 'getAttachment__default', 'getFilesOnCase__default',
+    'uploadfinished', 'onuploadfinished', 'ContentVersion', 'contentDocumentId', 'documentId', 'fileUploader', 'handlePost', 'handleUpload'];
+  function _scanUses(u) {
+    for (const term of USE_TERMS) {
+      let i = 0;
+      const arr = uses[term] || (uses[term] = []);
+      while ((i = u.indexOf(term, i)) >= 0 && arr.length < 8) {
+        arr.push(_excerpt(u, i, 500, 1200));
+        i += term.length + 1200;
+      }
+    }
   }
 
   function _scanFeed(t) {
@@ -347,6 +363,12 @@ function createCensus() {
     let m;
     while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW), t.slice(Math.max(0, m.index - 400), m.index));
     _scanFeed(t);
+    if (t.includes(POST_IMPORT)) {
+      // Bundles may carry module source as an escaped string literal (\" and \n); read it unescaped.
+      const u = t.includes('\\"') ? t.replace(/\\\\/g, '\u0000').replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\t/g, ' ').replace(/\u0000/g, '\\') : t;
+      if (u !== t && postCalls.length < 20) for (const r of analyzeImportCalls(u)) if (postCalls.length < 20) postCalls.push(r);
+      _scanUses(u);
+    }
     let ix = 0;
     while ((ix = t.indexOf(POST_IMPORT, ix)) >= 0 && postImports.length < 12) {
       postImports.push({ len: t.length, at: ix, excerpt: _excerpt(t, ix, 400, 900) });
@@ -390,7 +412,7 @@ function createCensus() {
     };
   }
 
-  return { scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, scripts, page, bundle };
+  return { scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, uses, scripts, page, bundle };
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -632,6 +654,7 @@ async function run(deps) {
   out.p1imports = census.postImports.slice();
   out.pageDescriptors = Array.from(census.descriptors.values());
   out.feedActions = Array.from(census.feedActions.values());
+  out.uses = census.uses;
   out.winClosedAtMs = state.closedAt ? state.closedAt - Date.parse(at) : null;
   if (code) out.code = code;
 
