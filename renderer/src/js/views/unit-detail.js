@@ -17,6 +17,7 @@ import { open as openWRModal, readFileAsAttachment } from './wr-modal.js';
 import { open as openVendorReview } from './vendor-review-modal.js';
 import { open as openDealerWOModal } from './dealer-wo-modal.js';
 import { open as openRcaModal } from './rca-modal.js';
+import { aperiaTireSectionHtml, wireAperiaTires } from './aperia-tires.js';
 
 // RCA button shows on COMPLETED Repair timeline cards completed within this window.
 const RCA_WINDOW_MS = 9 * 24 * 60 * 60 * 1000;
@@ -2823,7 +2824,7 @@ function renderIntelPane(unit){
     '<div class="dp-ask-row"><input id="dp-ask-input" class="dp-ask-input" type="text" placeholder="Ask about this unit..."/><button id="dp-ask-btn" class="detail-panel__btn">Ask</button></div>'+
     '<div id="dp-ai-result" style="display:none" class="dp-ai-result-box"></div>';
 
-  return '<div class="dp-pane" id="dp-pane-intel">'+dialHtml+subsHtml+insHtml+shotHtml+askHtml+'</div>';
+  return '<div class="dp-pane" id="dp-pane-intel">'+dialHtml+subsHtml+aperiaTireSectionHtml(unit)+insHtml+shotHtml+askHtml+'</div>';
 }
 
 // ── actions pane ──────────────────────────────────────────────────────────────
@@ -3002,6 +3003,7 @@ function _renderUnit(unit) {
   });
   // Publish the default tab (computed by renderTabs) for the assistant.
   _emitTabContext();
+  try { wireAperiaTires(_panel, unit); } catch (_) {}
 
   // Load ALL uptake screenshots into Intel tab (one per insight). Each image
   // lazy-loads its PNG as a data URL and opens full-size on click.

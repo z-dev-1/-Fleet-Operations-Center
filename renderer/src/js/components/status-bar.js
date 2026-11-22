@@ -23,6 +23,8 @@ import { absorbFleetSlice, emptyFleet, renderHtml, dtnaPill } from './status-bar
 import { mount as mountFleetTrust } from './fleet-trust-indicator.js';
 import { open as openAuthHealthPanel } from './auth-health-panel.js';
 import { open as openDtnaPanel } from './dtna-panel.js';
+import { aperiaPill } from './aperia-pill-logic.js';
+import { open as openAperiaPanel } from './aperia-panel.js';
 
 // DTNA bridge (preload expose('dtna')); read directly, not through bridge.js.
 const _dtna = () => (typeof window !== 'undefined' && window.dtna) || null;
@@ -41,6 +43,7 @@ const SHELL_HTML =
       '<button type="button" class="tb-fresh tb-fresh--grey" id="tb-fresh" title="Fleet data freshness — click to refresh">Fleet data …</button>' +
       '<button type="button" class="tb-auth tb-auth--grey" id="tb-auth" aria-haspopup="dialog">Auth …</button>' +
       '<button type="button" class="tb-dtna tb-dtna--grey" id="tb-dtna" aria-haspopup="dialog">DTNA …</button>' +
+      '<button type="button" class="tb-aperia tb-aperia--grey" id="tb-aperia" aria-haspopup="dialog">Aperia …</button>' +
     '</div>' +
   '</div>';
 
@@ -116,6 +119,26 @@ export function init(container) {
     try { if (typeof dt.onStatus === 'function') dt.onStatus(applyDtna); } catch (_) {}
   }
   if (dtnaEl) dtnaEl.addEventListener('click', () => { try { openDtnaPanel(); } catch (_) {} });
+
+  // ── Aperia HALO Connect pill: one status() read now, then a re-read on each
+  // aperia:alert push (IPC only, no network). No timer; click opens the panel.
+  const aperiaEl = _el.querySelector('#tb-aperia');
+  const _aperia = () => (typeof window !== 'undefined' && window.aperia) || null;
+  const applyAperia = (s) => {
+    if (!aperiaEl) return;
+    const p = aperiaPill(s);
+    aperiaEl.className = p.cls;
+    aperiaEl.textContent = p.text;
+    aperiaEl.title = p.title;
+  };
+  applyAperia(null);
+  const ap = _aperia();
+  const readAperia = () => { try { Promise.resolve(ap.status()).then(applyAperia).catch(() => {}); } catch (_) {} };
+  if (ap && typeof ap.status === 'function') {
+    readAperia();
+    try { if (typeof ap.onAlert === 'function') ap.onAlert(() => readAperia()); } catch (_) {}
+  }
+  if (aperiaEl) aperiaEl.addEventListener('click', () => { try { openAperiaPanel({ onChange: applyAperia }); } catch (_) {} });
 
   // Resolve the REAL app version dynamically (no hard-coded value).
   try {
