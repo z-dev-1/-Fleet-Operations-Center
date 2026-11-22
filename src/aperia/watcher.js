@@ -13,7 +13,8 @@
  *   status() -> { alerts:'off'|'ws'|'polling', minutes, lastPollAt, lastNewCount }
  *
  * One desktop Notification per new non-muted issue id; ids persist in aperia_seen_alerts.json so a restart
- * never re-notifies. Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
+ * never re-notifies. Approved extension: when an already-seen id's severity goes UP (MINOR < MAJOR <
+ * CRITICAL), one more Notification fires per step up; the highest severity per id persists with the ids. Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
  * Logs carry counts and codes only.
  */
 const C0 = require('./constants');
@@ -49,6 +50,7 @@ let _minutes = C0.ALERT_POLL_DEFAULT_MIN;
 let _interval = null;
 let _socket = null;
 let _seen = new Map();
+let _sev = new Map(); // id -> highest severity seen/notified; a step up notifies once more
 let _lastPollAt = null;
 let _lastNewCount = 0;
 let _lastMode = 'off';
@@ -100,7 +102,30 @@ function _notify(alert) {
   });
 }
 
-function _save() { try { _seenStore().save(_seen, _now()); } catch (e) { log.warn('[aperia] watcher save', { code: 'APERIA_SEEN_WRITE_FAILED', err: safeErr(e) }); } }
+const SEV_RANK = Object.freeze({ MINOR: 1, MAJOR: 2, CRITICAL: 3 });
+function _rank(s) { return SEV_RANK[String(s || '').toUpperCase()] || 0; }
+function _sevKey(s) { const k = String(s || '').toUpperCase(); return SEV_RANK[k] ? k : ''; }
+
+/**
+ * _escalated(id, severity) -> true once per step up for an already-seen id. An id with no recorded
+ * severity (older seen file) just records it. Equal or lower severity never notifies or lowers the record.
+ */
+function _escalated(id, severity) {
+  const k = _sevKey(severity);
+  if (!k) return false;
+  const prev = _sev.get(id);
+  if (!prev) { _sev.set(id, k); return false; }
+  if (_rank(k) <= _rank(prev)) return false;
+  _sev.set(id, k);
+  return true;
+}
+
+function _noteSev(id, severity) {
+  const k = _sevKey(severity);
+  if (k && _rank(k) > _rank(_sev.get(id))) _sev.set(id, k);
+}
+
+function _save() { try { _seenStore().save(_seen, _now(), _sev); } catch (e) { log.warn('[aperia] watcher save', { code: 'APERIA_SEEN_WRITE_FAILED', err: safeErr(e) }); } }
 
 function _validMinutes(m) {
   const C = _C();
@@ -114,7 +139,10 @@ async function _doStart(opts) {
   const ctx = opts.ctx || null;
   const minutes = _validMinutes(opts.minutes);
   if (!_capture().current()) return { ok: false, code: 'APERIA_SIGNIN_REQUIRED' };
-  const seen = _seenStore().load(_now());
+  const store = _seenStore();
+  const loaded = typeof store.loadAll === 'function' ? store.loadAll(_now()) : { ids: store.load(_now()), sev: new Map() };
+  const seen = loaded.ids;
+  const sev = loaded.sev;
   let r;
   try { r = await _client().listIssues(ctx); } catch (e) { log.warn('[aperia] watcher start', { code: 'APERIA_INTERNAL', err: safeErr(e) }); r = { ok: false, code: 'APERIA_INTERNAL' }; }
   if (gen !== _gen) return { ok: false, code: 'APERIA_ALERTS_OFF' };
@@ -123,9 +151,14 @@ async function _doStart(opts) {
   let primed = 0;
   for (const x of Array.isArray(r.rows) ? r.rows : []) {
     const id = x && x.issueId != null ? String(x.issueId) : '';
-    if (ID_RE.test(id) && !seen.has(id)) { seen.set(id, at); primed++; }
+    if (!ID_RE.test(id)) continue;
+    if (!seen.has(id)) { seen.set(id, at); primed++; }
+    // Priming records the current severity without notifying; only a later step up notifies.
+    const k = _sevKey(x.severity);
+    if (k && _rank(k) > _rank(sev.get(id))) sev.set(id, k);
   }
   _seen = seen;
+  _sev = sev;
   _ctx = ctx;
   _minutes = minutes;
   _on = true;
@@ -197,8 +230,8 @@ function _poll(ctx) {
     for (const x of Array.isArray(r.rows) ? r.rows : []) {
       if (!x || x.muted === true) continue;
       const id = x.issueId != null ? String(x.issueId) : '';
-      if (!ID_RE.test(id) || _seen.has(id)) continue;
-      _seen.set(id, at);
+      if (!ID_RE.test(id)) continue;
+      if (_seen.has(id)) { if (!_escalated(id, x.severity)) continue; } else { _seen.set(id, at); _noteSev(id, x.severity); }
       fresh.push({
         id, severity: x.severity, fleetVehicleId: x.fleetVehicleId, state: x.state,
         positionName: x.positionName, domicile: x.domicile, detectedAt: x.dateDetected,
@@ -222,8 +255,13 @@ async function pollNow(ctx) {
 async function _onWsAlert(a) {
   if (!_on || !a) return { ok: false, code: 'APERIA_ALERTS_OFF' };
   const id = a.id != null ? String(a.id) : '';
-  if (!ID_RE.test(id) || _seen.has(id)) return { ok: true, notified: false };
-  _seen.set(id, _now());
+  if (!ID_RE.test(id)) return { ok: true, notified: false };
+  if (_seen.has(id)) {
+    if (!_escalated(id, a.severity)) { _save(); return { ok: true, notified: false }; }
+  } else {
+    _seen.set(id, _now());
+    _noteSev(id, a.severity);
+  }
   _save();
   const gen = _gen;
   const alert = {
@@ -252,7 +290,7 @@ function _resetForTests() {
   if (_interval) { try { _timers().clearInterval(_interval); } catch (_) {} }
   if (_socket) { try { _socket.close(); } catch (_) {} }
   _deps = {}; _on = false; _ctx = null; _gen = 0; _minutes = C0.ALERT_POLL_DEFAULT_MIN; _interval = null; _socket = null;
-  _seen = new Map(); _lastPollAt = null; _lastNewCount = 0; _lastMode = 'off'; _startP = null; _pollP = null;
+  _seen = new Map(); _sev = new Map(); _lastPollAt = null; _lastNewCount = 0; _lastMode = 'off'; _startP = null; _pollP = null;
 }
 
 module.exports = { start, stop, pollNow, status, _onWsAlert, _setDeps, _resetForTests };

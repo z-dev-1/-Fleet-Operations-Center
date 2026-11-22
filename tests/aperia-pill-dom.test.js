@@ -144,7 +144,8 @@ describe('Aperia panel', () => {
     expect(o.querySelector('#aperia-panel-state').textContent).toBe('Aperia: Signed out');
     expect(o.querySelector('#aperia-panel-alerts-state').textContent).toBe('Tire Alerts: OFF');
     expect(o.querySelector('#aperia-panel-last').textContent).toBe('never');
-    expect(o.textContent).toContain('Aperia is read only when you press a button. Sign out stops a running pull.');
+    expect(o.textContent).toContain('Aperia is read only when you press a button. Sign out stops a running pull and closes the Aperia sign-in window.');
+    expect(o.querySelector('#aperia-panel-alerts-note').textContent).toContain("once more each time an alert's severity goes up");
     for (const id of ['signin', 'signout', 'issues', 'bulk', 'alerts', 'poll']) {
       expect(o.querySelector('#aperia-panel-' + id), id).toBeTruthy();
     }

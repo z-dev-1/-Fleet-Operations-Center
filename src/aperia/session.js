@@ -80,8 +80,17 @@ function noteResult(code) {
   _emit();
 }
 
-/** logout() — drop the in-memory token (cookies in the partition are left to the portal). */
-function logout() { capture.clearAll(); _emit(); return { ok: true, state: status().state }; }
+/**
+ * logout() — close the sign-in window (its CDP capture detaches with it, same as app quit) and drop both
+ * in-memory tokens, so the portal's own traffic cannot sign the app back in. Partition cookies stay.
+ */
+function logout() {
+  try { if (loginWindow()) _loginWin.close(); } catch (e) { log.warn('[aperia] logout close', safeErr(e)); }
+  _loginWin = null;
+  capture.clearAll();
+  _emit();
+  return { ok: true, state: status().state };
+}
 
 // ── Sign-in window ─────────────────────────────────────────────────────────
 function _isDestroyed(win) {

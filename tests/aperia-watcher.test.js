@@ -211,6 +211,40 @@ describe('aperia watcher: polling and notifications', () => {
     expect(watcherEvents(d.send)).toEqual(['polling', 'off']);
   });
 
+  it('severity escalation of a seen id notifies once per step up, never on equal/lower or every poll', async () => {
+    rows = [issue('90', { severity: 'MAJOR', fleetVehicleId: 'NP90' })];
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null });
+    await watcher.start({ ctx: d.ctx });
+    expect(FakeNotification.created).toEqual([]);
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    rows[0] = issue('90', { severity: 'CRITICAL', fleetVehicleId: 'NP90' });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    rows[0] = issue('90', { severity: 'MAJOR', fleetVehicleId: 'NP90' });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    rows[0] = issue('90', { severity: 'CRITICAL', fleetVehicleId: 'NP90' });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['CRITICAL: NP90']);
+  });
+
+  it('the notified severity survives a restart; a muted escalation does not notify', async () => {
+    rows = [issue('91', { severity: 'MINOR' }), issue('92', { severity: 'MINOR' })];
+    let m = fresh();
+    let d = setup(m.watcher, { wsToken: null });
+    await m.watcher.start({ ctx: d.ctx });
+    rows = [issue('91', { severity: 'CRITICAL' }), issue('92', { severity: 'MINOR' })];
+    expect(await m.watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+    m.watcher.stop();
+    expect(JSON.parse(fs.readFileSync(m.seenStore.filePath(), 'utf8')).sev).toEqual({ 91: 'CRITICAL', 92: 'MINOR' });
+    m = fresh();
+    d = setup(m.watcher, { wsToken: null });
+    await m.watcher.start({ ctx: d.ctx });
+    rows = [issue('91', { severity: 'CRITICAL' }), issue('92', { severity: 'MAJOR', muted: true })];
+    expect(await m.watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    expect(FakeNotification.created.length).toBe(1);
+  });
+
   it('a poll that fails with a sign-in code sends a watcher status; other failures do not', async () => {
     const { watcher } = fresh();
     const d = setup(watcher, { wsToken: null });
@@ -346,6 +380,21 @@ describe('aperia watcher: WS-first', () => {
     rows.push(issue('71', { fleetVehicleId: 'NP71' }));
     await vi.advanceTimersByTimeAsync(5 * 60e3);
     expect(FakeNotification.created.length).toBe(1);
+  });
+
+  it('a WS SEVERITY_CHANGE that steps up a seen id notifies once; equal or lower does not', async () => {
+    rows = [issue('80', { severity: 'MINOR', fleetVehicleId: 'NP80' })];
+    const { watcher } = fresh();
+    const d = setup(watcher);
+    await watcher.start({ ctx: d.ctx });
+    d.createAlertSocket.sockets[0].setState('open');
+    const frame = (severity) => ({ id: '80', severity, state: 'LEAK', vehicleId: 'v80', fleetVehicleId: 'NP80' });
+    expect(await watcher._onWsAlert(frame('MINOR'))).toEqual({ ok: true, notified: false });
+    expect(await watcher._onWsAlert(frame('MAJOR'))).toEqual({ ok: true, notified: true });
+    expect(await watcher._onWsAlert(frame('MAJOR'))).toEqual({ ok: true, notified: false });
+    expect(await watcher._onWsAlert(frame('MINOR'))).toEqual({ ok: true, notified: false });
+    expect(await watcher._onWsAlert(frame('CRITICAL'))).toEqual({ ok: true, notified: true });
+    expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['MAJOR: NP80', 'CRITICAL: NP80']);
   });
 
   it('a WS alert is marked seen before enrichment and notifies with positionName/domicile', async () => {

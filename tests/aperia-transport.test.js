@@ -241,6 +241,27 @@ describe('session.reauth / notePull', () => {
     expect(await p).toEqual({ ok: true });
   });
 
+  it('logout closes the sign-in window, so later portal traffic cannot re-capture a token', async () => {
+    const fx = createFakeElectron();
+    session._setDeps({ electron: fx.electron });
+    const login = session.openLoginWindow({});
+    await flush();
+    const win = fx.windows[0];
+    const dbg = win.webContents.debugger;
+    dbg.emitRequest({ requestId: 'b1', url: API, method: 'GET', headers: { Authorization: BEARER_HDR } });
+    dbg.emitResponse('b1', '{}', { status: 200 });
+    await login;
+    expect(session.status().state).toBe('connected');
+    session.logout();
+    expect(win.destroyed).toBe(true);
+    expect(session.loginWindow()).toBeNull();
+    expect(dbg.isAttached()).toBe(false);
+    dbg.emitRequest({ requestId: 'b2', url: API, method: 'GET', headers: { Authorization: BEARER_HDR } });
+    dbg.emitResponse('b2', '{}', { status: 200 });
+    expect(capture.current()).toBeNull();
+    expect(session.status().state).not.toBe('connected');
+  });
+
   it('times out with APERIA_SESSION_EXPIRED after REAUTH_WAIT_MS (fake timers)', async () => {
     vi.useFakeTimers();
     const fx = createFakeElectron();
