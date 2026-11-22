@@ -128,7 +128,9 @@ const WRITE_METHODS = Object.freeze({
 // The composer has no maxlength (P2); the app caps a posted comment at the write gate's COMMENT_MAX.
 const POST_COMMENT_MAX = 2000;
 // Change DTNA Stage (Phase C, 2026-11-21): E2E_CaseDetailsLWCController.changeStatus, forward-only.
-// Configured from portal code; not yet verified by a live write. Learned 2026-11-21 via the read-only
+// STATE: configured from portal code, NOT verified by a live write. The user declined a live test stage
+// change (the probe case is already Closed); the first real user-approved forward stage change is the
+// live validation. Learned 2026-11-21 via the read-only
 // stage probe (FLEET_DEV_DTNA_PROBE_MODE=stage): the c:e2E_RecordPath component's handleClick calls
 // changeStatus({ caseId: this.recordId, status: this.currentValue }) and then reads e.Status from the
 // returned Case (no success code is checked, so no successValue). statusValues are the portal stepper's
