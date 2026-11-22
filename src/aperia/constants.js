@@ -89,6 +89,41 @@ const SIGNIN_WINDOW_MS = 10 * 60e3;
 const FETCH_TIMEOUT_MS = 30e3;
 const MAX_BODY_BYTES = 40 * 1024 * 1024;
 
+// ── Client core ──
+const CONCURRENCY = 6;
+const INDEX_TTL_MS = 6 * 3600e3;
+const INDEX_MISS_REBUILD_MS = 15 * 60e3;
+const REAUTH_WAIT_MS = 120e3;
+const MAX_PAGES = 100;
+const BULK_MAX = 500;
+const UNIT_MAX = 40;
+
+// ── Tire / GPS rules ──
+const STALE_MS = 7 * 24 * 3600e3;
+const CRITICAL_RATIO = 0.8;
+const LOW_RATIO = 0.9;
+const HIGH_RATIO = 1.1;
+const PLACEHOLDER_GPS = Object.freeze({ lat: -11.11111, lng: 11.11111 });
+const GPS_EPS = 1e-4;
+const US_BOX = Object.freeze({ latMin: 24, latMax: 50, lngMin: -125, lngMax: -66 });
+
+// ── Alert watcher ──
+const ALERT_POLL_DEFAULT_MIN = 5;
+const ALERT_POLL_MIN = 1;
+const ALERT_POLL_MAX = 60;
+const SEEN_FILE = 'aperia_seen_alerts.json';
+const SEEN_MAX_AGE_MS = 60 * 24 * 3600e3;
+const SEEN_MAX = 50000;
+const TZ = 'America/New_York';
+const WS_OPEN_TIMEOUT_MS = 15e3;
+
+/** isAllowedApiPath(pathname) -> true only for /api/v1/vehicles, /api/v1/vehicles/{id}, /api/v1/issues/by/vehicle. */
+function isAllowedApiPath(pathname) {
+  const p = String(pathname || '').split('?')[0];
+  if (p === VEHICLES_PATH || p === ISSUES_BY_VEHICLE_PATH) return true;
+  return /^\/api\/v1\/vehicles\/[A-Za-z0-9_-]{1,64}$/.test(p);
+}
+
 /** parseUrl(s) -> URL | null. */
 function parseUrl(s) { try { return new URL(String(s || '')); } catch (_) { return null; } }
 
@@ -117,5 +152,8 @@ module.exports = {
   WS_PING, WS_PONG, WS_PING_MS, WS_MAX_RECONNECTS, WS_EVENT_TYPES, WS_ALERT_TYPES, APERIA_WS_ENABLED,
   FORBIDDEN_PATH_RES, FORBIDDEN_ENDPOINTS, WRITE_METHODS, ALLOWED_METHODS,
   SIGNIN_WINDOW_MS, FETCH_TIMEOUT_MS, MAX_BODY_BYTES,
-  parseUrl, isApiUrl, isForbiddenPath, isPortalUrl,
+  CONCURRENCY, INDEX_TTL_MS, INDEX_MISS_REBUILD_MS, REAUTH_WAIT_MS, MAX_PAGES, BULK_MAX, UNIT_MAX,
+  STALE_MS, CRITICAL_RATIO, LOW_RATIO, HIGH_RATIO, PLACEHOLDER_GPS, GPS_EPS, US_BOX,
+  ALERT_POLL_DEFAULT_MIN, ALERT_POLL_MIN, ALERT_POLL_MAX, SEEN_FILE, SEEN_MAX_AGE_MS, SEEN_MAX, TZ, WS_OPEN_TIMEOUT_MS,
+  parseUrl, isApiUrl, isForbiddenPath, isPortalUrl, isAllowedApiPath,
 };

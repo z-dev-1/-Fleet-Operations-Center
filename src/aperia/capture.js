@@ -45,8 +45,31 @@ function current() {
 function ageMs() { return _token ? Date.now() - _capturedAt : Infinity; }
 function secondsLeft() { return _token && typeof _expAt === 'number' ? Math.round(_expAt - Date.now() / 1000) : null; }
 function clear() { _token = null; _expAt = null; _capturedAt = 0; }
-/** describe() -> { hasToken, secondsLeft } (no token). */
-function describe() { return { hasToken: !!current(), secondsLeft: secondsLeft() }; }
+
+// WebSocket x-authorization token from the portal's own socket URL. Kept apart from the Bearer
+// (discovery: the two may differ). Memory only; never logged, written or returned by describe().
+let _wsToken = null;
+let _wsExpAt = null;
+/** wsToken() -> the in-memory socket token | null (the alert socket only; never log or return it). */
+function wsToken() {
+  if (_wsToken && typeof _wsExpAt === 'number' && _wsExpAt * 1000 <= Date.now()) clearWs();
+  return _wsToken;
+}
+function clearWs() { _wsToken = null; _wsExpAt = null; }
+/** clearAll() — drop the Bearer and the socket token (logout / teardown). */
+function clearAll() { clear(); clearWs(); }
+
+/** describe() -> { hasToken, secondsLeft, hasWsToken } (no token). */
+function describe() { return { hasToken: !!current(), secondsLeft: secondsLeft(), hasWsToken: !!wsToken() }; }
+
+/** _noteSocket(url) — keep the x-authorization value of a wss://HOST/api/ws/events URL. */
+function _noteSocket(url) {
+  const u = C.parseUrl(url);
+  if (!u || u.protocol !== 'wss:' || u.hostname !== C.HOST || u.pathname !== C.WS_PATH) return;
+  const t = u.searchParams.get(C.WS_TOKEN_PARAM);
+  if (!t || t.length < 10) return;
+  if (t !== _wsToken) { _wsToken = t; _wsExpAt = _jwtExpAt(t); }
+}
 
 function _set(token) {
   _token = token;
@@ -96,6 +119,8 @@ function createCapture(webContents, opts) {
           if (t === _token) clear();
           if (typeof o.onUnauthorized === 'function') o.onUnauthorized();
         }
+      } else if (method === 'Network.webSocketCreated') {
+        _noteSocket(params && params.url);
       } else if (method === 'Network.loadingFailed') {
         pending.delete(params && params.requestId);
       }
@@ -132,6 +157,8 @@ function createCapture(webContents, opts) {
   };
 }
 
-function _resetForTests() { clear(); }
+function _resetForTests() { clearAll(); }
 
-module.exports = { createCapture, current, ageMs, secondsLeft, clear, describe, _jwtExpAt, _bearerOf, _resetForTests };
+module.exports = {
+  createCapture, current, ageMs, secondsLeft, clear, describe, wsToken, clearWs, clearAll, _jwtExpAt, _bearerOf, _resetForTests,
+};

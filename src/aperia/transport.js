@@ -24,6 +24,7 @@ async function getJson(apiPath, opts) {
   const pathname = p.split('?')[0];
   if (!p.startsWith(C.API_PREFIX) || /[\s#]/.test(p) || pathname.includes('..')) return { ok: false, code: 'INVALID_INPUT' };
   if (C.isForbiddenPath(pathname)) return { ok: false, code: 'APERIA_FORBIDDEN_ENDPOINT' };
+  if (!C.isAllowedApiPath(pathname)) return { ok: false, code: 'APERIA_PATH_NOT_ALLOWED' };
   const token = capture.current();
   if (!token) return { ok: false, code: 'APERIA_SIGNIN_REQUIRED' };
   const timeoutMs = opts && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : C.FETCH_TIMEOUT_MS;

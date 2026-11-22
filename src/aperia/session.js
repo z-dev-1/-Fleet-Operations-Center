@@ -29,6 +29,8 @@ const _bus = new EventEmitter();
 let _everCaptured = false;
 let _lastCode = null;
 let _lastState = null;
+let _lastPullAt = null;
+let _reauthP = null;
 
 function _state() {
   if (capture.current()) return 'connected';
@@ -36,9 +38,15 @@ function _state() {
   return _everCaptured ? 'expired' : 'signed-out';
 }
 
-/** status() -> { ok:true, state, secondsLeft, lastCode } (no secrets, no network). */
+/** status() -> { ok:true, state, secondsLeft, lastCode, lastPullAt } (no secrets, no network). */
 function status() {
-  return { ok: true, state: _state(), secondsLeft: capture.secondsLeft(), lastCode: _lastCode };
+  return { ok: true, state: _state(), secondsLeft: capture.secondsLeft(), lastCode: _lastCode, lastPullAt: _lastPullAt };
+}
+
+/** notePull(atIso) — remember when the last successful Aperia read finished (shown in the panel). */
+function notePull(atIso) {
+  const ms = Date.parse(String(atIso || ''));
+  _lastPullAt = Number.isFinite(ms) ? new Date(ms).toISOString() : new Date().toISOString();
 }
 
 function _emit() {
@@ -73,7 +81,7 @@ function noteResult(code) {
 }
 
 /** logout() — drop the in-memory token (cookies in the partition are left to the portal). */
-function logout() { capture.clear(); _emit(); return { ok: true, state: status().state }; }
+function logout() { capture.clearAll(); _emit(); return { ok: true, state: status().state }; }
 
 // ── Sign-in window ─────────────────────────────────────────────────────────
 function _isDestroyed(win) {
@@ -191,17 +199,53 @@ function reloadPortal(ctx) {
 function teardownAll() {
   try { if (loginWindow()) _loginWin.close(); } catch (e) { log.warn('[aperia] teardown', safeErr(e)); }
   _loginWin = null;
-  capture.clear();
+  capture.clearAll();
+}
+
+/**
+ * reauth(ctx, {timeoutMs}) -> {ok:true} | {ok:false, code:'APERIA_SESSION_EXPIRED'}
+ * Single-flight (all concurrent callers share one wait). Immediate {ok:true} when a Bearer is held;
+ * else reload / show the portal window and wait for the next captured Bearer, up to C.REAUTH_WAIT_MS.
+ */
+function reauth(ctx, opts) {
+  if (capture.current()) return Promise.resolve({ ok: true });
+  if (_reauthP) return _reauthP;
+  const timeoutMs = opts && Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : C.REAUTH_WAIT_MS;
+  _reauthP = new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    let off = () => {};
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      off();
+      log.info('[aperia] reauth', { op: 'reauth', code: r.ok ? 'OK' : r.code });
+      resolve(r);
+    };
+    _emit(); // sync _lastState (a silently expired token) so the next capture emits 'connected'
+    off = onStatus((s) => { if (s && s.state === 'connected') finish({ ok: true }); });
+    timer = setTimeout(() => finish({ ok: false, code: 'APERIA_SESSION_EXPIRED' }), timeoutMs);
+    if (timer && typeof timer.unref === 'function') timer.unref();
+    Promise.resolve()
+      .then(() => reloadPortal(ctx))
+      .then((r) => {
+        if (capture.current()) finish({ ok: true });
+        else if (r && r.ok === false) finish({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+      })
+      .catch((e) => { log.warn('[aperia] reauth', safeErr(e)); finish({ ok: false, code: 'APERIA_SESSION_EXPIRED' }); });
+  }).finally(() => { _reauthP = null; });
+  return _reauthP;
 }
 
 function _resetForTests() {
   try { teardownAll(); } catch (_) {}
   _ses = null; _deps = {}; _loginP = null; _loginWin = null; _quitHooked = false;
-  _everCaptured = false; _lastCode = null; _lastState = null;
+  _everCaptured = false; _lastCode = null; _lastState = null; _lastPullAt = null; _reauthP = null;
   _bus.removeAllListeners();
 }
 
 module.exports = {
-  getSession, status, onStatus, onWindow, noteResult, logout, loginWindow, openLoginWindow, reloadPortal, teardownAll,
-  _setDeps, _resetForTests,
+  getSession, status, onStatus, onWindow, noteResult, notePull, logout, loginWindow, openLoginWindow, reloadPortal, reauth,
+  teardownAll, _setDeps, _resetForTests,
 };
