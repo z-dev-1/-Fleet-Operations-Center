@@ -88,7 +88,7 @@ function _deps(d) {
       return Array.isArray(fd.rows) ? fd.rows : [];
     }),
     // DTNA refresh: only through the session-gated sync-pass module (src/dtna/auto.js).
-    dtnaGate: pick('dtnaGate', () => () => require('../dtna/auto').gate()),
+    dtnaGate: pick('dtnaGate', () => () => require('../dtna/auto').ensureSignedIn()),
     dtnaRefresh: pick('dtnaRefresh', () => (id, o) => require('../dtna/auto').pullIfStale(id, o)),
     dtnaDiscover: pick('dtnaDiscover', () => (o) => require('../dtna/auto').discover(o)),
     // DTNA cache read through the injected store.
@@ -352,12 +352,13 @@ async function _scan(opts, d) {
   try { d.store.save('decisivCaseCache', caseCache); } catch (e) { err('store', 'CASE_CACHE_SAVE'); }
 
   // (h2) DTNA refresh while signed in, with the (h) rules: per-case CASE_TTL_MS, the shared MAX_CASES
-  // budget, a pause after every CASE_BATCH live reads, stalest first. Signed out: nothing is called.
-  // force (Refresh) is not passed on: the forced DTNA refresh is the manual "Pull DTNA".
+  // budget, a pause after every CASE_BATCH live reads, stalest first. Signed out or expired, the gate
+  // first tries one gated hidden background sign-in (src/dtna/auto.js ensureSignedIn); still signed
+  // out: nothing is called. force (Refresh) is not passed on: the forced DTNA refresh is the manual "Pull DTNA".
   let dtnaAuto = 'ok';
   let dtnaLive = 0;
   let gateOk = false;
-  try { const g = d.dtnaGate(); gateOk = !!(g && g.ok); } catch (_) { gateOk = false; }
+  try { const g = await d.dtnaGate(); gateOk = !!(g && g.ok); } catch (_) { gateOk = false; }
   if (!gateOk) dtnaAuto = 'signed-out';
   else {
     const signedOut = (c) => c === 'DTNA_AUTO_SIGNED_OUT' || c === 'DTNA_SIGNIN_REQUIRED' || c === 'DTNA_SESSION_EXPIRED';

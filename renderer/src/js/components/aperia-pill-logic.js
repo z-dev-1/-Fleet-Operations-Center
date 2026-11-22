@@ -20,6 +20,14 @@ export function aperiaPill(status) {
   const st = status && typeof status === 'object' ? status.state : null;
   const pill = (color, text) => ({ cls: 'tb-aperia tb-aperia--' + color, text, title: TITLE });
   if (st === 'connected') return alertsOn(status) ? pill('green', 'Aperia: Alerts ON') : pill('green', 'Aperia: Connected');
+  // The background sign-in reached a step it cannot finish on its own (MFA, terms, no saved credentials).
+  if (status && status.actionNeeded === true && st !== 'connecting') {
+    return {
+      cls: 'tb-aperia tb-aperia--amber',
+      text: 'Aperia: Action needed \u00b7 click to sign in',
+      title: TITLE + ' Background sign-in needs you to finish a sign-in step.',
+    };
+  }
   if (st === 'signed-out') return pill('grey', 'Aperia: Signed out');
   if (st === 'connecting') return pill('grey', 'Aperia: Connecting\u2026');
   if (st === 'expired') return pill('amber', 'Aperia: Expired');

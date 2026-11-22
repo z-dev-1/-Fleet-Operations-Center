@@ -2,7 +2,8 @@
 /**
  * src/aperia/client.js — READ-ONLY Aperia client on top of transport.getJson (GET, allow-listed paths).
  *
- * - _get: one session.reauth + one retry on APERIA_SESSION_EXPIRED; concurrent callers share the reauth.
+ * - _get: one session.reauth + one retry on APERIA_SESSION_EXPIRED / APERIA_SIGNIN_REQUIRED; concurrent
+ *   callers share the reauth.
  * - Unit index (memory only): unitKey -> vehicle id, built from /vehicles pages on the first lookup,
  *   reused for C.INDEX_TTL_MS, rebuilt once on a miss when older than C.INDEX_MISS_REBUILD_MS.
  * - Bulk / full-fleet tire pulls run a worker pool of C.CONCURRENCY.
@@ -41,14 +42,17 @@ function _reauth(ctx) {
   return _reauthP;
 }
 
-/** _get(path, ctx) -> transport result; on APERIA_SESSION_EXPIRED: reauth once, retry once. */
+/**
+ * _get(path, ctx) -> transport result; on APERIA_SESSION_EXPIRED (a 401) or APERIA_SIGNIN_REQUIRED (no
+ * Bearer held, e.g. it expired in memory): reauth once (a hidden background sign-in), retry once.
+ */
 async function _get(apiPath, ctx) {
   const gen = _authGen;
   const r = await _transport().getJson(apiPath);
-  if (r && !r.ok && r.code === 'APERIA_SESSION_EXPIRED') {
+  if (r && !r.ok && FATAL.has(r.code)) {
     if (_authGen === gen) {
       const a = await _reauth(ctx);
-      if (!a || !a.ok) return { ok: false, code: 'APERIA_SESSION_EXPIRED' };
+      if (!a || !a.ok) return { ok: false, code: r.code };
     }
     return _transport().getJson(apiPath);
   }

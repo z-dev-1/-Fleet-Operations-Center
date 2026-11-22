@@ -2,9 +2,13 @@
 /**
  * src/dtna/session.js — DTNA partition, visible sign-in window, hidden context refresh and status.
  *
- * Nothing here runs on its own. Windows open from a user action (the sign-in click or a pull), or,
- * only while the user is signed in (canAutoSync), as a silent hidden context refresh from the sync pass
- * (src/dtna/auto.js): no stored credentials are filled there, so it can never reach a login or MFA step.
+ * Windows open from a user action (the sign-in click or a pull), as a silent hidden context refresh
+ * from the sync pass while signed in (no credentials filled), or as a background sign-in
+ * (backgroundLogin): a HIDDEN window running the same stored-credential auto-login as the pill's Sign in,
+ * at startup and on expiry (src/dtna/auto-auth.js) and when a sync / pre-flight finds the session gone.
+ * Background sign-ins are single-flight and rate limited (src/utils/auth-retry-gate.js). One that rests
+ * on a sign-in step the auto-login cannot finish (MFA, terms, no stored credentials) latches
+ * status().actionNeeded, so the pill asks the user to sign in; no window is ever shown for it.
  * The partition persist:vendor-dtna is shared with the Split View webview, so no permission handlers
  * are installed on it. The CDP capture attaches BEFORE the first loadURL of every window, and no
  * page console listener is ever registered (the portal prints its OIDC token to the console).
@@ -14,7 +18,15 @@ const { EventEmitter } = require('events');
 const C = require('./constants');
 const capture = require('./capture');
 const { safeErr } = require('./redact');
+const { createRetryGate } = require('../utils/auth-retry-gate');
 const log = require('../utils/logger')('dtna');
+
+// Background sign-in rate limit (Phase E). ACTION_CODE = the hidden auto-login needs the user.
+const ACTION_CODE = 'DTNA_SIGNIN_ACTION_NEEDED';
+const _gate = createRetryGate({
+  minGapMs: C.BG_MIN_GAP_MS, failCooldownMs: C.BG_FAIL_COOLDOWN_MS, actionCooldownMs: C.BG_ACTION_COOLDOWN_MS,
+  actionCodes: new Set([ACTION_CODE]),
+});
 
 // Test seam: { electron, autoLogin }.
 let _deps = {};
@@ -75,14 +87,17 @@ function status() {
     s.expiresInSec = _expiresInSec();
     s.sessionCheckedAt = new Date(_sessionTime.at).toISOString();
   }
+  // Only while a background sign-in is waiting for the user (the pill then asks for a sign-in).
+  if (_gate.state().actionNeeded) s.actionNeeded = true;
   return s;
 }
 
 function _emit(force) {
   try {
     const s = status();
-    if (!force && s.state === _lastState) return;
-    _lastState = s.state;
+    const key = s.state + '|' + (s.actionNeeded === true);
+    if (!force && key === _lastState) return;
+    _lastState = key;
     _bus.emit('status', s);
   } catch (e) { log.warn('[dtna] status', safeErr(e)); }
 }
@@ -126,7 +141,7 @@ function canAutoSync() {
 }
 
 // A new sign-in starts a new session: the old servlet reading no longer applies.
-function _captured() { _everCaptured = true; _expired = false; _sessionTime = null; _emit(); }
+function _captured() { _everCaptured = true; _expired = false; _sessionTime = null; _gate.clearAction(); _emit(); }
 
 // ── Windows ────────────────────────────────────────────────────────────────
 function _webPreferences(extra) {
@@ -158,8 +173,9 @@ function _hookQuit() {
   } catch (e) { log.warn('[dtna] quit hook', safeErr(e)); }
 }
 
-function _attachAutoLogin(win) {
-  try { _autoLogin().attachAutoLogin(win, C.LIST_URL, { maxRetries: 2 }); } catch (e) { log.warn('[dtna] auto-login', safeErr(e)); }
+function _attachAutoLogin(win, onDone) {
+  const opts = typeof onDone === 'function' ? { maxRetries: 2, onDone } : { maxRetries: 2 };
+  try { _autoLogin().attachAutoLogin(win, C.LIST_URL, opts); } catch (e) { log.warn('[dtna] auto-login', safeErr(e)); }
 }
 
 const _cancels = new Set(); // finish callbacks of open windows (teardownAll)
@@ -258,26 +274,72 @@ let _hiddenP = null;
 // in well under this) before it gives up with DTNA_SIGNIN_REQUIRED.
 const SILENT_LOGIN_GRACE_MS = 5e3;
 
+// A silent (sync-pass) caller only ever sees these codes.
+function _silentResult(r) {
+  if (r && r.ok) return { ok: true };
+  const c = r && r.code;
+  return { ok: false, code: c === 'DTNA_TIMEOUT' || c === 'DTNA_CAPTURE_FAILED' ? c : 'DTNA_SIGNIN_REQUIRED' };
+}
+function _silentLogin() { return backgroundLogin({ reason: 'sync' }).then(_silentResult); }
+
 /**
  * ensureContext({force, silent}) -> {ok:true} | {ok:false, code:'DTNA_SIGNIN_REQUIRED'|'DTNA_TIMEOUT'|'DTNA_CAPTURE_FAILED'}
  * Fresh capture (< 30 min) and not forced -> ok. Else a single-flight hidden window on the Cases list
  * (inside a user pull, or a silent sync-pass read), destroyed after use.
- * silent (sync pass): DTNA_SIGNIN_REQUIRED with no window unless canAutoSync(); the hidden window gets
- * no auto-login and gives up as soon as it rests on a sign-in host.
+ * silent (sync pass): never a visible window. Signed in (canAutoSync) -> the hidden refresh gets no
+ * auto-login and gives up as soon as it rests on a sign-in host; then, like a signed-out or expired
+ * session, one gated background sign-in (backgroundLogin) runs.
  */
 function ensureContext(opts) {
   const force = !!(opts && opts.force);
   const silent = !!(opts && opts.silent);
-  if (silent && !canAutoSync()) return Promise.resolve({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+  if (silent && _loginP) return Promise.resolve({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+  if (silent && !canAutoSync()) return _silentLogin();
   if (!force && capture.current() && capture.ageMs() < C.CONTEXT_MAX_AGE_MS) return Promise.resolve({ ok: true });
+  if (!_hiddenP) {
+    _hiddenP = _hiddenRefresh({ autoLogin: !silent }).finally(() => { _hiddenP = null; _emit(); });
+    _emit();
+  }
+  if (!silent) return _hiddenP;
+  return _hiddenP.then((r) => (r && !r.ok && r.code === 'DTNA_SIGNIN_REQUIRED' ? _silentLogin() : _silentResult(r)));
+}
+
+// ── Background sign-in (Phase E) ───────────────────────────────────────────
+const BG_REASONS = new Set(['startup', 'sync', 'expired', 'expiry', 'preflight']);
+let _bgP = null;
+
+/**
+ * backgroundLogin({reason}) -> {ok:true} | {ok:false, code}
+ * The pill's Sign in flow (capture + stored-credential auto-login on the Cases list) in a HIDDEN window.
+ * Already connected with a fresh capture -> ok, no window. The visible sign-in in progress ->
+ * DTNA_SIGNIN_IN_PROGRESS (never waits on the user's window). Single-flight and gated: a gated call
+ * returns AUTH_COOLDOWN with no window. A sign-in step it cannot finish -> DTNA_SIGNIN_ACTION_NEEDED,
+ * which latches status().actionNeeded (pushed once) until any capture succeeds.
+ * Logs: { op, reason, code, ms } per attempt.
+ */
+function backgroundLogin(opts) {
+  const reason = opts && BG_REASONS.has(opts.reason) ? opts.reason : 'sync';
+  if (_loginP) return Promise.resolve({ ok: false, code: 'DTNA_SIGNIN_IN_PROGRESS' });
+  if (canAutoSync() && capture.current() && capture.ageMs() < C.CONTEXT_MAX_AGE_MS) return Promise.resolve({ ok: true });
+  if (_bgP) return _bgP;
   if (_hiddenP) return _hiddenP;
-  _hiddenP = _hiddenRefresh({ autoLogin: !silent }).finally(() => { _hiddenP = null; _emit(); });
-  _emit();
-  return _hiddenP;
+  const t0 = Date.now();
+  _bgP = _gate.run(() => {
+    _hiddenP = _hiddenRefresh({ autoLogin: true, background: true }).finally(() => { _hiddenP = null; _emit(); });
+    _emit();
+    return _hiddenP;
+  }).then((r) => {
+    const code = r && r.ok ? 'OK' : String((r && r.code) || 'DTNA_INTERNAL').slice(0, 40);
+    if (!(r && r.gated)) log.info('[dtna] auth', { op: 'background-login', reason, code, ms: Date.now() - t0 });
+    _emit(!!(r && r.firstAction));
+    return r && r.ok ? { ok: true } : { ok: false, code };
+  }).finally(() => { _bgP = null; });
+  return _bgP;
 }
 
 function _hiddenRefresh(o) {
   const autoLogin = !(o && o.autoLogin === false);
+  const background = !!(o && o.background);
   const t0 = Date.now();
   return new Promise((resolve) => {
     let settled = false;
@@ -317,9 +379,11 @@ function _hiddenRefresh(o) {
         finish({ ok: false, code: 'DTNA_CAPTURE_FAILED' });
         return;
       }
+      // Background: still on a sign-in host when the wait runs out = a step the auto-login cannot finish.
+      const loginCode = background ? ACTION_CODE : 'DTNA_SIGNIN_REQUIRED';
       timer = setTimeout(() => {
-        try { finish({ ok: false, code: _onLoginHost(win) ? 'DTNA_SIGNIN_REQUIRED' : 'DTNA_TIMEOUT' }); } catch (e) { log.warn('[dtna] wait', safeErr(e)); }
-      }, C.HIDDEN_WAIT_MS);
+        try { finish({ ok: false, code: _onLoginHost(win) ? loginCode : 'DTNA_TIMEOUT' }); } catch (e) { log.warn('[dtna] wait', safeErr(e)); }
+      }, background ? C.BG_LOGIN_WAIT_MS : C.HIDDEN_WAIT_MS);
       // Silent: no credentials are filled, so a window resting on a sign-in host will never connect.
       const checkLogin = () => {
         if (autoLogin || settled || grace || _isDestroyed(win) || !_onLoginHost(win)) return;
@@ -330,7 +394,17 @@ function _hiddenRefresh(o) {
       };
       if (!autoLogin) wc.on('did-navigate', () => { try { checkLogin(); } catch (e) { log.warn('[dtna] navigate', safeErr(e)); } });
       Promise.resolve().then(() => win.loadURL(C.LIST_URL)).then(() => { if (!autoLogin) checkLogin(); }).catch(() => {});
-      if (autoLogin) _attachAutoLogin(win);
+      if (autoLogin && !background) _attachAutoLogin(win);
+      // Background: the auto-login giving up (bad / no credentials, a form still showing after its
+      // retries) means the user must finish a step; a late capture inside the grace still wins.
+      if (background) {
+        _attachAutoLogin(win, (res) => {
+          try {
+            if (settled || grace || (res && res.success)) return;
+            grace = setTimeout(() => { grace = null; finish({ ok: false, code: ACTION_CODE }); }, SILENT_LOGIN_GRACE_MS);
+          } catch (e) { log.warn('[dtna] auto-login done', safeErr(e)); }
+        });
+      }
     } catch (e) {
       log.warn('[dtna] hidden window', safeErr(e));
       finish({ ok: false, code: 'DTNA_CAPTURE_FAILED' });
@@ -351,11 +425,12 @@ function _resetForTests() {
   try { teardownAll(); } catch (_) {}
   _ses = null; _deps = {}; _loginP = null; _loginWin = null; _hiddenP = null; _quitHooked = false;
   _everCaptured = false; _expired = false; _pulling = false; _lastCode = null; _lastPullAt = null; _lastState = null;
-  _sessionTime = null;
+  _sessionTime = null; _bgP = null;
+  _gate._reset();
   _bus.removeAllListeners();
 }
 
 module.exports = {
   getSession, status, onStatus, noteResult, setPulling, notePulled, noteSessionTime, openLoginWindow, ensureContext, canAutoSync,
-  teardownAll, _setDeps, _resetForTests,
+  backgroundLogin, teardownAll, _setDeps, _resetForTests,
 };

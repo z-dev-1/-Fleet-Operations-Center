@@ -518,6 +518,28 @@ describe('pending_est_sources: DTNA auto refresh (Phase D)', () => {
     expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), source: 'both' });
   });
 
+  it('Phase E: an async gate that resolves ok after a silent re-login -> the refresh proceeds, dtnaAuto ok', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(300) })]);
+    let signedIn = false;
+    w.deps.dtnaGate = vi.fn(async () => { await new Promise((r) => setTimeout(r, 2)); signedIn = true; return { ok: true }; });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(signedIn).toBe(true);
+    expect(w.deps.dtnaGate).toHaveBeenCalledTimes(1);
+    expect(w.deps.dtnaRefresh.mock.calls.map((c) => c[0])).toEqual([DCASE(1)]);
+    expect(scan.dtnaAuto).toBe('ok');
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), dtnaCaseNumber: '15667050' });
+  });
+
+  it('Phase E: an async gate that stays signed out after the hidden attempt -> no refresh, dtnaAuto signed-out', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(300) })]);
+    w.deps.dtnaGate = vi.fn(async () => ({ ok: false, code: 'DTNA_AUTO_SIGNED_OUT' }));
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).not.toHaveBeenCalled();
+    expect(scan.dtnaAuto).toBe('signed-out');
+  });
+
   it('a case named in WR comments with no cache entry is read and its row appears in the same scan (no manual pull)', async () => {
     const w = dtnaWorld([], { fresh: () => ({ unitId: 'EQ-WR_G' }) });
     const details = Object.assign({}, DETAILS, { WR_G: comment('DTNA case ' + DURL(DCASE(9))) });
@@ -582,7 +604,7 @@ describe('pending_est_sources: DTNA auto refresh (Phase D)', () => {
     expect(b.deps.getCaseStatusSummary.mock.calls).toEqual(a.deps.getCaseStatusSummary.mock.calls);
   });
 
-  it('the default gate (real src/dtna/auto.js) on a fresh run reads signed-out and loads no DTNA client / aura module', async () => {
+  it('the default gate (real src/dtna/auto.js ensureSignedIn) on a fresh run, hidden sign-in unavailable, reads signed-out and loads no DTNA client / aura module', async () => {
     const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry({ pulledAt: ago(300) })] });
     delete deps.dtnaGate; delete deps.dtnaRefresh; delete deps.dtnaDiscover;
     const scan = await src.scanTeamPending({}, deps);

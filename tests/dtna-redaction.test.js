@@ -2,7 +2,7 @@
 // dtna:* IPC result, sendToWindow payload, dtnaCaseCache or fleetData; comment text only in the cache
 // and the row (decision 6); static guards that keep DTNA network code user-initiated only.
 process.env.TZ = 'America/New_York';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -51,7 +51,12 @@ async function fetchImpl(_url, init) {
   fetchCount++;
   if (mode === 'reject') throw Object.assign(new Error('net::ERR_FAILED ' + SENTINEL_LOGIN_URL + ' ' + SENTINEL_COOKIE + ' ' + SENTINEL_TOKEN), { code: 'ERR_FAILED' });
   if (mode === 'redirect') return resp(302, '');
-  if (String(_url).includes('/SessionTimeServlet')) return resp(200, SERVLET_BODY);
+  if (String(_url).includes('/SessionTimeServlet')) {
+    // Phase E: one expired reading (the pre-flight then runs a hidden background sign-in).
+    if (mode === 'servletExpiredOnce') { mode = 'ok'; return resp(200, SERVLET_BODY.replace('"sr":27120', '"sr":0')); }
+    return resp(200, SERVLET_BODY);
+  }
+  if (mode === 'invalidOnce') { mode = 'ok'; return resp(200, invalidSession()); }
   if (mode === 'invalid') return resp(200, invalidSession());
   if (mode === 'sync') return resp(200, outOfSync());
   if (mode === 'apexError') return resp(200, apexError('System.QueryException', 'no rows ' + SENTINEL_TOKEN + ' ' + SENTINEL_COMMENT + ' ' + SENTINEL_EMAIL));
@@ -98,11 +103,11 @@ function onLoad(win) {
   });
 }
 
-function setup() {
+function setup(fxExtra) {
   logger = installFakeLogger(require);
   freshDtna(require);
   delete require.cache[require.resolve('../src/ipc/dtna.js')];
-  fx = createFakeElectron({ fetch: fetchImpl, onLoad });
+  fx = createFakeElectron(Object.assign({ fetch: fetchImpl, onLoad }, fxExtra || {}));
   fx.electron.app.getPath = (k) => (k === 'downloads' ? DOWNLOADS : TMP);
   session = require('../src/dtna/session');
   session._setDeps({ electron: fx.electron, autoLogin: { attachAutoLogin() {} } });
@@ -336,6 +341,27 @@ describe('DTNA redaction: draft-comment and post-comment', () => {
     assertStoresHaveNoAuth();
   });
 
+  it('(b3) Phase E: an expired pre-flight runs ONE hidden background sign-in, then the approval is still requested; clean', async () => {
+    await phaseBSetup();
+    const before = fx.windows.length;
+    mode = 'servletExpiredOnce';
+    const pending = call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    await until(() => approvals.length === 1);
+    expect(postCalls).toHaveLength(0);                       // still nothing sent before approval
+    expect(fx.windows.length).toBe(before + 1);
+    const bg = fx.windows[fx.windows.length - 1];
+    expect(bg.options.show).toBe(false);
+    expect(bg.isDestroyed()).toBe(true);
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toMatchObject({ ok: true, outcome: 'sent' });
+    expect(postCalls).toHaveLength(1);
+    expect(logger.lines.some((l) => l.args[0] === '[dtna] auth' && l.args[1].op === 'background-login' && l.args[1].reason === 'preflight' && l.args[1].code === 'OK')).toBe(true);
+    expect(logger.text()).not.toContain('oidcIdToken');
+    assertClean([r]);
+    assertStoresHaveNoAuth();
+  });
+
   it('(c) unconfigured POST_COMMENT_PARAMS -> DTNA_POST_NOT_CONFIGURED, no approval prompt, zero fetches', async () => {
     await phaseBSetup({ configured: false });
     const r = await call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
@@ -489,8 +515,8 @@ describe('DTNA redaction: sync pass (Phase D)', () => {
     assertStoresHaveNoAuth();
   });
 
-  it('signed out (fresh run): no DTNA fetch, no window, from every sync-pass entry', async () => {
-    setup();
+  it('signed out (fresh run), the hidden sign-in fails: one hidden window, no DTNA fetch, from every sync-pass entry', async () => {
+    setup({ attachThrows: true });
     const before = fetchCount;
     const auto = require('../src/dtna/auto');
     store.save('dtnaCaseCache', { version: 1, cases: {} });
@@ -502,10 +528,78 @@ describe('DTNA redaction: sync pass (Phase D)', () => {
     const scan = await src.scanTeamPending({ force: true }, collectorDeps());
     expect(scan.dtnaAuto).toBe('signed-out');
     expect(fetchCount).toBe(before);
-    expect(fx.windows).toHaveLength(0);
+    expect(fx.windows).toHaveLength(1);                     // one gated attempt for the whole pass
+    expect(fx.windows[0].options.show).toBe(false);
+    expect(fx.windows[0].isDestroyed()).toBe(true);
     const skips = logger.lines.filter((l) => l.args[0] === '[dtna] auto');
     expect(skips).toEqual([{ ns: 'dtna', level: 'info', args: ['[dtna] auto', { op: 'skip', code: 'DTNA_AUTO_SIGNED_OUT' }] }]);
     assertClean([scan]);
+  });
+});
+
+describe('DTNA redaction: background sign-in (Phase E)', () => {
+  it('(a) startup trigger: the hidden window captures the sentinel context/token in memory only; pushes and logs clean', async () => {
+    setup();
+    const auth = require('../src/dtna/auto-auth');
+    const C = require('../src/dtna/constants');
+    // Only the startup timer runs (at once); the expiry timer is left unarmed.
+    auth.start(ctx, { electron: fx.electron, setTimeout: (fn, ms) => { if (ms === C.BG_STARTUP_DELAY_MS) Promise.resolve().then(fn); return {}; }, clearTimeout: () => {} });
+    await until(() => session.status().state === 'connected' && Number.isFinite(session.status().expiresInSec));
+    expect(fx.windows).toHaveLength(1);
+    expect(fx.windows[0].options.show).toBe(false);
+    expect(fx.windows[0].isDestroyed()).toBe(true);
+    expect(require('../src/dtna/capture').current()).toBeTruthy();
+    const s = await call('dtna:status');
+    expect(s).toMatchObject({ state: 'connected', expiresInSec: 27120 });
+    expect(ctx.sent.some((x) => x[0] === 'dtna:status-changed' && x[1].state === 'connected')).toBe(true);
+    expect(logger.lines.some((l) => l.args[0] === '[dtna] auto-auth' && l.args[1].reason === 'startup' && l.args[1].code === 'OK')).toBe(true);
+    expect(logger.text()).not.toContain('oidcIdToken');
+    auth._resetForTests();
+    assertClean([s]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('(b) signed in, one invalid-session Aura response during the sync pass -> one hidden re-login, the read retries live; clean', async () => {
+    setup();
+    await signIn();
+    const before = fx.windows.length;
+    mode = 'invalidOnce';
+    const auto = require('../src/dtna/auto');
+    const r = await auto.pullIfStale(CASE_ID, { freshMs: 60e3 });
+    expect(r).toMatchObject({ ok: true, live: true, entry: { caseId: CASE_ID } });
+    expect(fx.windows.length).toBe(before + 1);
+    expect(fx.windows[fx.windows.length - 1].options.show).toBe(false);
+    expect(fx.windows[fx.windows.length - 1].isDestroyed()).toBe(true);
+    assertClean([]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('(c) the hidden auto-login hits a challenge on a sign-in URL with a query: action needed pushed, no URL or query in any log', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      setup({ urlFor: () => SENTINEL_LOGIN_URL, onLoad: () => {} });
+      session._setDeps({ electron: fx.electron, autoLogin: { attachAutoLogin: (_w, _u, o) => { if (o && o.onDone) o.onDone({ success: false, url: SENTINEL_LOGIN_URL, error: 'bad_credentials' }); } } });
+      let r = null;
+      session.backgroundLogin({ reason: 'startup' }).then((x) => { r = x; });
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(r).toEqual({ ok: false, code: 'DTNA_SIGNIN_ACTION_NEEDED' });
+      expect(session.status().actionNeeded).toBe(true);
+      expect(ctx.sent.filter((x) => x[0] === 'dtna:status-changed' && x[1].actionNeeded === true)).toHaveLength(1);
+      expect(fx.windows.every((w) => w.options.show === false)).toBe(true);
+      const t = logger.text();
+      expect(t).not.toContain(SENTINEL_LOGIN_URL);
+      expect(t).not.toContain('client_id');
+      assertClean([r, session.status()]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('static: the startup / expiry trigger modules never show a window, schedule a repeat or listen to the console', () => {
+    for (const f of [['dtna', 'auto-auth.js'], ['aperia', 'auto-auth.js']]) {
+      const src = fs.readFileSync(path.join(WT_ROOT, 'src', ...f), 'utf8');
+      for (const bad of ['console-message', 'setInterval', 'openLoginWindow', 'show: true']) expect(src, f.join('/') + ' ' + bad).not.toContain(bad);
+    }
+    const sess = fs.readFileSync(path.join(WT_ROOT, 'src', 'dtna', 'session.js'), 'utf8');
+    expect(sess).not.toContain('console-message');
   });
 });
 

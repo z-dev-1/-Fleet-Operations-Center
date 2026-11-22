@@ -61,7 +61,8 @@ function setup(o = {}) {
   };
   const store = { get: (cid) => cache.get(cid) || null, all: () => [...cache.values()] };
   auto._resetForTests();
-  auto._setDeps({ client, session: { canAutoSync: () => open }, store, now: () => NOW, sleep: async () => {} });
+  const session = Object.assign({ canAutoSync: () => open }, o.session || {});
+  auto._setDeps({ client, session, store, now: () => NOW, sleep: async () => {} });
 }
 
 beforeEach(() => { logger.clear(); });
@@ -145,6 +146,47 @@ describe('pullIfStale', () => {
   });
 });
 
+describe('Phase E: ensureSignedIn (silent re-login before a sync read)', () => {
+  it('signed out + a background sign-in that succeeds -> one shared sign-in for 3 concurrent pulls, then live pulls', async () => {
+    const backgroundLogin = vi.fn(async () => { await new Promise((r) => setTimeout(r, 5)); open = true; return { ok: true }; });
+    setup({ open: false, entries: [entry()], session: { backgroundLogin } });
+    const ids = [CASE_ID, id(1), id(2)];
+    const rs = await Promise.all(ids.map((c) => auto.pullIfStale(c, { freshMs: MIN })));
+    expect(backgroundLogin).toHaveBeenCalledTimes(1);
+    expect(backgroundLogin).toHaveBeenCalledWith({ reason: 'sync' });
+    expect(rs.every((r) => r.ok && r.live)).toBe(true);
+    expect(client.pullCase).toHaveBeenCalledTimes(3);
+    expect(logger.lines.filter((l) => l.args[0] === '[dtna] auto' && l.args[1].op === 'skip')).toHaveLength(0);
+  });
+
+  it('a failed background sign-in -> the cached entry + DTNA_AUTO_SIGNED_OUT, no pullCase', async () => {
+    const e = entry();
+    const backgroundLogin = vi.fn(async () => ({ ok: false, code: 'DTNA_SIGNIN_ACTION_NEEDED' }));
+    setup({ open: false, entries: [e], session: { backgroundLogin } });
+    expect(await auto.pullIfStale(CASE_ID, { freshMs: MIN })).toEqual({ ok: true, entry: e, live: false, code: 'DTNA_AUTO_SIGNED_OUT' });
+    expect(await auto.discover({ units: ['X'], budget: 3 })).toEqual({ pulled: 0, code: 'DTNA_AUTO_SIGNED_OUT' });
+    expect(client.pullCase).not.toHaveBeenCalled();
+    expect(client.listCaseIds).not.toHaveBeenCalled();
+    expect(backgroundLogin).toHaveBeenCalledTimes(2);
+  });
+
+  it('a throwing background sign-in is treated as signed out', async () => {
+    setup({ open: false, session: { backgroundLogin: async () => { throw new Error('x'); } } });
+    expect(await auto.ensureSignedIn()).toEqual({ ok: false, code: 'DTNA_AUTO_SIGNED_OUT' });
+  });
+
+  it('signed in -> ok with no background call; discovery proceeds after a silent re-login', async () => {
+    const backgroundLogin = vi.fn(async () => { open = true; return { ok: true }; });
+    setup({ open: true, session: { backgroundLogin } });
+    expect(await auto.ensureSignedIn()).toEqual({ ok: true });
+    expect(backgroundLogin).not.toHaveBeenCalled();
+    const ids = [id(1), id(2)];
+    setup({ open: false, ids, session: { backgroundLogin }, pull: (cid) => ({ ok: true, entry: entry({ caseId: cid, unitId: 'U' + cid.slice(-2) }) }) });
+    expect(await auto.discover({ units: ['NOT-THERE'], budget: 2 })).toEqual({ pulled: 2, code: 'OK' });
+    expect(backgroundLogin).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('discover', () => {
   it('signed out -> no list read, no pulls', async () => {
     setup({ open: false, ids: [id(1)] });
@@ -210,9 +252,9 @@ describe('end to end with the real session, aura and client', () => {
   let realAuto;
   let dstore;
   let attach;
-  function boot() {
+  function boot(fxOpts) {
     freshDtna(require);
-    fx = createFakeElectron({ onLoad: (win) => emitAuraSuccess(win.webContents) });
+    fx = createFakeElectron(Object.assign({ onLoad: (win) => emitAuraSuccess(win.webContents) }, fxOpts || {}));
     session = require('../src/dtna/session.js');
     attach = vi.fn();
     session._setDeps({ electron: fx.electron, autoLogin: { attachAutoLogin: attach } });
@@ -222,27 +264,45 @@ describe('end to end with the real session, aura and client', () => {
     dstore.put(entry({ pulledAt: iso(Date.now() - 3 * 60 * MIN) }));
   }
 
-  it('signed out (fresh app run): pullIfStale, discover and the facade make 0 fetches and open 0 windows', async () => {
-    boot();
+  it('signed out (fresh app run), hidden sign-in fails: one hidden window, 0 fetches, and a second pass inside the cooldown opens none', async () => {
+    boot({ attachThrows: true });
     const r = await realAuto.pullIfStale(CASE_ID, { freshMs: 2 * 60 * MIN });
     expect(r).toMatchObject({ ok: true, live: false, code: 'DTNA_AUTO_SIGNED_OUT', entry: { caseId: CASE_ID } });
+    expect(fx.windows).toHaveLength(1);
+    expect(fx.windows[0].options.show).toBe(false);
+    expect(fx.windows[0].destroyed).toBe(true);
     expect(await realAuto.discover({ units: ['122269'], budget: 10 })).toEqual({ pulled: 0, code: 'DTNA_AUTO_SIGNED_OUT' });
     const f = await require('../src/scrapers/dtna_enrich.js').enrichDtna(caseUrl(CASE_ID), { freshMs: 2 * 60 * MIN });
     expect(f).toMatchObject({ ok: true, offsiteText: 'old thread', dtnaCaseNumber: '15667050' });
     expect(fx.calls.fetch).toHaveLength(0);
-    expect(fx.windows).toHaveLength(0);
-    expect(attach).not.toHaveBeenCalled();
+    expect(fx.windows).toHaveLength(1);
     session._resetForTests();
   });
 
-  it('signed in, then marked expired: 0 fetches and no new window', async () => {
+  it('signed out (fresh app run), saved session: the sync pass signs in through one hidden window and reads live', async () => {
+    boot();
+    const r = await realAuto.pullIfStale(CASE_ID, { freshMs: MIN });
+    expect(r).toMatchObject({ live: true });
+    expect(fx.calls.fetch.length).toBeGreaterThan(0);
+    expect(fx.windows).toHaveLength(1);
+    expect(fx.windows[0].options.show).toBe(false);
+    expect(attach).toHaveBeenCalledWith(fx.windows[0], expect.any(String), { maxRetries: 2, onDone: expect.any(Function) });
+    expect(session.status().state).toBe('connected');
+    session._resetForTests();
+  });
+
+  it('signed in, then marked expired: one hidden re-login, then the live read proceeds (no visible window)', async () => {
     boot();
     await session.openLoginWindow({});
+    fx.windows[0].close();
     session.noteResult('DTNA_SIGNIN_REQUIRED');
+    require('../src/dtna/capture.js').clear();
     const n = fx.windows.length;
-    await realAuto.pullIfStale(CASE_ID, { freshMs: MIN });
-    expect(fx.calls.fetch).toHaveLength(0);
-    expect(fx.windows).toHaveLength(n);
+    const r = await realAuto.pullIfStale(CASE_ID, { freshMs: MIN });
+    expect(r).toMatchObject({ live: true });
+    expect(fx.calls.fetch.length).toBeGreaterThan(0);
+    expect(fx.windows).toHaveLength(n + 1);
+    expect(fx.windows[n].options.show).toBe(false);
     session._resetForTests();
   });
 

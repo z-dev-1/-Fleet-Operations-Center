@@ -162,8 +162,10 @@ describe('registration, preload and index.js', () => {
       }
     };
     walk(path.join(ROOT, 'src'));
-    expect(Object.keys(hits).sort()).toEqual(['aperia/watcher.js', 'ipc/aperia.js']);
+    // Phase E: the background sign-in pushes its status changes on the same aperia:alert event.
+    expect(Object.keys(hits).sort()).toEqual(['aperia/auto-auth.js', 'aperia/watcher.js', 'ipc/aperia.js']);
     expect(hits['aperia/watcher.js']).toEqual(['aperia:alert']);
+    expect(hits['aperia/auto-auth.js']).toEqual(['aperia:alert']);
     for (const ch of CHANNELS.concat(['aperia:progress'])) expect(hits['ipc/aperia.js']).toContain(ch);
   }, 60000);
 });

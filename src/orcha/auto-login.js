@@ -97,6 +97,12 @@ function partitionForUrl(url) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function _wait(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Logged URLs keep origin + path only: query strings and fragments can carry auth codes / state.
+function _safeUrl(u) {
+  try { const x = new URL(String(u || '')); return x.origin + x.pathname; }
+  catch (_) { return ''; }
+}
+
 async function _execSafe(wc, script) {
   try { return await wc.executeJavaScript(script); }
   catch (e) { logger.warn('execSafe failed:', e.message); return null; }
@@ -179,7 +185,7 @@ async function _dumpInputs(wc, label) {
     '  out.push({type:el.type,id:el.id,name:el.name,placeholder:el.placeholder,visible:(r.width>0&&r.height>0)});' +
     '});' +
     'var frames=document.querySelectorAll("iframe,frame").length;' +
-    'return JSON.stringify({inputs:out,frames:frames,url:location.href});' +
+    'return JSON.stringify({inputs:out,frames:frames,url:location.origin+location.pathname});' +
     '})()'
   );
   const dump = await _execSafe(wc, script);
@@ -431,7 +437,7 @@ async function _loginAzureB2C(wc, username, password) {
     'el.dispatchEvent(new Event("input",{bubbles:true}));' +
     'el.dispatchEvent(new Event("change",{bubbles:true}));' +
     'el.dispatchEvent(new Event("blur",{bubbles:true}));' +
-    'return el.value && el.value.length ? "ok:"+el.value.length : "empty";' +
+    'return el.value && el.value.length ? "ok" : "empty";' +
     '})()'
   );
   const committed = await _execSafe(wc, commitScript);
@@ -478,13 +484,14 @@ async function _postSubmitDiag(wc) {
     await _wait(2500);
     const nowUrl = await _execSafe(wc, 'location.href') || '';
     if (/ciam\.daimlertruck\.com|ciam\.dtna\.com|b2clogin\.com|login\.microsoftonline/i.test(nowUrl)) {
-      const snippet = await _execSafe(wc,
-        '(function(){var t=(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim();return t.slice(0,400);})()'
+      // Page text can carry the user id ("Hello, <user>"), so only its length is logged.
+      const bodyChars = await _execSafe(wc,
+        '(function(){return ((document.body&&document.body.innerText)||"").replace(/\\s+/g," ").trim().length;})()'
       );
-      logger.warn('Azure B2C: still on login host 2.5s after final submit — url=' + String(nowUrl).slice(0, 120) + ' | body="' + String(snippet || '').slice(0, 300) + '"');
+      logger.warn('Azure B2C: still on login host 2.5s after final submit — url=' + _safeUrl(nowUrl), { bodyChars: Number(bodyChars) || 0 });
       await _dumpInputs(wc, 'azure-b2c-post-submit');
     } else {
-      logger.info('Azure B2C: navigated off login host after submit → ' + String(nowUrl).slice(0, 100));
+      logger.info('Azure B2C: navigated off login host after submit → ' + _safeUrl(nowUrl));
     }
   } catch (_) { /* diagnostic only */ }
   return true;
@@ -674,7 +681,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
   // place so no exit path leaks a listener.
   function _cleanup() {
     try {
-      _cleanup();
+      win.webContents.removeListener('did-finish-load', onLoad);
       win.webContents.removeListener('did-navigate', onLoad);
       win.webContents.removeListener('did-stop-loading', onLoad);
     } catch (_) { /* window already destroyed */ }
@@ -709,11 +716,11 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
       if (!onLoginPg) {
         _done = true;
         _cleanup();
-        logger.info('attachAutoLogin: reached target:', currentUrl.slice(0, 80));
+        logger.info('attachAutoLogin: reached target:', _safeUrl(currentUrl));
         if (onDone) onDone({ success: true, url: currentUrl });
         return;
       }
-      logger.info('attachAutoLogin: on target URL but a login form is showing — logging in first:', currentUrl.slice(0, 80));
+      logger.info('attachAutoLogin: on target URL but a login form is showing — logging in first:', _safeUrl(currentUrl));
       if (!_loginAttempted) {
         if (loginAttempts >= maxRetries) {
           logger.warn('attachAutoLogin: login still showing on target after', loginAttempts, 'attempts');
@@ -750,7 +757,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
         const targetHostname = new URL(targetUrl).hostname;
         const retryResult = await attemptAutoLogin(win.webContents, currentUrl, targetHostname);
         if (!retryResult.filled) {
-          logger.warn('attachAutoLogin: retry could not act on', currentUrl.slice(0, 80));
+          logger.warn('attachAutoLogin: retry could not act on', _safeUrl(currentUrl));
         }
         return;
       }
@@ -767,7 +774,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
       let sameHost = false;
       try { sameHost = new URL(currentUrl).hostname === new URL(targetUrl).hostname; } catch (_) {}
       if (!sameHost) {
-        logger.info('attachAutoLogin: post-login, mid-redirect on', currentUrl.slice(0, 60), '— waiting for natural navigation');
+        logger.info('attachAutoLogin: post-login, mid-redirect on', _safeUrl(currentUrl), '— waiting for natural navigation');
         return;
       }
 
@@ -795,7 +802,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
     if (result.filled) {
       _loginAttempted = true;
     } else {
-      logger.warn('attachAutoLogin: could not fill for', currentUrl.slice(0, 80));
+      logger.warn('attachAutoLogin: could not fill for', _safeUrl(currentUrl));
       _done = true;
       _cleanup();
       if (onDone) onDone({ success: false, url: currentUrl, error: 'no_credentials' });
@@ -808,7 +815,7 @@ function attachAutoLogin(win, targetUrl, opts = {}) {
   // swapping to the login view without a navigation), so a late-rendering login
   // form still gets caught even when no navigation event fires.
   win.webContents.on('did-stop-loading', onLoad);
-  logger.info('attachAutoLogin: attached for', targetUrl.slice(0, 80));
+  logger.info('attachAutoLogin: attached for', _safeUrl(targetUrl));
 }
 
 // ── runAutoLoginLoop — the PROVEN "Test Login" settle loop ────────────────────
@@ -865,12 +872,12 @@ function runAutoLoginLoop(win, opts = {}) {
           settleTimer = setTimeout(checkSettled, 2000);
           return;
         }
-        logger.info('[' + label + '] settled, no login form at ' + currentUrl.slice(0, 80));
+        logger.info('[' + label + '] settled, no login form at ' + _safeUrl(currentUrl));
         finish({ ok: true, attempted: attempts > 0, site: lastSite });
         return;
       }
       if (attempts >= maxAttempts) {
-        logger.warn('[' + label + '] max attempts, still on login: ' + currentUrl.slice(0, 80));
+        logger.warn('[' + label + '] max attempts, still on login: ' + _safeUrl(currentUrl));
         finish({ ok: true, attempted: attempts > 0, site: lastSite, maxAttemptsReached: true });
         return;
       }
@@ -878,7 +885,7 @@ function runAutoLoginLoop(win, opts = {}) {
       try {
         const result = await attemptAutoLogin(win.webContents, currentUrl);
         lastSite = result.site || lastSite;
-        logger.info('[' + label + '] attempt ' + attempts + ' -> filled:' + result.filled + ' on ' + currentUrl.slice(0, 80));
+        logger.info('[' + label + '] attempt ' + attempts + ' -> filled:' + result.filled + ' on ' + _safeUrl(currentUrl));
         if (!result.filled) { finish({ ok: true, attempted: false, site: lastSite }); return; }
         urlAtLastAttempt = currentUrl; graceChecks = 0;
       } catch (e) {

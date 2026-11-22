@@ -632,4 +632,60 @@ describe('Phase C: dtna:stage-options / dtna:change-stage / dtna:session-time / 
     await flush(40);
     expect(stageClient.bulkPull).toHaveBeenCalledTimes(1);
   });
+
+  describe('Phase E: a blocked pre-flight first runs one hidden background sign-in', () => {
+    const backgroundLogin = vi.fn();
+    const bgSess = Object.assign({}, sess, { backgroundLogin });
+    const bgWrites = Object.assign({}, stageWrites, { isPostConfigured: () => true });
+    const cb = reg({ writes: bgWrites, session: bgSess });
+    const LOW = { block: true, code: 'DTNA_SESSION_LOW', remainingSec: 0 };
+    const PASS = { block: false, remainingSec: 28000 };
+    beforeEach(() => { backgroundLogin.mockReset(); backgroundLogin.mockResolvedValue({ ok: true }); });
+
+    it('re-login ok and the second pre-flight passes -> the stage approval is still requested, exactly once', async () => {
+      sessionTime.preflight.mockResolvedValueOnce(LOW).mockResolvedValueOnce(PASS);
+      fresh = [at('In Repair'), at('Closed')];
+      const r = await cb('dtna:change-stage', OKP);
+      expect(r).toMatchObject({ ok: true, outcome: 'sent', confirmed: true });
+      expect(backgroundLogin).toHaveBeenCalledTimes(1);
+      expect(backgroundLogin).toHaveBeenCalledWith({ reason: 'preflight' });
+      expect(sessionTime.preflight).toHaveBeenCalledTimes(2);
+      expect(gate.requestWrite).toHaveBeenCalledTimes(1);
+      expect(gate.requestWrite.mock.calls[0][0]).toMatchObject({ kind: 'dtnaStage', interactive: true });
+    });
+
+    it('re-login ok and the second pre-flight passes -> the comment approval is still requested, exactly once', async () => {
+      sessionTime.preflight.mockResolvedValueOnce(LOW).mockResolvedValueOnce(PASS);
+      const r = await cb('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: 'ETA please?' });
+      expect(r).toMatchObject({ ok: true, outcome: 'sent' });
+      expect(backgroundLogin).toHaveBeenCalledTimes(1);
+      expect(gate.requestWrite).toHaveBeenCalledTimes(1);
+      expect(gate.requestWrite.mock.calls[0][0]).toMatchObject({ kind: 'dtnaComment', interactive: true });
+    });
+
+    it('re-login ok and the second pre-flight passes -> the bulk pull starts', async () => {
+      sessionTime.preflight.mockResolvedValueOnce(LOW).mockResolvedValueOnce(PASS);
+      const b = await cb('dtna:bulk-pull', {});
+      expect(b.ok).toBe(true);
+      await flush(40);
+      expect(stageClient.bulkPull).toHaveBeenCalledTimes(1);
+      expect(backgroundLogin).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-login fails -> today\'s codes and zero approvals; still low after an ok re-login -> blocked too', async () => {
+      backgroundLogin.mockResolvedValue({ ok: false, code: 'DTNA_SIGNIN_ACTION_NEEDED' });
+      sessionTime.preflight.mockResolvedValueOnce(LOW);
+      expect(await cb('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 0 });
+      sessionTime.preflight.mockResolvedValueOnce(LOW);
+      expect(await cb('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: 'ETA please?' })).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 0 });
+      sessionTime.preflight.mockResolvedValueOnce(LOW);
+      expect(await cb('dtna:bulk-pull', {})).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+      backgroundLogin.mockResolvedValue({ ok: true });
+      sessionTime.preflight.mockResolvedValueOnce(LOW).mockResolvedValueOnce({ block: true, code: 'DTNA_SESSION_LOW', remainingSec: 40 });
+      expect(await cb('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 40 });
+      expect(gate.requestWrite).not.toHaveBeenCalled();
+      expect(stageClient.bulkPull).not.toHaveBeenCalled();
+      expect(networkCalls()).toBe(0);
+    });
+  });
 });

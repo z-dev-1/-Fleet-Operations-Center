@@ -131,8 +131,10 @@ describe('322283 email timeline digest', () => {
     // control on purpose; same rule.
     // Aperia v1 adds the aperia-* renderer files (pill, panel, unit tires, issues and bulk modals) on
     // purpose; same rule. DTNA Phase D edits the deep-scan DTNA offsite block on purpose
-    // (session-gated live read, case number, cache join); same rule.
-    const upgraded = ['src/orcha/deep-scan.js', 'renderer/src/js/components/relay-write-approval.js', 'renderer/src/js/views/dtna-actions.js',
+    // (session-gated live read, case number, cache join); same rule. Phase E (background DTNA / Aperia
+    // sign-in) trims the auto-login engine's log lines (no URL query, no page text) and fixes its
+    // listener cleanup on purpose; same rule.
+    const upgraded = ['src/orcha/deep-scan.js', 'src/orcha/auto-login.js', 'renderer/src/js/components/relay-write-approval.js', 'renderer/src/js/views/dtna-actions.js',
       'renderer/src/js/views/dtna-stage-actions.js',
       'renderer/src/css/fleet.css', 'renderer/src/js/views/id-links.js',
       'renderer/src/js/views/pending-estimates-logic.js', 'renderer/src/js/views/pending-estimates-panel.js',

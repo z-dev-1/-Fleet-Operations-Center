@@ -2,7 +2,7 @@
 // driven through the real registerAperiaIPC handlers with fakes only (CDP FakeDebugger, ses.fetch, WebSocket,
 // Notification). No sentinel Bearer, WS token, cookie, email or phone may appear in any log line, IPC result,
 // sendToWindow payload, Notification, export file or aperia_seen_alerts.json. Plus static guards on src/aperia/**.
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -310,6 +310,95 @@ describe('Aperia redaction across the stack', () => {
     expect(s).toEqual({ ok: false, code: 'APERIA_HTTP' });
     assertClean([a, i, b, c, s, await call('aperia:status')]);
   });
+});
+
+describe('Aperia redaction: background sign-in (Phase E)', () => {
+  const C = () => require('../src/aperia/constants');
+  const hidden = () => fx.windows.filter((w) => w.options.show === false);
+  const shown = () => fx.windows.filter((w) => w.options.show !== false);
+
+  async function startupLogin() {
+    const auth = require('../src/aperia/auto-auth');
+    // Only the startup timer runs (at once); nothing else is scheduled.
+    auth.start(ctx, { electron: fx.electron, setTimeout: (fn, ms) => { if (ms === C().BG_STARTUP_DELAY_MS) Promise.resolve().then(fn); return {}; }, clearTimeout: () => {} });
+    await until(() => M.session.status().state === 'connected');
+    return auth;
+  }
+
+  it('startup trigger: the hidden window captures the Bearer and WS token in memory only; aperia:alert {type:session} pushes are clean', async () => {
+    setup();
+    const auth = await startupLogin();
+    expect(M.capture.current()).toBe(SENTINEL_BEARER);
+    expect(M.capture.wsToken()).toBe(SENTINEL_WS_TOKEN);
+    expect(fx.windows).toHaveLength(1);
+    expect(hidden()).toHaveLength(1);
+    expect(fx.windows[0].destroyed).toBe(true);
+    const pushes = ctx.sent.filter((s) => s[0] === 'aperia:alert');
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    expect(pushes.every((s) => JSON.stringify(s[1]) === '{"type":"session"}')).toBe(true);
+    const st = await call('aperia:status');
+    expect(st).toMatchObject({ state: 'connected', alerts: 'off' });
+    expect(logger.lines.some((l) => l.args[0] === '[aperia] auth' && l.args[1].op === 'background-login' && l.args[1].code === 'OK')).toBe(true);
+    auth._resetForTests();
+    assertClean([st]);
+  });
+
+  it('a 401 with no sign-in window open -> one hidden re-login, the read retries and succeeds; never a visible window; clean', async () => {
+    setup();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const auth = await startupLogin();
+      auth._resetForTests();
+      vi.setSystemTime(Date.now() + 3 * 60e3);          // past the background sign-in min gap
+      mode = 'once401';
+      const r = await call('aperia:unit', { assetId: 'NP6923' });
+      expect(r.ok).toBe(true);
+      expect(fx.windows).toHaveLength(2);
+      expect(shown()).toHaveLength(0);
+      expect(fx.windows.every((w) => w.destroyed)).toBe(true);
+      expect(logger.lines.some((l) => l.args[0] === '[aperia] auth' && l.args[1].reason === 'reauth' && l.args[1].code === 'OK')).toBe(true);
+      assertClean([r]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('the opt-in watcher, started by the user after a background sign-in, recovers silently from a 401 on its poll', async () => {
+    setup();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const auth = await startupLogin();
+      auth._resetForTests();
+      expect((await call('aperia:status')).alerts).toBe('off');   // background auth never turns alerts on
+      const s = await call('aperia:start-alerts', { minutes: 5 });
+      expect(s.ok).toBe(true);
+      vi.setSystemTime(Date.now() + 3 * 60e3);
+      mode = 'once401';
+      const pn = await call('aperia:poll-now');
+      expect(pn).toMatchObject({ ok: true });
+      expect(shown()).toHaveLength(0);
+      expect(hidden()).toHaveLength(2);
+      const stop = await call('aperia:stop-alerts');
+      assertClean([s, pn, stop]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('the challenge path (auto-login gives up) pushes action needed once; no visible window; clean', async () => {
+    setup();
+    fx = createFakeElectron({});
+    fx.electron.app.getPath = (k) => (k === 'downloads' ? DOWNLOADS : TMP);
+    M.session._setDeps({
+      electron: fx.electron,
+      autoLogin: { attachAutoLogin: (_w, _u, o) => { if (o && o.onDone) o.onDone({ success: false, error: 'bad_credentials' }); }, isLoginPage: async () => true },
+    });
+    const seen = [];
+    M.session.onStatus((x) => seen.push(x));
+    const r = await M.session.backgroundLogin({ reason: 'startup' });
+    expect(r).toEqual({ ok: false, code: 'APERIA_SIGNIN_ACTION_NEEDED' });
+    expect(M.session.status().actionNeeded).toBe(true);
+    expect(await M.session.backgroundLogin({ reason: 'expired' })).toEqual({ ok: false, code: 'AUTH_COOLDOWN' });
+    expect(seen.filter((x) => x.actionNeeded === true)).toHaveLength(1);
+    expect(shown()).toHaveLength(0);
+    assertClean([r, M.session.status()]);
+  }, 15000);
 });
 
 describe('Aperia static guards', () => {

@@ -2,8 +2,8 @@
 /**
  * src/dtna/constants.js — DTNA Service Tracker (Salesforce Experience Cloud, Aura) constants. Pure, no requires.
  *
- * DTNA network calls come from a user action (a click behind it) or from the normal sync pass while the
- * user is signed in (src/dtna/auto.js, session-gated, never a sign-in); nothing here schedules anything.
+ * DTNA network calls come from a user action (a click behind it), from the normal sync pass
+ * (src/dtna/auto.js) or from the gated background sign-in (src/dtna/auto-auth.js); nothing here schedules anything.
  */
 
 const HOST = 'dtna.my.site.com';
@@ -164,6 +164,18 @@ const SESSION_TIME_TIMEOUT_MS = 10e3;
 // Pre-flight before a write / bulk pull: below this many seconds left, ask the user to sign in again first.
 const SESSION_PREFLIGHT_MIN_SEC = 120;
 
+// Background sign-in (Phase E, src/dtna/auto-auth.js + session.backgroundLogin): a hidden window with the
+// stored-credential auto-login, at startup, on expiry and on a sync auth failure. Rate limited by
+// src/utils/auth-retry-gate.js: at most one attempt per BG_MIN_GAP_MS, BG_FAIL_COOLDOWN_MS after a
+// timeout, BG_ACTION_COOLDOWN_MS once a step needs the user (MFA / terms / no stored credentials).
+const BG_LOGIN_WAIT_MS = 90e3;
+const BG_STARTUP_DELAY_MS = 10e3;
+const BG_MIN_GAP_MS = 2 * 60e3;
+const BG_FAIL_COOLDOWN_MS = 5 * 60e3;
+const BG_ACTION_COOLDOWN_MS = 30 * 60e3;
+const BG_EXPIRY_SLACK_MS = 60e3;
+const BG_EXPIRY_MAX_MS = 9 * 3600e3;
+
 module.exports = {
   HOST, BASE, AURA_PATH, AURA_URL, PARTITION, LIST_URL, DEFAULT_LIST_FILTER,
   CASE_ID_RE, COMMENT_ID_RE, DTNA_CASE_URL_RE, caseUrl, LOGIN_HOST_RE,
@@ -172,4 +184,6 @@ module.exports = {
   THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, CASE_NUMBER_READ, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
   WRITE_METHODS, POST_COMMENT_MAX, CASE_STAGES, caseStageOf, stageIndex, isForwardStage, STAGE_CHANGE_PARAMS,
   SESSION_TIME_URL, SESSION_TIME_TIMEOUT_MS, SESSION_PREFLIGHT_MIN_SEC,
+  BG_LOGIN_WAIT_MS, BG_STARTUP_DELAY_MS, BG_MIN_GAP_MS, BG_FAIL_COOLDOWN_MS, BG_ACTION_COOLDOWN_MS,
+  BG_EXPIRY_SLACK_MS, BG_EXPIRY_MAX_MS,
 };

@@ -9,8 +9,9 @@
  * only, no network), dtna:change-stage (forward-only stage change: dealer-visible, ALWAYS through the
  * write gate's approval modal; DTNA_STAGE_NOT_CONFIGURED until constants.STAGE_CHANGE_PARAMS is filled)
  * and dtna:session-time (the SessionTimeServlet seconds left; user-initiated).
- * Before a stage change, a comment post or a bulk pull, a session pre-flight asks the user to sign in
- * again when the session is (nearly) expired; a failed pre-flight read never blocks.
+ * Before a stage change, a comment post or a bulk pull, a session pre-flight checks the session; when it
+ * is (nearly) expired, one gated hidden background sign-in runs and the pre-flight is read again, and
+ * only if it still blocks is the user asked to sign in. A failed pre-flight read never blocks.
  * Session status changes are pushed on dtna:status-changed.
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Results carry ids, counts and codes only: comment text stays in dtnaCaseCache / fleetData rows and
@@ -151,7 +152,7 @@ function registerDtnaIPC(ctx, deps) {
   });
 
   // Pre-flight: blocks only when the servlet says the session is expired or nearly so (fail-open).
-  const _preflight = async () => {
+  const _preflightOnce = async () => {
     try {
       const pf = await sessionTime().preflight();
       return pf && pf.block ? pf : null;
@@ -159,6 +160,22 @@ function registerDtnaIPC(ctx, deps) {
       log.warn('[dtna] preflight', safeErr(e));
       return null;
     }
+  };
+  // Blocked: one gated hidden background sign-in, then the pre-flight once more. Approvals stay where
+  // they are (after the pre-flight); this only decides whether the request may ask for one.
+  const _preflight = async () => {
+    const pf = await _preflightOnce();
+    if (!pf) return null;
+    let r = null;
+    try {
+      const S = session();
+      if (S && typeof S.backgroundLogin === 'function') r = await S.backgroundLogin({ reason: 'preflight' });
+    } catch (e) {
+      log.warn('[dtna] preflight sign-in', safeErr(e));
+      r = null;
+    }
+    if (!r || !r.ok) return pf;
+    return _preflightOnce();
   };
 
   // ── list ─────────────────────────────────────────────────────────────────

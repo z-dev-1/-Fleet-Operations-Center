@@ -82,6 +82,22 @@ describe('_get: 401 -> reauth -> retry once', () => {
     expect(session.reauth).toHaveBeenCalledTimes(1);
   });
 
+  it('Phase E: APERIA_SIGNIN_REQUIRED (no Bearer held) -> one reauth -> one retry', async () => {
+    let n = 0;
+    const { transport, session } = setup({ intercept: () => (n++ === 0 ? { ok: false, code: 'APERIA_SIGNIN_REQUIRED' } : null) });
+    const r = await client.getVehicle('104', {});
+    expect(r.ok).toBe(true);
+    expect(transport.calls).toHaveLength(2);
+    expect(session.reauth).toHaveBeenCalledTimes(1);
+  });
+
+  it('Phase E: APERIA_SIGNIN_REQUIRED and the reauth fails -> the same code, no retry', async () => {
+    const { transport, session } = setup({ intercept: () => ({ ok: false, code: 'APERIA_SIGNIN_REQUIRED' }) }, { reauth: async () => ({ ok: false, code: 'APERIA_SESSION_EXPIRED' }) });
+    expect(await client.getVehicle('104', {})).toEqual({ ok: false, code: 'APERIA_SIGNIN_REQUIRED' });
+    expect(transport.calls).toHaveLength(1);
+    expect(session.reauth).toHaveBeenCalledTimes(1);
+  });
+
   it('failed reauth -> APERIA_SESSION_EXPIRED without a retry', async () => {
     const { transport, session } = setup({ intercept: () => EXPIRED }, { reauth: async () => ({ ok: false, code: 'APERIA_SESSION_EXPIRED' }) });
     expect(await client.getVehicle('104', {})).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
@@ -207,13 +223,17 @@ describe('bulk / fleet worker pool', () => {
     expect(r.results[1]).toEqual({ assetId: 'NOPE', found: false, code: 'APERIA_UNIT_NOT_FOUND' });
   });
 
-  it('a fatal code stops scheduling', async () => {
-    const { transport } = setup({ pages: pages40, intercept: (p) => (/^\/api\/v1\/vehicles\/\w+$/.test(p) ? { ok: false, code: 'APERIA_SIGNIN_REQUIRED' } : null) });
+  it('a fatal code stops scheduling (signed out and the shared background re-login fails)', async () => {
+    const { transport, session } = setup(
+      { pages: pages40, intercept: (p) => (/^\/api\/v1\/vehicles\/\w+$/.test(p) ? { ok: false, code: 'APERIA_SIGNIN_REQUIRED' } : null) },
+      { reauth: async () => ({ ok: false, code: 'APERIA_SESSION_EXPIRED' }) },
+    );
     const r = await client.bulkLookup(Array.from({ length: 40 }, (_, i) => 'B' + i), { ctx: {} });
     expect(r.ok).toBe(false);
     expect(r.code).toBe('APERIA_SIGNIN_REQUIRED');
     expect(r.results.length).toBeLessThanOrEqual(C.CONCURRENCY);
     expect(transport.calls.filter((p) => /^\/api\/v1\/vehicles\/\w+$/.test(p)).length).toBeLessThanOrEqual(C.CONCURRENCY);
+    expect(session.reauth).toHaveBeenCalled();
   });
 
   it('session expired after the failed reauth is fatal', async () => {

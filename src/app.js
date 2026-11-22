@@ -701,6 +701,9 @@ function _startAutoSync() {
   if (isSetupComplete()) {
     _windowApi.createMainWindow();
     log.info('Main window created');
+    // Phase E: background DTNA / Aperia sign-in (hidden windows, a few seconds after this; never awaited).
+    try { require('./dtna/auto-auth').start(_ctx); } catch (e) { log.warn('[dtna] auto-auth start failed (non-fatal): ' + (e && e.name)); }
+    try { require('./aperia/auto-auth').start(_ctx); } catch (e) { log.warn('[aperia] auto-auth start failed (non-fatal): ' + (e && e.name)); }
   } else {
     log.info('First launch — showing setup wizard');
     _windowApi.showSetupWizard();

@@ -236,4 +236,15 @@ describe('dtnaPill (DTNA Service Tracker status pill)', () => {
     expect(fmtExpiresIn(3600)).toBe('1h 0m');
     expect(fmtExpiresIn(-5)).toBe('<1m');
   });
+  it('background sign-in (Phase E): actionNeeded on a signed-out / expired session -> amber "Action needed"; connected or busy -> unchanged', () => {
+    for (const state of ['expired', 'signed-out']) {
+      const p = dtnaPill({ ok: true, state, actionNeeded: true });
+      expect(p).toMatchObject({ cls: 'tb-dtna tb-dtna--amber', text: 'DTNA: Action needed \u00b7 click to sign in' });
+      expect(p.title).toMatch(/Background sign-in needs you to finish a sign-in step\./);
+    }
+    expect(dtnaPill({ ok: true, state: 'connected', actionNeeded: true }).text).toBe('DTNA: Connected');
+    expect(dtnaPill({ ok: true, state: 'connecting', actionNeeded: true }).text).toBe('DTNA: Connecting\u2026');
+    expect(dtnaPill({ ok: true, state: 'pulling', actionNeeded: true }).text).toBe('DTNA: Pulling\u2026');
+    expect(dtnaPill({ ok: true, state: 'expired', actionNeeded: 'yes' }).text).toBe('DTNA: Expired \u00b7 sign in to refresh');
+  });
 });

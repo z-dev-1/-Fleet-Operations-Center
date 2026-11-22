@@ -188,6 +188,14 @@ export function dtnaPill(status) {
   const hit = (typeof st === 'string' && Object.prototype.hasOwnProperty.call(_DTNA_PILL, st)) ? _DTNA_PILL[st] : ['grey', 'DTNA \u2026'];
   let text = hit[1];
   let title = 'DTNA Service Tracker: refreshes on each sync while connected. Sign in to refresh DTNA. Click to sign in or pull cases.';
+  // The background sign-in reached a step it cannot finish on its own (MFA, terms, no saved credentials).
+  if (status && status.actionNeeded === true && st !== 'connected' && st !== 'pulling' && st !== 'connecting') {
+    return {
+      cls: 'tb-dtna tb-dtna--amber',
+      text: 'DTNA: Action needed \u00b7 click to sign in',
+      title: title + ' Background sign-in needs you to finish a sign-in step.',
+    };
+  }
   // expiresInSec comes from the last session-time read (a click), counted down in main; no polling here.
   const exp = status && typeof status === 'object' ? status.expiresInSec : undefined;
   if (st === 'connected' && Number.isFinite(exp) && exp > 0) {

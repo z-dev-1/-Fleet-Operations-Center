@@ -80,6 +80,16 @@ describe('aperiaPill / alertsLabel / fmtEt (pure)', () => {
     expect(p({ state: 'weird' }).text).toBe('Aperia \u2026');
     expect(p(null).title).toContain('never checks Aperia on its own');
   });
+  it('background sign-in (Phase E): actionNeeded -> amber "Action needed"; connected / connecting unchanged', () => {
+    const p = (s) => logic.aperiaPill(s);
+    for (const state of ['signed-out', 'expired']) {
+      expect(p({ state, actionNeeded: true })).toMatchObject({ cls: 'tb-aperia tb-aperia--amber', text: 'Aperia: Action needed \u00b7 click to sign in' });
+    }
+    expect(p({ state: 'expired', actionNeeded: true }).title).toMatch(/Background sign-in needs you to finish a sign-in step\./);
+    expect(p({ state: 'connected', actionNeeded: true }).text).toBe('Aperia: Connected');
+    expect(p({ state: 'connecting', actionNeeded: true }).text).toBe('Aperia: Connecting\u2026');
+    expect(p({ state: 'expired', actionNeeded: 1 }).text).toBe('Aperia: Expired');
+  });
   it('alertsLabel and ET formatting (process TZ is UTC)', () => {
     expect(logic.alertsLabel({ alerts: 'ws' })).toBe('Tire Alerts: ON');
     expect(logic.alertsLabel({ alerts: 'polling' })).toBe('Tire Alerts: ON');

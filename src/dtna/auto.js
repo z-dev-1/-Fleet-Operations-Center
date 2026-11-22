@@ -7,8 +7,10 @@
  * Decisiv branches. No timer and no scheduler here.
  *
  * Session-gated: a read runs only while the user is signed in (session.canAutoSync()). Signed out or
- * expired, every call returns the cached entry with no network and no window. Reads are {silent:true}:
- * no sign-in window and no auto-login, so a sync can never start an interactive or MFA login.
+ * expired, the pass first asks the session for one gated HIDDEN background sign-in
+ * (session.backgroundLogin, rate limited there) and reads live once it succeeds; otherwise every call
+ * returns the cached entry with no network. Reads are {silent:true}: never a visible sign-in window,
+ * so a sync can never put an interactive or MFA prompt in front of the user.
  * Logs: op, caseTag, counts, codes and ms only.
  */
 const { setTimeout: _wait } = require('timers/promises');
@@ -49,6 +51,27 @@ function gate() {
   let ok = false;
   try { ok = _session().canAutoSync() === true; } catch (_) { ok = false; }
   return ok ? { ok: true } : { ok: false, code: SIGNED_OUT };
+}
+
+/**
+ * ensureSignedIn() -> {ok:true} | {ok:false, code:'DTNA_AUTO_SIGNED_OUT'}
+ * gate(), and when closed one gated hidden background sign-in (session.backgroundLogin) then gate()
+ * again. A session without backgroundLogin behaves exactly like gate().
+ */
+let _signInP = null; // concurrent sync callers share one background sign-in
+function ensureSignedIn() {
+  if (gate().ok) return Promise.resolve({ ok: true });
+  let S = null;
+  try { S = _session(); } catch (_) { S = null; }
+  if (!S || typeof S.backgroundLogin !== 'function') return Promise.resolve({ ok: false, code: SIGNED_OUT });
+  if (!_signInP) {
+    _signInP = Promise.resolve()
+      .then(() => S.backgroundLogin({ reason: 'sync' }))
+      .catch(() => null)
+      .then(() => gate())
+      .finally(() => { _signInP = null; });
+  }
+  return _signInP;
 }
 
 // At most C.CONCURRENCY live pulls at once across every caller (a released slot is handed over).
@@ -97,7 +120,7 @@ async function pullIfStale(caseId, opts) {
     const age = _now() - at;
     if (age >= 0 && age < fresh) return { ok: true, entry, live: false };
   }
-  const g = gate();
+  const g = await ensureSignedIn();
   if (!g.ok) { _noteSkip(g.code); return { ok: !!entry, entry, live: false, code: g.code }; }
   _lastSkip = null;
   if (_inflight.has(caseId)) return _inflight.get(caseId);
@@ -115,7 +138,7 @@ async function pullIfStale(caseId, opts) {
 async function discover(opts) {
   const o = opts || {};
   const budget = Math.max(0, Math.floor(Number(o.budget) || 0));
-  const g = gate();
+  const g = await ensureSignedIn();
   if (!g.ok) { _noteSkip(g.code); return { pulled: 0, code: g.code }; }
   if (!budget) return { pulled: 0, code: 'OK' };
   const want = new Set((Array.isArray(o.units) ? o.units : []).map(J.normUnit).filter(Boolean));
@@ -135,7 +158,7 @@ async function discover(opts) {
   let code = 'OK';
   for (let i = 0; i < todo.length; i += C.CONCURRENCY) {
     if (i > 0) await _sleep(C.BATCH_GAP_MS);
-    if (!gate().ok) { code = SIGNED_OUT; break; }
+    if (!(await ensureSignedIn()).ok) { code = SIGNED_OUT; break; }
     let stop = null;
     await Promise.all(todo.slice(i, i + C.CONCURRENCY).map(async (id) => {
       const r = await _pull(id, { includeComments: false });
@@ -173,7 +196,7 @@ function applyCachedCase(row, opts) {
 }
 
 function _resetForTests() {
-  _deps = {}; _lastSkip = null; _active = 0; _queue.length = 0; _inflight.clear(); _discovered.clear();
+  _deps = {}; _lastSkip = null; _active = 0; _queue.length = 0; _inflight.clear(); _discovered.clear(); _signInP = null;
 }
 
-module.exports = { gate, pullIfStale, discover, applyCachedCase, _setDeps, _resetForTests };
+module.exports = { gate, ensureSignedIn, pullIfStale, discover, applyCachedCase, _setDeps, _resetForTests };

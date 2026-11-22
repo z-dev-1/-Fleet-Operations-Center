@@ -2,8 +2,9 @@
 /**
  * src/aperia/constants.js — Aperia HALO Connect (amazon.aperiatech.com) constants. Pure, no requires.
  *
- * Every Aperia network call is user-initiated (a sign-in, a click or the opt-in alert watcher);
- * nothing here schedules anything. The client is READ-ONLY: GET only, never a write method.
+ * Aperia network calls come from a user action (a sign-in, a click or the opt-in alert watcher) or the
+ * gated background sign-in (src/aperia/auto-auth.js); nothing here schedules anything. The client is
+ * READ-ONLY: GET only, never a write method.
  */
 const HOST = 'amazon.aperiatech.com';
 const BASE_URL = 'https://amazon.aperiatech.com';
@@ -94,6 +95,16 @@ const CONCURRENCY = 6;
 const INDEX_TTL_MS = 6 * 3600e3;
 const INDEX_MISS_REBUILD_MS = 15 * 60e3;
 const REAUTH_WAIT_MS = 120e3;
+// Background sign-in (Phase E, src/aperia/auto-auth.js + session.backgroundLogin): a hidden window on the
+// portal with the stored-credential auto-login. Same rate limits as DTNA (src/utils/auth-retry-gate.js).
+const BG_LOGIN_WAIT_MS = 60e3;
+const BG_STARTUP_DELAY_MS = 25e3;
+const BG_MIN_GAP_MS = 2 * 60e3;
+const BG_FAIL_COOLDOWN_MS = 5 * 60e3;
+const BG_ACTION_COOLDOWN_MS = 30 * 60e3;
+// After the Bearer is captured the hidden window stays up to this long for the portal's own alert
+// socket, so its x-authorization token is captured too (the opt-in watcher's WS path).
+const BG_WS_GRACE_MS = 10e3;
 const MAX_PAGES = 100;
 const BULK_MAX = 500;
 const UNIT_MAX = 40;
@@ -153,6 +164,7 @@ module.exports = {
   FORBIDDEN_PATH_RES, FORBIDDEN_ENDPOINTS, WRITE_METHODS, ALLOWED_METHODS,
   SIGNIN_WINDOW_MS, FETCH_TIMEOUT_MS, MAX_BODY_BYTES,
   CONCURRENCY, INDEX_TTL_MS, INDEX_MISS_REBUILD_MS, REAUTH_WAIT_MS, MAX_PAGES, BULK_MAX, UNIT_MAX,
+  BG_LOGIN_WAIT_MS, BG_STARTUP_DELAY_MS, BG_MIN_GAP_MS, BG_FAIL_COOLDOWN_MS, BG_ACTION_COOLDOWN_MS, BG_WS_GRACE_MS,
   STALE_MS, CRITICAL_RATIO, LOW_RATIO, HIGH_RATIO, PLACEHOLDER_GPS, GPS_EPS, US_BOX,
   ALERT_POLL_DEFAULT_MIN, ALERT_POLL_MIN, ALERT_POLL_MAX, SEEN_FILE, SEEN_MAX_AGE_MS, SEEN_MAX, TZ, WS_OPEN_TIMEOUT_MS,
   parseUrl, isApiUrl, isForbiddenPath, isPortalUrl, isAllowedApiPath,

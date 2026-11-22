@@ -262,20 +262,39 @@ describe('session.reauth / notePull', () => {
     expect(session.status().state).not.toBe('connected');
   });
 
-  it('times out with APERIA_SESSION_EXPIRED after REAUTH_WAIT_MS (fake timers)', async () => {
+  it('no sign-in window open: the hidden background sign-in gives up after BG_LOGIN_WAIT_MS -> APERIA_SESSION_EXPIRED; a new reauth inside the cooldown returns at once with no window (fake timers)', async () => {
+    vi.useFakeTimers();
+    const fx = createFakeElectron();
+    session._setDeps({ electron: fx.electron, autoLogin: { attachAutoLogin() {}, isLoginPage: async () => false } });
+    let res = null;
+    session.reauth({}).then((r) => { res = r; });
+    await vi.advanceTimersByTimeAsync(C.BG_LOGIN_WAIT_MS - 1000);
+    expect(res).toBeNull();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(res).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+    expect(fx.windows).toHaveLength(1);
+    expect(fx.windows[0].options.show).toBe(false);
+    expect(fx.windows[0].destroyed).toBe(true);
+    const p = session.reauth({}, { timeoutMs: 500 });
+    expect(await p).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+    expect(fx.windows).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('the sign-in window open: reload-and-wait still times out after REAUTH_WAIT_MS (fake timers)', async () => {
     vi.useFakeTimers();
     const fx = createFakeElectron();
     session._setDeps({ electron: fx.electron });
+    session.openLoginWindow({});
+    await flush();
+    fx.windows[0].webContents.reload = () => {};
     let res = null;
     session.reauth({}).then((r) => { res = r; });
     await vi.advanceTimersByTimeAsync(C.REAUTH_WAIT_MS - 1000);
     expect(res).toBeNull();
     await vi.advanceTimersByTimeAsync(2000);
     expect(res).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
-    // a new reauth after the timeout starts a new wait
-    const p = session.reauth({}, { timeoutMs: 500 });
-    await vi.advanceTimersByTimeAsync(600);
-    expect(await p).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+    expect(fx.windows).toHaveLength(1);
   });
 
   it('notePull sets lastPullAt in status()', () => {

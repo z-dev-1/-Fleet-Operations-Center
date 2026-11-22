@@ -200,22 +200,48 @@ describe('ensureContext', () => {
 describe('Phase D: canAutoSync and silent ensureContext (sync pass)', () => {
   const hiddenAutoLogins = (win) => autoLogin.attachAutoLogin.mock.calls.filter((c) => c[0] === win).length;
 
-  it('never signed in this run -> canAutoSync false; silent opens no window', async () => {
+  it('never signed in this run -> silent runs one HIDDEN background sign-in (auto-login with onDone) and connects', async () => {
     expect(session.canAutoSync()).toBe(false);
-    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
-    expect(await session.ensureContext({ silent: true, force: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
-    expect(fx.windows).toHaveLength(0);
-    expect(autoLogin.attachAutoLogin).not.toHaveBeenCalled();
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(1);
+    const w = fx.windows[0];
+    expect(w.options.show).toBe(false);
+    expect(w.options).toMatchObject({ skipTaskbar: true, x: -4000, y: -4000 });
+    expect(w.destroyed).toBe(true);
+    expect(autoLogin.attachAutoLogin).toHaveBeenCalledWith(w, C.LIST_URL, { maxRetries: 2, onDone: expect.any(Function) });
+    expect(session.status().state).toBe('connected');
+    expect(session.canAutoSync()).toBe(true);
+    // Connected with a fresh capture: a second silent call opens nothing.
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(1);
+    noConsoleListener();
   });
 
-  it('signed in -> canAutoSync true; marked expired -> false and silent opens no window', async () => {
+  it('never signed in and the hidden sign-in needs the user -> DTNA_SIGNIN_REQUIRED + actionNeeded; a second silent call inside the cooldown opens no window', async () => {
+    vi.useFakeTimers();
+    signedIn = false;
+    let done = null;
+    session.ensureContext({ silent: true }).then((r) => { done = r; });
+    await vi.advanceTimersByTimeAsync(C.BG_LOGIN_WAIT_MS);
+    expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(session.status()).toMatchObject({ state: 'signed-out', actionNeeded: true });
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fx.windows).toHaveLength(1);
+    expect(fx.windows.every((w) => w.options.show === false && w.destroyed)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('signed in -> canAutoSync true; marked expired -> false and silent re-signs in through one hidden window', async () => {
     await session.openLoginWindow({});
     expect(session.canAutoSync()).toBe(true);
     session.noteResult('DTNA_SESSION_EXPIRED');
     expect(session.canAutoSync()).toBe(false);
     capture.clear();
-    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
-    expect(fx.windows).toHaveLength(1);
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(2);
+    expect(fx.windows[1].options.show).toBe(false);
+    expect(fx.windows[1].destroyed).toBe(true);
+    expect(session.canAutoSync()).toBe(true);
   });
 
   it('a session-time reading at 0 s left -> canAutoSync false', async () => {
@@ -257,7 +283,7 @@ describe('Phase D: canAutoSync and silent ensureContext (sync pass)', () => {
     expect(autoLogin.attachAutoLogin).toHaveBeenCalledTimes(1); // the visible sign-in window only
   });
 
-  it('silent hidden window resting on a login host -> DTNA_SIGNIN_REQUIRED well before HIDDEN_WAIT_MS, no timer left', async () => {
+  it('silent refresh resting on a login host gives up well before HIDDEN_WAIT_MS, then ONE hidden background sign-in -> DTNA_SIGNIN_REQUIRED + actionNeeded', async () => {
     vi.useFakeTimers();
     const p = session.openLoginWindow({});
     await vi.advanceTimersByTimeAsync(10);
@@ -267,10 +293,18 @@ describe('Phase D: canAutoSync and silent ensureContext (sync pass)', () => {
     let done = null;
     session.ensureContext({ silent: true }).then((r) => { done = r; });
     await vi.advanceTimersByTimeAsync(6000);
-    expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
     const hidden = fx.windows[1];
     expect(hidden.destroyed).toBe(true);
     expect(hiddenAutoLogins(hidden)).toBe(0);
+    expect(fx.windows).toHaveLength(3);
+    const bg = fx.windows[2];
+    expect(bg.options.show).toBe(false);
+    expect(hiddenAutoLogins(bg)).toBe(1);
+    expect(done).toBeNull();
+    await vi.advanceTimersByTimeAsync(C.BG_LOGIN_WAIT_MS);
+    expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(bg.destroyed).toBe(true);
+    expect(session.status().actionNeeded).toBe(true);
     fx.windows[0].close();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -285,6 +319,116 @@ describe('Phase D: canAutoSync and silent ensureContext (sync pass)', () => {
     expect(hiddenAutoLogins(fx.windows[0])).toBe(1);
     await vi.advanceTimersByTimeAsync(C.HIDDEN_WAIT_MS);
     expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+  });
+});
+
+describe('Phase E: backgroundLogin (startup / expiry / sync re-login)', () => {
+  const visible = () => fx.windows.filter((w) => w.options.show !== false);
+  const challengeLogin = () => {
+    autoLogin = { attachAutoLogin: vi.fn((_w, _u, o) => { if (o && o.onDone) o.onDone({ success: false, error: 'bad_credentials' }); }) };
+    session._setDeps({ electron: fx.electron, autoLogin });
+  };
+
+  it('a saved session resumes: one hidden window captures, status connected, no visible window', async () => {
+    const seen = [];
+    session.onStatus((s) => seen.push(s.state));
+    expect(await session.backgroundLogin({ reason: 'startup' })).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(1);
+    expect(visible()).toHaveLength(0);
+    expect(fx.windows[0].destroyed).toBe(true);
+    const id = fx.windows[0].webContents.id;
+    expect(fx.calls.events.indexOf('attach:' + id)).toBeLessThan(fx.calls.events.indexOf('loadURL:' + id));
+    expect(session.status().state).toBe('connected');
+    expect(session.status().actionNeeded).toBeUndefined();
+    expect(seen).toEqual(['connecting', 'connected']);
+    // Already connected with a fresh capture: no window at all.
+    expect(await session.backgroundLogin({ reason: 'expiry' })).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(1);
+    noConsoleListener();
+  });
+
+  it('concurrent calls share one hidden window', async () => {
+    const p1 = session.backgroundLogin({ reason: 'startup' });
+    const p2 = session.backgroundLogin({ reason: 'sync' });
+    const p3 = session.ensureContext({ silent: true });
+    expect(p2).toBe(p1);
+    expect(await p1).toEqual({ ok: true });
+    expect(await p3).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(1);
+  });
+
+  it('the visible sign-in in progress -> DTNA_SIGNIN_IN_PROGRESS, no hidden window', async () => {
+    signedIn = false;
+    const p = session.openLoginWindow({});
+    expect(await session.backgroundLogin({ reason: 'startup' })).toEqual({ ok: false, code: 'DTNA_SIGNIN_IN_PROGRESS' });
+    expect(fx.windows).toHaveLength(1);
+    fx.windows[0].close();
+    await p;
+  });
+
+  it('an interactive challenge (auto-login gives up) -> action needed pushed exactly once across two attempts, never a visible window', async () => {
+    vi.useFakeTimers();
+    signedIn = false;
+    challengeLogin();
+    const seen = [];
+    session.onStatus((s) => seen.push(s));
+    let r1 = null;
+    session.backgroundLogin({ reason: 'startup' }).then((r) => { r1 = r; });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(r1).toEqual({ ok: false, code: 'DTNA_SIGNIN_ACTION_NEEDED' });
+    expect(session.status()).toMatchObject({ state: 'signed-out', actionNeeded: true });
+    // Inside the 30 min cooldown: gated, no window.
+    await vi.advanceTimersByTimeAsync(10 * 60e3);
+    expect(await session.backgroundLogin({ reason: 'sync' })).toEqual({ ok: false, code: 'AUTH_COOLDOWN' });
+    expect(fx.windows).toHaveLength(1);
+    // After the cooldown: one quiet retry, still latched, no second "action needed" transition.
+    await vi.advanceTimersByTimeAsync(C.BG_ACTION_COOLDOWN_MS);
+    let r2 = null;
+    session.backgroundLogin({ reason: 'expiry' }).then((r) => { r2 = r; });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(r2).toEqual({ ok: false, code: 'DTNA_SIGNIN_ACTION_NEEDED' });
+    expect(fx.windows).toHaveLength(2);
+    expect(visible()).toHaveLength(0);
+    let transitions = 0;
+    let prev = false;
+    for (const s of seen) { const a = s.actionNeeded === true; if (a && !prev) transitions++; prev = a; }
+    expect(transitions).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    noConsoleListener();
+  });
+
+  it('timeout off a login host -> DTNA_TIMEOUT (no action needed) and a 5 min cooldown', async () => {
+    vi.useFakeTimers();
+    setup({ onLoad: () => {} });
+    let r = null;
+    session.backgroundLogin({ reason: 'startup' }).then((x) => { r = x; });
+    await vi.advanceTimersByTimeAsync(C.BG_LOGIN_WAIT_MS);
+    expect(r).toEqual({ ok: false, code: 'DTNA_TIMEOUT' });
+    expect(session.status().actionNeeded).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(3 * 60e3);
+    expect(await session.backgroundLogin({ reason: 'sync' })).toEqual({ ok: false, code: 'AUTH_COOLDOWN' });
+    expect(fx.windows).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2 * 60e3 + 1000);
+    session.backgroundLogin({ reason: 'sync' });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fx.windows).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(C.BG_LOGIN_WAIT_MS);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a manual Sign in clears actionNeeded', async () => {
+    vi.useFakeTimers();
+    signedIn = false;
+    challengeLogin();
+    session.backgroundLogin({ reason: 'startup' });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(session.status().actionNeeded).toBe(true);
+    signedIn = true;
+    const p = session.openLoginWindow({});
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await p).toEqual({ ok: true, state: 'connected' });
+    expect(session.status().actionNeeded).toBeUndefined();
+    expect(Object.keys(session.status()).sort()).toEqual(['contextAgeSec', 'lastCode', 'lastPullAt', 'ok', 'state']);
   });
 });
 

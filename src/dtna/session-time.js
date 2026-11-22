@@ -6,8 +6,9 @@
  * The servlet answers 'while(1);{"sp":<period secs>,"sr":<remaining secs>}'. Only the two integers ever
  * leave this module; the body is never logged, stored or returned. The OIDC user-info handler (which
  * returns an id token) is never called: that ~1 h token does not authorize the Aura API.
- * Runs only on a user action (DTNA panel open / Check session, or a pre-flight before a write or bulk
- * pull). Nothing here schedules anything. Never throws.
+ * Runs on a user action (DTNA panel open / Check session, or a pre-flight before a write or bulk
+ * pull) and once after a background sign-in or when its expiry timer fires (src/dtna/auto-auth.js).
+ * Nothing here schedules anything. Never throws.
  * Logs: { code, remainingSec, ms } only.
  */
 const C = require('./constants');
