@@ -1,0 +1,248 @@
+'use strict';
+/**
+ * src/aperia/watcher.js — the opt-in tire alert watcher. OFF at load: requiring this module starts no
+ * timer and makes no Aperia call.
+ *
+ *   start({ minutes, ctx }) -> { ok:true, status } | { ok:true, already:true, status } | { ok:false, code }
+ *     Needs a captured Bearer (APERIA_SIGNIN_REQUIRED). Primes the seen ids from one issues read WITHOUT
+ *     notifying, starts the poll interval (minutes 1..60, default 5) and, when C.APERIA_WS_ENABLED and a WS
+ *     token was captured, the alert socket. Each tick polls only while the socket is not open.
+ *   stop() -> { ok:true, status }       clears the interval, closes the socket.
+ *   pollNow(ctx) -> { ok:true, newCount } | { ok:false, code }   (APERIA_ALERTS_OFF when off)
+ *   status() -> { alerts:'off'|'ws'|'polling', minutes, lastPollAt, lastNewCount }
+ *
+ * One desktop Notification per new non-muted issue id; ids persist in aperia_seen_alerts.json so a restart
+ * never re-notifies. Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
+ * Logs carry counts and codes only.
+ */
+const C0 = require('./constants');
+const { safeErr } = require('./redact');
+const log = require('../utils/logger')('aperia');
+
+// Test seam: { client, capture, seenStore, createAlertSocket, Notification, send, mainWindow, now, timers, constants }.
+let _deps = {};
+function _setDeps(d) { _deps = d || {}; }
+function _C() { return _deps.constants || C0; }
+function _client() { return _deps.client || require('./client'); }
+function _capture() { return _deps.capture || require('./capture'); }
+function _seenStore() { return _deps.seenStore || require('./seen-store'); }
+function _createSocket() { return _deps.createAlertSocket || require('./ws').createAlertSocket; }
+function _now() { return typeof _deps.now === 'function' ? _deps.now() : Date.now(); }
+function _timers() {
+  return Object.assign({
+    setInterval: (...a) => globalThis.setInterval(...a),
+    clearInterval: (t) => globalThis.clearInterval(t),
+  }, _deps.timers || {});
+}
+function _Notification() {
+  if ('Notification' in _deps) return _deps.Notification;
+  try { return require('electron').Notification; } catch (_) { return null; }
+}
+
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+let _on = false;
+let _ctx = null;
+let _gen = 0;
+let _minutes = C0.ALERT_POLL_DEFAULT_MIN;
+let _interval = null;
+let _socket = null;
+let _seen = new Map();
+let _lastPollAt = null;
+let _lastNewCount = 0;
+let _lastMode = 'off';
+let _startP = null;
+let _pollP = null;
+
+function status() {
+  const alerts = !_on ? 'off' : (_socket && _socket.state() === 'open' ? 'ws' : 'polling');
+  return { alerts, minutes: _minutes, lastPollAt: _lastPollAt, lastNewCount: _lastNewCount };
+}
+
+function _send(ch, payload) {
+  try {
+    if (typeof _deps.send === 'function') _deps.send(ch, payload);
+    else if (_ctx && typeof _ctx.sendToWindow === 'function') _ctx.sendToWindow(ch, payload);
+  } catch (e) { log.warn('[aperia] watcher send', { code: 'APERIA_SEND_FAILED', err: safeErr(e) }); }
+}
+
+/** _emitStatus(force) — send { type:'watcher', status } when the mode changed (or always when forced). */
+function _emitStatus(force) {
+  const st = status();
+  if (!force && st.alerts === _lastMode) return;
+  _lastMode = st.alerts;
+  _send('aperia:alert', { type: 'watcher', status: st });
+}
+
+function _q(v) { const s = v === null || v === undefined ? '' : String(v); return s || '?'; }
+
+function _notify(alert) {
+  const title = `${_q(alert.severity)}: ${_q(alert.fleetVehicleId)}`;
+  const body = `${_q(alert.state).replace(/_/g, ' ')} \u2013 ${_q(alert.positionName)} (${_q(alert.domicile)})`;
+  const N = _Notification();
+  try {
+    if (N && typeof N.isSupported === 'function' && N.isSupported()) {
+      const n = new N({ title, body, silent: false });
+      n.on('click', () => {
+        const w = _deps.mainWindow || (_ctx && _ctx.mainWindow);
+        if (w) { try { w.show(); w.focus(); } catch (_) {} }
+      });
+      n.show();
+    }
+  } catch (e) { log.warn('[aperia] watcher notify', { code: 'APERIA_NOTIFY_FAILED', err: safeErr(e) }); }
+  _send('aperia:alert', {
+    type: 'alert',
+    alert: {
+      id: alert.id, severity: alert.severity || '', fleetVehicleId: alert.fleetVehicleId || '', state: alert.state || '',
+      positionName: alert.positionName || '', domicile: alert.domicile || '', detectedAt: alert.detectedAt || '',
+    },
+  });
+}
+
+function _save() { try { _seenStore().save(_seen, _now()); } catch (e) { log.warn('[aperia] watcher save', { code: 'APERIA_SEEN_WRITE_FAILED', err: safeErr(e) }); } }
+
+function _validMinutes(m) {
+  const C = _C();
+  return Number.isInteger(m) && m >= C.ALERT_POLL_MIN && m <= C.ALERT_POLL_MAX ? m : C.ALERT_POLL_DEFAULT_MIN;
+}
+
+async function _doStart(opts) {
+  const gen = ++_gen;
+  const t0 = Date.now();
+  const C = _C();
+  const ctx = opts.ctx || null;
+  const minutes = _validMinutes(opts.minutes);
+  if (!_capture().current()) return { ok: false, code: 'APERIA_SIGNIN_REQUIRED' };
+  const seen = _seenStore().load(_now());
+  let r;
+  try { r = await _client().listIssues(ctx); } catch (e) { log.warn('[aperia] watcher start', { code: 'APERIA_INTERNAL', err: safeErr(e) }); r = { ok: false, code: 'APERIA_INTERNAL' }; }
+  if (gen !== _gen) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+  if (!r || !r.ok) { log.info('[aperia] watcher start', { code: (r && r.code) || 'APERIA_INTERNAL' }); return { ok: false, code: (r && r.code) || 'APERIA_INTERNAL' }; }
+  const at = _now();
+  let primed = 0;
+  for (const x of Array.isArray(r.rows) ? r.rows : []) {
+    const id = x && x.issueId != null ? String(x.issueId) : '';
+    if (ID_RE.test(id) && !seen.has(id)) { seen.set(id, at); primed++; }
+  }
+  _seen = seen;
+  _ctx = ctx;
+  _minutes = minutes;
+  _on = true;
+  _lastPollAt = new Date(at).toISOString();
+  _lastNewCount = 0;
+  _save();
+  _interval = _timers().setInterval(_tick, minutes * 60e3);
+  try { if (_interval && typeof _interval.unref === 'function') _interval.unref(); } catch (_) {}
+  _emitStatus(true);
+  const token = C.APERIA_WS_ENABLED ? _capture().wsToken() : null;
+  if (token) {
+    const sock = _createSocket()({
+      token,
+      onAlert: (a) => { if (_socket === sock) _onWsAlert(a); },
+      onState: () => { if (_socket === sock) _emitStatus(false); },
+    });
+    _socket = sock;
+    sock.open();
+  }
+  log.info('[aperia] watcher start', { seen: _seen.size, primed, minutes, ws: !!token, ms: Date.now() - t0 });
+  return { ok: true, status: status() };
+}
+
+function start(opts) {
+  if (_on) return Promise.resolve({ ok: true, already: true, status: status() });
+  if (_startP) return _startP;
+  _startP = _doStart(opts || {}).finally(() => { _startP = null; });
+  return _startP;
+}
+
+function stop() {
+  _gen++;
+  if (_interval) { try { _timers().clearInterval(_interval); } catch (_) {} _interval = null; }
+  const sock = _socket;
+  _socket = null;
+  if (sock) { try { sock.close(); } catch (_) {} }
+  const was = _on;
+  _on = false;
+  if (was) { log.info('[aperia] watcher stop', { seen: _seen.size }); _emitStatus(true); }
+  return { ok: true, status: status() };
+}
+
+function _tick() {
+  if (!_on) return;
+  if (_socket && _socket.state() === 'open') return;
+  _poll(_ctx).catch(() => {});
+}
+
+function _poll(ctx) {
+  if (_pollP) return _pollP;
+  _pollP = (async () => {
+    const gen = _gen;
+    let r;
+    try { r = await _client().listIssues(ctx || _ctx); } catch (e) { log.warn('[aperia] watcher poll', { code: 'APERIA_INTERNAL', err: safeErr(e) }); r = { ok: false, code: 'APERIA_INTERNAL' }; }
+    if (gen !== _gen || !_on) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+    _lastPollAt = new Date(_now()).toISOString();
+    if (!r || !r.ok) { log.info('[aperia] watcher poll', { code: (r && r.code) || 'APERIA_INTERNAL' }); return { ok: false, code: (r && r.code) || 'APERIA_INTERNAL' }; }
+    const at = _now();
+    const fresh = [];
+    for (const x of Array.isArray(r.rows) ? r.rows : []) {
+      if (!x || x.muted === true) continue;
+      const id = x.issueId != null ? String(x.issueId) : '';
+      if (!ID_RE.test(id) || _seen.has(id)) continue;
+      _seen.set(id, at);
+      fresh.push({
+        id, severity: x.severity, fleetVehicleId: x.fleetVehicleId, state: x.state,
+        positionName: x.positionName, domicile: x.domicile, detectedAt: x.dateDetected,
+      });
+    }
+    if (fresh.length) _save();
+    _lastNewCount = fresh.length;
+    for (const a of fresh) _notify(a);
+    log.info('[aperia] watcher poll', { rows: Array.isArray(r.rows) ? r.rows.length : 0, newCount: fresh.length });
+    return { ok: true, newCount: fresh.length };
+  })().finally(() => { _pollP = null; });
+  return _pollP;
+}
+
+async function pollNow(ctx) {
+  if (!_on) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+  return _poll(ctx || _ctx);
+}
+
+/** _onWsAlert(a) — one socket alert: skip seen ids; mark seen + save; enrich (best effort); notify. */
+async function _onWsAlert(a) {
+  if (!_on || !a) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+  const id = a.id != null ? String(a.id) : '';
+  if (!ID_RE.test(id) || _seen.has(id)) return { ok: true, notified: false };
+  _seen.set(id, _now());
+  _save();
+  const gen = _gen;
+  const alert = {
+    id, severity: a.severity, fleetVehicleId: a.fleetVehicleId, state: a.state,
+    positionName: '', domicile: '', detectedAt: new Date(_now()).toISOString(),
+  };
+  try {
+    const r = a.vehicleId ? await _client().getVehicle(a.vehicleId, _ctx) : null;
+    if (r && r.ok && r.unit) {
+      const u = r.unit;
+      const hit = (Array.isArray(u.issues) ? u.issues : []).find((x) => x && String(x.id) === id)
+        || (Array.isArray(u.tires) ? u.tires : []).find((t) => t && t.issue && String(t.issue.id) === id);
+      if (hit) alert.positionName = hit.positionName || '';
+      alert.domicile = u.domicile || '';
+      if (!alert.fleetVehicleId) alert.fleetVehicleId = u.fleetVehicleId || '';
+    } else if (r) {
+      log.info('[aperia] watcher enrich', { code: r.code || 'APERIA_INTERNAL' });
+    }
+  } catch (e) { log.warn('[aperia] watcher enrich', { code: 'APERIA_INTERNAL', err: safeErr(e) }); }
+  if (gen !== _gen || !_on) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+  _notify(alert);
+  return { ok: true, notified: true };
+}
+
+function _resetForTests() {
+  if (_interval) { try { _timers().clearInterval(_interval); } catch (_) {} }
+  if (_socket) { try { _socket.close(); } catch (_) {} }
+  _deps = {}; _on = false; _ctx = null; _gen = 0; _minutes = C0.ALERT_POLL_DEFAULT_MIN; _interval = null; _socket = null;
+  _seen = new Map(); _lastPollAt = null; _lastNewCount = 0; _lastMode = 'off'; _startP = null; _pollP = null;
+}
+
+module.exports = { start, stop, pollNow, status, _onWsAlert, _setDeps, _resetForTests };
