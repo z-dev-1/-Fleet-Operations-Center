@@ -128,14 +128,26 @@ const WRITE_METHODS = Object.freeze({
 // The composer has no maxlength (P2); the app caps a posted comment at the write gate's COMMENT_MAX.
 const POST_COMMENT_MAX = 2000;
 // Change DTNA Stage (Phase C, 2026-11-21): E2E_CaseDetailsLWCController.changeStatus, forward-only.
-// null until the stage probe (FLEET_DEV_DTNA_PROBE_MODE=stage) reads the portal's changeStatus call site;
-// never guess. While null the change-stage IPC returns DTNA_STAGE_NOT_CONFIGURED (no prompt, no network).
+// Configured from portal code; not yet verified by a live write. Learned 2026-11-21 via the read-only
+// stage probe (FLEET_DEV_DTNA_PROBE_MODE=stage): the c:e2E_RecordPath component's handleClick calls
+// changeStatus({ caseId: this.recordId, status: this.currentValue }) and then reads e.Status from the
+// returned Case (no success code is checked, so no successValue). statusValues are the portal stepper's
+// step labels; the case record's Status field reads 'Closed' on the 'Closed - Current Stage' step.
+// Set to null to disable: the change-stage IPC then returns DTNA_STAGE_NOT_CONFIGURED (no prompt, no network).
 // Shape (src/dtna/writes.js buildStageParams resolves the '$' placeholders):
 //   { classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus',
 //     params: { <key>: '$caseId' | '$status' | '$fromStatus' | literal string|boolean|null },
 //     statusValues: { '<CASE_STAGES name>': '<portal status value>' },
 //     successValue?: number|string }
-const STAGE_CHANGE_PARAMS = null;
+const STAGE_CHANGE_PARAMS = Object.freeze({
+  classname: 'E2E_CaseDetailsLWCController',
+  method: 'changeStatus',
+  params: Object.freeze({ caseId: '$caseId', status: '$status' }),
+  statusValues: Object.freeze({
+    'Pre-Repair': 'Pre-Repair', Arrived: 'Arrived', 'In-Repair': 'In-Repair',
+    'Post-Repair': 'Post-Repair', 'Ready for Pickup': 'Ready for Pickup', Closed: 'Closed',
+  }),
+});
 
 // Session timer: cookie-only servlet returning { sp: period secs, sr: remaining secs } behind 'while(1);'.
 const SESSION_TIME_URL = BASE + '/_nc_external/system/security/session/SessionTimeServlet';

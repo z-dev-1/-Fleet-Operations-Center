@@ -104,7 +104,7 @@ describe('isPostConfigured / postApprovedComment', () => {
 });
 
 describe('stage change (Phase C)', () => {
-  // Test-only config: the shipped STAGE_CHANGE_PARAMS stays null until the stage probe reads the portal.
+  // Test-only config (other key names on purpose, to exercise the placeholder resolution).
   const SCFG = {
     classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus',
     params: { recordId: '$caseId', newStatus: '$status' },
@@ -112,12 +112,30 @@ describe('stage change (Phase C)', () => {
   };
   const SP = { caseId: CASE_ID, fromStage: 'In-Repair', toStage: 'Closed', repairOrderNo: 'R101048154' };
 
-  it('shipped STAGE_CHANGE_PARAMS is null: not configured, zero aura calls', async () => {
-    expect(C.STAGE_CHANGE_PARAMS).toBeNull();
+  it('shipped STAGE_CHANGE_PARAMS (from the portal c:e2E_RecordPath call site): configured, one changeStatus with { caseId, status }', async () => {
+    expect(C.STAGE_CHANGE_PARAMS.classname).toBe('E2E_CaseDetailsLWCController');
+    expect(C.STAGE_CHANGE_PARAMS.method).toBe('changeStatus');
+    expect(Object.keys(C.STAGE_CHANGE_PARAMS.params)).toEqual(['caseId', 'status']);
+    expect(C.STAGE_CHANGE_PARAMS.successValue).toBeUndefined();
+    expect(Object.keys(C.STAGE_CHANGE_PARAMS.statusValues)).toEqual(C.CASE_STAGES);
+    for (const s of C.CASE_STAGES) expect(C.STAGE_CHANGE_PARAMS.statusValues[s]).toBe(s);
+    expect(writes.buildStageParams(C.STAGE_CHANGE_PARAMS, SP)).toEqual({ caseId: CASE_ID, status: 'Closed' });
+    expect(writes.buildStageParams(C.STAGE_CHANGE_PARAMS, Object.assign({}, SP, { fromStage: 'Arrived', toStage: 'In-Repair' })))
+      .toEqual({ caseId: CASE_ID, status: 'In-Repair' });
+    const aura = { callWrite: vi.fn(async () => ({ ok: true, status: 200, value: { Status: 'Closed' } })) };
+    writes._setDeps({ aura });
+    expect(writes.isStageConfigured()).toBe(true);
+    expect(writes.stageTargets('In-Repair')).toEqual(['Post-Repair', 'Ready for Pickup', 'Closed']);
+    const token = {};
+    expect(await writes.postApprovedStageChange(SP, token)).toEqual({ ok: true, toStage: 'Closed' });
+    expect(aura.callWrite.mock.calls).toEqual([['changeStatus', { caseId: CASE_ID, status: 'Closed' }, token]]);
+  });
+
+  it('STAGE_CHANGE_PARAMS null: not configured, zero aura calls', async () => {
     expect(C.WRITE_METHODS.changeStatus).toEqual({ classname: 'E2E_CaseDetailsLWCController' });
     expect(Object.keys(C.WRITE_METHODS)).toEqual(['postComment', 'changeStatus']);
     const aura = { callWrite: vi.fn() };
-    writes._setDeps({ aura });
+    writes._setDeps({ aura, stageConfig: null });
     expect(writes.isStageConfigured()).toBe(false);
     expect(await writes.postApprovedStageChange(SP, {})).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
     expect(aura.callWrite).not.toHaveBeenCalled();

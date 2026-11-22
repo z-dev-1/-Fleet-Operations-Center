@@ -374,7 +374,7 @@ describe('DTNA redaction: change-stage and session-time', () => {
       log: (m) => logger.lines.push({ ns: 'write-gate', level: 'info', args: [m] }),
     });
     gate.setWindowGetter(() => ({ isDestroyed: () => false, webContents: { send: (ch, d) => { if (ch === 'relayWrites:approval-request') approvals.push(d); } } }));
-    require('../src/dtna/writes')._setDeps(configured ? { stageConfig: SCFG } : {});
+    require('../src/dtna/writes')._setDeps(configured ? { stageConfig: SCFG } : { stageConfig: null });
     await signIn();
     const p = await call('dtna:pull-unit', { equipmentId: '122269' });
     expect(p.ok).toBe(true);

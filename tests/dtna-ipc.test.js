@@ -504,15 +504,24 @@ describe('Phase C: dtna:stage-options / dtna:change-stage / dtna:session-time / 
     expect(sessionTime.preflight).not.toHaveBeenCalled();
   });
 
-  it('unconfigured (shipped STAGE_CHANGE_PARAMS = null) -> DTNA_STAGE_NOT_CONFIGURED: no prompt, no read, no pre-flight', async () => {
-    expect(await real('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
+  it('unconfigured (STAGE_CHANGE_PARAMS = null) -> DTNA_STAGE_NOT_CONFIGURED: no prompt, no read, no pre-flight', async () => {
+    configured = false;
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
     expect(gate.requestWrite).not.toHaveBeenCalled();
     expect(networkCalls()).toBe(0);
     expect(sessionTime.preflight).not.toHaveBeenCalled();
-    expect(await real('dtna:stage-options', OKP)).toEqual({
+    expect(await cs('dtna:stage-options', OKP)).toEqual({
       ok: true, configured: false, current: 'In-Repair', currentIndex: 2, targets: ['Post-Repair', 'Ready for Pickup', 'Closed'],
       stages: ['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed'],
     });
+  });
+
+  it('shipped STAGE_CHANGE_PARAMS (real writes) -> stage-options configured: true (cache only)', async () => {
+    expect(await real('dtna:stage-options', OKP)).toEqual({
+      ok: true, configured: true, current: 'In-Repair', currentIndex: 2, targets: ['Post-Repair', 'Ready for Pickup', 'Closed'],
+      stages: ['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed'],
+    });
+    expect(networkCalls()).toBe(0);
   });
 
   it('configured: not pulled -> DTNA_NOT_PULLED; low session -> DTNA_SESSION_LOW; neither prompts', async () => {
