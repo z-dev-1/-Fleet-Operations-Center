@@ -872,3 +872,19 @@ expose('zoomHub', {
   onSummaryProgress: (cb) => on('zoomData:summary-progress', cb),
   onObsState:        (cb) => on('zoomStudio:obs-state', cb),
 });
+// ── Aperia HALO Connect (user-initiated reads; the tire-alert watcher runs only after startAlerts) ──
+expose('aperia', {
+  login:       () => ipcRenderer.invoke('aperia:login'),
+  logout:      () => ipcRenderer.invoke('aperia:logout'),
+  status:      () => ipcRenderer.invoke('aperia:status'),
+  unit:        (p) => ipcRenderer.invoke('aperia:unit', p || {}),
+  bulk:        (p) => ipcRenderer.invoke('aperia:bulk', p || {}),
+  fleetTires:  (p) => ipcRenderer.invoke('aperia:fleet-tires', p || {}),
+  issues:      (p) => ipcRenderer.invoke('aperia:issues', p || {}),
+  startAlerts: (p) => ipcRenderer.invoke('aperia:start-alerts', p || {}),
+  stopAlerts:  () => ipcRenderer.invoke('aperia:stop-alerts'),
+  pollNow:     () => ipcRenderer.invoke('aperia:poll-now'),
+  exportBulk:  (p) => ipcRenderer.invoke('aperia:export', p || {}),
+  onProgress:  (cb) => on('aperia:progress', cb),
+  onAlert:     (cb) => on('aperia:alert', cb),
+});
