@@ -866,6 +866,15 @@ function _startAutoSync() {
     catch (e) { log.warn('[dtna-probe] could not start: ' + (e && e.name)); }
   }
 
+  // DEV-ONLY, READ-ONLY Aperia HALO Connect discovery probe (dev aid): FLEET_DEV_APERIA_PROBE=1.
+  // Inert unless set. Opens the Aperia sign-in window, runs once after the user's own sign-in: three
+  // GETs (shapes/counts), the portal bundle's WS-token call site, the portal's own WebSocket frames
+  // (~3 min). Writes <dataDir>/dev/aperia-probe-<date>.json and logs counts. Never writes to Aperia.
+  if (process.env.FLEET_DEV_APERIA_PROBE === '1') {
+    try { require('./dev/dev-aperia-probe').start({ log }); }
+    catch (e) { log.warn('[aperia-probe] could not start: ' + (e && e.name)); }
+  }
+
   // One-shot READ-ONLY RCA API self-test (dev aid): FLEET_RCA_SELFTEST=<wrUuid>.
   // GETs the RCA template + that WR's saved responses through the AAP page and
   // logs the outcome. Never submits anything.
