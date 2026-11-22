@@ -92,18 +92,26 @@ const CASE_FIELDS = Object.freeze({
 // field on getCaseRecord, getRepairOrderId or getCommentsByCaseRepairOrder; the bundle exposes no estimate/EA
 // read method). Phase B ships DTNA Total = '—' with status from case (CASE_FIELDS.caseStatus).
 const ESTIMATE_FIELDS = null;
-// dtna-probe 2026-11-21 (P1/P2): postComment is E2E_UTP_CommentController.postComment (write, not called).
-// P1 could not read its param keys: the minified LWC import binds it as a bare function, so no key literals
-// sit next to the call site. P2 composer on the Comments tab: one textarea ("Write a message to the repair
-// facility:"), no maxlength, no comment-type picklist, a file uploader and a "Post" button. The no-RO case
-// shows no composer. Param keys stay unknown until a Phase B capture of the page's own Post click.
-// Shape to fill (src/dtna/writes.js buildPostParams resolves the '$' placeholders):
-//   { classname: 'E2E_UTP_CommentController',
-//     params: { <apexKey>: '$caseId' | '$repairOrderId' | '$text' | <literal string|boolean|null>, ... },
-//     maxLen?: number }
-// It needs a '$text' key and a '$caseId' or '$repairOrderId' key. While null, the post-comment IPC returns
-// { ok:false, code:'DTNA_POST_NOT_CONFIGURED' } with no approval prompt and no network.
-const POST_COMMENT_PARAMS = null;
+// learned 2026-11-21 via the read-only post probe (dtna-post-probe, case ...4U5AAK; no comment posted).
+// Source: the portal's own composer, LWC c:e2E_CaseComments handleCommentSubmit (the "Post" button) calls
+//   E2E_UTP_CommentController.postComment({ caseId: recordId, userInput: <textarea>, userName: <User.Name>, files: fileArray })
+// and treats returnValue === 201 as sent; anything else is "Message not sent to Repair Facility".
+// No repairOrderId and no comment-type key (the portal labels new comments 'Services Tracker Comment').
+// userName 'AFP FAS' is the shared site user's name (user-confirmed). files: [] = text only; attachments
+// are a fast-follow (lightning-file-upload -> ContentVersion -> files[] entries
+// { name, documentId, contentVersionId, AttachmentId: contentVersionId + '_internal', FileName }, names <= 50 chars).
+// STATE: params discovered from the portal composer, NOT yet verified by a live round-trip post. The user
+// declined a test post; the first real user-approved comment in production is the live validation.
+// Shape (src/dtna/writes.js buildPostParams resolves the '$' placeholders): params values are
+// '$caseId' | '$repairOrderId' | '$text' | literal string|boolean|null | [] (empty array); successValue?: the
+// returnValue that means sent (anything else fails with DTNA_POST_REJECTED). Set to null to disable posting
+// (then the post-comment IPC returns DTNA_POST_NOT_CONFIGURED with no approval prompt and no network).
+const POST_COMMENT_PARAMS = Object.freeze({
+  classname: 'E2E_UTP_CommentController',
+  method: 'postComment',
+  params: Object.freeze({ caseId: '$caseId', userInput: '$text', userName: 'AFP FAS', files: Object.freeze([]) }),
+  successValue: 201,
+});
 // The only Apex write aura.callWrite accepts (behind a single-use write-gate approval token).
 const WRITE_METHODS = Object.freeze({
   postComment: Object.freeze({ classname: 'E2E_UTP_CommentController' }),

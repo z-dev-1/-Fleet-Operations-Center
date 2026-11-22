@@ -53,6 +53,8 @@ function buildPostParams(cfg, payload) {
       return null; // unknown placeholder
     } else if (v === null || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 200)) {
       out[k] = v;
+    } else if (Array.isArray(v) && v.length === 0) {
+      out[k] = []; // e.g. files: [] (text-only comment; attachments are not wired yet)
     } else {
       return null;
     }
@@ -70,6 +72,12 @@ function isPostConfigured() {
 function _maxLen(cfg) {
   const n = cfg && Number(cfg.maxLen);
   return Number.isFinite(n) && n > 0 ? Math.min(n, C.POST_COMMENT_MAX) : C.POST_COMMENT_MAX;
+}
+
+// cfg.successValue: the Apex returnValue that means "sent" (the portal composer checks 201). Any other
+// value is DTNA_POST_REJECTED ("Message not sent to Repair Facility").
+function _hasSuccessValue(cfg) {
+  return !!cfg && (typeof cfg.successValue === 'number' || typeof cfg.successValue === 'string');
 }
 
 function _commentId(v) {
@@ -100,7 +108,9 @@ async function postApprovedComment(payload, token) {
     else {
       let a;
       try { a = await _aura().callWrite('postComment', params, token); } catch (_) { a = { ok: false, code: 'DTNA_INTERNAL' }; }
-      r = a && a.ok ? { ok: true, commentId: _commentId(a.value) } : { ok: false, code: _str((a && a.code) || 'DTNA_INTERNAL').slice(0, 40) };
+      if (!a || !a.ok) r = { ok: false, code: _str((a && a.code) || 'DTNA_INTERNAL').slice(0, 40) };
+      else if (_hasSuccessValue(cfg) && String(a.value) !== String(cfg.successValue)) r = { ok: false, code: 'DTNA_POST_REJECTED' };
+      else r = { ok: true, commentId: _commentId(a.value) };
     }
   }
   log.info('[dtna] post-comment', { caseTag: tag, len: text.length, code: r.ok ? 'OK' : r.code, ms: Date.now() - t0 });

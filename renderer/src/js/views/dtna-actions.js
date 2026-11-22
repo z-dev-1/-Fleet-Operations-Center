@@ -36,6 +36,9 @@ export function dtnaCommentModalBody() {
     '<p class="ra-hint" role="note"><strong>Visible to the dealer (DTNA Service Tracker).</strong> Nothing is sent until you approve the exact text.</p>' +
     '<textarea id="dtna-cm-text" class="dp-escalate__comment" maxlength="' + DTNA_COMMENT_MAX + '" rows="7" aria-label="DTNA case comment" placeholder="Message to the repair facility"></textarea>' +
     '<div class="dp-escalate__row"><button type="button" id="dtna-cm-draft" class="dp-escalate__btn dp-ra-btn">AI draft</button>' +
+      // Attachments are a fast-follow: wired placeholder, disabled until the upload path ships (files: [] today).
+      '<button type="button" id="dtna-cm-attach" class="dp-escalate__btn dp-ra-btn" disabled aria-disabled="true"' +
+        ' title="Attaching files to DTNA comments is coming soon">\uD83D\uDCCE Attach file (coming soon)</button>' +
       '<span id="dtna-cm-count" class="dp-escalate__count">0/' + DTNA_COMMENT_MAX + '</span></div>' +
   '</div>';
 }
@@ -65,6 +68,7 @@ export function postMessage(r, caseId) {
   const code = r && r.code;
   if (r && r.outcome === 'sent') return { level: 'success', text: 'Comment posted to DTNA case \u2026' + tag + '. Pull DTNA to see it in the thread.' };
   if (code === 'DTNA_POST_NOT_CONFIGURED') return { level: 'warn', text: 'Posting to DTNA is not set up yet. Nothing was sent.' };
+  if (code === 'DTNA_POST_REJECTED') return { level: 'error', text: 'DTNA did not accept the comment (message not sent to the repair facility). Pull DTNA to check the thread before trying again.' };
   if (code === 'DTNA_NOT_PULLED') return { level: 'warn', text: 'Pull DTNA for this unit first.' };
   if (code === 'DTNA_NO_REPAIR_ORDER') return { level: 'warn', text: 'This DTNA case has no repair order; the portal does not accept comments on it.' };
   return outcomeMessage(r, 'DTNA comment');

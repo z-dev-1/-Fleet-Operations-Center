@@ -233,7 +233,7 @@ async function callWrite(name, params, token) {
   const p = _isPlainObject(params) ? params : null;
   const keys = p ? Object.keys(p) : [];
   const valid = p && keys.length > 0 && keys.length <= 10 && keys.every((k) => /^\w{1,60}$/.test(k))
-    && keys.every((k) => p[k] === null || typeof p[k] === 'string' || typeof p[k] === 'boolean')
+    && keys.every((k) => p[k] === null || typeof p[k] === 'string' || typeof p[k] === 'boolean' || (Array.isArray(p[k]) && p[k].length === 0))
     && keys.every((k) => !/caseid/i.test(k) || C.CASE_ID_RE.test(String(p[k])));
   if (!valid) {
     log.info('[dtna] apex', { method: name, code: 'DTNA_INVALID_INPUT' });

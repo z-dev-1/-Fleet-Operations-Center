@@ -43,14 +43,38 @@ describe('buildPostParams', () => {
 });
 
 describe('isPostConfigured / postApprovedComment', () => {
-  it('the shipped constants leave POST_COMMENT_PARAMS unset -> not configured', () => {
-    expect(C.POST_COMMENT_PARAMS).toBeNull();
-    expect(writes.isPostConfigured()).toBe(false);
+  it('the shipped POST_COMMENT_PARAMS match the portal composer (c:e2E_CaseComments handleCommentSubmit)', () => {
+    expect(C.POST_COMMENT_PARAMS).toEqual({
+      classname: 'E2E_UTP_CommentController', method: 'postComment',
+      params: { caseId: '$caseId', userInput: '$text', userName: 'AFP FAS', files: [] },
+      successValue: 201,
+    });
+    expect(writes.isPostConfigured()).toBe(true);
+    expect(writes.buildPostParams(C.POST_COMMENT_PARAMS, PAYLOAD)).toEqual({ caseId: CASE_ID, userInput: 'Please send the ETA', userName: 'AFP FAS', files: [] });
+  });
+
+  it('shipped config: 201 -> sent once with the composer params; any other returnValue -> DTNA_POST_REJECTED', async () => {
+    const token = {};
+    const aura = { callWrite: vi.fn(async () => ({ ok: true, value: 201 })) };
+    writes._setDeps({ aura });
+    expect(await writes.postApprovedComment(PAYLOAD, token)).toEqual({ ok: true, commentId: '' });
+    expect(aura.callWrite).toHaveBeenCalledTimes(1);
+    expect(aura.callWrite.mock.calls[0]).toEqual(['postComment', { caseId: CASE_ID, userInput: 'Please send the ETA', userName: 'AFP FAS', files: [] }, token]);
+    for (const v of [500, 400, null, 'Error', { Id: 'a1Agx0000000099AAA' }]) {
+      aura.callWrite.mockResolvedValueOnce({ ok: true, value: v });
+      expect(await writes.postApprovedComment(PAYLOAD, token)).toEqual({ ok: false, code: 'DTNA_POST_REJECTED' });
+    }
+    expect(logger.text()).not.toContain('Please send the ETA');
+  });
+
+  it('buildPostParams accepts only an EMPTY array literal', () => {
+    expect(writes.buildPostParams({ params: { caseId: '$caseId', body: '$text', files: [] } }, PAYLOAD)).toEqual({ caseId: CASE_ID, body: 'Please send the ETA', files: [] });
+    expect(writes.buildPostParams({ params: { caseId: '$caseId', body: '$text', files: ['x'] } }, PAYLOAD)).toBeNull();
   });
 
   it('not configured -> DTNA_POST_NOT_CONFIGURED with zero aura calls', async () => {
     const aura = { callWrite: vi.fn() };
-    writes._setDeps({ aura });
+    writes._setDeps({ aura, config: null });
     expect(await writes.postApprovedComment(PAYLOAD, {})).toEqual({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
     expect(aura.callWrite).not.toHaveBeenCalled();
   });

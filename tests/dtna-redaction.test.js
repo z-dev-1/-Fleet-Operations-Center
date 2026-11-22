@@ -61,7 +61,12 @@ async function fetchImpl(_url, init) {
   }
   if (method === 'getRepairOrderId') return resp(200, success(isMain ? RO_LIST : []));
   if (method === 'getCommentsByCaseRepairOrder') return resp(200, success(isMain ? SENT_COMMENTS : NO_RO_COMMENTS));
-  if (method === 'postComment') { postCalls.push(params); return resp(200, success({ Id: 'a1Agx0000000099AAA' })); }
+  if (method === 'postComment') {
+    postCalls.push(params);
+    // The real portal (userInput key) returns 201; mode 'reject201' returns a failure status.
+    if ('userInput' in params) return resp(200, success(mode === 'reject201' ? 500 : 201));
+    return resp(200, success({ Id: 'a1Agx0000000099AAA' }));
+  }
   return resp(200, success(null));
 }
 
@@ -241,7 +246,7 @@ describe('DTNA redaction: draft-comment and post-comment', () => {
       log: (m) => logger.lines.push({ ns: 'write-gate', level: 'info', args: [m] }),
     });
     gate.setWindowGetter(() => ({ isDestroyed: () => false, webContents: { send: (ch, d) => { if (ch === 'relayWrites:approval-request') approvals.push(d); } } }));
-    require('../src/dtna/writes')._setDeps(configured ? { config: POST_CFG } : {});
+    require('../src/dtna/writes')._setDeps(configured === 'shipped' ? {} : { config: configured ? POST_CFG : null });
     require('../src/dtna/comment-draft')._setDepsForTest({ ask: async (p) => { prompts.push(p); return 'Could you share an ETA for the repair?'; } });
     await signIn();
     const p = await call('dtna:pull-unit', { equipmentId: '122269' });
@@ -287,6 +292,29 @@ describe('DTNA redaction: draft-comment and post-comment', () => {
     expect(t).not.toContain(SENTINEL_COMMENT);
     expect(t).not.toContain('Please share the ETA');
     assertClean([r]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('(b2) shipped POST_COMMENT_PARAMS: approval first, one postComment with the composer keys, 201 -> sent, non-201 -> send-failed', async () => {
+    await phaseBSetup({ configured: 'shipped' });
+    const pending = call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    await until(() => approvals.length === 1);
+    expect(postCalls).toHaveLength(0);
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: approvals[0].id });
+    expect(postCalls).toEqual([{ caseId: CASE_ID, userInput: TEXT, userName: 'AFP FAS', files: [] }]);
+    expect(logger.text()).not.toContain(SENTINEL_COMMENT);
+    assertClean([r]);
+
+    mode = 'reject201';
+    const p2 = call('dtna:post-comment', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    await until(() => approvals.length === 2);
+    gate.respond(approvals[1].id, true);
+    const r2 = await p2;
+    expect(r2).toEqual({ ok: false, outcome: 'send-failed', id: approvals[1].id, code: 'DTNA_POST_REJECTED' });
+    expect(postCalls).toHaveLength(2);
+    assertClean([r2]);
     assertStoresHaveNoAuth();
   });
 

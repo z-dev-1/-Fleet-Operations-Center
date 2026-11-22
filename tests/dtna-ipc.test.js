@@ -344,8 +344,20 @@ describe('dtna:draft-comment / dtna:post-comment', () => {
   const OK = { equipmentId: '122269', caseId: CASE_ID, text: 'Please send an ETA', aiDrafted: true };
   beforeEach(() => { configured = true; });
 
-  it('real (unconfigured) writes -> DTNA_POST_NOT_CONFIGURED, no approval request, no cache read', async () => {
-    expect(await h3['dtna:post-comment']({}, OK)).toEqual({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
+  it('real writes (shipped POST_COMMENT_PARAMS) -> one interactive dtnaComment approval request; no direct client call', async () => {
+    writeGate.requestWrite.mockClear();
+    const r = await h3['dtna:post-comment']({}, OK);
+    expect(r).toMatchObject({ ok: true, outcome: 'sent' });
+    expect(writeGate.requestWrite).toHaveBeenCalledTimes(1);
+    expect(writeGate.requestWrite.mock.calls[0][0]).toMatchObject({ kind: 'dtnaComment', interactive: true, payload: { caseId: CASE_ID } });
+    expect(clientCalls()).toBe(0);
+    writeGate.requestWrite.mockClear();
+  });
+
+  it('unconfigured writes -> DTNA_POST_NOT_CONFIGURED, no approval request, no cache read', async () => {
+    configured = false;
+    dtnaStore.get.mockClear();
+    expect(await c2('dtna:post-comment', OK)).toEqual({ ok: false, code: 'DTNA_POST_NOT_CONFIGURED' });
     expect(writeGate.requestWrite).not.toHaveBeenCalled();
     expect(dtnaStore.get).not.toHaveBeenCalled();
     expect(clientCalls()).toBe(0);
