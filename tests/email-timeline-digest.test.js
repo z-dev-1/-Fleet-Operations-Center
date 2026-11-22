@@ -127,8 +127,10 @@ describe('322283 email timeline digest', () => {
     // none of their changed lines may touch the timeline. The Inbox Triage free-write reply edits the
     // email triage overlay on purpose (same rule). DTNA Phase A edits these on purpose
     // (status pill, Pull DTNA, bulk tool); same rule. DTNA Phase B adds the dealer-visible approval
-    // title and the Post to DTNA compose modal on purpose; same rule.
+    // title and the Post to DTNA compose modal on purpose; same rule. DTNA Phase C adds the Change Stage
+    // control on purpose; same rule.
     const upgraded = ['renderer/src/js/components/relay-write-approval.js', 'renderer/src/js/views/dtna-actions.js',
+      'renderer/src/js/views/dtna-stage-actions.js',
       'renderer/src/css/fleet.css', 'renderer/src/js/views/id-links.js',
       'renderer/src/js/views/pending-estimates-logic.js', 'renderer/src/js/views/pending-estimates-panel.js',
       'renderer/src/js/views/unit-detail.js', 'renderer/src/js/components/email-triage-overlay.js',

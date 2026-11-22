@@ -103,6 +103,95 @@ describe('isPostConfigured / postApprovedComment', () => {
   });
 });
 
+describe('stage change (Phase C)', () => {
+  // Test-only config: the shipped STAGE_CHANGE_PARAMS stays null until the stage probe reads the portal.
+  const SCFG = {
+    classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus',
+    params: { recordId: '$caseId', newStatus: '$status' },
+    statusValues: { Arrived: 'Arrived', 'In-Repair': 'In Repair', 'Ready for Pickup': 'Ready for Pickup', Closed: 'Closed' },
+  };
+  const SP = { caseId: CASE_ID, fromStage: 'In-Repair', toStage: 'Closed', repairOrderNo: 'R101048154' };
+
+  it('shipped STAGE_CHANGE_PARAMS is null: not configured, zero aura calls', async () => {
+    expect(C.STAGE_CHANGE_PARAMS).toBeNull();
+    expect(C.WRITE_METHODS.changeStatus).toEqual({ classname: 'E2E_CaseDetailsLWCController' });
+    expect(Object.keys(C.WRITE_METHODS)).toEqual(['postComment', 'changeStatus']);
+    const aura = { callWrite: vi.fn() };
+    writes._setDeps({ aura });
+    expect(writes.isStageConfigured()).toBe(false);
+    expect(await writes.postApprovedStageChange(SP, {})).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
+    expect(aura.callWrite).not.toHaveBeenCalled();
+    // Unconfigured: every later pipeline stage is listed (the UI disables Submit).
+    expect(writes.stageTargets('In-Repair')).toEqual(['Post-Repair', 'Ready for Pickup', 'Closed']);
+  });
+
+  it('buildStageParams: placeholders, unknown placeholder, unmapped target, wrong classname / method', () => {
+    expect(writes.buildStageParams(SCFG, SP)).toEqual({ recordId: CASE_ID, newStatus: 'Closed' });
+    expect(writes.buildStageParams(Object.assign({}, SCFG, { params: { recordId: '$caseId', newStatus: '$status', prev: '$fromStatus', force: false } }), SP))
+      .toEqual({ recordId: CASE_ID, newStatus: 'Closed', prev: 'In Repair', force: false });
+    expect(writes.buildStageParams(Object.assign({}, SCFG, { params: { recordId: '$caseId', newStatus: '$status', x: '$other' } }), SP)).toBeNull();
+    expect(writes.buildStageParams(SCFG, Object.assign({}, SP, { toStage: 'Post-Repair' }))).toBeNull();
+    expect(writes.buildStageParams(Object.assign({}, SCFG, { classname: 'E2E_UTP_CommentController' }), SP)).toBeNull();
+    expect(writes.buildStageParams(Object.assign({}, SCFG, { method: 'postComment' }), SP)).toBeNull();
+    expect(writes.buildStageParams(Object.assign({}, SCFG, { params: { newStatus: '$status' } }), SP)).toBeNull();
+    expect(writes.buildStageParams(SCFG, Object.assign({}, SP, { caseId: 'nope' }))).toBeNull();
+    expect(writes.buildStageParams(null, SP)).toBeNull();
+  });
+
+  it('configured: stageTargets lists only mapped later stages; Closed and unknown -> []', () => {
+    writes._setDeps({ stageConfig: SCFG });
+    expect(writes.isStageConfigured()).toBe(true);
+    expect(writes.stageTargets('In-Repair')).toEqual(['Ready for Pickup', 'Closed']);
+    expect(writes.stageTargets('Pre-Repair')).toEqual(['Arrived', 'In-Repair', 'Ready for Pickup', 'Closed']);
+    expect(writes.stageTargets('Closed')).toEqual([]);
+    expect(writes.stageTargets('Bogus')).toEqual([]);
+  });
+
+  it('same or earlier stage -> DTNA_STAGE_NOT_FORWARD with zero calls; bad input -> DTNA_INVALID_INPUT', async () => {
+    const aura = { callWrite: vi.fn() };
+    writes._setDeps({ aura, stageConfig: SCFG });
+    for (const toStage of ['In-Repair', 'Arrived', 'Pre-Repair']) {
+      expect(await writes.postApprovedStageChange(Object.assign({}, SP, { toStage }), {})).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_FORWARD' });
+    }
+    expect(await writes.postApprovedStageChange(Object.assign({}, SP, { toStage: 'Bogus' }), {})).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });
+    expect(await writes.postApprovedStageChange(Object.assign({}, SP, { caseId: 'x' }), {})).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });
+    expect(aura.callWrite).not.toHaveBeenCalled();
+  });
+
+  it('forward: ONE callWrite(changeStatus) with the params and the token; failure codes pass through', async () => {
+    const token = {};
+    const aura = { callWrite: vi.fn(async () => ({ ok: true, value: null, status: 200 })) };
+    writes._setDeps({ aura, stageConfig: SCFG });
+    expect(await writes.postApprovedStageChange(SP, token)).toEqual({ ok: true, toStage: 'Closed' });
+    expect(aura.callWrite).toHaveBeenCalledTimes(1);
+    expect(aura.callWrite.mock.calls[0]).toEqual(['changeStatus', { recordId: CASE_ID, newStatus: 'Closed' }, token]);
+    aura.callWrite.mockResolvedValueOnce({ ok: false, code: 'DTNA_APEX_ERROR', status: 200 });
+    expect(await writes.postApprovedStageChange(SP, token)).toEqual({ ok: false, code: 'DTNA_APEX_ERROR' });
+    aura.callWrite.mockRejectedValueOnce(new Error('boom'));
+    expect(await writes.postApprovedStageChange(SP, token)).toEqual({ ok: false, code: 'DTNA_INTERNAL' });
+  });
+
+  it('successValue mismatch -> DTNA_STAGE_REJECTED', async () => {
+    const aura = { callWrite: vi.fn(async () => ({ ok: true, value: 'Error' })) };
+    writes._setDeps({ aura, stageConfig: Object.assign({ successValue: 'Success' }, SCFG) });
+    expect(await writes.postApprovedStageChange(SP, {})).toEqual({ ok: false, code: 'DTNA_STAGE_REJECTED' });
+    aura.callWrite.mockResolvedValueOnce({ ok: true, value: 'Success' });
+    expect(await writes.postApprovedStageChange(SP, {})).toEqual({ ok: true, toStage: 'Closed' });
+  });
+
+  it('logs only method, caseTag, from, to, code, status, ms', async () => {
+    const aura = { callWrite: vi.fn(async () => ({ ok: true, value: null, status: 200 })) };
+    writes._setDeps({ aura, stageConfig: SCFG });
+    await writes.postApprovedStageChange(SP, {});
+    const lines = logger.lines.filter((l) => l.args[0] === '[dtna] change-stage');
+    expect(lines).toHaveLength(1);
+    const o = lines[0].args[1];
+    expect(Object.keys(o).sort()).toEqual(['caseTag', 'code', 'from', 'method', 'ms', 'status', 'to']);
+    expect(o).toMatchObject({ method: 'changeStatus', caseTag: CASE_ID.slice(-6), from: 'In-Repair', to: 'Closed', code: 'OK', status: 200 });
+    expect(logger.text()).not.toContain(CASE_ID);
+  });
+});
+
 describe('static: callWrite has one caller', () => {
   it('under src/, only src/dtna/writes.js calls callWrite( outside src/dtna/aura.js', () => {
     const SRC = path.join(WT_ROOT, 'src');

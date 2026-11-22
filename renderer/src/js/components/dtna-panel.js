@@ -2,11 +2,12 @@
  * dtna-panel.js — DTNA Service Tracker panel, opened from the bottom status
  * bar DTNA pill (#tb-dtna, status-bar.js). Pattern: auth-health-panel.js.
  *
- * Opening the panel only reads dtna.status(). Sign in runs only from the
+ * Opening the panel reads dtna.status() and the session time once
+ * (dtna.sessionTime, also on "Check session"). Sign in runs only from the
  * Sign in button; "Pull open cases" closes the panel and opens the DTNA Pull
  * bulk modal (which itself starts nothing until Start is pressed).
  */
-import { dtnaPill } from './status-bar-logic.js';
+import { dtnaPill, fmtExpiresIn } from './status-bar-logic.js';
 
 const OVERLAY_ID = 'dtna-panel-overlay';
 
@@ -56,10 +57,12 @@ export function open(deps = defaultDeps()) {
         <div class="sd-section-title" id="dtna-panel-title">DTNA Service Tracker</div>
         <div id="dtna-panel-state" class="sd-status warn" style="margin-bottom:8px">${dt ? 'DTNA \u2026' : 'DTNA is not available in this build'}</div>
         <div class="sd-hint" style="margin-bottom:8px">Last pull: <b id="dtna-panel-last">never</b></div>
+        <div class="sd-hint" style="margin-bottom:8px">Session: <b id="dtna-panel-session">not checked</b></div>
         <div class="sd-hint" style="margin-bottom:8px">DTNA is read only when you press a button here, on a unit, or in DTNA Pull.</div>
         <div class="sd-btn-row">
           <button type="button" class="sd-btn primary" id="dtna-panel-signin">Sign in</button>
           <button type="button" class="sd-btn secondary" id="dtna-panel-pull">Pull open cases</button>
+          <button type="button" class="sd-btn secondary" id="dtna-panel-check">Check session</button>
         </div>
       </div>
     </div>`;
@@ -83,10 +86,27 @@ export function open(deps = defaultDeps()) {
     if (!dt || typeof dt.status !== 'function') return Promise.resolve();
     return Promise.resolve().then(() => dt.status()).then(apply).catch(() => {});
   };
+  // Session time: one servlet read per panel open / Check session click. The new state reaches the
+  // pill and this panel through the pushed dtna:status-changed (onStatus), so status() is not re-read.
+  const sessionEl = overlay.querySelector('#dtna-panel-session');
+  const checkBtn = overlay.querySelector('#dtna-panel-check');
+  const checkSession = () => {
+    if (!dt || typeof dt.sessionTime !== 'function') return Promise.resolve();
+    return Promise.resolve().then(() => dt.sessionTime()).then((r) => {
+      if (!_open || _open.overlay !== overlay || !sessionEl) return;
+      if (r && r.ok && !r.expired && Number(r.remainingSec) > 0) sessionEl.textContent = 'expires in ' + fmtExpiresIn(r.remainingSec);
+      else if (r && r.ok) sessionEl.textContent = 'expired \u2014 sign in again';
+      else sessionEl.textContent = 'could not check (' + String((r && r.code) || 'unknown') + ')';
+    }).catch(() => { if (sessionEl) sessionEl.textContent = 'could not check (unknown)'; });
+  };
 
   if (!dt) {
     if (signinBtn) signinBtn.disabled = true;
     if (pullBtn) pullBtn.disabled = true;
+  }
+  if (checkBtn) {
+    if (!dt || typeof dt.sessionTime !== 'function') checkBtn.disabled = true;
+    checkBtn.addEventListener('click', () => { if (!checkBtn.disabled) checkSession(); });
   }
   if (signinBtn) signinBtn.addEventListener('click', () => {
     if (!dt || typeof dt.login !== 'function' || signinBtn.disabled) return;
@@ -119,6 +139,6 @@ export function open(deps = defaultDeps()) {
       try { overlay.remove(); } catch (_) {}
     },
   };
-  read();
+  read().then(() => checkSession());
   return overlay;
 }

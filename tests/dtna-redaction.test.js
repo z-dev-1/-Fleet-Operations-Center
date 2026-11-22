@@ -43,10 +43,15 @@ function resp(status, body) { return { status, type: 'basic', headers: headers()
 
 let fetchCount = 0;
 let postCalls = [];
+let stageCalls = [];
+let stageMoved = false;
+// SessionTimeServlet body (Phase C): carries an id token + email the app must never keep.
+const SERVLET_BODY = 'while(1);{"sp":28800,"sr":27120,"oidcIdToken":"' + SENTINEL_TOKEN + '","email":"' + SENTINEL_EMAIL + '"}';
 async function fetchImpl(_url, init) {
   fetchCount++;
   if (mode === 'reject') throw Object.assign(new Error('net::ERR_FAILED ' + SENTINEL_LOGIN_URL + ' ' + SENTINEL_COOKIE + ' ' + SENTINEL_TOKEN), { code: 'ERR_FAILED' });
   if (mode === 'redirect') return resp(302, '');
+  if (String(_url).includes('/SessionTimeServlet')) return resp(200, SERVLET_BODY);
   if (mode === 'invalid') return resp(200, invalidSession());
   if (mode === 'sync') return resp(200, outOfSync());
   if (mode === 'apexError') return resp(200, apexError('System.QueryException', 'no rows ' + SENTINEL_TOKEN + ' ' + SENTINEL_COMMENT + ' ' + SENTINEL_EMAIL));
@@ -56,8 +61,14 @@ async function fetchImpl(_url, init) {
   const { method, params } = action.params;
   const isMain = params.caseId === CASE_ID;
   if (method === 'getCaseRecord') {
-    const rec = Object.assign({}, isMain ? CASE_RECORD : NO_RO_RECORD, { CreatedBy: { Email: SENTINEL_EMAIL }, Portal_User_Email__c: SENTINEL_EMAIL });
+    const rec = Object.assign({}, isMain ? CASE_RECORD : NO_RO_RECORD, { CreatedBy: { Email: SENTINEL_EMAIL }, Portal_User_Email__c: SENTINEL_EMAIL },
+      isMain && stageMoved ? { Status: 'Closed', steps: [] } : {});
     return resp(200, success(rec));
+  }
+  if (method === 'changeStatus') {
+    stageCalls.push(params);
+    stageMoved = true;
+    return resp(200, success(null));
   }
   if (method === 'getRepairOrderId') return resp(200, success(isMain ? RO_LIST : []));
   if (method === 'getCommentsByCaseRepairOrder') return resp(200, success(isMain ? SENT_COMMENTS : NO_RO_COMMENTS));
@@ -100,6 +111,8 @@ function setup() {
   store.save('dtnaCaseCache', { version: 1, cases: {} });
   store.save('fleetData', { rows: [{ equipmentId: '122269', workRequestId: 'WR1', vendor: 'HORWITH FREIGHTLINER', offsiteShopEventUrl: caseUrl(CASE_ID) }] });
   mode = 'ok';
+  stageMoved = false;
+  stageCalls = [];
 }
 
 const call = (ch, p) => handlers.get(ch)({}, p);
@@ -341,7 +354,99 @@ describe('DTNA redaction: draft-comment and post-comment', () => {
   });
 });
 
+// ── Phase C: the approval-gated stage change and the session-time read ──
+describe('DTNA redaction: change-stage and session-time', () => {
+  const gate = require('../src/writes/write-gate');
+  const SCFG = {
+    classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus',
+    params: { recordId: '$caseId', newStatus: '$status' },
+    statusValues: { 'Post-Repair': 'Post Repair', 'Ready for Pickup': 'Ready for Pickup', Closed: 'Closed' },
+  };
+  const STAGE_LOG_KEYS = ['method', 'caseTag', 'from', 'to', 'code', 'status', 'ms'];
+  let approvals;
+
+  async function stageSetup({ configured = true } = {}) {
+    setup();
+    approvals = [];
+    gate._setDepsForTest({
+      flags: { requireApproval: false },   // dealer-visible: must still be gated
+      notify: () => {},
+      log: (m) => logger.lines.push({ ns: 'write-gate', level: 'info', args: [m] }),
+    });
+    gate.setWindowGetter(() => ({ isDestroyed: () => false, webContents: { send: (ch, d) => { if (ch === 'relayWrites:approval-request') approvals.push(d); } } }));
+    require('../src/dtna/writes')._setDeps(configured ? { stageConfig: SCFG } : {});
+    await signIn();
+    const p = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(p.ok).toBe(true);
+    logger.clear();
+    fetchCount = 0;
+  }
+
+  afterEach(() => { gate._setDepsForTest({}); gate.setWindowGetter(null); });
+
+  it('(c1) change-stage: gated with requireApproval:false; one changeStatus after approval; read back; clean logs and stores', async () => {
+    await stageSetup();
+    const pending = call('dtna:change-stage', { equipmentId: '122269', caseId: CASE_ID, target: 'Closed' });
+    await until(() => approvals.length === 1);
+    expect(stageCalls).toHaveLength(0);                      // nothing sent before approval
+    expect(approvals[0].kind).toBe('dtnaStage');
+    expect(approvals[0].preview).toContain('CHANGE DTNA CASE STAGE: In-Repair -> Closed');
+    expect(approvals[0].preview).toContain('VISIBLE TO THE DEALER (DTNA)');
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: approvals[0].id, fromStage: 'In-Repair', toStage: 'Closed', currentStage: 'Closed', confirmed: true });
+    expect(stageCalls).toEqual([{ recordId: CASE_ID, newStatus: 'Closed' }]);
+    const stageLines = logger.lines.filter((l) => l.args[0] === '[dtna] change-stage');
+    expect(stageLines.length).toBeGreaterThanOrEqual(2);
+    for (const l of stageLines) for (const k of Object.keys(l.args[1] || {})) expect(STAGE_LOG_KEYS).toContain(k);
+    expect(stageLines.some((l) => l.args[1].method === 'changeStatus' && l.args[1].from === 'In-Repair' && l.args[1].to === 'Closed')).toBe(true);
+    expect(logger.text()).not.toContain(CASE_ID);
+    const pend = store.load('relayWritesPending', { items: [] });
+    expect(containsSentinel(pend, AUTH_SENTINELS)).toBe(null);
+    expect(pend.items.find((i) => i.id === r.id)).toMatchObject({ kind: 'dtnaStage', state: 'sent' });
+    assertClean([r]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('(c2) unconfigured STAGE_CHANGE_PARAMS -> DTNA_STAGE_NOT_CONFIGURED, no prompt, zero fetches', async () => {
+    await stageSetup({ configured: false });
+    const r = await call('dtna:change-stage', { equipmentId: '122269', caseId: CASE_ID, target: 'Closed' });
+    expect(r).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
+    expect(approvals).toHaveLength(0);
+    expect(fetchCount).toBe(0);
+    assertClean([r]);
+  });
+
+  it('(c3) session-time: only integers leave the servlet body; status and pushes stay clean', async () => {
+    await stageSetup();
+    const r = await call('dtna:session-time');
+    expect(r).toEqual({ ok: true, remainingSec: 27120, periodSec: 28800, expired: false });
+    expect(fetchCount).toBe(1);
+    const s = await call('dtna:status');
+    expect(s).toMatchObject({ state: 'connected', expiresInSec: 27120 });
+    expect(Object.values(s).every((v) => v === null || ['number', 'string', 'boolean'].includes(typeof v))).toBe(true);
+    const t = logger.text();
+    expect(t).toContain('[dtna] session-time');
+    expect(t).not.toContain('SessionTimeServlet');
+    expect(t).not.toContain('oidcIdToken');
+    expect(JSON.stringify(ctx.sent)).not.toContain('oidcIdToken');
+    assertClean([r, s]);
+    assertStoresHaveNoAuth();
+  });
+});
+
 describe('DTNA static guards', () => {
+  it('no src/**/*.js names the OIDC user-info handler (the app never reads the OIDC id token)', () => {
+    const SRC = path.join(WT_ROOT, 'src');
+    const out = [];
+    const walk = (x) => { for (const f of fs.readdirSync(x, { withFileTypes: true })) { const p = path.join(x, f.name); if (f.isDirectory()) walk(p); else if (f.name.endsWith('.js')) out.push(p); } };
+    walk(SRC);
+    expect(out.filter((p) => /OIDCLogoutHandler|getUserInfo/.test(fs.readFileSync(p, 'utf8')))).toEqual([]);
+    const st = fs.readFileSync(path.join(SRC, 'dtna', 'session-time.js'), 'utf8');
+    expect(st).not.toContain('JSON.parse(');
+    expect(st).not.toContain('console-message');
+  });
+
   it('the Pending Estimates collector and src/dtna/pending.js never require a DTNA network module', () => {
     const RE = /require\(\s*['"][^'"]*dtna\/(client|aura|session|capture)(\.js)?['"]\s*\)/;
     for (const f of [['scrapers', 'pending_est_sources.js'], ['dtna', 'pending.js'], ['dtna', 'comment-draft.js']]) {

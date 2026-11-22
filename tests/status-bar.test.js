@@ -9,7 +9,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   deriveStatus, absorbFleetSlice, emptyFleet, timeSince, esc, renderHtml,
-  FRESH_MS, STALE_MS, countUnavailable, dtnaPill,
+  FRESH_MS, STALE_MS, countUnavailable, dtnaPill, fmtExpiresIn,
 } from '../renderer/src/js/components/status-bar-logic.js';
 
 const NOW = 1_700_000_000_000;
@@ -223,5 +223,17 @@ describe('dtnaPill (DTNA Service Tracker status pill)', () => {
     for (const s of [null, undefined, {}, { state: 'weird' }, { state: 'toString' }, 'connected']) {
       expect(dtnaPill(s)).toMatchObject({ cls: 'tb-dtna tb-dtna--grey', text: 'DTNA \u2026' });
     }
+  });
+  it('session time (Phase C): connected shows "expires in"; expired stays Expired', () => {
+    expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 27120, sessionCheckedAt: '2026-11-21T20:00:00.000Z' }))
+      .toMatchObject({ cls: 'tb-dtna tb-dtna--green', text: 'DTNA: Connected \u00b7 expires in 7h 32m' });
+    expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 27120, sessionCheckedAt: '2026-11-21T20:00:00.000Z' }).title).toMatch(/Session time as of /);
+    expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 59 }).text).toBe('DTNA: Connected \u00b7 expires in <1m');
+    expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 600 }).text).toBe('DTNA: Connected \u00b7 expires in 10m');
+    expect(dtnaPill({ ok: true, state: 'connected' }).text).toBe('DTNA: Connected');
+    expect(dtnaPill({ ok: true, state: 'expired', expiresInSec: 0 })).toMatchObject({ cls: 'tb-dtna tb-dtna--amber', text: 'DTNA: Expired' });
+    expect(dtnaPill({ ok: true, state: 'pulling', expiresInSec: 500 }).text).toBe('DTNA: Pulling\u2026');
+    expect(fmtExpiresIn(3600)).toBe('1h 0m');
+    expect(fmtExpiresIn(-5)).toBe('<1m');
   });
 });

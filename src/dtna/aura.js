@@ -5,7 +5,8 @@
  * Form-encoded POSTs through the persist:vendor-dtna session with the context/token/pageURI the
  * capture took from the page's own requests. Never throws; returns {ok:true, value} | {ok:false, code}.
  * Only READ_METHODS reach callApex; _callApexRaw (dev probe only) refuses anything write-like.
- * WRITE_METHODS reach only callWrite, and only with a single-use write-gate approval token.
+ * WRITE_METHODS (postComment, changeStatus) reach only callWrite, and only with a single-use write-gate
+ * approval token; callApex and _callApexRaw refuse both.
  * One log line per call: { method, caseTag, code, status, ms }. No bodies, URLs or messages are logged.
  */
 const C = require('./constants');
@@ -213,7 +214,8 @@ async function callApex(name, params) {
 }
 
 /**
- * callWrite(name, params, token) — the ONLY DTNA write path (src/dtna/writes.js postApprovedComment).
+ * callWrite(name, params, token) — the ONLY DTNA write path (src/dtna/writes.js postApprovedComment and
+ * postApprovedStageChange).
  * name must be in WRITE_METHODS, and token a live single-use write-gate approval token, else zero
  * requests. No retry: a dealer-visible write is sent at most once per approval.
  */

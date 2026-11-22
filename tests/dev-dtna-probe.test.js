@@ -67,6 +67,7 @@ function fakeClient(o = {}) {
     calls,
     async getCaseRecord(id) {
       calls.push(['getCaseRecord', id]);
+      if (o.getCaseRecord) return o.getCaseRecord(id);
       return { ok: true, value: { Id: id, Unit_Number__c: id === CASE1 ? '122269' : '99', Serial__c: 'NP6923', Status: 'Arrived', Owner_Email__c: SENTINEL_EMAIL, Repair_Order__c: null, steps: [{ name: 'Arrived', at: '2026-11-01T10:00:00Z' }] } };
     },
     async getRepairOrderId(id) { calls.push(['getRepairOrderId', id]); return { ok: true, value: id === CASE1 ? { Id: 'a0X000000000001AAA' } : null }; },
@@ -108,7 +109,7 @@ function setup(o = {}) {
       const wc = win.webContents;
       wc.executeJavaScript = async (s) => { scripts.push(s); return { roots: 2, fields: [{ tag: 'textarea', type: '', name: 'comment', label: 'Comment', maxlength: '2000', required: true }], labels: ['Comment Type'], options: ['Estimate', 'General Comment'], buttons: ['Post'] }; };
       if (n++ === 0 && url === C.LIST_URL) {
-        emitScript(wc, 's1', BUNDLE);
+        emitScript(wc, 's1', o.bundle || BUNDLE);
         emitAuraSuccess(wc, {
           postData: auraPostData({
             context: SENTINEL_CONTEXT, token: SENTINEL_TOKEN, pageURI: SENTINEL_PAGEURI,
@@ -343,6 +344,89 @@ describe('timeout', () => {
     expect(log.lines.some((l) => l.startsWith('[dtna-probe] done') && l.endsWith('code=DTNA_PROBE_TIMEOUT'))).toBe(true);
     const out = JSON.parse(fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8'));
     expect(out.code).toBe('DTNA_PROBE_TIMEOUT');
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+});
+
+describe('stage mode (Phase C, read-only changeStatus discovery)', () => {
+  const STAGE_SRC = 'define("c/e2eCaseStatus",["@salesforce/apex/E2E_CaseDetailsLWCController.changeStatus"],function(c){'
+    + 'var STAGES=["Arrived","In Repair","Ready for Pickup","Closed"];var owner="' + SENTINEL_EMAIL + '";'
+    + 'class S{handleStageClick(){c({ recordId: this.recordId, status: this.selected }).then(()=>1)}}});';
+  // Escaped module source, as the portal ships some LWC bundles.
+  const STAGE_BUNDLE = 'x=' + JSON.stringify(STAGE_SRC) + ';';
+  const date = () => new Date().toISOString().slice(0, 10);
+
+  function stageSetup(o = {}) {
+    const s = setup(Object.assign({ bundle: STAGE_BUNDLE }, o));
+    s.stageOutFile = path.join(s.dataDir, 'phase-c', 'stage-probe.json');
+    s.deps.mode = 'stage';
+    s.deps.stageOutFile = s.stageOutFile;
+    return s;
+  }
+
+  it('start() with FLEET_DEV_DTNA_PROBE_MODE=stage runs stage mode after connected', async () => {
+    const { fx, deps, stageOutFile } = stageSetup();
+    delete deps.mode;
+    const log = recordingLog();
+    expect(probe.start({ env: { FLEET_DEV_DTNA_PROBE: '1', FLEET_DEV_DTNA_PROBE_MODE: 'stage' }, log, _deps: deps })).toBe(true);
+    expect(fx.windows.length).toBe(0);
+    deps.session.emit('connected');
+    await probe._lastRunForTests();
+    expect(fx.windows[0].loads).toEqual([C.LIST_URL, C.caseUrl(CASE1)]);
+    expect(fs.existsSync(stageOutFile)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(stageOutFile, 'utf8')).mode).toBe('stage');
+  });
+
+  it('reads param keys, status literals and handlers from the escaped bundle; one getCaseRecord read; no write', async () => {
+    const { fx, deps, dataDir, stageOutFile } = stageSetup();
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log }, deps));
+    expect(r).toMatchObject({ ok: true, file: 'dtna-stage-probe-' + date() + '.json' });
+    const text = fs.readFileSync(stageOutFile, 'utf8');
+    const out = JSON.parse(text);
+    expect(out.stage.paramKeys).toEqual(expect.arrayContaining(['recordId', 'status']));
+    expect(out.stage.calls.some((c) => c.argKind === 'object' && c.keys.join() === 'recordId,status')).toBe(true);
+    expect(out.stage.statusLiterals).toEqual(expect.arrayContaining(['Arrived', 'In Repair', 'Ready for Pickup', 'Closed']));
+    expect(out.stage.handlers).toContain('handleStageClick');
+    expect(out.stage.caseStageFields.Status).toBe('Arrived');
+    expect(out.stage.currentStage).toEqual({ name: 'Arrived', index: 1 });
+    expect(out.stage.imports.count).toBe(1);
+    expect(out.stage.pageCalledChangeStatus).toBe(false);
+    expect(out.stage.dom).toMatchObject({ code: 'OK' });
+    // The dated copy under <dataDir>/dev is the same sanitized result.
+    expect(fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8')).toBe(text);
+    // Read-only: exactly one Apex read, no raw / write calls, no click.
+    expect(deps.client.calls).toEqual([['getCaseRecord', CASE1]]);
+    expect(deps.aura.calls).toEqual([]);
+    expect(fx.windows[0].isDestroyed()).toBe(true);
+    // Secrets: no auth sentinel, no raw email, in either file or the logs.
+    for (const t of [text, log.lines.join('\n')]) {
+      expect(containsSentinel(t, AUTH_SENTINELS)).toBe(null);
+    }
+    expect(text).not.toContain('Owner_Email__c');
+    const done = log.lines.filter((l) => l.startsWith('[dtna-probe] done'));
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatch(/^\[dtna-probe\] done mode=stage keys=\d+ values=\d+ file=stage-probe\.json$/);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('S2_SCRIPT is read-only', () => {
+    const s = probe.S2_SCRIPT;
+    for (const bad of ['click(', 'submit', 'dispatchEvent', 'focus(', '.value =', '.value=', 'innerHTML =', 'fetch(', 'XMLHttpRequest']) expect(s).not.toContain(bad);
+  });
+
+  it('the default output path is <worktree>/.agents/tasks/dtna-aura/phase-c/stage-probe.json', () => {
+    expect(probe.STAGE_OUT_FILE).toBe(path.join(WT_ROOT, '.agents', 'tasks', 'dtna-aura', 'phase-c', 'stage-probe.json'));
+  });
+
+  it('timeout: closes the window, still writes the file and logs done with the code', async () => {
+    const { fx, deps, dataDir, stageOutFile } = stageSetup({ timeoutMs: 150, getCaseRecord: () => new Promise(() => {}) });
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log }, deps));
+    expect(r).toMatchObject({ ok: false, code: 'DTNA_PROBE_TIMEOUT' });
+    expect(fx.windows[0].isDestroyed()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(stageOutFile, 'utf8')).code).toBe('DTNA_PROBE_TIMEOUT');
+    expect(log.lines.some((l) => l.startsWith('[dtna-probe] done mode=stage') && l.endsWith('code=DTNA_PROBE_TIMEOUT'))).toBe(true);
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 });

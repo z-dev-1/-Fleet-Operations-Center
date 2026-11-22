@@ -4,8 +4,13 @@
  *
  * Channels: dtna:status, dtna:login, dtna:pull-unit, dtna:list-cases, dtna:bulk-pull (+ dtna:progress
  * events), dtna:bulk-cancel, dtna:export, dtna:draft-comment (AI text only, no network to DTNA) and
- * dtna:post-comment (the one DTNA write: dealer-visible, ALWAYS through the write gate's approval
- * modal; returns DTNA_POST_NOT_CONFIGURED until constants.POST_COMMENT_PARAMS is filled).
+ * dtna:post-comment (dealer-visible, ALWAYS through the write gate's approval modal; returns
+ * DTNA_POST_NOT_CONFIGURED until constants.POST_COMMENT_PARAMS is filled), dtna:stage-options (cache
+ * only, no network), dtna:change-stage (forward-only stage change: dealer-visible, ALWAYS through the
+ * write gate's approval modal; DTNA_STAGE_NOT_CONFIGURED until constants.STAGE_CHANGE_PARAMS is filled)
+ * and dtna:session-time (the SessionTimeServlet seconds left; user-initiated).
+ * Before a stage change, a comment post or a bulk pull, a session pre-flight asks the user to sign in
+ * again when the session is (nearly) expired; a failed pre-flight read never blocks.
  * Session status changes are pushed on dtna:status-changed.
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Results carry ids, counts and codes only: comment text stays in dtnaCaseCache / fleetData rows and
@@ -29,7 +34,8 @@ function _payload(p) {
 
 /**
  * registerDtnaIPC(ctx, deps)
- * deps (tests): { handle, client, session, store, electron, rowApply, deepScan, writeGate, writes, commentDraft, dtnaStore }
+ * deps (tests): { handle, client, session, store, electron, rowApply, deepScan, writeGate, writes, commentDraft, dtnaStore,
+ *   sessionTime, pending }
  */
 function registerDtnaIPC(ctx, deps) {
   const d = deps || {};
@@ -44,6 +50,8 @@ function registerDtnaIPC(ctx, deps) {
   const writes = () => d.writes || require('../dtna/writes');
   const commentDraft = () => d.commentDraft || require('../dtna/comment-draft');
   const dtnaStore = () => d.dtnaStore || require('../dtna/store');
+  const sessionTime = () => d.sessionTime || require('../dtna/session-time');
+  const pending = () => d.pending || require('../dtna/pending');
   const join = require('../dtna/join');
   const C = require('../dtna/constants');
 
@@ -79,7 +87,11 @@ function registerDtnaIPC(ctx, deps) {
     if (typeof p.equipmentId !== 'string') return _bad('equipmentId');
     const id = p.equipmentId.trim();
     if (!id || id.length > EQUIPMENT_MAX) return _bad('equipmentId');
+    return _pullUnit(id);
+  });
 
+  // The pull-unit body (also the read-back after a stage change). id is a validated equipmentId.
+  async function _pullUnit(id) {
     const st = store();
     // Merge base: the LARGER of ctx.lastData.rows and the stored fleetData rows (same as relay:refresh-unit).
     const liveRows = (ctx && ctx.lastData && Array.isArray(ctx.lastData.rows)) ? ctx.lastData.rows : [];
@@ -128,7 +140,25 @@ function registerDtnaIPC(ctx, deps) {
     } finally {
       try { S.setPulling(false); } catch (e) { log.warn('[dtna] status', safeErr(e)); }
     }
+  }
+
+  // ── session time (user-initiated: DTNA panel open / Check session) ────────
+  wrap('dtna:session-time', async () => {
+    const r = await sessionTime().read();
+    if (!r || !r.ok) return { ok: false, code: String((r && r.code) || 'DTNA_INTERNAL').slice(0, 40) };
+    return { ok: true, remainingSec: r.remainingSec, periodSec: r.periodSec, expired: !!r.expired };
   });
+
+  // Pre-flight: blocks only when the servlet says the session is expired or nearly so (fail-open).
+  const _preflight = async () => {
+    try {
+      const pf = await sessionTime().preflight();
+      return pf && pf.block ? pf : null;
+    } catch (e) {
+      log.warn('[dtna] preflight', safeErr(e));
+      return null;
+    }
+  };
 
   // ── list ─────────────────────────────────────────────────────────────────
   wrap('dtna:list-cases', async (payload) => {
@@ -148,6 +178,9 @@ function registerDtnaIPC(ctx, deps) {
     const p = _payload(payload);
     if (!p) return _bad('payload');
     if (p.includeComments !== undefined && typeof p.includeComments !== 'boolean') return _bad('includeComments');
+    if (_running) return { ok: false, code: 'DTNA_BUSY', jobId: _running.jobId };
+    // Session (nearly) expired: the existing callers sign the user in on DTNA_SIGNIN_REQUIRED.
+    if (await _preflight()) return { ok: false, code: 'DTNA_SIGNIN_REQUIRED' };
     if (_running) return { ok: false, code: 'DTNA_BUSY', jobId: _running.jobId };
     const jobId = 'j' + Date.now().toString(36);
     const ac = new AbortController();
@@ -231,6 +264,8 @@ function registerDtnaIPC(ctx, deps) {
     if (!entry) return done({ ok: false, code: 'DTNA_NOT_PULLED' });
     // The repair order comes from the cache, never from the renderer.
     if (!entry.repairOrderId) return done({ ok: false, code: 'DTNA_NO_REPAIR_ORDER' });
+    const pf = await _preflight();
+    if (pf) return done({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: Number(pf.remainingSec) || 0 });
     const r = await writeGate().requestWrite({
       kind: 'dtnaComment',
       payload: { caseId, repairOrderId: String(entry.repairOrderId), repairOrderNo: String(entry.repairOrderNo || ''), text: p.text },
@@ -243,6 +278,91 @@ function registerDtnaIPC(ctx, deps) {
     if (r && r.ok && r.result && r.result.commentId) out.commentId = String(r.result.commentId);
     if (r && !r.ok && typeof r.error === 'string' && /^DTNA_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
     return done(out);
+  });
+
+  // ── stage: forward-only, dealer-visible, approval-gated ───────────────────
+  const _caseOk = (p) => typeof p.caseId === 'string' && C.CASE_ID_RE.test(p.caseId);
+
+  wrap('dtna:stage-options', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    if (!_equipment(p)) return _bad('equipmentId');
+    if (!_caseOk(p)) return _bad('caseId');
+    // Cache only: no network.
+    const entry = dtnaStore().get(p.caseId);
+    if (!entry) return { ok: false, code: 'DTNA_NOT_PULLED' };
+    const st = pending().currentStage(entry);
+    if (!st) return { ok: false, code: 'DTNA_STAGE_UNKNOWN' };
+    return {
+      ok: true,
+      configured: !!writes().isStageConfigured(),
+      current: st.name,
+      currentIndex: st.index,
+      targets: writes().stageTargets(st.name),
+      stages: C.CASE_STAGES.slice(),
+    };
+  });
+
+  const _stageBusy = new Set(); // caseIds with a stage change in flight
+
+  wrap('dtna:change-stage', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    const equipmentId = _equipment(p);
+    if (!equipmentId) return _bad('equipmentId');
+    if (!_caseOk(p)) return _bad('caseId');
+    if (typeof p.target !== 'string' || C.stageIndex(p.target) < 0) return _bad('target');
+    const caseId = p.caseId;
+    const target = p.target;
+    const tag = caseTag(caseId);
+    let from = '';
+    const done = (r) => { log.info('[dtna] change-stage', { caseTag: tag, from, to: target, code: r.code || r.outcome || 'OK' }); return r; };
+    // Not configured: no approval prompt, no network.
+    if (!writes().isStageConfigured()) return done({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
+    if (!dtnaStore().get(caseId)) return done({ ok: false, code: 'DTNA_NOT_PULLED' });
+    if (_stageBusy.has(caseId)) return done({ ok: false, code: 'DTNA_BUSY' });
+    _stageBusy.add(caseId);
+    try {
+      const pf = await _preflight();
+      if (pf) return done({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: Number(pf.remainingSec) || 0 });
+      // Fresh read so the approval shows the stage that is on the server now.
+      const fr = await client().pullCase(caseId, { includeComments: false });
+      if (!fr || !fr.ok) return done({ ok: false, code: String((fr && fr.code) || 'DTNA_INTERNAL').slice(0, 40) });
+      const cur = pending().currentStage(fr.entry);
+      if (!cur) return done({ ok: false, code: 'DTNA_STAGE_UNKNOWN' });
+      from = cur.name;
+      if (!C.isForwardStage(from, target)) return done({ ok: false, code: 'DTNA_STAGE_NOT_FORWARD', currentStage: from });
+      const r = await writeGate().requestWrite({
+        kind: 'dtnaStage',
+        payload: { caseId, fromStage: from, toStage: target, repairOrderNo: String((fr.entry && fr.entry.repairOrderNo) || '') },
+        origin: 'unit-detail-dtna-stage',
+        unit: equipmentId,
+        interactive: true,
+      });
+      if (!r || !r.ok) {
+        const out = { ok: false, outcome: String((r && r.outcome) || 'send-failed'), id: (r && r.id) || null };
+        if (r && typeof r.error === 'string' && /^DTNA_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
+        return done(out);
+      }
+      // Sent: re-pull the unit (same path as Pull DTNA) and read the stage back.
+      let pullCode = '';
+      try {
+        const pr = await _pullUnit(equipmentId);
+        if (!pr || !pr.ok) pullCode = String((pr && pr.code) || 'DTNA_INTERNAL').slice(0, 40);
+      } catch (e) {
+        log.warn('[dtna] change-stage re-pull', safeErr(e));
+        pullCode = 'DTNA_INTERNAL';
+      }
+      const after = pending().currentStage(dtnaStore().get(caseId));
+      const out = {
+        ok: true, outcome: 'sent', id: r.id || null, fromStage: from, toStage: target,
+        currentStage: after ? after.name : '', confirmed: !!after && after.name === target,
+      };
+      if (pullCode) out.pullCode = pullCode;
+      return done(out);
+    } finally {
+      _stageBusy.delete(caseId);
+    }
   });
 
   // ── export ───────────────────────────────────────────────────────────────

@@ -388,6 +388,36 @@ describe('callWrite (the only DTNA write path)', () => {
     expect(logger.text()).not.toContain(TOK);
   });
 
+  it('changeStatus (Phase C) is refused by callApex and _callApexRaw, and needs a live token in callWrite', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success(null)));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
+    const SP = { recordId: CASE_ID, status: 'Closed' };
+    expect(await aura.callApex('changeStatus', SP)).toEqual({ ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' });
+    expect(await aura._callApexRaw('E2E_CaseDetailsLWCController', 'changeStatus', SP)).toEqual({ ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' });
+    expect(await aura.callWrite('changeStatus', SP, {})).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(await aura.callWrite('changeStatus', SP)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(fetch).not.toHaveBeenCalled();
+    const t = g.mint();
+    expect((await aura.callWrite('changeStatus', SP, t)).ok).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0].params).toMatchObject({ classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus', params: SP });
+    expect(await aura.callWrite('changeStatus', SP, t)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(logger.text()).not.toContain(TOK);
+  });
+
+  it('changeStatus: an expired session is not retried', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, invalidSession()));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
+    expect(await aura.callWrite('changeStatus', { recordId: CASE_ID, status: 'Closed' }, g.mint())).toMatchObject({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it('an expired session is not retried for a write', async () => {
     await seed();
     const fetch = vi.fn(async () => res(200, invalidSession()));

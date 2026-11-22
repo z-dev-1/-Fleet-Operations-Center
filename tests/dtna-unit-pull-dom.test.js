@@ -131,6 +131,36 @@ describe('Post to DTNA button (Phase B)', () => {
   });
 });
 
+describe('Change Stage button (Phase C)', () => {
+  let hadWindow;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    hadWindow = 'window' in globalThis;
+    if (!hadWindow) globalThis.window = {};
+    globalThis.window.dtna = { pullUnit: vi.fn(), postComment: vi.fn(), stageOptions: vi.fn(), changeStage: vi.fn() };
+  });
+  afterEach(() => {
+    const dt = globalThis.window.dtna;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    expect(dt.stageOptions).not.toHaveBeenCalled();
+    expect(dt.changeStage).not.toHaveBeenCalled();
+    if (!hadWindow) delete globalThis.window; else delete globalThis.window.dtna;
+  });
+  const base = (extra) => ({ equipmentId: '122269', relaySynced: true, workRequestId: 'svc-1', vendor: 'Amerit',
+    _secondaryWRs: [], _plannedWRData: null, ...extra });
+
+  it('a DTNA-case offsite renders [data-dtna-stage] right after [data-dtna-post]; other offsites render none', () => {
+    const h = m.renderRepairPane(base({ offsiteShopEventUrl: DTNA, asistSource: 'dtna' }));
+    expect(h).toContain('data-dtna-stage="122269" data-dtna-case="500gx000002E4U5AAK"');
+    expect(h).toContain('\u21e2 Change Stage</button>');
+    expect(h.indexOf('data-dtna-post=')).toBeLessThan(h.indexOf('data-dtna-stage='));
+    expect(h.split('data-dtna-stage=').length - 1).toBe(1);
+    expect(m.renderRepairPane(base({ offsiteShopEventUrl: DECISIV, make: 'Freightliner' }))).not.toContain('data-dtna-stage');
+    expect(m.renderRepairPane(base({ make: 'Freightliner' }))).not.toContain('data-dtna-stage');
+  });
+});
+
 describe('Pull DTNA toast when a comment read failed (Phase A review #1)', () => {
   let prevDoc;
   let prevWin;

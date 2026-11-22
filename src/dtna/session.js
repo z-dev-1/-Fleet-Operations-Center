@@ -37,10 +37,22 @@ let _pulling = false;
 let _lastCode = null;
 let _lastPullAt = null;
 let _lastState = null;
+// Last SessionTimeServlet reading (src/dtna/session-time.js): integers + when it was read. No body.
+let _sessionTime = null;
+
+function _expiresInSec() {
+  if (!_sessionTime) return null;
+  return Math.max(0, _sessionTime.remainingSec - Math.floor((Date.now() - _sessionTime.at) / 1000));
+}
 
 function _state() {
   if (_pulling) return 'pulling';
   if (_loginP || _hiddenP) return 'connecting';
+  if (_sessionTime) {
+    // The servlet reading is the session's own clock (~8 h), so it replaces the capture-age proxy.
+    if (_expiresInSec() <= 0) return _everCaptured ? 'expired' : 'signed-out';
+    return _expired ? 'expired' : 'connected';
+  }
   const has = !!capture.current();
   if (!has && !_everCaptured) return 'signed-out';
   if (!has || _expired || capture.ageMs() >= C.CONTEXT_MAX_AGE_MS) return 'expired';
@@ -50,19 +62,24 @@ function _state() {
 /** status() -> { ok:true, state, contextAgeSec, lastPullAt, lastCode } (no secrets, no network). */
 function status() {
   const age = capture.ageMs();
-  return {
+  const s = {
     ok: true,
     state: _state(),
     contextAgeSec: Number.isFinite(age) ? Math.round(age / 1000) : null,
     lastPullAt: _lastPullAt,
     lastCode: _lastCode,
   };
+  if (_sessionTime) {
+    s.expiresInSec = _expiresInSec();
+    s.sessionCheckedAt = new Date(_sessionTime.at).toISOString();
+  }
+  return s;
 }
 
-function _emit() {
+function _emit(force) {
   try {
     const s = status();
-    if (s.state === _lastState) return;
+    if (!force && s.state === _lastState) return;
     _lastState = s.state;
     _bus.emit('status', s);
   } catch (e) { log.warn('[dtna] status', safeErr(e)); }
@@ -85,7 +102,21 @@ function noteResult(code) {
 function setPulling(on) { _pulling = !!on; _emit(); }
 function notePulled(at) { _lastPullAt = typeof at === 'string' && at ? at : new Date().toISOString(); _emit(); }
 
-function _captured() { _everCaptured = true; _expired = false; _emit(); }
+/** noteSessionTime({remainingSec, periodSec}) — store a servlet reading (integers only) and push status. */
+function noteSessionTime(t) {
+  const rem = Number(t && t.remainingSec);
+  const per = t && t.periodSec != null ? Number(t.periodSec) : null;
+  if (!Number.isFinite(rem)) return;
+  _sessionTime = {
+    remainingSec: Math.max(0, Math.floor(rem)),
+    periodSec: per != null && Number.isFinite(per) ? Math.max(0, Math.floor(per)) : null,
+    at: Date.now(),
+  };
+  _emit(true);
+}
+
+// A new sign-in starts a new session: the old servlet reading no longer applies.
+function _captured() { _everCaptured = true; _expired = false; _sessionTime = null; _emit(); }
 
 // ── Windows ────────────────────────────────────────────────────────────────
 function _webPreferences(extra) {
@@ -290,10 +321,11 @@ function _resetForTests() {
   try { teardownAll(); } catch (_) {}
   _ses = null; _deps = {}; _loginP = null; _loginWin = null; _hiddenP = null; _quitHooked = false;
   _everCaptured = false; _expired = false; _pulling = false; _lastCode = null; _lastPullAt = null; _lastState = null;
+  _sessionTime = null;
   _bus.removeAllListeners();
 }
 
 module.exports = {
-  getSession, status, onStatus, noteResult, setPulling, notePulled, openLoginWindow, ensureContext, teardownAll,
+  getSession, status, onStatus, noteResult, setPulling, notePulled, noteSessionTime, openLoginWindow, ensureContext, teardownAll,
   _setDeps, _resetForTests,
 };

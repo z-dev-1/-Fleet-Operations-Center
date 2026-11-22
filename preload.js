@@ -306,7 +306,8 @@ expose('pendingEst', {
   scan: (opts) => ipcRenderer.invoke('pending-est:scan', opts || {}),
 });
 
-// ── DTNA Service Tracker (user-initiated reads; postComment is the one write, always approval-gated) ──
+// ── DTNA Service Tracker (user-initiated reads; postComment and changeStage are the writes, always
+// approval-gated; sessionTime reads the session's seconds left on a click) ──
 expose('dtna', {
   status:     () => ipcRenderer.invoke('dtna:status'),
   login:      () => ipcRenderer.invoke('dtna:login'),
@@ -317,6 +318,9 @@ expose('dtna', {
   exportBulk: (p) => ipcRenderer.invoke('dtna:export', p || {}),
   draftComment: (p) => ipcRenderer.invoke('dtna:draft-comment', p || {}),
   postComment:  (p) => ipcRenderer.invoke('dtna:post-comment', p || {}),
+  stageOptions: (p) => ipcRenderer.invoke('dtna:stage-options', p || {}),
+  changeStage:  (p) => ipcRenderer.invoke('dtna:change-stage', p || {}),
+  sessionTime:  () => ipcRenderer.invoke('dtna:session-time'),
   onStatus:   (cb) => on('dtna:status-changed', cb),
   onProgress: (cb) => on('dtna:progress', cb),
 });

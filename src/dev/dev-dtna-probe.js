@@ -15,6 +15,9 @@
  *  - P2 runs a DOM-reading script on the Comments tab: it never clicks, types, focuses or sends.
  *  - No page console listener (the portal prints its OIDC token there).
  *
+ *  - Stage mode (FLEET_DEV_DTNA_PROBE_MODE=stage) reads the changeStatus call sites and the stepper
+ *    DOM (S2, read-only) and makes one getCaseRecord read; it never calls changeStatus.
+ *
  * Output: <getDataDir()>/dev/dtna-probe-<YYYY-MM-DD>.json (emails masked; no token, context,
  * pageURI, cookies or URLs with a query). The logger gets counts only, and always a
  * `[dtna-probe] done ...` line (also on timeout or error, with code=...). The probe window is always closed.
@@ -29,7 +32,13 @@ const { stripHtml } = require('../dtna/thread');
 const ENV_FLAG = 'FLEET_DEV_DTNA_PROBE';
 // FLEET_DEV_DTNA_PROBE_MODE=post: postComment discovery only (P1b call sites + P2 composer on the RO
 // test case). The probe itself makes no Apex calls in this mode; output dtna-post-probe-<date>.json.
+// FLEET_DEV_DTNA_PROBE_MODE=stage: changeStatus discovery only (Phase C). Reads the
+// E2E_CaseDetailsLWCController.changeStatus call sites from the portal bundles (escaped-string aware),
+// the status literals and handler names around them, the stage stepper DOM (S2, read-only) and ONE
+// getCaseRecord read for the current-stage fields. No write, no click, no _callApexRaw. Output:
+// <worktree>/.agents/tasks/dtna-aura/phase-c/stage-probe.json and <dataDir>/dev/dtna-stage-probe-<date>.json.
 const MODE_FLAG = 'FLEET_DEV_DTNA_PROBE_MODE';
+const STAGE_OUT_FILE = path.resolve(__dirname, '..', '..', '.agents', 'tasks', 'dtna-aura', 'phase-c', 'stage-probe.json');
 const WINDOW_TITLE = 'DTNA discovery probe (dev, read-only)';
 const OVERALL_TIMEOUT_MS = 10 * 60e3;
 const SETTLE_MS = 8000;
@@ -93,6 +102,47 @@ const P2_SCRIPT = [
   '})()',
 ].join('\n');
 
+// READ-ONLY stage stepper inspection (S2, stage mode). Reads tags, attributes, classes and text only.
+const S2_SCRIPT = [
+  '(function(){',
+  '  var out = { items: [], buttons: [], hosts: [], roots: 0 };',
+  '  var STEP_RE = /progress|path|step|stage|status/;',
+  '  function hostChain(el){ var n = el, chain = []; for (var k = 0; k < 60 && n; k++) { var tg = String(n.tagName || "").toLowerCase();',
+  '    if (tg.indexOf("-") > 0 && chain.indexOf(tg) < 0 && chain.length < 12) chain.push(tg);',
+  '    n = n.parentNode || null; if (n && n.nodeType === 11) n = n.host || null; } return chain.join(" < "); }',
+  '  var seen = 0;',
+  '  function txt(s){ return String(s == null ? "" : s).replace(/\\s+/g, " ").trim().slice(0, 120); }',
+  '  function add(arr, v){ if (v && arr.indexOf(v) < 0 && arr.length < 80) arr.push(v); }',
+  '  function attr(el, n){ try { return el.getAttribute(n) || ""; } catch (e) { return ""; } }',
+  '  function inStepper(el){ var n = el.parentNode || null; for (var k = 0; k < 30 && n; k++) { if (n.nodeType === 11) { n = n.host || null; if (!n) break; }',
+  '    var tg = String(n.tagName || "").toLowerCase(); if (tg.indexOf("-") > 0 && STEP_RE.test(tg)) return true; n = n.parentNode || null; } return false; }',
+  '  function walk(root, depth){',
+  '    if (!root || depth > 25 || seen > 20000) return;',
+  '    out.roots++;',
+  '    var els = root.querySelectorAll("*");',
+  '    for (var i = 0; i < els.length; i++) {',
+  '      var el = els[i]; seen++;',
+  '      var tag = String(el.tagName || "").toLowerCase();',
+  '      var role = attr(el, "role");',
+  '      var cls = attr(el, "class");',
+  '      var step = (tag.indexOf("-") > 0 && STEP_RE.test(tag)) || /slds-path__item|slds-progress__item/.test(cls)',
+  '        || ((role === "option" || role === "listitem" || role === "tab") && inStepper(el));',
+  '      if (step && out.items.length < 80) {',
+  '        var cur = attr(el, "aria-current");',
+  '        out.items.push({ tag: tag, label: txt(attr(el, "title") || attr(el, "aria-label") || attr(el, "data-value") || el.textContent),',
+  '          current: (!!cur && cur !== "false") || attr(el, "aria-selected") === "true" || /slds-is-current|slds-is-active/.test(cls),',
+  '          complete: /slds-is-complete/.test(cls) });',
+  '        add(out.hosts, tag + ": " + hostChain(el));',
+  '      }',
+  '      if (tag === "button" || tag === "lightning-button" || role === "button") add(out.buttons, txt(attr(el, "label") || attr(el, "title") || el.textContent));',
+  '      if (el.shadowRoot) walk(el.shadowRoot, depth + 1);',
+  '    }',
+  '  }',
+  '  walk(document, 0);',
+  '  return out;',
+  '})()',
+].join('\n');
+
 // ── masking / scrubbing ───────────────────────────────────────────────────
 const EMAIL_RE = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
 const QUERY_URL_RE = /\bhttps?:\/\/[^\s"'<>]*\?[^\s"'<>]*/gi;
@@ -148,6 +198,9 @@ function _paramKeysIn(win) {
 
 // ── P1b: map the postComment import to its factory parameter and read the call sites (zero calls) ──
 const POST_IMPORT = '@salesforce/apex/E2E_UTP_CommentController.postComment';
+const STAGE_IMPORT = '@salesforce/apex/E2E_CaseDetailsLWCController.changeStatus';
+const STAGE_WINDOW = 6000;
+const STAGE_WORD_RE = /stage|status|repair|pick\s*-?up|arriv|clos/i;
 const FEED_WRITE_RE = /^(post|add|create|insert|save|submit|share|update|edit)/i;
 
 function _balanced(t, open) {
@@ -270,12 +323,44 @@ function analyzeImportCalls(text, spec) {
   return out;
 }
 
+/** _unescaped(t) — bundles may carry module source as an escaped string literal (\" and \n); read it unescaped. */
+function _unescaped(t) {
+  return t.includes('\\"') ? t.replace(/\\\\/g, '\u0000').replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\t/g, ' ').replace(/\u0000/g, '\\') : t;
+}
+
 function createCensus() {
   const bundle = new Map(); // 'cls.method' -> { classname, method, kind, paramKeys, hits }
   const page = new Map();
   const postSites = [];
   const postCalls = [];
   const postImports = [];
+  // Stage mode (changeStatus): call-site records, import positions, nearby status literals and handler names.
+  const stageCalls = [];
+  const stageImports = [];
+  const stageLiterals = [];
+  const stageHandlers = [];
+
+  function _scanStage(u) {
+    const at = [];
+    let i = 0;
+    while ((i = u.indexOf(STAGE_IMPORT, i)) >= 0 && at.length < 20) { at.push(i); i += STAGE_IMPORT.length; }
+    const cre = /(?<![\w$])changeStatus\b/g;
+    let cm;
+    while ((cm = cre.exec(u)) && at.length < 40) at.push(cm.index);
+    for (const p of at) {
+      const win = u.slice(Math.max(0, p - STAGE_WINDOW), p + STAGE_WINDOW);
+      // No code punctuation inside a literal, so a window that starts mid-string resyncs on the next quote.
+      const lre = /"([^"\\\n{}[\]();=]{1,60})"|'([^'\\\n{}[\]();=]{1,60})'/g;
+      let m;
+      while ((m = lre.exec(win)) && stageLiterals.length < 60) {
+        const lit = (m[1] != null ? m[1] : m[2]).trim();
+        if (!lit || /^@salesforce\/|^c\//.test(lit) || stageLiterals.includes(lit)) continue;
+        if (C.caseStageOf(lit) || STAGE_WORD_RE.test(lit)) stageLiterals.push(_cap(lit, 60));
+      }
+      const hre = /(?<![\w$])(handle[\w$]{0,40}|on[\w$]{0,40}click)\b/gi;
+      while ((m = hre.exec(win)) && stageHandlers.length < 20) if (!stageHandlers.includes(m[1])) stageHandlers.push(m[1]);
+    }
+  }
   // Every non-Apex Aura action descriptor the page sends: descriptor + param key names (+ key types). No values.
   const descriptors = new Map();
   // Bundle literals of feed/community controller actions, write-like ones with a code excerpt.
@@ -363,9 +448,18 @@ function createCensus() {
     let m;
     while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW), t.slice(Math.max(0, m.index - 400), m.index));
     _scanFeed(t);
+    if (t.includes(STAGE_IMPORT)) {
+      const u = _unescaped(t);
+      for (const src of (u !== t ? [u, t] : [t])) for (const r of analyzeImportCalls(src, STAGE_IMPORT)) if (stageCalls.length < 20) stageCalls.push(r);
+      _scanStage(u);
+      let sx = 0;
+      while ((sx = t.indexOf(STAGE_IMPORT, sx)) >= 0 && stageImports.length < 12) {
+        stageImports.push({ len: t.length, at: sx, excerpt: _excerpt(t, sx, 400, 900) });
+        sx += STAGE_IMPORT.length;
+      }
+    }
     if (t.includes(POST_IMPORT)) {
-      // Bundles may carry module source as an escaped string literal (\" and \n); read it unescaped.
-      const u = t.includes('\\"') ? t.replace(/\\\\/g, '\u0000').replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\t/g, ' ').replace(/\u0000/g, '\\') : t;
+      const u = _unescaped(t);
       if (u !== t && postCalls.length < 20) for (const r of analyzeImportCalls(u)) if (postCalls.length < 20) postCalls.push(r);
       _scanUses(u);
     }
@@ -412,7 +506,10 @@ function createCensus() {
     };
   }
 
-  return { scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, uses, scripts, page, bundle };
+  return {
+    scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, uses, scripts, page, bundle,
+    stageCalls, stageImports, stageLiterals, stageHandlers,
+  };
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -573,9 +670,12 @@ function _resolveDeps(d) {
     settleMs: Number.isFinite(x.settleMs) ? x.settleMs : SETTLE_MS,
     loadTimeoutMs: Number.isFinite(x.loadTimeoutMs) ? x.loadTimeoutMs : LOAD_TIMEOUT_MS,
     timeoutMs: Number.isFinite(x.timeoutMs) ? x.timeoutMs : OVERALL_TIMEOUT_MS,
-    mode: x.mode === 'post' ? 'post' : 'full',
+    mode: x.mode === 'post' || x.mode === 'stage' ? x.mode : 'full',
+    stageOutFile: typeof x.stageOutFile === 'string' && x.stageOutFile ? x.stageOutFile : STAGE_OUT_FILE,
   };
 }
+
+function _modeOf(v) { return v === 'post' || v === 'stage' ? v : 'full'; }
 
 /**
  * start({ log, env, _deps }) — the only entry point. Inert (returns false, creates nothing) unless
@@ -598,7 +698,7 @@ function start(opts) {
     stopped = true;
     _ran = true;
     try { if (unsub) unsub(); } catch (_) {}
-    _lastRun = run(Object.assign({ mode: env[MODE_FLAG] === 'post' ? 'post' : 'full' }, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
+    _lastRun = run(Object.assign({ mode: _modeOf(env[MODE_FLAG]) }, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
   };
   unsub = session.onStatus(onStatus);
   if (stopped) { try { unsub(); } catch (_) {} }
@@ -614,9 +714,9 @@ async function run(deps) {
   const D = _resolveDeps(deps);
   const at = new Date(D.now()).toISOString();
   const date = at.slice(0, 10);
-  const fileName = (D.mode === 'post' ? 'dtna-post-probe-' : 'dtna-probe-') + date + '.json';
+  const fileName = (D.mode === 'post' ? 'dtna-post-probe-' : D.mode === 'stage' ? 'dtna-stage-probe-' : 'dtna-probe-') + date + '.json';
   const out = {
-    version: 1, at, mode: D.mode, targets: (D.mode === 'post' ? TARGETS.slice(0, 1) : TARGETS).map(caseTag),
+    version: 1, at, mode: D.mode, targets: (D.mode === 'full' ? TARGETS : TARGETS.slice(0, 1)).map(caseTag),
     d0: null, d1: [], d2: { repairOrders: [], calls: [], skipped: [], needsConfirmation: [] },
     d3: null, d4: null, p1: { sites: [] }, p1b: [], p2: [], classes: {},
   };
@@ -657,17 +757,38 @@ async function run(deps) {
   out.uses = census.uses;
   out.winClosedAtMs = state.closedAt ? state.closedAt - Date.parse(at) : null;
   if (code) out.code = code;
+  if (D.mode === 'stage') out.stage = _stageOut(census, state);
 
   let written = false;
+  let stageWritten = false;
   try {
     const cur = D.capture.current ? D.capture.current() : null;
     const secrets = cur ? [cur.context, cur.token, cur.pageURI].filter((s) => typeof s === 'string' && s.length >= 8) : [];
+    const json = JSON.stringify(_scrubDeep(out, secrets), null, 1);
+    if (D.mode === 'stage') {
+      try {
+        fs.mkdirSync(path.dirname(D.stageOutFile), { recursive: true });
+        fs.writeFileSync(D.stageOutFile, json);
+        stageWritten = true;
+      } catch (e) {
+        code = code || ('DTNA_PROBE_WRITE:' + _errName(e));
+      }
+    }
     const dir = path.join(D.getDataDir(), 'dev');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, fileName), JSON.stringify(_scrubDeep(out, secrets), null, 1));
+    fs.writeFileSync(path.join(dir, fileName), json);
     written = true;
   } catch (e) {
     code = code || ('DTNA_PROBE_WRITE:' + _errName(e));
+  }
+
+  if (D.mode === 'stage') {
+    const s = out.stage || { paramKeys: [], statusLiterals: [] };
+    const sline = '[dtna-probe] done mode=stage keys=' + s.paramKeys.length + ' values=' + s.statusLiterals.length
+      + ' file=' + (stageWritten ? path.basename(D.stageOutFile) : '-') + (code ? ' code=' + code : '');
+    if (code) log.warn(sline); else log.info(sline);
+    _running = false;
+    return { ok: !code, code: code || undefined, file: written ? fileName : null };
   }
 
   const d3 = out.d3 || { cases: 0, comments: 0 };
@@ -700,6 +821,61 @@ async function _p2(D, state, id) {
   } catch (e) {
     return { caseTag: caseTag(id), code: 'DTNA_PROBE_SCRIPT:' + _errName(e) };
   }
+}
+
+async function _s2(D, state, id) {
+  if (state.aborted || _isDestroyed(state.win)) return { caseTag: caseTag(id), code: 'DTNA_PROBE_NO_WINDOW' };
+  try {
+    const r = await Promise.race([state.win.webContents.executeJavaScript(S2_SCRIPT, true), _sleep(D.loadTimeoutMs).then(() => null)]);
+    if (!r || typeof r !== 'object') return { caseTag: caseTag(id), code: 'DTNA_PROBE_NO_RESULT' };
+    const items = (Array.isArray(r.items) ? r.items.slice(0, 80) : []).filter((x) => x && typeof x === 'object').map((x) => ({
+      tag: _cap(x.tag, 60), label: _cap(x.label, 120), current: !!x.current, complete: !!x.complete,
+    }));
+    const list = (a, n, c) => (Array.isArray(a) ? a.slice(0, n).filter((x) => typeof x === 'string').map((x) => _cap(x, c)) : []);
+    return { caseTag: caseTag(id), code: 'OK', roots: Number(r.roots) || 0, items, buttons: list(r.buttons, 80, 120), hosts: list(r.hosts, 20, 600) };
+  } catch (e) {
+    return { caseTag: caseTag(id), code: 'DTNA_PROBE_SCRIPT:' + _errName(e) };
+  }
+}
+
+/** _stageFields(value) -> scalar fields whose key names a status / stage (dotted paths, capped). */
+function _stageFields(value) {
+  const out = {};
+  _walk(value, '', 0, (p, k, v) => {
+    if (!k || !/status|stage|step|milestone/i.test(k) || Object.keys(out).length >= 40) return;
+    const s = _scalar(v);
+    if (s !== undefined) out[p] = s;
+  });
+  return out;
+}
+
+/** _stageOut(census, state) -> the sanitized stage-mode result (key names, literals, DOM labels). */
+function _stageOut(census, state) {
+  const st = state.stage || {};
+  const calls = [];
+  for (const rec of census.stageCalls) {
+    for (const c of (rec && rec.calls) || []) {
+      if (calls.length < 20) calls.push({ via: c.via, argKind: c.argKind, keys: c.keys.slice(), entries: c.entries.slice(), excerpt: c.excerpt });
+    }
+  }
+  const paramKeys = [];
+  const addKey = (k) => { if (typeof k === 'string' && /^[\w$]{1,60}$/.test(k) && !paramKeys.includes(k) && paramKeys.length < 30) paramKeys.push(k); };
+  for (const c of calls) c.keys.forEach(addKey);
+  const b = census.bundle.get('E2E_CaseDetailsLWCController.changeStatus');
+  if (b) b.paramKeys.forEach(addKey);
+  return {
+    imports: { count: census.stageImports.length, at: census.stageImports.map((x) => ({ len: x.len, at: x.at })) },
+    calls,
+    paramKeys,
+    statusLiterals: census.stageLiterals.slice(),
+    handlers: census.stageHandlers.slice(),
+    dom: st.dom || null,
+    caseStageFields: st.record && st.record.caseStageFields ? st.record.caseStageFields : {},
+    currentStage: st.record && st.record.currentStage ? st.record.currentStage : null,
+    recordCode: st.record ? st.record.code : null,
+    pageCalledChangeStatus: Array.from(census.page.values()).some((e) => e.method === 'changeStatus'),
+    scripts: Object.assign({}, census.scripts),
+  };
 }
 
 async function _steps(D, state, census, out) {
@@ -740,6 +916,30 @@ async function _steps(D, state, census, out) {
     if (state.net.pending.size) await Promise.allSettled(Array.from(state.net.pending));
     out.d0 = census.result();
     out.p1 = { sites: census.postSites.slice(), sources: census.all().filter((m) => m.method === 'postComment').map((m) => ({ classname: m.classname, paramKeys: m.paramKeys })) };
+    return { code: capCode };
+  }
+  if (D.mode === 'stage') {
+    // changeStatus discovery only: the RO test case page, stepper DOM read + bundle call sites, then ONE
+    // getCaseRecord read. No write, no click, no _callApexRaw.
+    try { await wc.debugger.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }); } catch (_) {}
+    const id = TARGETS[0];
+    state.stage = { dom: null, record: null };
+    await _load(D, state, C.caseUrl(id));
+    for (let i = 0; i < 10 && !state.aborted; i++) {
+      state.stage.dom = await _s2(D, state, id);
+      if (state.stage.dom && Array.isArray(state.stage.dom.items) && state.stage.dom.items.length) break;
+      await _sleep(Math.min(3000, D.settleMs || 0));
+    }
+    if (state.net.pending.size) await Promise.allSettled(Array.from(state.net.pending));
+    out.d0 = census.result();
+    if (state.aborted) return { code: capCode };
+    const r = await D.client.getCaseRecord(id);
+    if (r && r.ok) {
+      const v = r.value && typeof r.value === 'object' ? r.value : {};
+      state.stage.record = { code: 'OK', caseStageFields: _stageFields(v), currentStage: C.caseStageOf(v.Status) };
+    } else {
+      state.stage.record = { code: String((r && r.code) || 'DTNA_PROBE_NO_RESULT').slice(0, 60) };
+    }
     return { code: capCode };
   }
   for (const id of TARGETS) {
@@ -888,6 +1088,7 @@ function _resetForTests() { _armed = false; _ran = false; _running = false; _las
 function _lastRunForTests() { return _lastRun; }
 
 module.exports = {
-  start, run, ENV_FLAG, MODE_FLAG, WINDOW_TITLE, analyzeImportCalls, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT,
+  start, run, ENV_FLAG, MODE_FLAG, WINDOW_TITLE, analyzeImportCalls, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT, S2_SCRIPT,
+  STAGE_IMPORT, STAGE_OUT_FILE,
   createCensus, _isSafeRead, _decide, _scrubDeep, _resetForTests, _lastRunForTests,
 };

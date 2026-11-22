@@ -34,6 +34,7 @@ const m = vi.hoisted(() => ({
     pullUnit: vi.fn(async () => ({ ok: true })),
     listCases: vi.fn(async () => ({ ok: true, count: 0 })),
     bulkPull: vi.fn(async () => ({ ok: true, jobId: 'j1' })),
+    sessionTime: vi.fn(async () => ({ ok: true, remainingSec: 27120, periodSec: 28800, expired: false })),
   },
 }));
 vi.mock('../renderer/src/js/bridge.js', () => ({ fleet: m.fleet, auth: m.auth }));
@@ -282,6 +283,36 @@ describe('DTNA pill -> DTNA panel (user-initiated only)', () => {
     await flush();
     expect(m.dtna.status).not.toHaveBeenCalled();
     expect(m.dtna.login).not.toHaveBeenCalled();
+  });
+
+  it('session time (Phase C): never on init or a timer; once per pill click and once per Check session', async () => {
+    m.dtna.sessionTime.mockClear();
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    await flush();
+    expect(m.dtna.sessionTime).not.toHaveBeenCalled();
+    m.dtna.status.mockClear();
+    container.querySelector('#tb-dtna').click();
+    await flush();
+    expect(m.dtna.sessionTime).toHaveBeenCalledTimes(1);
+    expect(m.dtna.status).toHaveBeenCalledTimes(1);
+    expect(dtnaOverlay().querySelector('#dtna-panel-session').textContent).toBe('expires in 7h 32m');
+    dtnaOverlay().querySelector('#dtna-panel-check').click();
+    await flush();
+    expect(m.dtna.sessionTime).toHaveBeenCalledTimes(2);
+    expect(m.dtna.status).toHaveBeenCalledTimes(1);
+    m.dtna.sessionTime.mockResolvedValueOnce({ ok: true, remainingSec: 0, periodSec: null, expired: true });
+    dtnaOverlay().querySelector('#dtna-panel-check').click();
+    await flush();
+    expect(dtnaOverlay().querySelector('#dtna-panel-session').textContent).toBe('expired \u2014 sign in again');
+    m.dtna.sessionTime.mockResolvedValueOnce({ ok: false, code: 'DTNA_NETWORK' });
+    dtnaOverlay().querySelector('#dtna-panel-check').click();
+    await flush();
+    expect(dtnaOverlay().querySelector('#dtna-panel-session').textContent).toBe('could not check (DTNA_NETWORK)');
+    expect(initStatusCalls).toBe(1);
+    expect(m.dtna.login).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    await flush();
+    expect(m.dtna.sessionTime).toHaveBeenCalledTimes(4);
   });
 
   it('closes on Escape, ✕ and backdrop click', () => {

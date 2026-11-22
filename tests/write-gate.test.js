@@ -423,11 +423,126 @@ describe('dtnaComment (dealer-visible DTNA case comment, findings §10)', () => 
     expect(logs.join('\n')).not.toContain(DTEXT);
   });
 
-  it('EXTERNAL_KINDS holds only dtnaComment; addComment with requireApproval:false still sends directly', async () => {
-    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment']);
+  it('EXTERNAL_KINDS holds only the DTNA kinds; addComment with requireApproval:false still sends directly', async () => {
+    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment', 'dtnaStage']);
     dsetup({ flags: { requireApproval: false } });
     const r = await gate.requestWrite(spec());
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('dtnaStage (dealer-visible forward-only DTNA stage change, Phase C)', () => {
+  const CASE = '500gx000002E4U5AAK';
+  const PAY = { caseId: CASE, fromStage: 'In-Repair', toStage: 'Closed', repairOrderNo: 'R101048154' };
+  const sspec = (o = {}) => Object.assign({
+    kind: 'dtnaStage', origin: 'unit-detail-dtna-stage', unit: '122269', payload: PAY, interactive: false,
+  }, o);
+  let change;
+  let tokens;
+  function ssetup(over = {}) {
+    tokens = [];
+    change = vi.fn(async (p, t) => { tokens.push(t); return { ok: true, toStage: p.toStage }; });
+    setup(Object.assign({ dtnaChangeStage: change }, over));
+  }
+
+  it('previewOf is exact: from -> to, unit, case + url, RO, dealer-visible, origin', () => {
+    expect(gate.previewOf('dtnaStage', PAY, { unit: '122269', origin: 'unit-detail-dtna-stage' })).toBe([
+      'CHANGE DTNA CASE STAGE: In-Repair -> Closed',
+      'Unit: 122269',
+      'DTNA case: ' + CASE + '  https://dtna.my.site.com/Servicetracker/s/case/' + CASE + '/detail',
+      'Repair order: R101048154',
+      'Visibility: VISIBLE TO THE DEALER (DTNA)',
+      'Origin: unit-detail-dtna-stage',
+    ].join('\n'));
+    expect(gate.previewOf('dtnaStage', { caseId: CASE, fromStage: 'Arrived', toStage: 'In-Repair' }, {})).toContain('Repair order: (none)');
+  });
+
+  it('is gated even with requireApproval:false (pending-approval, nothing sent)', async () => {
+    ssetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(sspec());
+    expect(r.outcome).toBe('pending-approval');
+    expect(r.error).toContain('nothing was sent to DTNA');
+    expect(change).not.toHaveBeenCalled();
+    expect(logs.some((l) => /approved .*by=setting-requireApproval-false/.test(l))).toBe(false);
+    const it0 = gate.list().items.find((i) => i.id === r.id);
+    expect(it0.kind).toBe('dtnaStage');
+    expect(it0.preview).toContain('CHANGE DTNA CASE STAGE: In-Repair -> Closed');
+    expect(it0.preview).toContain('VISIBLE TO THE DEALER (DTNA)');
+  });
+
+  it('approvedBy is ignored (logged approvedBy-ignored)', async () => {
+    ssetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(sspec({ approvedBy: 'some-modal' }));
+    expect(r.outcome).toBe('pending-approval');
+    expect(change).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.startsWith('[write] approvedBy-ignored kind=dtnaStage'))).toBe(true);
+  });
+
+  it('same / earlier / unknown stage or a bad case id -> DTNA_STAGE_NOT_FORWARD: nothing staged, no prompt, no send', async () => {
+    ssetup({ flags: { requireApproval: false } });
+    gate.setWindowGetter(() => win);
+    const bad = [
+      { fromStage: 'In-Repair', toStage: 'In-Repair' },
+      { fromStage: 'Closed', toStage: 'In-Repair' },
+      { fromStage: 'In-Repair', toStage: 'Arrived' },
+      { fromStage: 'In-Repair', toStage: 'Done' },
+      { fromStage: 'Bogus', toStage: 'Closed' },
+      { caseId: 'nope' },
+    ];
+    for (const b of bad) {
+      const r = await gate.requestWrite(sspec({ interactive: true, payload: Object.assign({}, PAY, b) }));
+      expect(r).toEqual({ ok: false, outcome: 'skipped-not-approved', id: null, error: 'DTNA_STAGE_NOT_FORWARD' });
+    }
+    expect(sent).toHaveLength(0);
+    expect(gate.list().items).toHaveLength(0);
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it('interactive approve sends once with a single-use token; a second approve is refused', async () => {
+    let accepted = null;
+    let second = null;
+    ssetup({ flags: { requireApproval: false }, dtnaChangeStage: vi.fn(async (p, t) => { accepted = gate.isApprovalToken(t); second = gate.isApprovalToken(t); return { ok: true, toStage: p.toStage }; }) });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(sspec({ interactive: true }));
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].data.kind).toBe('dtnaStage');
+    expect(sent[0].data.preview).toContain('CHANGE DTNA CASE STAGE: In-Repair -> Closed');
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, outcome: 'sent', result: { toStage: 'Closed' } });
+    expect(accepted).toBe(true);
+    expect(second).toBe(false);
+    const again = await gate.approve(r.id);
+    expect(again.outcome).toBe('skipped-not-approved');
+    expect(again.error).toBe('write already sent');
+    expect(logs.some((l) => l.startsWith('[write] sent kind=dtnaStage') && l.includes('len=0'))).toBe(true);
+  });
+
+  it('the send gets the exact stored payload; deny -> nothing sent', async () => {
+    ssetup();
+    const r = await gate.requestWrite(sspec());
+    await gate.approve(r.id);
+    expect(change).toHaveBeenCalledTimes(1);
+    expect(change.mock.calls[0][0]).toEqual(PAY);
+    ssetup();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(sspec({ interactive: true }));
+    await flush();
+    gate.respond(sent[0].data.id, false);
+    expect(await p).toMatchObject({ ok: false, outcome: 'skipped-not-approved', error: 'Not approved; nothing was sent to DTNA' });
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it('a failed change -> send-failed with a sanitized code; a throw -> DTNA_INTERNAL', async () => {
+    ssetup({ dtnaChangeStage: vi.fn(async () => ({ ok: false, code: 'DTNA_apex error <x> ' + 'A'.repeat(80), message: 'secret' })) });
+    const r = await gate.requestWrite(sspec());
+    const s = await gate.approve(r.id);
+    expect(s).toEqual({ ok: false, outcome: 'send-failed', id: r.id, result: null, error: 'DTNA_' + 'A'.repeat(35) });
+    ssetup({ dtnaChangeStage: vi.fn(async () => { throw new Error('boom secret'); }) });
+    const r2 = await gate.requestWrite(sspec());
+    expect(await gate.approve(r2.id)).toMatchObject({ ok: false, outcome: 'send-failed', error: 'DTNA_INTERNAL' });
+    expect(logs.join('\n')).not.toContain('secret');
   });
 });

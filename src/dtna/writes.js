@@ -1,6 +1,7 @@
 'use strict';
 /**
- * src/dtna/writes.js — the one DTNA write: post a comment on a Service Tracker case.
+ * src/dtna/writes.js — the DTNA writes: post a comment on a Service Tracker case, and move a case
+ * forward to a later stage (postApprovedStageChange, below). Both are dealer-visible and approval-gated.
  *
  * postApprovedComment is called ONLY by src/writes/write-gate.js _send('dtnaComment') after the user
  * approved the exact text. It passes the gate's single-use token on to aura.callWrite, which refuses a
@@ -12,7 +13,8 @@ const C = require('./constants');
 const { caseTag } = require('./redact');
 const log = require('../utils/logger')('dtna');
 
-// Test seam: { aura, config } (config overrides constants.POST_COMMENT_PARAMS; null keeps it unset).
+// Test seam: { aura, config, stageConfig } (config / stageConfig override constants.POST_COMMENT_PARAMS /
+// STAGE_CHANGE_PARAMS; null keeps them unset).
 let _deps = {};
 function _setDeps(d) { _deps = d || {}; }
 function _aura() { return _deps.aura || require('./aura'); }
@@ -117,4 +119,112 @@ async function postApprovedComment(payload, token) {
   return r;
 }
 
-module.exports = { buildPostParams, isPostConfigured, postApprovedComment, PLACEHOLDERS, _setDeps };
+// ── Change DTNA Stage (forward only; dealer-visible) ───────────────────────
+// postApprovedStageChange is called ONLY by src/writes/write-gate.js _send('dtnaStage') after the user
+// approved the exact from -> to change, and is the only caller of callWrite('changeStatus'). The Apex
+// params come from constants.STAGE_CHANGE_PARAMS; while that is null nothing can be sent
+// (DTNA_STAGE_NOT_CONFIGURED). Logs: method, caseTag, from / to stage labels, code, status, ms only.
+function _stageConfig() { return Object.prototype.hasOwnProperty.call(_deps, 'stageConfig') ? _deps.stageConfig : C.STAGE_CHANGE_PARAMS; }
+
+const STAGE_PLACEHOLDERS = ['$caseId', '$status', '$fromStatus'];
+
+function _statusValue(cfg, name) {
+  const sv = cfg && cfg.statusValues && typeof cfg.statusValues === 'object' && !Array.isArray(cfg.statusValues) ? cfg.statusValues : null;
+  if (!sv || C.stageIndex(name) < 0 || !Object.prototype.hasOwnProperty.call(sv, name)) return '';
+  const v = sv[name];
+  return typeof v === 'string' && v.trim() && v.length <= 80 ? v : '';
+}
+
+/**
+ * buildStageParams(cfg, payload) -> Apex params object | null
+ * cfg: STAGE_CHANGE_PARAMS shape (constants.js). payload: { caseId, fromStage, toStage } (CASE_STAGES names).
+ */
+function buildStageParams(cfg, payload) {
+  if (!cfg || typeof cfg !== 'object' || !cfg.params || typeof cfg.params !== 'object' || Array.isArray(cfg.params)) return null;
+  if (cfg.classname !== C.WRITE_METHODS.changeStatus.classname || cfg.method !== 'changeStatus') return null;
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const keys = Object.keys(cfg.params);
+  if (!keys.length || keys.length > 10) return null;
+  const vals = keys.map((k) => cfg.params[k]);
+  if (!vals.includes('$caseId') || !vals.includes('$status')) return null;
+  const out = {};
+  for (const k of keys) {
+    if (!/^\w{1,60}$/.test(k)) return null;
+    const v = cfg.params[k];
+    if (v === '$caseId') {
+      if (!C.CASE_ID_RE.test(_str(p.caseId))) return null;
+      out[k] = _str(p.caseId);
+    } else if (v === '$status' || v === '$fromStatus') {
+      const s = _statusValue(cfg, _str(v === '$status' ? p.toStage : p.fromStage));
+      if (!s) return null;
+      out[k] = s;
+    } else if (typeof v === 'string' && v.startsWith('$')) {
+      return null; // unknown placeholder
+    } else if (v === null || typeof v === 'boolean' || (typeof v === 'string' && v.length <= 200)) {
+      out[k] = v;
+    } else {
+      return null;
+    }
+  }
+  return out;
+}
+
+/** isStageConfigured() -> true only when STAGE_CHANGE_PARAMS builds params for a dummy forward change. */
+function isStageConfigured() {
+  const cfg = _stageConfig();
+  const sv = cfg && cfg.statusValues && typeof cfg.statusValues === 'object' ? cfg.statusValues : null;
+  if (!sv) return false;
+  const mapped = C.CASE_STAGES.filter((s) => _statusValue(cfg, s));
+  if (!mapped.length) return false;
+  const to = mapped[mapped.length - 1];
+  const from = mapped.length > 1 ? mapped[0] : C.CASE_STAGES[0];
+  return !!buildStageParams(cfg, { caseId: DUMMY.caseId, fromStage: from, toStage: to });
+}
+
+/** stageTargets(fromName) -> CASE_STAGES names after fromName (only portal-mapped ones once configured). */
+function stageTargets(fromName) {
+  const i = C.stageIndex(fromName);
+  if (i < 0) return [];
+  const later = C.CASE_STAGES.slice(i + 1);
+  if (!isStageConfigured()) return later;
+  const cfg = _stageConfig();
+  return later.filter((s) => _statusValue(cfg, s));
+}
+
+/**
+ * postApprovedStageChange(payload, token) -> {ok:true, toStage} | {ok:false, code}
+ * payload: { caseId, fromStage, toStage, repairOrderNo } (the write gate's stored payload).
+ */
+async function postApprovedStageChange(payload, token) {
+  const t0 = Date.now();
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const tag = caseTag(_str(p.caseId));
+  const from = C.stageIndex(_str(p.fromStage)) >= 0 ? _str(p.fromStage) : '';
+  const to = C.stageIndex(_str(p.toStage)) >= 0 ? _str(p.toStage) : '';
+  const cfg = _stageConfig();
+  let r;
+  let status;
+  if (!isStageConfigured()) r = { ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' };
+  else if (!C.CASE_ID_RE.test(_str(p.caseId)) || !from || !to) r = { ok: false, code: 'DTNA_INVALID_INPUT' };
+  else if (!C.isForwardStage(from, to)) r = { ok: false, code: 'DTNA_STAGE_NOT_FORWARD' };
+  else {
+    const params = buildStageParams(cfg, p);
+    if (!params) r = { ok: false, code: 'DTNA_INVALID_INPUT' };
+    else {
+      let a;
+      try { a = await _aura().callWrite('changeStatus', params, token); } catch (_) { a = { ok: false, code: 'DTNA_INTERNAL' }; }
+      status = a && Number.isFinite(a.status) ? a.status : undefined;
+      if (!a || !a.ok) r = { ok: false, code: _str((a && a.code) || 'DTNA_INTERNAL').slice(0, 40) };
+      else if (_hasSuccessValue(cfg) && String(a.value) !== String(cfg.successValue)) r = { ok: false, code: 'DTNA_STAGE_REJECTED' };
+      else r = { ok: true, toStage: to };
+    }
+  }
+  log.info('[dtna] change-stage', { method: 'changeStatus', caseTag: tag, from, to, code: r.ok ? 'OK' : r.code, status, ms: Date.now() - t0 });
+  return r;
+}
+
+module.exports = {
+  buildPostParams, isPostConfigured, postApprovedComment, PLACEHOLDERS,
+  buildStageParams, isStageConfigured, stageTargets, postApprovedStageChange, STAGE_PLACEHOLDERS,
+  _setDeps,
+};

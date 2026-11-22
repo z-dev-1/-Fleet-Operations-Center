@@ -71,6 +71,7 @@ export function postMessage(r, caseId) {
   if (code === 'DTNA_POST_REJECTED') return { level: 'error', text: 'DTNA did not accept the comment (message not sent to the repair facility). Pull DTNA to check the thread before trying again.' };
   if (code === 'DTNA_NOT_PULLED') return { level: 'warn', text: 'Pull DTNA for this unit first.' };
   if (code === 'DTNA_NO_REPAIR_ORDER') return { level: 'warn', text: 'This DTNA case has no repair order; the portal does not accept comments on it.' };
+  if (code === 'DTNA_SESSION_LOW') return { level: 'warn', text: 'Your DTNA session is about to expire. Sign in again, then send. Nothing was sent.' };
   return outcomeMessage(r, 'DTNA comment');
 }
 
@@ -129,6 +130,9 @@ export function openDtnaCommentModal(unit, caseCtx, deps) {
     try { r = await d.bridge.postComment({ equipmentId, caseId, text, aiDrafted }); } catch (_) { r = { ok: false, code: 'DTNA_INTERNAL' }; }
     const o = postMessage(r, caseId);
     d.toast.show(o.level, o.text);
+    if (r && r.code === 'DTNA_SESSION_LOW' && typeof d.bridge.login === 'function' && d.confirm('Sign in to DTNA again now?')) {
+      try { await d.bridge.login(); } catch (_) { /* the sign-in window reports its own state */ }
+    }
   }
 
   d.modal.show({

@@ -36,6 +36,14 @@ function caseStageOf(text) {
   for (const [i, re] of _STAGE_MATCH) if (re.test(s)) return { name: CASE_STAGES[i], index: i };
   return null;
 }
+/** stageIndex(name) -> exact index of name in CASE_STAGES, or -1. */
+function stageIndex(name) { return typeof name === 'string' ? CASE_STAGES.indexOf(name) : -1; }
+/** isForwardStage(from, to) -> true only when both are pipeline names and to is later than from. */
+function isForwardStage(from, to) {
+  const a = stageIndex(from);
+  const b = stageIndex(to);
+  return a >= 0 && b >= 0 && b > a;
+}
 
 /** caseUrl(id) -> canonical case detail URL (matches DTNA_CASE_RE in src/scrapers/dtna_enrich.js). */
 function caseUrl(id) { return BASE + '/s/case/' + id + '/detail'; }
@@ -115,9 +123,25 @@ const POST_COMMENT_PARAMS = Object.freeze({
 // The only Apex write aura.callWrite accepts (behind a single-use write-gate approval token).
 const WRITE_METHODS = Object.freeze({
   postComment: Object.freeze({ classname: 'E2E_UTP_CommentController' }),
+  changeStatus: Object.freeze({ classname: 'E2E_CaseDetailsLWCController' }),
 });
 // The composer has no maxlength (P2); the app caps a posted comment at the write gate's COMMENT_MAX.
 const POST_COMMENT_MAX = 2000;
+// Change DTNA Stage (Phase C, 2026-11-21): E2E_CaseDetailsLWCController.changeStatus, forward-only.
+// null until the stage probe (FLEET_DEV_DTNA_PROBE_MODE=stage) reads the portal's changeStatus call site;
+// never guess. While null the change-stage IPC returns DTNA_STAGE_NOT_CONFIGURED (no prompt, no network).
+// Shape (src/dtna/writes.js buildStageParams resolves the '$' placeholders):
+//   { classname: 'E2E_CaseDetailsLWCController', method: 'changeStatus',
+//     params: { <key>: '$caseId' | '$status' | '$fromStatus' | literal string|boolean|null },
+//     statusValues: { '<CASE_STAGES name>': '<portal status value>' },
+//     successValue?: number|string }
+const STAGE_CHANGE_PARAMS = null;
+
+// Session timer: cookie-only servlet returning { sp: period secs, sr: remaining secs } behind 'while(1);'.
+const SESSION_TIME_URL = BASE + '/_nc_external/system/security/session/SessionTimeServlet';
+const SESSION_TIME_TIMEOUT_MS = 10e3;
+// Pre-flight before a write / bulk pull: below this many seconds left, ask the user to sign in again first.
+const SESSION_PREFLIGHT_MIN_SEC = 120;
 
 module.exports = {
   HOST, BASE, AURA_PATH, AURA_URL, PARTITION, LIST_URL, DEFAULT_LIST_FILTER,
@@ -125,5 +149,6 @@ module.exports = {
   READ_METHODS, APEX_CLASS, WRITE_RE,
   CONTEXT_MAX_AGE_MS, HIDDEN_WAIT_MS, SIGNIN_WINDOW_MS, CALL_TIMEOUT_MS, CONCURRENCY, BATCH_GAP_MS,
   THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
-  WRITE_METHODS, POST_COMMENT_MAX, CASE_STAGES, caseStageOf,
+  WRITE_METHODS, POST_COMMENT_MAX, CASE_STAGES, caseStageOf, stageIndex, isForwardStage, STAGE_CHANGE_PARAMS,
+  SESSION_TIME_URL, SESSION_TIME_TIMEOUT_MS, SESSION_PREFLIGHT_MIN_SEC,
 };

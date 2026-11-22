@@ -55,7 +55,12 @@ const client = {
 };
 const deepScan = { rebuildUnitTimeline: vi.fn(async () => ({ ok: true })) };
 const ctx = { lastData: { rows: [] }, sendToWindow: vi.fn(), pushData: vi.fn(), pushStatus: vi.fn() };
-require('../src/ipc/dtna').registerDtnaIPC(ctx, { client, session, deepScan });
+// Session-time fake (Phase C): a healthy 8 h session unless a test says otherwise.
+const sessionTime = {
+  read: vi.fn(async () => ({ ok: true, remainingSec: 20000, periodSec: 28800, expired: false })),
+  preflight: vi.fn(async () => ({ block: false, remainingSec: 20000 })),
+};
+require('../src/ipc/dtna').registerDtnaIPC(ctx, { client, session, deepScan, sessionTime });
 
 const call = (ch, p) => handlers[ch]({}, p);
 const clientCalls = () => ['resolveCaseForRow', 'pullCase', 'listCaseIds', 'bulkPull'].reduce((n, k) => n + client[k].mock.calls.length, 0);
@@ -71,20 +76,23 @@ beforeEach(() => {
   ctx.lastData = { rows: [] };
 });
 
-const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:draft-comment', 'dtna:export', 'dtna:list-cases', 'dtna:login', 'dtna:post-comment', 'dtna:pull-unit', 'dtna:status'];
+const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:change-stage', 'dtna:draft-comment', 'dtna:export', 'dtna:list-cases', 'dtna:login',
+  'dtna:post-comment', 'dtna:pull-unit', 'dtna:session-time', 'dtna:stage-options', 'dtna:status'];
 
 describe('registration and preload', () => {
-  it('registers exactly the nine dtna:* channels', () => {
+  it('registers exactly the twelve dtna:* channels', () => {
     expect(Object.keys(handlers).filter((k) => k.startsWith('dtna:')).sort()).toEqual(CHANNELS);
     expect(Object.keys(handlers).sort()).toEqual(CHANNELS);
   });
 
-  it('preload exposes dtna with exactly the eleven keys on their channels', () => {
+  it('preload exposes dtna with exactly the fourteen keys on their channels (no raw callApex / callWrite)', () => {
     const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8');
     const m = pre.match(/expose\('dtna',\s*\{([\s\S]*?)\n\}\);/);
     expect(m).toBeTruthy();
     const keys = [...m[1].matchAll(/^\s*(\w+)\s*:/gm)].map((x) => x[1]);
-    expect(keys).toEqual(['status', 'login', 'pullUnit', 'listCases', 'bulkPull', 'bulkCancel', 'exportBulk', 'draftComment', 'postComment', 'onStatus', 'onProgress']);
+    expect(keys).toEqual(['status', 'login', 'pullUnit', 'listCases', 'bulkPull', 'bulkCancel', 'exportBulk', 'draftComment', 'postComment',
+      'stageOptions', 'changeStage', 'sessionTime', 'onStatus', 'onProgress']);
+    expect(m[1]).not.toMatch(/callApex|callWrite|_callApexRaw/);
     const b = m[1];
     expect(b).toMatch(/status:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:status'\)/);
     expect(b).toMatch(/login:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:login'\)/);
@@ -97,6 +105,22 @@ describe('registration and preload', () => {
     expect(b).toMatch(/onProgress:\s*\(cb\)\s*=>\s*on\('dtna:progress',\s*cb\)/);
     expect(b).toMatch(/draftComment:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:draft-comment',\s*p \|\| \{\}\)/);
     expect(b).toMatch(/postComment:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:post-comment',\s*p \|\| \{\}\)/);
+    expect(b).toMatch(/stageOptions:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:stage-options',\s*p \|\| \{\}\)/);
+    expect(b).toMatch(/changeStage:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:change-stage',\s*p \|\| \{\}\)/);
+    expect(b).toMatch(/sessionTime:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:session-time'\)/);
+  });
+
+  it('only src/ipc/dtna.js contains dtna:change-stage / dtna:stage-options under src/', () => {
+    const hits = [];
+    const walk = (d) => {
+      for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, f.name);
+        if (f.isDirectory()) walk(p);
+        else if (f.name.endsWith('.js') && /dtna:(change-stage|stage-options)/.test(fs.readFileSync(p, 'utf8'))) hits.push(path.relative(path.join(ROOT, 'src'), p).replace(/\\/g, '/'));
+      }
+    };
+    walk(path.join(ROOT, 'src'));
+    expect(hits).toEqual(['ipc/dtna.js']);
   });
 
   it('only src/ipc/dtna.js contains dtna:draft-comment / dtna:post-comment under src/', () => {
@@ -337,9 +361,9 @@ describe('dtna:draft-comment / dtna:post-comment', () => {
   const ctx2 = { lastData: { rows: [{ equipmentId: '122269' }] }, sendToWindow: vi.fn() };
   // Own session stub so the top-level status listener is not replaced.
   const session2 = Object.assign({}, session, { onStatus: () => () => {} });
-  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h2[ch] = fn; }, client, session: session2, deepScan, writeGate, writes: fakeWrites, commentDraft, dtnaStore });
+  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h2[ch] = fn; }, client, session: session2, deepScan, writeGate, writes: fakeWrites, commentDraft, dtnaStore, sessionTime });
   const h3 = {};
-  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h3[ch] = fn; }, client, session: session2, deepScan, writeGate, commentDraft, dtnaStore });
+  require('../src/ipc/dtna').registerDtnaIPC(ctx2, { handle: (ch, fn) => { h3[ch] = fn; }, client, session: session2, deepScan, writeGate, commentDraft, dtnaStore, sessionTime });
   const c2 = (ch, p) => h2[ch]({}, p);
   const OK = { equipmentId: '122269', caseId: CASE_ID, text: 'Please send an ETA', aiDrafted: true };
   beforeEach(() => { configured = true; });
@@ -411,5 +435,179 @@ describe('dtna:draft-comment / dtna:post-comment', () => {
     commentDraft.draftForCase.mockResolvedValueOnce({ ok: false, code: 'DTNA_NOT_PULLED' });
     expect(await c2('dtna:draft-comment', { equipmentId: '122269', caseId: CASE_ID })).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
     expect(writeGate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('post-comment pre-flight (Phase C): a low session -> DTNA_SESSION_LOW before any approval request', async () => {
+    sessionTime.preflight.mockResolvedValueOnce({ block: true, code: 'DTNA_SESSION_LOW', remainingSec: 45 });
+    expect(await c2('dtna:post-comment', OK)).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 45 });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+    // A failed pre-flight read never blocks.
+    sessionTime.preflight.mockRejectedValueOnce(new Error('x'));
+    expect((await c2('dtna:post-comment', OK)).outcome).toBe('sent');
+    expect(writeGate.requestWrite).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Phase C: dtna:stage-options / dtna:change-stage / dtna:session-time / bulk pre-flight', () => {
+  const ROWS = () => [{ equipmentId: '122269', workRequestId: 'WR1', vendor: 'HORWITH FREIGHTLINER', offsiteShopEventUrl: caseUrl(CASE_ID) }];
+  const at = (stage) => Object.assign({}, ENTRY, { caseStatus: stage, steps: [] });
+  let cache;
+  let fresh;      // queue of entries the next pullCase calls return
+  const stageStore = { get: vi.fn((id) => cache[id] || null) };
+  const stageClient = {
+    resolveCaseForRow: vi.fn(async () => ({ ok: true, caseId: CASE_ID, via: 'cache' })),
+    pullCase: vi.fn(async (id) => { const e = fresh.length ? fresh.shift() : cache[id]; cache[id] = e; return { ok: true, entry: e }; }),
+    bulkPull: vi.fn(async () => ({ ok: true, results: [], total: 0, failed: 0 })),
+  };
+  const gate = { requestWrite: vi.fn(async () => ({ ok: true, outcome: 'sent', id: 'rw_9', result: { toStage: 'Closed' } })) };
+  let configured = true;
+  const realWrites = require('../src/dtna/writes');
+  const stageWrites = { isStageConfigured: vi.fn(() => configured), stageTargets: (n) => realWrites.stageTargets(n) };
+  const sess = Object.assign({}, session, { onStatus: () => () => {} });
+  const ctx3 = { lastData: { rows: [] }, sendToWindow: vi.fn(), pushData: vi.fn(), pushStatus: vi.fn() };
+  const reg = (extra) => {
+    const h = {};
+    require('../src/ipc/dtna').registerDtnaIPC(ctx3, Object.assign({
+      handle: (ch, fn) => { h[ch] = fn; }, client: stageClient, session: sess, deepScan, writeGate: gate, dtnaStore: stageStore, sessionTime,
+    }, extra));
+    return (ch, p) => h[ch]({}, p);
+  };
+  const cs = reg({ writes: stageWrites });
+  const real = reg({});                 // real src/dtna/writes: STAGE_CHANGE_PARAMS is null
+  const OKP = { equipmentId: '122269', caseId: CASE_ID, target: 'Closed' };
+  const networkCalls = () => stageClient.pullCase.mock.calls.length + stageClient.resolveCaseForRow.mock.calls.length;
+
+  beforeEach(() => {
+    configured = true;
+    cache = { [CASE_ID]: at('In Repair') };
+    fresh = [];
+    store.save('fleetData', { rows: ROWS() });
+    ctx3.lastData = { rows: [] };
+  });
+
+  it('invalid inputs -> DTNA_INVALID_INPUT with the field; nothing read or requested', async () => {
+    const cases = [
+      ['dtna:change-stage', 'x', 'payload'],
+      ['dtna:change-stage', { caseId: CASE_ID, target: 'Closed' }, 'equipmentId'],
+      ['dtna:change-stage', Object.assign({}, OKP, { caseId: '500bad' }), 'caseId'],
+      ['dtna:change-stage', Object.assign({}, OKP, { caseId: '001gx000002E4U5AAK' }), 'caseId'],
+      ['dtna:change-stage', Object.assign({}, OKP, { target: 'Bogus' }), 'target'],
+      ['dtna:change-stage', Object.assign({}, OKP, { target: 'closed' }), 'target'],
+      ['dtna:change-stage', Object.assign({}, OKP, { target: 5 }), 'target'],
+      ['dtna:change-stage', { equipmentId: '122269', caseId: CASE_ID }, 'target'],
+      ['dtna:stage-options', { equipmentId: '122269', caseId: 'x' }, 'caseId'],
+      ['dtna:stage-options', { caseId: CASE_ID }, 'equipmentId'],
+    ];
+    for (const [ch, p, field] of cases) expect(await cs(ch, p)).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field });
+    expect(networkCalls()).toBe(0);
+    expect(gate.requestWrite).not.toHaveBeenCalled();
+    expect(sessionTime.preflight).not.toHaveBeenCalled();
+  });
+
+  it('unconfigured (shipped STAGE_CHANGE_PARAMS = null) -> DTNA_STAGE_NOT_CONFIGURED: no prompt, no read, no pre-flight', async () => {
+    expect(await real('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_CONFIGURED' });
+    expect(gate.requestWrite).not.toHaveBeenCalled();
+    expect(networkCalls()).toBe(0);
+    expect(sessionTime.preflight).not.toHaveBeenCalled();
+    expect(await real('dtna:stage-options', OKP)).toEqual({
+      ok: true, configured: false, current: 'In-Repair', currentIndex: 2, targets: ['Post-Repair', 'Ready for Pickup', 'Closed'],
+      stages: ['Pre-Repair', 'Arrived', 'In-Repair', 'Post-Repair', 'Ready for Pickup', 'Closed'],
+    });
+  });
+
+  it('configured: not pulled -> DTNA_NOT_PULLED; low session -> DTNA_SESSION_LOW; neither prompts', async () => {
+    expect(await cs('dtna:change-stage', Object.assign({}, OKP, { caseId: '500gx0000000000ZZZ' }))).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
+    sessionTime.preflight.mockResolvedValueOnce({ block: true, code: 'DTNA_SESSION_LOW', remainingSec: 30 });
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 30 });
+    expect(gate.requestWrite).not.toHaveBeenCalled();
+    expect(networkCalls()).toBe(0);
+  });
+
+  it('the fresh read already shows the target or later -> DTNA_STAGE_NOT_FORWARD with the current stage', async () => {
+    fresh = [at('Closed')];
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_FORWARD', currentStage: 'Closed' });
+    fresh = [at('Ready for Pickup')];
+    expect(await cs('dtna:change-stage', Object.assign({}, OKP, { target: 'Post-Repair' }))).toEqual({ ok: false, code: 'DTNA_STAGE_NOT_FORWARD', currentStage: 'Ready for Pickup' });
+    fresh = [at('Weird status')];
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_UNKNOWN' });
+    expect(stageClient.pullCase.mock.calls.every((c) => c[1] && c[1].includeComments === false)).toBe(true);
+    expect(gate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('a failed fresh read passes its code through, nothing requested', async () => {
+    stageClient.pullCase.mockResolvedValueOnce({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(gate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('happy path: fresh read, ONE interactive dtnaStage request with the exact payload, one re-pull, confirmed', async () => {
+    fresh = [at('In Repair'), at('Closed')];
+    const r = await cs('dtna:change-stage', OKP);
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: 'rw_9', fromStage: 'In-Repair', toStage: 'Closed', currentStage: 'Closed', confirmed: true });
+    expect(gate.requestWrite).toHaveBeenCalledTimes(1);
+    expect(gate.requestWrite.mock.calls[0][0]).toEqual({
+      kind: 'dtnaStage', origin: 'unit-detail-dtna-stage', unit: '122269', interactive: true,
+      payload: { caseId: CASE_ID, fromStage: 'In-Repair', toStage: 'Closed', repairOrderNo: ENTRY.repairOrderNo },
+    });
+    expect(stageClient.pullCase.mock.calls).toEqual([[CASE_ID, { includeComments: false }], [CASE_ID]]);
+    expect(ctx3.pushData).toHaveBeenCalledTimes(1);
+    expect(sessionTime.preflight).toHaveBeenCalledTimes(1);
+  });
+
+  it('a re-pull that still shows the old stage -> confirmed:false with the server stage', async () => {
+    fresh = [at('In Repair'), at('In Repair')];
+    const r = await cs('dtna:change-stage', OKP);
+    expect(r).toMatchObject({ ok: true, outcome: 'sent', currentStage: 'In-Repair', confirmed: false });
+    stageClient.pullCase.mockResolvedValueOnce({ ok: true, entry: at('In Repair') }).mockResolvedValueOnce({ ok: false, code: 'DTNA_TIMEOUT' });
+    const r2 = await cs('dtna:change-stage', OKP);
+    expect(r2).toMatchObject({ ok: true, outcome: 'sent', confirmed: false, pullCode: 'DTNA_TIMEOUT' });
+  });
+
+  it('gate outcomes pass through; no re-pull unless sent', async () => {
+    gate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'skipped-not-approved', id: 'rw_2', error: 'Not approved; nothing was sent to DTNA' });
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, outcome: 'skipped-not-approved', id: 'rw_2' });
+    gate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'send-failed', id: 'rw_3', result: null, error: 'DTNA_STAGE_REJECTED' });
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, outcome: 'send-failed', id: 'rw_3', code: 'DTNA_STAGE_REJECTED' });
+    expect(stageClient.pullCase).toHaveBeenCalledTimes(2);   // the two fresh reads only
+  });
+
+  it('a second change for the same case while one is in flight -> DTNA_BUSY', async () => {
+    let release;
+    sessionTime.preflight.mockImplementationOnce(() => new Promise((r) => { release = () => r({ block: false, remainingSec: 20000 }); }));
+    const p1 = cs('dtna:change-stage', OKP);
+    await flush();
+    expect(await cs('dtna:change-stage', OKP)).toEqual({ ok: false, code: 'DTNA_BUSY' });
+    release();
+    expect((await p1).ok).toBe(true);
+    expect(gate.requestWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('stage-options: forward-only targets from the cache, Closed -> [], unknown -> DTNA_STAGE_UNKNOWN, zero network', async () => {
+    expect(await cs('dtna:stage-options', OKP)).toMatchObject({ ok: true, configured: true, current: 'In-Repair', targets: ['Post-Repair', 'Ready for Pickup', 'Closed'] });
+    cache[CASE_ID] = at('Closed');
+    expect(await cs('dtna:stage-options', OKP)).toMatchObject({ ok: true, current: 'Closed', targets: [] });
+    cache[CASE_ID] = at('Something else');
+    expect(await cs('dtna:stage-options', OKP)).toEqual({ ok: false, code: 'DTNA_STAGE_UNKNOWN' });
+    expect(await cs('dtna:stage-options', Object.assign({}, OKP, { caseId: '500gx0000000000ZZZ' }))).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
+    expect(networkCalls()).toBe(0);
+    expect(sessionTime.preflight).not.toHaveBeenCalled();
+    expect(sessionTime.read).not.toHaveBeenCalled();
+  });
+
+  it('session-time returns the integers only; a failure returns its code', async () => {
+    sessionTime.read.mockResolvedValueOnce({ ok: true, remainingSec: 27120, periodSec: 28800, expired: false, extra: 'x' });
+    expect(await cs('dtna:session-time')).toEqual({ ok: true, remainingSec: 27120, periodSec: 28800, expired: false });
+    sessionTime.read.mockResolvedValueOnce({ ok: false, code: 'DTNA_NETWORK' });
+    expect(await cs('dtna:session-time')).toEqual({ ok: false, code: 'DTNA_NETWORK' });
+  });
+
+  it('bulk-pull pre-flight: a low session -> DTNA_SIGNIN_REQUIRED and no job starts', async () => {
+    sessionTime.preflight.mockResolvedValueOnce({ block: true, code: 'DTNA_SESSION_LOW', remainingSec: 0 });
+    expect(await cs('dtna:bulk-pull', {})).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(stageClient.bulkPull).not.toHaveBeenCalled();
+    const b = await cs('dtna:bulk-pull', {});
+    expect(b.ok).toBe(true);
+    await flush(40);
+    expect(stageClient.bulkPull).toHaveBeenCalledTimes(1);
   });
 });

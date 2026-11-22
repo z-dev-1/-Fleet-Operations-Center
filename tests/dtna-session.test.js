@@ -237,6 +237,48 @@ describe('status', () => {
     expect(JSON.stringify(session.status())).not.toMatch(/TOKEN|CTX/);
   });
 
+  it('session-time reading (Phase C): drives expiry instead of the capture age; a new capture clears it', async () => {
+    vi.useFakeTimers();
+    const seen = [];
+    session.onStatus((s) => seen.push(s));
+    const p = session.openLoginWindow({});
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+    // Without a reading the status shape is exactly the old one.
+    expect(Object.keys(session.status()).sort()).toEqual(['contextAgeSec', 'lastCode', 'lastPullAt', 'ok', 'state']);
+    vi.setSystemTime(Date.now() + 31 * 60e3);
+    expect(session.status().state).toBe('expired');
+    const n = seen.length;
+    session.noteSessionTime({ remainingSec: 600.7, periodSec: 28800 });
+    expect(seen.length).toBe(n + 1);                         // pushed even when the state is unchanged
+    expect(session.status()).toMatchObject({ state: 'connected', expiresInSec: 600 });
+    expect(session.status().sessionCheckedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    vi.setSystemTime(Date.now() + 300e3);
+    expect(session.status().expiresInSec).toBe(300);
+    vi.setSystemTime(Date.now() + 301e3);
+    expect(session.status()).toMatchObject({ state: 'expired', expiresInSec: 0 });
+    session.noteSessionTime({ remainingSec: 900, periodSec: 28800 });
+    expect(session.status().state).toBe('connected');
+    session.noteResult('DTNA_SESSION_EXPIRED');
+    expect(session.status().state).toBe('expired');
+    session.noteResult('OK');
+    expect(session.status().state).toBe('connected');
+    expect(JSON.stringify(session.status())).not.toMatch(/TOKEN|CTX/);
+    // A new sign-in capture starts a new session: the reading is dropped.
+    capture.clear();
+    session.ensureContext();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(session.status().expiresInSec).toBeUndefined();
+    expect(Object.keys(session.status()).sort()).toEqual(['contextAgeSec', 'lastCode', 'lastPullAt', 'ok', 'state']);
+  });
+
+  it('a zero reading before any sign-in reads as signed-out', () => {
+    session.noteSessionTime({ remainingSec: 0, periodSec: null });
+    expect(session.status()).toMatchObject({ state: 'signed-out', expiresInSec: 0 });
+    session.noteSessionTime({ remainingSec: 'x' });
+    expect(session.status().expiresInSec).toBe(0);
+  });
+
   it('teardownAll closes an open sign-in window', async () => {
     signedIn = false;
     const p = session.openLoginWindow({});

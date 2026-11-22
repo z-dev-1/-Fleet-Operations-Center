@@ -174,14 +174,28 @@ const _DTNA_PILL = {
   expired:      ['amber', 'DTNA: Expired'],
   pulling:      ['green', 'DTNA: Pulling\u2026'],
 };
+/** fmtExpiresIn(sec) -> 'Xh Ym' | 'Ym' | '<1m'. PURE. */
+export function fmtExpiresIn(sec) {
+  const s = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m >= 1) return m + 'm';
+  return '<1m';
+}
 export function dtnaPill(status) {
   const st = status && typeof status === 'object' ? status.state : null;
   const hit = (typeof st === 'string' && Object.prototype.hasOwnProperty.call(_DTNA_PILL, st)) ? _DTNA_PILL[st] : ['grey', 'DTNA \u2026'];
-  return {
-    cls: 'tb-dtna tb-dtna--' + hit[0],
-    text: hit[1],
-    title: 'DTNA Service Tracker: click to sign in or pull cases. This pill never checks DTNA on its own.',
-  };
+  let text = hit[1];
+  let title = 'DTNA Service Tracker: click to sign in or pull cases. This pill never checks DTNA on its own.';
+  // expiresInSec comes from the last session-time read (a click), counted down in main; no polling here.
+  const exp = status && typeof status === 'object' ? status.expiresInSec : undefined;
+  if (st === 'connected' && Number.isFinite(exp) && exp > 0) {
+    text = 'DTNA: Connected \u00b7 expires in ' + fmtExpiresIn(exp);
+    const at = status.sessionCheckedAt ? new Date(status.sessionCheckedAt) : null;
+    if (at && !isNaN(at.getTime())) title += ' Session time as of ' + at.toLocaleTimeString() + '.';
+  }
+  return { cls: 'tb-dtna tb-dtna--' + hit[0], text, title };
 }
 
 function colorClass(color) {

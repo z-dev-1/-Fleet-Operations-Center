@@ -21,6 +21,9 @@
  * dtnaComment (a DTNA Service Tracker case comment, src/dtna/writes.js) is
  * dealer-visible: it is in EXTERNAL_KINDS, so it ALWAYS waits for the user's
  * approval, even with requireApproval === false, and approvedBy is ignored.
+ * dtnaStage (move a DTNA case to a LATER stage, src/dtna/writes.js
+ * postApprovedStageChange) is dealer-visible too and in EXTERNAL_KINDS; a
+ * same / earlier / unknown target stage is refused before anything is staged.
  *
  * The preview is built from the stored payload only, and approve(id) sends that
  * same stored payload once, so the text shown is the text sent.
@@ -39,10 +42,10 @@ const ADD_COMMENT_PATH = '/api/v1/addComment';
 const COMMENT_MAX = 2000;
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
-const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment'];
-// Dealer-visible writes outside Relay: ALWAYS approved by the user on the exact text.
+const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage'];
+// Dealer-visible writes outside Relay: ALWAYS approved by the user on the exact content.
 // settings.writes.requireApproval === false and approvedBy never bypass these.
-const EXTERNAL_KINDS = new Set(['dtnaComment']);
+const EXTERNAL_KINDS = new Set(['dtnaComment', 'dtnaStage']);
 const DTNA_CASE_URL = 'https://dtna.my.site.com/Servicetracker/s/case/';
 
 let _deps = {};
@@ -104,13 +107,13 @@ function _str(v) { return v == null ? '' : String(v); }
 function _textLen(kind, payload) {
   if (!payload) return 0;
   if (kind === 'updateEscalations') return _str(payload.comment).length;
-  if (kind === 'setLifecycle') return 0;
+  if (kind === 'setLifecycle' || kind === 'dtnaStage') return 0;
   return (kind === 'addComment' || kind === 'dtnaComment') ? _str(payload.text).length : _str(payload.comments).trim().length;
 }
 function _target(kind, payload, spec) {
   if (kind === 'addComment' || kind === 'updateEscalations') return _str(payload.workRequestId);
   if (kind === 'setLifecycle') return _str(payload.aaid || payload.assetUrl || payload.equipmentId);
-  if (kind === 'dtnaComment') return _str(payload.caseId);
+  if (kind === 'dtnaComment' || kind === 'dtnaStage') return _str(payload.caseId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
 // Dedup key for a work-order write: the fields that define WHAT is requested.
@@ -164,6 +167,14 @@ function _normalizePayload(kind, payload) {
       repairOrderId: _str(p.repairOrderId),
       repairOrderNo: _str(p.repairOrderNo),
       text: _str(p.text).slice(0, COMMENT_MAX),
+    };
+  }
+  if (kind === 'dtnaStage') {
+    return {
+      caseId: _str(p.caseId),
+      fromStage: _str(p.fromStage),
+      toStage: _str(p.toStage),
+      repairOrderNo: _str(p.repairOrderNo),
     };
   }
   if (kind === 'setLifecycle') {
@@ -226,6 +237,16 @@ function previewOf(kind, payload, meta) {
     lines.push('Origin: ' + (m.origin || 'unknown'));
     lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
     lines.push(_str(p.text));
+    return lines.join('\n');
+  }
+  if (kind === 'dtnaStage') {
+    const cid = _str(p.caseId);
+    lines.push('CHANGE DTNA CASE STAGE: ' + _str(p.fromStage) + ' -> ' + _str(p.toStage));
+    lines.push('Unit: ' + (m.unit || '-'));
+    lines.push('DTNA case: ' + cid + '  ' + DTNA_CASE_URL + cid + '/detail');
+    lines.push('Repair order: ' + (_str(p.repairOrderNo) || '(none)'));
+    lines.push('Visibility: VISIBLE TO THE DEALER (DTNA)');
+    lines.push('Origin: ' + (m.origin || 'unknown'));
     return lines.join('\n');
   }
   if (kind === 'setLifecycle') {
@@ -340,6 +361,25 @@ async function _send(f, payload) {
       _logLine('send-failed', f, 'error=' + code);
       return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
     }
+    if (f.kind === 'dtnaStage') {
+      // Single-use token: src/dtna/aura.js callWrite refuses a write without it.
+      const token = {};
+      _tokens.add(token);
+      let r;
+      try {
+        const change = _deps.dtnaChangeStage || ((p, t) => require('../dtna/writes').postApprovedStageChange(p, t));
+        r = await change(payload, token);
+      } finally {
+        _tokens.delete(token);
+      }
+      if (r && r.ok) {
+        _logLine('sent', f, 'len=0');
+        return { ok: true, outcome: 'sent', id: f.id, result: { toStage: _str(r.toStage) } };
+      }
+      const code = _str((r && r.code) || 'DTNA_INTERNAL').replace(/[^A-Z0-9_]/g, '').slice(0, 40) || 'DTNA_INTERNAL';
+      _logLine('send-failed', f, 'error=' + code);
+      return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
+    }
     const token = {};
     _tokens.add(token);
     const commit = _deps.commitWorkOrder || ((o, t) => _api()._commitApprovedWorkOrder(o, t));
@@ -354,7 +394,7 @@ async function _send(f, payload) {
     return { ok: false, outcome: 'send-failed', id: f.id, result: result || null, error: err };
   } catch (e) {
     // A DTNA failure never carries an error message (it could echo request or response content).
-    const err = f.kind === 'dtnaComment' ? 'DTNA_INTERNAL' : ((e && e.message) || String(e));
+    const err = EXTERNAL_KINDS.has(f.kind) ? 'DTNA_INTERNAL' : ((e && e.message) || String(e));
     _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
     return { ok: false, outcome: 'send-failed', id: f.id, error: err };
   }
@@ -485,6 +525,13 @@ async function requestWrite(spec) {
   const kind = s.kind;
   if (!KINDS.includes(kind)) return { ok: false, outcome: 'skipped-not-approved', id: null, error: 'unknown write kind' };
   const payload = _normalizePayload(kind, s.payload);
+  if (kind === 'dtnaStage') {
+    // Forward only: refuse a same / earlier / unknown stage before anything is staged or prompted.
+    const DC = require('../dtna/constants');
+    if (!DC.CASE_ID_RE.test(payload.caseId) || !DC.isForwardStage(payload.fromStage, payload.toStage)) {
+      return { ok: false, outcome: 'skipped-not-approved', id: null, error: 'DTNA_STAGE_NOT_FORWARD' };
+    }
+  }
   const f = {
     kind,
     origin: _str(s.origin) || 'unknown',
