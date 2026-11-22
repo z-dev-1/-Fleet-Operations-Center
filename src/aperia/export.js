@@ -100,15 +100,19 @@ function _ymd(date) {
   return _DAY.format(Number.isFinite(d.getTime()) ? d : new Date());
 }
 
-/** writeExport({kind, columns, rows, format:'tsv'|'xls', dir, date}) -> { filename }. */
+/** writeExport({kind, columns, rows, format:'tsv'|'xls', dir, date}) -> { filename } (aperia-<kind>-<date>[-N].<ext>). */
 function writeExport(o) {
   const kind = String((o && o.kind) || '');
   if (!/^[a-z][a-z-]{0,19}$/.test(kind)) throw new Error('invalid export kind');
   const format = o.format === 'xls' ? 'xls' : 'tsv';
   const columns = Array.isArray(o.columns) ? o.columns.slice() : [];
   const rows = Array.isArray(o.rows) ? o.rows : [];
-  const filename = 'aperia-' + kind + '-' + _ymd(o.date) + '.' + format;
-  const file = path.join(String(o.dir || ''), filename);
+  const dir = String(o.dir || '');
+  // Never overwrite an earlier export: the first of the day keeps the plain name, later ones get -2, -3, ...
+  const stem = 'aperia-' + kind + '-' + _ymd(o.date);
+  let filename = stem + '.' + format;
+  for (let n = 2; fs.existsSync(path.join(dir, filename)) && n < 1000; n++) filename = stem + '-' + n + '.' + format;
+  const file = path.join(dir, filename);
   if (format === 'tsv') {
     fs.writeFileSync(file, toTSV(columns, rows), 'utf8');
   } else {

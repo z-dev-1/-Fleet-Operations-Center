@@ -67,7 +67,7 @@ const WS_MAX_RECONNECTS = 10;
 const WS_EVENT_TYPES = Object.freeze({ NEW_ISSUE: 'NEW_ISSUE', SEVERITY_CHANGE: 'SEVERITY_CHANGE', ISSUE_CSV_GENERATED: 'ISSUE_CSV_GENERATED' });
 const WS_ALERT_TYPES = Object.freeze(['NEW_ISSUE', 'SEVERITY_CHANGE']);
 // WS-first watcher allowed: the token is captured passively (no mint) and the frame format is known.
-// The issues poll stays as the fallback whenever the socket is not open.
+// The issues poll runs on every watcher tick, socket open or not (the frame format is unverified live).
 const APERIA_WS_ENABLED = true;
 
 // ── Forbidden ──

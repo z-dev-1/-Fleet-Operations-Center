@@ -211,6 +211,21 @@ describe('aperia watcher: polling and notifications', () => {
     expect(watcherEvents(d.send)).toEqual(['polling', 'off']);
   });
 
+  it('a poll that fails with a sign-in code sends a watcher status; other failures do not', async () => {
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null });
+    await watcher.start({ ctx: d.ctx });
+    expect(watcherEvents(d.send)).toEqual(['polling']);
+    d.client.listIssues.mockResolvedValueOnce({ ok: false, code: 'APERIA_HTTP_500' });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: false, code: 'APERIA_HTTP_500' });
+    expect(watcherEvents(d.send)).toEqual(['polling']);
+    d.client.listIssues.mockResolvedValueOnce({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: false, code: 'APERIA_SESSION_EXPIRED' });
+    d.client.listIssues.mockResolvedValueOnce({ ok: false, code: 'APERIA_SIGNIN_REQUIRED' });
+    await vi.advanceTimersByTimeAsync(5 * 60e3);
+    expect(watcherEvents(d.send)).toEqual(['polling', 'polling', 'polling']);
+  });
+
   it('defaults to 5 minutes for an invalid minutes value', async () => {
     const { watcher } = fresh();
     const d = setup(watcher, { wsToken: null });
@@ -281,7 +296,7 @@ describe('aperia watcher: seen ids on disk', () => {
 });
 
 describe('aperia watcher: WS-first', () => {
-  it('socket open -> alerts ws and ticks skip the poll; socket failed/unauthorized -> polling resumes', async () => {
+  it('socket open -> alerts ws and ticks still poll; socket failed/unauthorized -> polling', async () => {
     const { watcher } = fresh();
     const d = setup(watcher);
     await watcher.start({ ctx: d.ctx });
@@ -293,19 +308,44 @@ describe('aperia watcher: WS-first', () => {
     sock.setState('open');
     expect(watcher.status().alerts).toBe('ws');
     await vi.advanceTimersByTimeAsync(15 * 60e3);
-    expect(d.client.listIssues).toHaveBeenCalledTimes(1);
+    expect(d.client.listIssues).toHaveBeenCalledTimes(4);
     sock.setState('failed');
     expect(watcher.status().alerts).toBe('polling');
     await vi.advanceTimersByTimeAsync(5 * 60e3);
-    expect(d.client.listIssues).toHaveBeenCalledTimes(2);
+    expect(d.client.listIssues).toHaveBeenCalledTimes(5);
     sock.setState('open');
     sock.setState('unauthorized');
     await vi.advanceTimersByTimeAsync(5 * 60e3);
-    expect(d.client.listIssues).toHaveBeenCalledTimes(3);
+    expect(d.client.listIssues).toHaveBeenCalledTimes(6);
     expect(watcherEvents(d.send)).toEqual(['polling', 'ws', 'polling', 'ws', 'polling']);
     watcher.stop();
     expect(sock.close).toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('socket open but silent: a new issue in the feed is still notified by the tick poll, once', async () => {
+    const { watcher } = fresh();
+    const d = setup(watcher);
+    await watcher.start({ ctx: d.ctx });
+    d.createAlertSocket.sockets[0].setState('open');
+    rows.push(issue('70', { fleetVehicleId: 'NP70' }));
+    await vi.advanceTimersByTimeAsync(5 * 60e3);
+    expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['CRITICAL: NP70']);
+    // The same id later arriving on the socket does not notify again.
+    expect(await watcher._onWsAlert({ id: '70', severity: 'CRITICAL', state: 'LEAK', vehicleId: 'v70', fleetVehicleId: 'NP70' })).toEqual({ ok: true, notified: false });
+    await vi.advanceTimersByTimeAsync(5 * 60e3);
+    expect(FakeNotification.created.length).toBe(1);
+  });
+
+  it('a WS alert is not notified again by the next tick poll', async () => {
+    const { watcher } = fresh();
+    const d = setup(watcher);
+    await watcher.start({ ctx: d.ctx });
+    d.createAlertSocket.sockets[0].setState('open');
+    expect(await watcher._onWsAlert({ id: '71', severity: 'CRITICAL', state: 'LEAK', vehicleId: 'v71', fleetVehicleId: 'NP71' })).toEqual({ ok: true, notified: true });
+    rows.push(issue('71', { fleetVehicleId: 'NP71' }));
+    await vi.advanceTimersByTimeAsync(5 * 60e3);
+    expect(FakeNotification.created.length).toBe(1);
   });
 
   it('a WS alert is marked seen before enrichment and notifies with positionName/domicile', async () => {

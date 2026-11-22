@@ -115,4 +115,15 @@ describe('TSV / Excel', () => {
     expect(xml).not.toContain(">=cmd");
     expect(() => X.writeExport({ kind: '../x', columns: [], rows: [], format: 'tsv', dir })).toThrow();
   });
+
+  it('a second same-day export of the same kind gets -2, -3 and leaves the earlier files intact', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aperia-export-'));
+    const a = X.writeExport({ kind: 'issues', columns: ['unit'], rows: [{ unit: 'FIRST' }], format: 'tsv', dir, date: NOW });
+    const b = X.writeExport({ kind: 'issues', columns: ['unit'], rows: [{ unit: 'SECOND' }], format: 'tsv', dir, date: NOW });
+    const c = X.writeExport({ kind: 'issues', columns: ['unit'], rows: [{ unit: 'THIRD' }], format: 'tsv', dir, date: NOW });
+    expect([a.filename, b.filename, c.filename]).toEqual(['aperia-issues-2026-11-22.tsv', 'aperia-issues-2026-11-22-2.tsv', 'aperia-issues-2026-11-22-3.tsv']);
+    expect(fs.readFileSync(path.join(dir, a.filename), 'utf8')).toContain('FIRST');
+    expect(fs.readFileSync(path.join(dir, b.filename), 'utf8')).toContain('SECOND');
+    expect(X.writeExport({ kind: 'issues', columns: ['unit'], rows: [], format: 'xls', dir, date: NOW }).filename).toBe('aperia-issues-2026-11-22.xls');
+  });
 });

@@ -6,7 +6,8 @@
  *   start({ minutes, ctx }) -> { ok:true, status } | { ok:true, already:true, status } | { ok:false, code }
  *     Needs a captured Bearer (APERIA_SIGNIN_REQUIRED). Primes the seen ids from one issues read WITHOUT
  *     notifying, starts the poll interval (minutes 1..60, default 5) and, when C.APERIA_WS_ENABLED and a WS
- *     token was captured, the alert socket. Each tick polls only while the socket is not open.
+ *     token was captured, the alert socket. Every tick polls, whether or not the socket is open. A poll
+ *     that fails with a sign-in code sends a { type:'watcher' } status so the pill re-reads status().
  *   stop() -> { ok:true, status }       clears the interval, closes the socket.
  *   pollNow(ctx) -> { ok:true, newCount } | { ok:false, code }   (APERIA_ALERTS_OFF when off)
  *   status() -> { alerts:'off'|'ws'|'polling', minutes, lastPollAt, lastNewCount }
@@ -167,11 +168,14 @@ function stop() {
   return { ok: true, status: status() };
 }
 
+// Every tick polls, socket open or not: the alert-frame format is unverified live and the socket has no
+// liveness check, so an open socket alone must never suppress alerts. Seen-id de-dupe prevents doubles.
 function _tick() {
   if (!_on) return;
-  if (_socket && _socket.state() === 'open') return;
   _poll(_ctx).catch(() => {});
 }
+
+const SIGNIN_CODES = new Set(['APERIA_SIGNIN_REQUIRED', 'APERIA_SESSION_EXPIRED']);
 
 function _poll(ctx) {
   if (_pollP) return _pollP;
@@ -181,7 +185,13 @@ function _poll(ctx) {
     try { r = await _client().listIssues(ctx || _ctx); } catch (e) { log.warn('[aperia] watcher poll', { code: 'APERIA_INTERNAL', err: safeErr(e) }); r = { ok: false, code: 'APERIA_INTERNAL' }; }
     if (gen !== _gen || !_on) return { ok: false, code: 'APERIA_ALERTS_OFF' };
     _lastPollAt = new Date(_now()).toISOString();
-    if (!r || !r.ok) { log.info('[aperia] watcher poll', { code: (r && r.code) || 'APERIA_INTERNAL' }); return { ok: false, code: (r && r.code) || 'APERIA_INTERNAL' }; }
+    if (!r || !r.ok) {
+      const code = (r && r.code) || 'APERIA_INTERNAL';
+      log.info('[aperia] watcher poll', { code });
+      // Lost sign-in: push a watcher status so the pill / panel re-read status() and stop showing Alerts ON.
+      if (SIGNIN_CODES.has(code)) _emitStatus(true);
+      return { ok: false, code };
+    }
     const at = _now();
     const fresh = [];
     for (const x of Array.isArray(r.rows) ? r.rows : []) {
