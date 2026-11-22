@@ -142,7 +142,7 @@ describe('run() with fakes', () => {
         if (p.startsWith('/api/v1/issues/by/vehicle')) return { ok: true, status: 200, value: { content: [{ id: 99, fleetVehicleId: '122269', account: { id: 1, name: 'DFW5' }, contacts: [{ email: SENT_EMAIL }], issues: [{ id: 5, severity: 'CRITICAL', state: 'LEAK' }] }], totalElements: 1, totalPages: 1 } };
         if (p.startsWith('/api/v1/vehicles?')) return { ok: true, status: 200, value: { vehicles: [{ id: 99, fleetVehicleId: '122269', vin: 'V' }], totalElements: 8811, totalPages: 18, totalUnfilteredElements: 8811 } };
         if (p === '/api/v1/vehicles/99') return { ok: true, status: 200, value: { id: 99, sensors: [{ id: 1, position: 'L1IC', pressure: 100, setPoint: 105, faulted: false, issue: { id: 5, severity: 'CRITICAL', actions: ['Inflate'] } }], latestGeoTag: { latitude: 32.9, longitude: -97.0 } } };
-        if (p.startsWith(C.WS_MINT_PATH)) return { ok: true, status: 200, value: { token: SENT_WS } };
+        if (p.startsWith('/api/v1/notifications/token')) return { ok: true, status: 200, value: { token: SENT_WS } };
         return { ok: false, code: 'UNEXPECTED' };
       },
     };

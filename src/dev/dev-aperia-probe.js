@@ -37,6 +37,8 @@ const MAX_SCRIPTS = 40;
 const BODY_MAX = 25 * 1024 * 1024;
 const BUNDLE_TERMS = Object.freeze(['notifications/token', 'ws/events', 'x-authorization', 'new WebSocket']);
 const SITES_PER_TERM = 6;
+// Discovery candidate only. 2026-11-22: this is the alert-settings GET-by-id route, not a mint (see constants.js).
+const MINT_CANDIDATE_PATH = '/api/v1/notifications/token';
 const EVENT_KEY_RE = /^(type|event|eventType|event_type|eventName|action|topic|channel|destination|kind|messageType|message_type|subject|op|command|category|severity|state)$/i;
 const STOMP_RE = /^(CONNECT|CONNECTED|STOMP|SEND|SUBSCRIBE|UNSUBSCRIBE|MESSAGE|RECEIPT|ERROR|ACK|NACK|DISCONNECT)\r?\n/;
 
@@ -141,7 +143,7 @@ function mintPlan(mintSites) {
   if (get.queryLiteral) for (const [k, v] of new URLSearchParams(get.queryLiteral)) qs.append(k, v);
   for (const p of get.params) qs.append(p.key, String(p.literalValue == null ? '' : p.literalValue).replace(/^!0$/, 'true').replace(/^!1$/, 'false'));
   const s = qs.toString();
-  return { send: true, method: 'GET', path: C.WS_MINT_PATH + (s ? '?' + s : ''), reason: 'GET_LITERAL_PARAMS' };
+  return { send: true, method: 'GET', path: MINT_CANDIDATE_PATH + (s ? '?' + s : ''), reason: 'GET_LITERAL_PARAMS' };
 }
 
 /** _jwtInfo(s) -> { claimNames, ttlHours, scope } for a JWT-shaped string | null. No claim values except scope. */
@@ -306,7 +308,7 @@ function createObserver(wc, getSecrets) {
     for (const k of u.searchParams.keys()) if (e.queryNames.length < 20 && !e.queryNames.includes(k)) e.queryNames.push(k);
     if (apiCalls.size < 200) apiCalls.set(key, e);
     const rec = { key, mint: null };
-    if (u.pathname === C.WS_MINT_PATH && mintCalls.length < 10) {
+    if (u.pathname === MINT_CANDIDATE_PATH && mintCalls.length < 10) {
       let bodyKeys = null;
       if (typeof rq.postData === 'string') {
         const j = safeJson(rq.postData);
