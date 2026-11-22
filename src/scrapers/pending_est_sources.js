@@ -12,8 +12,11 @@
  *      parseCasePage) with the stage from getCaseStatusSummary.
  *   4. User fleet rows whose offsite estimate is not on an open WR in the pull
  *      are still listed, flagged notInRg.
- *   5. DTNA (findings §6b, §5.3): read from the dtnaCaseCache ONLY (filled by the
- *      user's "Pull DTNA"); this module never makes a DTNA network call. Cases
+ *   5. DTNA (findings §6b, §5.3): while the user is signed in to DTNA, cases named
+ *      by WR comments / fleet rows / open-WR units are refreshed with the Decisiv
+ *      case rules (CASE_TTL_MS, MAX_CASES, CASE_BATCH, stalest first) through the
+ *      session-gated src/dtna/auto.js (never a sign-in); signed out, nothing is
+ *      called. Rows then read the dtnaCaseCache. Cases
  *      join open WRs by unit (src/dtna/pending.joinCasesToWrs). DTNA has no
  *      estimate amount: total null, status from the case. An unjoined case that
  *      is not closed is listed notInRg. excludedDtna stays 0 (shape compat).
@@ -47,6 +50,7 @@ const DTNA_VENDOR_RE = /FREIGHTLINER|DAIMLER/;
 const DP = require('../dtna/pending');
 const DJ = require('../dtna/join');
 const DC = require('../dtna/constants');
+const { offsiteUrlOf } = require('../utils/offsite-owner');
 
 let _inflight = null;
 
@@ -83,7 +87,11 @@ function _deps(d) {
       const fd = store.load('fleetData', {}) || {};
       return Array.isArray(fd.rows) ? fd.rows : [];
     }),
-    // DTNA cache read through the injected store (never a DTNA network module).
+    // DTNA refresh: only through the session-gated sync-pass module (src/dtna/auto.js).
+    dtnaGate: pick('dtnaGate', () => () => require('../dtna/auto').gate()),
+    dtnaRefresh: pick('dtnaRefresh', () => (id, o) => require('../dtna/auto').pullIfStale(id, o)),
+    dtnaDiscover: pick('dtnaDiscover', () => (o) => require('../dtna/auto').discover(o)),
+    // DTNA cache read through the injected store.
     loadDtnaCases: pick('loadDtnaCases', () => () => {
       const ds = require('../dtna/store');
       const raw = store.load(ds.KEY, null);
@@ -343,7 +351,63 @@ async function _scan(opts, d) {
   }
   try { d.store.save('decisivCaseCache', caseCache); } catch (e) { err('store', 'CASE_CACHE_SAVE'); }
 
-  // (g2) DTNA cases from the dtnaCaseCache (cache only; refreshed by the user's "Pull DTNA")
+  // (h2) DTNA refresh while signed in, with the (h) rules: per-case CASE_TTL_MS, the shared MAX_CASES
+  // budget, a pause after every CASE_BATCH live reads, stalest first. Signed out: nothing is called.
+  // force (Refresh) is not passed on: the forced DTNA refresh is the manual "Pull DTNA".
+  let dtnaAuto = 'ok';
+  let dtnaLive = 0;
+  let gateOk = false;
+  try { const g = d.dtnaGate(); gateOk = !!(g && g.ok); } catch (_) { gateOk = false; }
+  if (!gateOk) dtnaAuto = 'signed-out';
+  else {
+    const signedOut = (c) => c === 'DTNA_AUTO_SIGNED_OUT' || c === 'DTNA_SIGNIN_REQUIRED' || c === 'DTNA_SESSION_EXPIRED';
+    let known = [];
+    try { const e = d.loadDtnaCases(); known = Array.isArray(e) ? e : []; } catch (_) { known = []; }
+    const byId = new Map(known.map((e) => [e.caseId, e]));
+    const openUnits = new Set([...openById.values()].map((w) => DJ.normUnit(w.assetDisplayName)).filter(Boolean));
+    const ids = new Set(wrDtnaCase.values());
+    for (const row of fleet) { const id = row ? DJ.caseIdFromUrl(offsiteUrlOf(row)) : ''; if (id) ids.add(id); }
+    for (const e of known) if (openUnits.has(DJ.normUnit(e.unitId)) && !DP.isCaseClosed(e)) ids.add(e.caseId);
+    const pulledMs = (id) => { const t = Date.parse((byId.get(id) && byId.get(id).pulledAt) || ''); return Number.isFinite(t) ? t : -Infinity; };
+    const order = [...ids].filter((id) => DC.CASE_ID_RE.test(id)).sort((a, b) => pulledMs(a) - pulledMs(b));
+    for (const id of order) {
+      const hit = byId.get(id);
+      if (hit && _ageOk(hit.pulledAt, nowMs, CASE_TTL_MS)) continue;
+      if (caseN + dtnaLive >= MAX_CASES) break;
+      if (dtnaLive > 0 && dtnaLive % CASE_BATCH === 0) { try { await d.sleep(CASE_BATCH_PAUSE_MS); } catch (_) {} }
+      let r;
+      try { r = await d.dtnaRefresh(id, { freshMs: CASE_TTL_MS }); } catch (_) { r = { ok: false, live: true, code: 'DTNA_NETWORK' }; }
+      if (r && r.live) dtnaLive++;
+      const code = r && r.ok ? '' : String((r && r.code) || 'DTNA_ERROR');
+      if (signedOut(code)) { dtnaAuto = 'signed-out'; break; }
+      if (code) err('dtna', code);
+      // Portal unreachable: stop for this scan (same stop rule as the bulk pull); the next scan retries.
+      if (code === 'DTNA_NETWORK' || code === 'DTNA_TIMEOUT' || code === 'DTNA_CAPTURE_FAILED') { dtnaAuto = 'error'; break; }
+    }
+    // Open FREIGHTLINER / DAIMLER WRs whose unit has no case yet: one bounded discovery (unit-number join).
+    if (dtnaAuto === 'ok' && caseN + dtnaLive < MAX_CASES) {
+      let cached = [];
+      try { const e = d.loadDtnaCases(); cached = Array.isArray(e) ? e : []; } catch (_) { cached = []; }
+      const cachedUnits = new Set(cached.map((e) => DJ.normUnit(e.unitId)).filter(Boolean));
+      const units = new Set();
+      for (const w of openById.values()) {
+        if (!DTNA_VENDOR_RE.test(_up(w.vendor)) || wrDtnaCase.has(_wrIdOf(w))) continue;
+        const u = DJ.normUnit(w.assetDisplayName);
+        if (u && !cachedUnits.has(u)) units.add(u);
+      }
+      if (units.size) {
+        try {
+          const r = await d.dtnaDiscover({ units: [...units], budget: MAX_CASES - caseN - dtnaLive });
+          dtnaLive += Number(r && r.pulled) || 0;
+          const code = String((r && r.code) || 'OK');
+          if (signedOut(code)) dtnaAuto = 'signed-out';
+          else if (code !== 'OK') err('dtna', code);
+        } catch (_) { err('dtna', 'DTNA_DISCOVER'); }
+      }
+    }
+  }
+
+  // (g2) DTNA cases from the dtnaCaseCache (refreshed above and by the user's "Pull DTNA")
   let dtnaEntries = [];
   try { const e = d.loadDtnaCases(); dtnaEntries = Array.isArray(e) ? e : []; } catch (_) { err('dtna', 'DTNA_CACHE_READ'); dtnaEntries = []; }
   let dtnaJoin = { byWr: new Map(), unjoined: [] };
@@ -502,7 +566,7 @@ async function _scan(opts, d) {
       };
       if (dr.dtna) {
         row.dtnaCaseId = dtnaCaseId;
-        row.dtnaRepairOrderNo = String(dr.dtna.repairOrderNo || dr.dtna.caseNumber || '');
+        row.dtnaCaseNumber = String(dr.dtna.caseNumber || '');
       }
       rows.push(row);
       counts[source]++;
@@ -513,10 +577,10 @@ async function _scan(opts, d) {
 
   const errors = [...errCounts.entries()].map(([k, n]) => { const [stage, code] = k.split('|'); return { stage, code, n }; });
   const dtnaAsOf = DP.latestPulledAt(dtnaEntries);
-  const scan = { ok: true, asOf: nowIso, rows, excludedDtna, dtnaAsOf, counts, errors, wrEst, assetCache };
+  const scan = { ok: true, asOf: nowIso, rows, excludedDtna, dtnaAsOf, dtnaAuto, counts, errors, wrEst, assetCache };
   try { d.store.save('pendingEstScan', scan); } catch (_) { errors.push({ stage: 'store', code: 'SCAN_SAVE', n: 1 }); }
   d.log.info('[pending-est] team scan: ' + open.length + ' open WRs, ' + rows.length + ' rows (rg=' + counts.rg + ' decisiv=' + counts.decisiv
-    + ' both=' + counts.both + ' dtna=' + counts.dtna + ' mismatch=' + counts.mismatch + ' notInRg=' + counts.notInRg + '), dtnaCases=' + dtnaEntries.length
+    + ' both=' + counts.both + ' dtna=' + counts.dtna + ' mismatch=' + counts.mismatch + ' notInRg=' + counts.notInRg + '), dtnaCases=' + dtnaEntries.length + ' dtnaLive=' + dtnaLive
     + (errors.length ? ', errors=' + errors.map((x) => x.stage + ':' + x.code + 'x' + x.n).join(',') : ''));
   return Object.assign(_strip(scan), { cached: false });
 }

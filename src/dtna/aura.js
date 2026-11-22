@@ -5,6 +5,8 @@
  * Form-encoded POSTs through the persist:vendor-dtna session with the context/token/pageURI the
  * capture took from the page's own requests. Never throws; returns {ok:true, value} | {ok:false, code}.
  * Only READ_METHODS reach callApex; _callApexRaw (dev probe only) refuses anything write-like.
+ * getCaseNumberRecord is the one non-Apex read (the portal's RecordUi getRecordWithFields, Case.CaseNumber).
+ * A {silent:true} call (the sync pass) asks the session for a silent context only: no sign-in, no auto-login.
  * WRITE_METHODS (postComment, changeStatus) reach only callWrite, and only with a single-use write-gate
  * approval token; callApex and _callApexRaw refuse both.
  * One log line per call: { method, caseTag, code, status, ms }. No bodies, URLs or messages are logged.
@@ -135,7 +137,8 @@ async function _run(send, info) {
   const S = _session();
   let r;
   try {
-    const e = await S.ensureContext();
+    // silent (the sync pass, src/dtna/auto.js): ensureContext never opens a sign-in or auto-login.
+    const e = info.silent ? await S.ensureContext({ silent: true }) : await S.ensureContext();
     if (!e || !e.ok) {
       r = { ok: false, code: (e && e.code) || 'DTNA_SIGNIN_REQUIRED' };
     } else {
@@ -145,7 +148,7 @@ async function _run(send, info) {
         r = { ok: false, code: 'DTNA_SIGNIN_REQUIRED', status: r.status };
       } else if (!r.ok && RETRY_CODES.has(r.code)) {
         capture.clear();
-        const e2 = await S.ensureContext({ force: true });
+        const e2 = await S.ensureContext(info.silent ? { force: true, silent: true } : { force: true });
         if (!e2 || !e2.ok) r = { ok: false, code: 'DTNA_SIGNIN_REQUIRED' };
         else {
           r = await send();
@@ -189,8 +192,8 @@ function _send(classname, method, params) {
 
 function _isPlainObject(o) { return !!o && typeof o === 'object' && !Array.isArray(o); }
 
-/** callApex(name, params) — allowlisted reads only; validated before any request. */
-async function callApex(name, params) {
+/** callApex(name, params, {silent}) — allowlisted reads only; validated before any request. */
+async function callApex(name, params, opts) {
   const spec = typeof name === 'string' && Object.prototype.hasOwnProperty.call(C.READ_METHODS, name) ? C.READ_METHODS[name] : null;
   if (!spec) {
     log.info('[dtna] apex', { method: 'refused', code: 'DTNA_METHOD_NOT_ALLOWED' });
@@ -210,7 +213,31 @@ async function callApex(name, params) {
   const classname = seen && /^E2E_\w+$/.test(seen) ? seen : C.APEX_CLASS[name];
   const clean = {};
   for (const k of spec.params) clean[k] = p[k];
-  return _run(_send(classname, name, clean), { method: name, caseTag: caseTag(p.caseId) });
+  return _run(_send(classname, name, clean), { method: name, caseTag: caseTag(p.caseId), silent: !!(opts && opts.silent) });
+}
+
+/**
+ * getCaseNumberRecord(caseId, {silent}) — the Case's human case number through the portal's own record
+ * read (constants.CASE_NUMBER_READ). Read-only; returns the raw record value ({ fields: { CaseNumber } }).
+ */
+async function getCaseNumberRecord(caseId, opts) {
+  if (typeof caseId !== 'string' || !C.CASE_ID_RE.test(caseId)) {
+    log.info('[dtna] apex', { method: 'getRecordWithFields', code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  const send = () => {
+    const id = ++_seq;
+    const message = JSON.stringify({
+      actions: [{
+        id: id + ';a',
+        descriptor: C.CASE_NUMBER_READ.descriptor,
+        callingDescriptor: 'UNKNOWN',
+        params: { recordId: caseId, fields: [C.CASE_NUMBER_READ.field], optionalFields: [] },
+      }],
+    });
+    return _post('?r=' + id + '&aura.RecordUi.getRecordWithFields=1', message);
+  };
+  return _run(send, { method: 'getRecordWithFields', caseTag: caseTag(caseId), silent: !!(opts && opts.silent) });
 }
 
 /**
@@ -245,8 +272,8 @@ async function callWrite(name, params, token) {
   return _run(_send(spec.classname, name, Object.assign({}, p)), { method: name, caseTag: caseTag(caseKey ? p[caseKey] : ''), noRetry: true });
 }
 
-/** replayGetItems(mutate) — re-send the page's captured list action (deep copy), mutate(params) first. */
-async function replayGetItems(mutate) {
+/** replayGetItems(mutate, {silent}) — re-send the page's captured list action (deep copy), mutate(params) first. */
+async function replayGetItems(mutate, opts) {
   const send = () => {
     const t = capture.getItemsTemplate();
     if (!t || !t.action) return Promise.resolve({ ok: false, code: 'DTNA_NO_LIST_TEMPLATE' });
@@ -256,7 +283,7 @@ async function replayGetItems(mutate) {
     if (typeof mutate === 'function') mutate(action.params);
     return _post(t.query || '', JSON.stringify({ actions: [action] }));
   };
-  return _run(send, { method: 'getItems', caseTag: '------' });
+  return _run(send, { method: 'getItems', caseTag: '------', silent: !!(opts && opts.silent) });
 }
 
 /** _callApexRaw(classname, method, params) — dev probe only (src/dev/dev-dtna-probe.js). Reads only. */
@@ -276,4 +303,4 @@ async function _callApexRaw(classname, method, params) {
 
 function _resetForTests() { _deps = {}; _seq = 0; }
 
-module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, _callApexRaw, _post, _setDeps, _resetForTests };
+module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, getCaseNumberRecord, _callApexRaw, _post, _setDeps, _resetForTests };

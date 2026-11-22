@@ -185,6 +185,14 @@ function _ownedEstimate(r) {
   }
   return null;
 }
+// The DTNA case number (Vendor WO) when this WR owns a DTNA case URL, else null. Same rule as
+// the renderer's id-links.js vendorWoOf DTNA branch.
+const _DTNA_CASE_URL_RE = /^https:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/500[A-Za-z0-9]{15}/;
+function _ownedDtnaCaseNumber(r) {
+  const no = _s(r.dtnaCaseNumber).trim();
+  if (!no) return null;
+  return _ownedOffsiteUrls(r).some((u) => _DTNA_CASE_URL_RE.test(u) && !/[\s"'<>]/.test(u)) ? no : null;
+}
 // decisivCaseCache[estimateId] (written by the Pending Estimates scan), or null. A case
 // scraped more than STALE_MS ago (or with no scrape time) is ignored, so RG / AAP wins.
 function _decisivFor(est, nowMs) {
@@ -217,6 +225,10 @@ function _withOffsite(row, unitRow, unit, wr) {
   if (primary) {
     for (const k of OFFSITE_URL_FIELDS) {
       if (!_s(out[k]).trim() && typeof u[k] === 'string' && u[k].trim()) out[k] = u[k].trim().slice(0, 2000);
+    }
+    // The DTNA case number the renderer's Vendor WO chip shows (digits only).
+    if (!_s(out.dtnaCaseNumber).trim() && typeof u.dtnaCaseNumber === 'string' && /^\d{1,12}$/.test(u.dtnaCaseNumber.trim())) {
+      out.dtnaCaseNumber = u.dtnaCaseNumber.trim();
     }
     if (_ownedEstimate(out)) return out;
   }
@@ -270,7 +282,7 @@ function collectFacts(row, { now, factSet, evidenceText } = {}) {
   const etr = dcEtrMs != null ? _ymd(new Date(dcEtrMs)) : fsEtr;
   const city = first(r.dealerCity) && first(r.dealerState) ? first(r.dealerCity) + ', ' + first(r.dealerState)
     : (first(dc.dealerCity) && first(dc.dealerState) ? first(dc.dealerCity) + ', ' + first(dc.dealerState) : null);
-  const vendorWo = first(offEst && offEst.id, r.vendorWorkOrderId);
+  const vendorWo = first(offEst && offEst.id, _ownedDtnaCaseNumber(r), r.vendorWorkOrderId);
 
   return {
     unit: first(r.equipmentId),

@@ -2,7 +2,9 @@
 /**
  * src/dtna/session.js — DTNA partition, visible sign-in window, hidden context refresh and status.
  *
- * Nothing here runs on its own: every window is opened by a user action (the sign-in click or a pull).
+ * Nothing here runs on its own. Windows open from a user action (the sign-in click or a pull), or,
+ * only while the user is signed in (canAutoSync), as a silent hidden context refresh from the sync pass
+ * (src/dtna/auto.js): no stored credentials are filled there, so it can never reach a login or MFA step.
  * The partition persist:vendor-dtna is shared with the Split View webview, so no permission handlers
  * are installed on it. The CDP capture attaches BEFORE the first loadURL of every window, and no
  * page console listener is ever registered (the portal prints its OIDC token to the console).
@@ -113,6 +115,14 @@ function noteSessionTime(t) {
     at: Date.now(),
   };
   _emit(true);
+}
+
+/**
+ * canAutoSync() -> true only while the user is signed in: captured this run, not marked expired, no
+ * sign-in window in progress and the last session-time reading (if any) not at 0 s. Pure, no network.
+ */
+function canAutoSync() {
+  return _everCaptured && !_expired && !_loginP && !(_sessionTime && _expiresInSec() <= 0);
 }
 
 // A new sign-in starts a new session: the old servlet reading no longer applies.
@@ -244,31 +254,42 @@ function _openLogin(ctx) {
 // ── Hidden refresh window ──────────────────────────────────────────────────
 let _hiddenP = null;
 
+// Silent refresh: how long the hidden window may sit on a sign-in host (an SSO bounce passes through
+// in well under this) before it gives up with DTNA_SIGNIN_REQUIRED.
+const SILENT_LOGIN_GRACE_MS = 5e3;
+
 /**
- * ensureContext({force}) -> {ok:true} | {ok:false, code:'DTNA_SIGNIN_REQUIRED'|'DTNA_TIMEOUT'|'DTNA_CAPTURE_FAILED'}
+ * ensureContext({force, silent}) -> {ok:true} | {ok:false, code:'DTNA_SIGNIN_REQUIRED'|'DTNA_TIMEOUT'|'DTNA_CAPTURE_FAILED'}
  * Fresh capture (< 30 min) and not forced -> ok. Else a single-flight hidden window on the Cases list
- * (only reached inside a user pull), destroyed after use.
+ * (inside a user pull, or a silent sync-pass read), destroyed after use.
+ * silent (sync pass): DTNA_SIGNIN_REQUIRED with no window unless canAutoSync(); the hidden window gets
+ * no auto-login and gives up as soon as it rests on a sign-in host.
  */
 function ensureContext(opts) {
   const force = !!(opts && opts.force);
+  const silent = !!(opts && opts.silent);
+  if (silent && !canAutoSync()) return Promise.resolve({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
   if (!force && capture.current() && capture.ageMs() < C.CONTEXT_MAX_AGE_MS) return Promise.resolve({ ok: true });
   if (_hiddenP) return _hiddenP;
-  _hiddenP = _hiddenRefresh().finally(() => { _hiddenP = null; _emit(); });
+  _hiddenP = _hiddenRefresh({ autoLogin: !silent }).finally(() => { _hiddenP = null; _emit(); });
   _emit();
   return _hiddenP;
 }
 
-function _hiddenRefresh() {
+function _hiddenRefresh(o) {
+  const autoLogin = !(o && o.autoLogin === false);
   const t0 = Date.now();
   return new Promise((resolve) => {
     let settled = false;
     let timer = null;
+    let grace = null;
     let cap = null;
     let win = null;
     const finish = (r) => {
       if (settled) return;
       settled = true;
       if (timer) { clearTimeout(timer); timer = null; }
+      if (grace) { clearTimeout(grace); grace = null; }
       _cancels.delete(cancel);
       try { if (cap) cap.detach(); } catch (e) { log.warn('[dtna] detach', safeErr(e)); }
       try { if (win && !_isDestroyed(win)) win.destroy(); } catch (e) { log.warn('[dtna] destroy', safeErr(e)); }
@@ -299,8 +320,17 @@ function _hiddenRefresh() {
       timer = setTimeout(() => {
         try { finish({ ok: false, code: _onLoginHost(win) ? 'DTNA_SIGNIN_REQUIRED' : 'DTNA_TIMEOUT' }); } catch (e) { log.warn('[dtna] wait', safeErr(e)); }
       }, C.HIDDEN_WAIT_MS);
-      Promise.resolve().then(() => win.loadURL(C.LIST_URL)).catch(() => {});
-      _attachAutoLogin(win);
+      // Silent: no credentials are filled, so a window resting on a sign-in host will never connect.
+      const checkLogin = () => {
+        if (autoLogin || settled || grace || _isDestroyed(win) || !_onLoginHost(win)) return;
+        grace = setTimeout(() => {
+          grace = null;
+          try { if (!settled && !_isDestroyed(win) && _onLoginHost(win)) finish({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' }); } catch (e) { log.warn('[dtna] wait', safeErr(e)); }
+        }, SILENT_LOGIN_GRACE_MS);
+      };
+      if (!autoLogin) wc.on('did-navigate', () => { try { checkLogin(); } catch (e) { log.warn('[dtna] navigate', safeErr(e)); } });
+      Promise.resolve().then(() => win.loadURL(C.LIST_URL)).then(() => { if (!autoLogin) checkLogin(); }).catch(() => {});
+      if (autoLogin) _attachAutoLogin(win);
     } catch (e) {
       log.warn('[dtna] hidden window', safeErr(e));
       finish({ ok: false, code: 'DTNA_CAPTURE_FAILED' });
@@ -326,6 +356,6 @@ function _resetForTests() {
 }
 
 module.exports = {
-  getSession, status, onStatus, noteResult, setPulling, notePulled, noteSessionTime, openLoginWindow, ensureContext, teardownAll,
-  _setDeps, _resetForTests,
+  getSession, status, onStatus, noteResult, setPulling, notePulled, noteSessionTime, openLoginWindow, ensureContext, canAutoSync,
+  teardownAll, _setDeps, _resetForTests,
 };

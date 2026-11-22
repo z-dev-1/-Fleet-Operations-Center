@@ -338,6 +338,13 @@ describe('sortItems / mismatch badge / new columns', () => {
     expect(h).not.toContain('DTNA excluded');
     expect(L.metaHtml({ asOf: null, dtnaAsOf: '2026-11-19T17:30:00Z' })).toContain('DTNA as of 11/19 12:30');
   });
+
+  it('Phase D: dtnaAuto signed-out adds "sign in to refresh DTNA" to the DTNA part only', () => {
+    expect(L.metaHtml({ asOf: null, dtnaAsOf: '2026-11-19T17:30:00Z', dtnaAuto: 'signed-out' }))
+      .toContain('<span class="pe-dtna">DTNA as of 11/19 12:30 \u00B7 sign in to refresh DTNA</span>');
+    expect(L.metaHtml({ asOf: null, dtnaAuto: 'ok' })).not.toContain('sign in');
+    expect(L.metaHtml({ asOf: null })).not.toContain('sign in');
+  });
 });
 
 // ── DTNA rows (Phase B): Total '—', status from the case, Source DTNA, case chip ──
@@ -347,12 +354,12 @@ describe('DTNA in the merge', () => {
   const dOff = { source: 'dtna', caseId: CASE, url: DURL, dealerName: 'HORWITH FREIGHTLINER', fleetStatus: '', repairStatus: 'Arrived',
     stage: 'arrival', stageStatus: '', stageSince: '', total: null, totalSource: 'none', updatedAt: iso(NOW - 2 * H), scrapedAt: iso(NOW - H), roNumber: 'R101048154', ok: true };
   const D1 = scanRow({ key: 'wr:' + wr(70), workRequestId: wr(70), equipmentId: 'D700', aaid: 'AAID-D7', vendor: 'Freightliner', vendorKind: 'dtna',
-    source: 'dtna', offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaRepairOrderNo: 'R101048154' });
+    source: 'dtna', offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaCaseNumber: '15667050' });
   const D2 = scanRow({ key: 'dtna:' + CASE.replace('AAK', 'AAL'), workRequestId: '', equipmentId: 'D710', vendorKind: 'dtna', source: 'dtna', rgOpen: false, notInRg: true,
     offsiteShopEventUrl: DURL.replace(CASE, CASE.replace('AAK', 'AAL')), offsite: Object.assign({}, dOff, { caseId: CASE.replace('AAK', 'AAL') }),
-    dtnaCaseId: CASE.replace('AAK', 'AAL'), dtnaRepairOrderNo: '' });
+    dtnaCaseId: CASE.replace('AAK', 'AAL'), dtnaCaseNumber: '' });
   const D3 = scanRow({ key: 'wr:' + wr(71), workRequestId: wr(71), equipmentId: 'D720', vendorKind: 'dtna', source: 'both', rgPending: true, rgPendingCost: 300,
-    offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaRepairOrderNo: 'R2' });
+    offsiteShopEventUrl: DURL, offsite: dOff, dtnaCaseId: CASE, dtnaCaseNumber: '15667051' });
   const m = () => L.mergeTeamRows([], [D1, D2, D3], { now: NOW });
 
   it('Total is null and renders a dash with the hint; Repair Status is the case status; Source DTNA / both', () => {
@@ -366,9 +373,10 @@ describe('DTNA in the merge', () => {
     expect(L.rowHtml(m().find((x) => x.unitId === 'D720'))).toContain('<td>both</td>');
   });
 
-  it('the Vendor WO chip is the RO number linked to the case URL; no RO -> no DTNA chip', () => {
+  it('the Vendor WO chip is the DTNA case number linked to the case URL (never the RO or case id); none -> no DTNA chip', () => {
     const d = m().find((x) => x.unitId === 'D700');
-    expect(d.vendorWo).toEqual({ id: 'R101048154', url: DURL, kind: 'dtna' });
+    expect(d.vendorWo).toEqual({ id: '15667050', url: DURL, kind: 'dtna' });
+    expect(L.rowHtml(d)).not.toContain('>R101048154<');
     expect(L.rowHtml(d)).toContain('data-id-link="' + DURL + '"');
     expect(m().find((x) => x.unitId === 'D710').vendorWo).toBeNull();
   });
@@ -377,7 +385,7 @@ describe('DTNA in the merge', () => {
     const fleetRow = Object.assign({}, G, { workRequestId: wr(70) });
     const res = L.mergeTeamRows(run([fleetRow, F, Hrow]).items, [D1], { now: NOW });
     const g = res.find((x) => x.unitId === 'G700');
-    expect(g).toMatchObject({ src: 'dtna', vendorWo: { kind: 'dtna', id: 'R101048154' } });
+    expect(g).toMatchObject({ src: 'dtna', vendorWo: { kind: 'dtna', id: '15667050' } });
     expect(res.find((x) => x.unitId === 'F600').vendorKind).toBe('dtna');
     expect(res.find((x) => x.unitId === 'H800').vendorKind).toBe('dtna');
   });

@@ -303,7 +303,7 @@ function _teamUnit(r) {
     estimatePendingCost: _num(r.rgPendingCost),
     domicileSite: _str(r.domicileSite),
     _offsiteWrId: url && wrId ? wrId : '',
-    dtnaRepairOrderNo: _str(r.dtnaRepairOrderNo),
+    dtnaCaseNumber: _str(r.dtnaCaseNumber),
     dtnaCaseId: _str(r.dtnaCaseId),
   };
 }
@@ -560,13 +560,14 @@ export function rowHtml(item) {
 }
 
 // excludedDtna is accepted for shape compat and no longer shown (DTNA is listed).
-export function metaHtml({ count, asOf, cached, shown, total, mismatch, teamAsOf, scanning, teamCached, teamError, dtnaAsOf } = {}) {
+export function metaHtml({ count, asOf, cached, shown, total, mismatch, teamAsOf, scanning, teamCached, teamError, dtnaAsOf, dtnaAuto } = {}) {
   const hasTeam = shown != null || total != null;
   let h = '<span class="pe-asof">as of ' + escAttr(formatAsOf(asOf)) + (cached ? ' (cached)' : '') + '</span>';
   if (hasTeam) h += ' \u00B7 <span class="pe-count">' + escAttr(String(shown || 0)) + ' shown of ' + escAttr(String(total || 0)) + '</span>';
   else h += ' \u00B7 <span class="pe-count">' + escAttr(String(count || 0)) + ' pending</span>';
   if (mismatch != null) h += ' \u00B7 <span class="pe-mismatch">' + escAttr(String(mismatch || 0)) + ' done offsite / RG open</span>';
-  h += ' \u00B7 <span class="pe-dtna">' + (dtnaAsOf ? 'DTNA as of ' + escAttr(formatAsOf(dtnaAsOf)) : 'DTNA not pulled') + '</span>';
+  h += ' \u00B7 <span class="pe-dtna">' + (dtnaAsOf ? 'DTNA as of ' + escAttr(formatAsOf(dtnaAsOf)) : 'DTNA not pulled')
+    + (dtnaAuto === 'signed-out' ? ' \u00B7 sign in to refresh DTNA' : '') + '</span>';
   if (teamAsOf) h += ' \u00B7 <span class="pe-team">team as of ' + escAttr(formatAsOf(teamAsOf)) + (teamCached ? ' (cached)' : '') + '</span>';
   if (teamError) h += ' \u00B7 <span class="pe-stale">team scan: ' + escAttr(teamError) + '</span>';
   if (scanning) h += ' \u00B7 <span class="pe-scanning">scanning\u2026</span>';

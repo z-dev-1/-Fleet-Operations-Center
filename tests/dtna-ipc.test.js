@@ -198,6 +198,19 @@ describe('dtna:pull-unit', () => {
     expect(ctx.lastData.rows).toEqual([{ equipmentId: 'OTHER' }]);
   });
 
+  it('Phase D: the manual pull is a force refresh: a case pulled 1 min ago is pulled again, not through auto.js; the row carries the case number', async () => {
+    const recent = Object.assign({}, ENTRY, { caseNumber: '15667050', pulledAt: new Date(Date.now() - 60e3).toISOString() });
+    require('../src/dtna/store').put(recent);
+    client.pullCase.mockResolvedValueOnce({ ok: true, entry: recent });
+    store.save('fleetData', { rows: [Object.assign(ROW(), { offsiteShopEventUrl: caseUrl(CASE_ID), asistScrapedAt: recent.pulledAt })] });
+    const r = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(r.ok).toBe(true);
+    expect(client.pullCase).toHaveBeenCalledTimes(1);
+    expect(client.pullCase.mock.calls[0]).toEqual([CASE_ID]);   // no {silent}, no freshness window
+    expect(store.load('fleetData', {}).rows[0].dtnaCaseNumber).toBe('15667050');
+    expect(fs.readFileSync(path.join(ROOT, 'src', 'ipc', 'dtna.js'), 'utf8')).not.toMatch(/require\([^)]*dtna\/auto/);
+  });
+
   it('uses ctx.lastData rows when they are the larger set', async () => {
     store.save('fleetData', { rows: [] });
     ctx.lastData = { rows: [ROW()] };

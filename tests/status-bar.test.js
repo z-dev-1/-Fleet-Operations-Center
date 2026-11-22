@@ -208,16 +208,16 @@ describe('helpers', () => {
 
 describe('dtnaPill (DTNA Service Tracker status pill)', () => {
   it.each([
-    ['signed-out', 'tb-dtna tb-dtna--grey', 'DTNA: Signed out'],
+    ['signed-out', 'tb-dtna tb-dtna--grey', 'DTNA: Signed out \u00b7 sign in to refresh'],
     ['connecting', 'tb-dtna tb-dtna--grey', 'DTNA: Connecting\u2026'],
     ['connected', 'tb-dtna tb-dtna--green', 'DTNA: Connected'],
-    ['expired', 'tb-dtna tb-dtna--amber', 'DTNA: Expired'],
+    ['expired', 'tb-dtna tb-dtna--amber', 'DTNA: Expired \u00b7 sign in to refresh'],
     ['pulling', 'tb-dtna tb-dtna--green', 'DTNA: Pulling\u2026'],
   ])('%s', (state, cls, text) => {
     const p = dtnaPill({ ok: true, state, lastPullAt: null });
     expect(p.cls).toBe(cls);
     expect(p.text).toBe(text);
-    expect(p.title).toMatch(/never checks DTNA on its own/);
+    expect(p.title).toMatch(/refreshes on each sync while connected\. Sign in to refresh DTNA\./);
   });
   it('missing or unknown status -> grey placeholder', () => {
     for (const s of [null, undefined, {}, { state: 'weird' }, { state: 'toString' }, 'connected']) {
@@ -231,7 +231,7 @@ describe('dtnaPill (DTNA Service Tracker status pill)', () => {
     expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 59 }).text).toBe('DTNA: Connected \u00b7 expires in <1m');
     expect(dtnaPill({ ok: true, state: 'connected', expiresInSec: 600 }).text).toBe('DTNA: Connected \u00b7 expires in 10m');
     expect(dtnaPill({ ok: true, state: 'connected' }).text).toBe('DTNA: Connected');
-    expect(dtnaPill({ ok: true, state: 'expired', expiresInSec: 0 })).toMatchObject({ cls: 'tb-dtna tb-dtna--amber', text: 'DTNA: Expired' });
+    expect(dtnaPill({ ok: true, state: 'expired', expiresInSec: 0 })).toMatchObject({ cls: 'tb-dtna tb-dtna--amber', text: 'DTNA: Expired \u00b7 sign in to refresh' });
     expect(dtnaPill({ ok: true, state: 'pulling', expiresInSec: 500 }).text).toBe('DTNA: Pulling\u2026');
     expect(fmtExpiresIn(3600)).toBe('1h 0m');
     expect(fmtExpiresIn(-5)).toBe('<1m');

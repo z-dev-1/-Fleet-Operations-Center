@@ -18,6 +18,8 @@ const OFFSITE_FIELDS = [
   'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'dealerName',
   // relay-extract §12.1: offsite fact block, stage history and dealer ids belong to the offsite too.
   'offsiteFacts', 'offsiteStageHistory', 'dealerCode', 'decisivDealerId',
+  // DTNA Phase D: the DTNA case number shown as Vendor WO.
+  'dtnaCaseNumber',
 ];
 
 function offsiteUrlOf(row) {

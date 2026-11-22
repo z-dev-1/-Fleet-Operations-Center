@@ -14,7 +14,8 @@
  * Session status changes are pushed on dtna:status-changed.
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Results carry ids, counts and codes only: comment text stays in dtnaCaseCache / fleetData rows and
- * in a file the user exports. Nothing here runs on a timer.
+ * in a file the user exports. Nothing here runs on a timer. "Pull DTNA" here is the on-demand force
+ * refresh; the normal sync pass reads DTNA separately, through the session-gated src/dtna/auto.js.
  */
 const path = require('path');
 const fs = require('fs');

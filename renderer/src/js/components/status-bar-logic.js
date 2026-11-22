@@ -168,10 +168,10 @@ export function deriveStatus(f, opts) {
  * The pill only reflects pushed or requested status; it never checks DTNA.
  */
 const _DTNA_PILL = {
-  'signed-out': ['grey', 'DTNA: Signed out'],
+  'signed-out': ['grey', 'DTNA: Signed out \u00b7 sign in to refresh'],
   connecting:   ['grey', 'DTNA: Connecting\u2026'],
   connected:    ['green', 'DTNA: Connected'],
-  expired:      ['amber', 'DTNA: Expired'],
+  expired:      ['amber', 'DTNA: Expired \u00b7 sign in to refresh'],
   pulling:      ['green', 'DTNA: Pulling\u2026'],
 };
 /** fmtExpiresIn(sec) -> 'Xh Ym' | 'Ym' | '<1m'. PURE. */
@@ -187,7 +187,7 @@ export function dtnaPill(status) {
   const st = status && typeof status === 'object' ? status.state : null;
   const hit = (typeof st === 'string' && Object.prototype.hasOwnProperty.call(_DTNA_PILL, st)) ? _DTNA_PILL[st] : ['grey', 'DTNA \u2026'];
   let text = hit[1];
-  let title = 'DTNA Service Tracker: click to sign in or pull cases. This pill never checks DTNA on its own.';
+  let title = 'DTNA Service Tracker: refreshes on each sync while connected. Sign in to refresh DTNA. Click to sign in or pull cases.';
   // expiresInSec comes from the last session-time read (a click), counted down in main; no polling here.
   const exp = status && typeof status === 'object' ? status.expiresInSec : undefined;
   if (st === 'connected' && Number.isFinite(exp) && exp > 0) {

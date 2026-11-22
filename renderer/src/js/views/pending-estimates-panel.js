@@ -89,7 +89,7 @@ function createController(deps) {
   let byKey = new Map(); let byWr = new Map();
   let filters = L.defaultFilters(); // Owner = Mine on open
   let sort = { key: 'default', dir: 'asc' };
-  const scan = { rows: [], asOf: null, cached: false, scanning: false, error: null, excludedDtna: 0, dtnaAsOf: null };
+  const scan = { rows: [], asOf: null, cached: false, scanning: false, error: null, excludedDtna: 0, dtnaAsOf: null, dtnaAuto: null };
   let loading = Promise.resolve();
 
   function render() {
@@ -110,7 +110,7 @@ function createController(deps) {
     bodyEl.innerHTML = L.overlayHtml({ items: shown, excludedDtna: Math.max(res.excludedDtna, scan.excludedDtna || 0), asOf: f.syncedAt,
       cached: !!(f.usedCache || f.stale), filtered: all.length > 0, sort,
       meta: { shown: shown.length, total: all.length, mismatch: team ? mismatch : undefined, teamAsOf: scan.asOf,
-        teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error, dtnaAsOf: scan.dtnaAsOf } });
+        teamCached: scan.cached, scanning: scan.scanning, teamError: scan.error, dtnaAsOf: scan.dtnaAsOf, dtnaAuto: scan.dtnaAuto } });
     wireIdLinks(bodyEl, (u, o) => (typeof deps.openUrl === 'function' ? deps.openUrl(u, o) : undefined));
     const btn = headEl && typeof headEl.querySelector === 'function' ? headEl.querySelector('[data-pe-refresh]') : null;
     if (btn) {
@@ -230,6 +230,7 @@ function createController(deps) {
       scan.cached = !!s.cached;
       scan.excludedDtna = Number(s.excludedDtna) || 0;
       scan.dtnaAsOf = s.dtnaAsOf || null;
+      scan.dtnaAuto = s.dtnaAuto || null;
     }
     // Per-case Decisiv failures (e.g. an expired session) explain blank offsite columns.
     const dec = (Array.isArray(s.errors) ? s.errors : [])

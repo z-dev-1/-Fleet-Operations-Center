@@ -58,11 +58,16 @@ async function fetchImpl(_url, init) {
   const body = new URLSearchParams(String(init.body));
   const action = JSON.parse(body.get('message')).actions[0];
   if (/ACTION\$getItems$/.test(action.descriptor)) return resp(200, success(listResult([CASE_ID, NO_RO_CASE_ID]), { raw: true }));
+  // Phase D: the Case.CaseNumber read (RecordUi), with a sentinel in another field.
+  if (/RecordUiController\/ACTION\$getRecordWithFields$/.test(action.descriptor)) {
+    return resp(200, success({ apiName: 'Case', id: action.params.recordId, fields: { CaseNumber: { value: '15667050', displayValue: null }, Owner: { value: SENTINEL_EMAIL } } }, { raw: true }));
+  }
   const { method, params } = action.params;
   const isMain = params.caseId === CASE_ID;
   if (method === 'getCaseRecord') {
     const rec = Object.assign({}, isMain ? CASE_RECORD : NO_RO_RECORD, { CreatedBy: { Email: SENTINEL_EMAIL }, Portal_User_Email__c: SENTINEL_EMAIL },
       isMain && stageMoved ? { Status: 'Closed', steps: [] } : {});
+    if (mode === 'noCaseNumber') delete rec.CaseNumber;   // the real record has none (probe D1)
     return resp(200, success(rec));
   }
   if (method === 'changeStatus') {
@@ -435,6 +440,75 @@ describe('DTNA redaction: change-stage and session-time', () => {
   });
 });
 
+describe('DTNA redaction: sync pass (Phase D)', () => {
+  const st = (value) => ({ type: 'Neutral', description: { value, displayText: value } });
+  const collectorDeps = () => ({
+    searchAllPages: async () => [{ workRequestId: 'WR1', aaid: 'aaid-1', assetDisplayName: '122269', assetDomicileSite: 'DAB1', vendor: 'FREIGHTLINER',
+      status: st('ESTIMATE_PENDING_APPROVAL'), modifiedTimestamp: 1, scheduledDateTime: Date.parse('2026-11-20T12:00:00Z'), vendorWorkOrderIds: [] }],
+    getService: async () => ({ workRequest: { comments: [{ text: 'DTNA case ' + caseUrl(CASE_ID), timestamp: '2026-11-20T12:00:00Z' }] } }),
+    getAsset: async () => ({ asset: { attributesText: { operator: 'OPX', domicileSite: 'DAB1' } } }),
+    getCasePage: async () => { throw new Error('no Decisiv call expected'); },
+    getCaseStatusSummary: async () => { throw new Error('no Decisiv call expected'); },
+    fasFor: () => '', loadMine: () => ({ mySites: new Set(), myCarriers: new Set() }), rowIsMine: () => false,
+    fleetRows: () => store.load('fleetData', {}).rows,
+  });
+  const PRIMITIVE = (v) => v === null || v === undefined || ['number', 'string', 'boolean'].includes(typeof v);
+
+  it('signed in: auto pull (with the case-number read), discovery, the facade and a collector scan leak nothing', async () => {
+    setup();
+    await signIn();
+    mode = 'noCaseNumber';
+    const auto = require('../src/dtna/auto');
+    const r1 = await auto.pullIfStale(CASE_ID, { freshMs: 60e3 });
+    expect(r1).toMatchObject({ ok: true, live: true, entry: { caseNumber: '15667050' } });
+    const r2 = await auto.discover({ units: ['133001'], budget: 5 });
+    expect(r2).toEqual({ pulled: 1, code: 'OK' });
+    const f = await require('../src/scrapers/dtna_enrich').enrichDtna(caseUrl(CASE_ID));
+    expect(f).toMatchObject({ ok: true, dtnaCaseNumber: '15667050' });
+    store.save('dtnaCaseCache', { version: 1, cases: {} });
+    const src = require('../src/scrapers/pending_est_sources');
+    src._resetForTests();
+    const scan = await src.scanTeamPending({ force: true }, collectorDeps());
+    expect(scan).toMatchObject({ ok: true, dtnaAuto: 'ok' });
+    expect(scan.rows.find((r) => r.key === 'wr:WR1')).toMatchObject({ dtnaCaseId: CASE_ID, dtnaCaseNumber: '15667050' });
+
+    const t = logger.text();
+    expect(t).toContain('[dtna] auto');
+    expect(t).toContain('getRecordWithFields');
+    expect(containsSentinel(t)).toBe(null);
+    expect(t).not.toContain('15667050');
+    expect(t).not.toContain('R101048154');
+    for (const l of logger.lines.filter((x) => x.ns === 'dtna')) {
+      for (const a of l.args.slice(1)) {
+        if (a && typeof a === 'object') expect(Object.values(a).every(PRIMITIVE), JSON.stringify(Object.keys(a))).toBe(true);
+      }
+    }
+    // Comment text is business data in the entry and the facade's thread; no auth value anywhere.
+    expect(containsSentinel([r1, f], AUTH_SENTINELS)).toBe(null);
+    assertClean([r2, scan, store.load('pendingEstScan', {})]);
+    assertStoresHaveNoAuth();
+  });
+
+  it('signed out (fresh run): no DTNA fetch, no window, from every sync-pass entry', async () => {
+    setup();
+    const before = fetchCount;
+    const auto = require('../src/dtna/auto');
+    store.save('dtnaCaseCache', { version: 1, cases: {} });
+    expect(await auto.pullIfStale(CASE_ID, { freshMs: 60e3 })).toMatchObject({ live: false, code: 'DTNA_AUTO_SIGNED_OUT' });
+    expect(await auto.discover({ units: ['122269'], budget: 5 })).toMatchObject({ pulled: 0, code: 'DTNA_AUTO_SIGNED_OUT' });
+    expect(await require('../src/scrapers/dtna_enrich').enrichDtna(caseUrl(CASE_ID))).toMatchObject({ ok: false, error: 'DTNA signed out' });
+    const src = require('../src/scrapers/pending_est_sources');
+    src._resetForTests();
+    const scan = await src.scanTeamPending({ force: true }, collectorDeps());
+    expect(scan.dtnaAuto).toBe('signed-out');
+    expect(fetchCount).toBe(before);
+    expect(fx.windows).toHaveLength(0);
+    const skips = logger.lines.filter((l) => l.args[0] === '[dtna] auto');
+    expect(skips).toEqual([{ ns: 'dtna', level: 'info', args: ['[dtna] auto', { op: 'skip', code: 'DTNA_AUTO_SIGNED_OUT' }] }]);
+    assertClean([scan]);
+  });
+});
+
 describe('DTNA static guards', () => {
   it('no src/**/*.js names the OIDC user-info handler (the app never reads the OIDC id token)', () => {
     const SRC = path.join(WT_ROOT, 'src');
@@ -453,6 +527,13 @@ describe('DTNA static guards', () => {
       expect(fs.readFileSync(path.join(WT_ROOT, 'src', ...f), 'utf8'), f.join('/')).not.toMatch(RE);
     }
     expect(fs.readFileSync(path.join(WT_ROOT, 'src', 'dtna', 'pending.js'), 'utf8')).not.toMatch(/require\(\s*['"]\.\/(aura|client|session|capture|writes)['"]\s*\)/);
+    // Phase D: the collector reaches DTNA only through the session-gated sync-pass module.
+    expect(fs.readFileSync(path.join(WT_ROOT, 'src', 'scrapers', 'pending_est_sources.js'), 'utf8')).toContain("require('../dtna/auto')");
+  });
+
+  it('Phase D: src/dtna/auto.js never opens a sign-in, auto-logs-in, schedules or requires electron', () => {
+    const src = fs.readFileSync(path.join(WT_ROOT, 'src', 'dtna', 'auto.js'), 'utf8');
+    for (const bad of ['openLoginWindow', 'attachAutoLogin', 'setInterval', 'setTimeout(', 'setPulling', "require('electron')"]) expect(src, bad).not.toContain(bad);
   });
 
   const SRC = path.join(WT_ROOT, 'src');
@@ -486,9 +567,9 @@ describe('DTNA static guards', () => {
     const allowed = (r) => r === 'ipc/dtna.js' || r === 'dev/dev-dtna-probe.js' || r.startsWith('dtna/');
     const offenders = files(SRC).filter((p) => RE.test(fs.readFileSync(p, 'utf8'))).map(rel).filter((r) => !allowed(r));
     expect(offenders).toEqual([]);
-    // The facade deep-scan uses reads the cache store only.
+    // The facade deep-scan uses reaches the network only through src/dtna/auto.js (Phase D).
     const facade = fs.readFileSync(path.join(SRC, 'scrapers', 'dtna_enrich.js'), 'utf8');
-    expect(facade).toContain("require('../dtna/store')");
+    expect(facade).toContain("require('../dtna/auto')");
     expect(facade).not.toMatch(RE);
   });
 });

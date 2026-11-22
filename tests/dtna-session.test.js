@@ -197,6 +197,97 @@ describe('ensureContext', () => {
   });
 });
 
+describe('Phase D: canAutoSync and silent ensureContext (sync pass)', () => {
+  const hiddenAutoLogins = (win) => autoLogin.attachAutoLogin.mock.calls.filter((c) => c[0] === win).length;
+
+  it('never signed in this run -> canAutoSync false; silent opens no window', async () => {
+    expect(session.canAutoSync()).toBe(false);
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(await session.ensureContext({ silent: true, force: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fx.windows).toHaveLength(0);
+    expect(autoLogin.attachAutoLogin).not.toHaveBeenCalled();
+  });
+
+  it('signed in -> canAutoSync true; marked expired -> false and silent opens no window', async () => {
+    await session.openLoginWindow({});
+    expect(session.canAutoSync()).toBe(true);
+    session.noteResult('DTNA_SESSION_EXPIRED');
+    expect(session.canAutoSync()).toBe(false);
+    capture.clear();
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fx.windows).toHaveLength(1);
+  });
+
+  it('a session-time reading at 0 s left -> canAutoSync false', async () => {
+    await session.openLoginWindow({});
+    session.noteSessionTime({ remainingSec: 0, periodSec: 28800 });
+    expect(session.canAutoSync()).toBe(false);
+    session.noteSessionTime({ remainingSec: 600, periodSec: 28800 });
+    expect(session.canAutoSync()).toBe(true);
+  });
+
+  it('while the sign-in window is in progress, silent opens no window', async () => {
+    await session.openLoginWindow({});
+    session.noteResult('OK');
+    signedIn = false;
+    capture.clear();
+    fx.windows[0].close();
+    const p = session.openLoginWindow({});
+    expect(session.canAutoSync()).toBe(false);
+    expect(await session.ensureContext({ silent: true })).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fx.windows).toHaveLength(2);
+    fx.windows[1].close();
+    await p;
+  });
+
+  it('signed in with a capture older than 30 min -> one hidden window, no auto-login on it', async () => {
+    vi.useFakeTimers();
+    const p = session.openLoginWindow({});
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+    vi.setSystemTime(Date.now() + C.CONTEXT_MAX_AGE_MS + 1000);
+    const q = session.ensureContext({ silent: true });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await q).toEqual({ ok: true });
+    expect(fx.windows).toHaveLength(2);
+    const hidden = fx.windows[1];
+    expect(hidden.options.show).toBe(false);
+    expect(hidden.destroyed).toBe(true);
+    expect(hiddenAutoLogins(hidden)).toBe(0);
+    expect(autoLogin.attachAutoLogin).toHaveBeenCalledTimes(1); // the visible sign-in window only
+  });
+
+  it('silent hidden window resting on a login host -> DTNA_SIGNIN_REQUIRED well before HIDDEN_WAIT_MS, no timer left', async () => {
+    vi.useFakeTimers();
+    const p = session.openLoginWindow({});
+    await vi.advanceTimersByTimeAsync(10);
+    await p;
+    signedIn = false;
+    vi.setSystemTime(Date.now() + C.CONTEXT_MAX_AGE_MS + 1000);
+    let done = null;
+    session.ensureContext({ silent: true }).then((r) => { done = r; });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    const hidden = fx.windows[1];
+    expect(hidden.destroyed).toBe(true);
+    expect(hiddenAutoLogins(hidden)).toBe(0);
+    fx.windows[0].close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a non-silent hidden refresh on a login host still waits HIDDEN_WAIT_MS and keeps auto-login', async () => {
+    vi.useFakeTimers();
+    signedIn = false;
+    let done = null;
+    session.ensureContext().then((r) => { done = r; });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(done).toBeNull();
+    expect(hiddenAutoLogins(fx.windows[0])).toBe(1);
+    await vi.advanceTimersByTimeAsync(C.HIDDEN_WAIT_MS);
+    expect(done).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+  });
+});
+
 describe('status', () => {
   it('signed-out -> connecting -> connected -> expired -> pulling, emitted on every change', async () => {
     const seen = [];

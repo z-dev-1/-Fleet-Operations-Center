@@ -652,6 +652,12 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
 
   // Offsite enrichment: if unit has a Decisiv URL, scrape vendor notes
   let offsiteText = '';
+  // DTNA rows whose WR comments carry no case link: the unit's open cached case (unit-number join,
+  // cache only), so the gate below treats it like any other offsite link.
+  if (!(u.offsiteShopEventUrl || u.savedOffsiteUrl || u.asistSrUrl) && /FREIGHTLINER|DAIMLER/i.test(String(u.vendor || ''))) {
+    try { require('../dtna/auto').applyCachedCase(u, { extract: !!(_xf && _xf.enabled) }); }
+    catch (e) { logger.warn('[DS] DTNA cache join failed for ' + u.equipmentId + ' (' + (e && e.name) + ')'); }
+  }
   const offsiteUrl = u.offsiteShopEventUrl || u.asistSrUrl || '';
   // PRIMARY source: the offsite page text already captured by relay.js Phase 3.6
   // (stored as asistNotes, ~8000ch). Prefer it — it's already on the row, so we
@@ -716,13 +722,13 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
       logger.warn('[DS] Offsite enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
-  // DTNA (Daimler/Freightliner) Servicetracker: its case comment feed is a
-  // Salesforce Lightning community — scrape the rendered feed (see dtna_enrich).
+  // DTNA (Daimler/Freightliner) Servicetracker: the case is read through the
+  // session-gated Aura client (see dtna_enrich; signed out -> the cached case).
   // Same offsiteText/timeline path as Decisiv; feeds the AI timeline identically.
   if (!offsiteText && offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl)) {
     try {
       const { enrichDtna } = require('../scrapers/dtna_enrich');
-      const dr = await enrichDtna(offsiteUrl);
+      const dr = await enrichDtna(offsiteUrl, { freshMs: OFFSITE_CACHE_FRESH_MS });
       if (dr && dr.ok && dr.offsiteText) {
         offsiteText = dr.offsiteText.substring(0, 3000);
         u.asistNotes = dr.offsiteText.slice(0, 8000); // keep the row's cache current
@@ -731,6 +737,9 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
         u.asistLabel = dr.bestLabel || 'DTNA Case';
         u.asistSrUrl = offsiteUrl;
         if (dr.offsiteStage) u.offsiteStage = dr.offsiteStage;
+        if (dr.offsiteStageDetail) u.offsiteStageDetail = dr.offsiteStageDetail;
+        if (dr.offsiteStageSince) u.offsiteStageSince = dr.offsiteStageSince;
+        if (dr.dtnaCaseNumber) u.dtnaCaseNumber = dr.dtnaCaseNumber;
         // relay-extract: DTNA facts from the 20000-char raw thread (else the 8000-char text).
         if (_xf && _xf.enabled) {
           try {

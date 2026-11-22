@@ -3,7 +3,7 @@
 // main relay-action-draft.js collectFacts().vendorWo (drafter text, RO#). Both must agree.
 import { describe, it, expect, afterEach } from 'vitest';
 import { createRequire } from 'module';
-import { vendorWoOf, estimateIdFromUrl } from '../renderer/src/js/views/id-links.js';
+import { vendorWoOf, estimateIdFromUrl, vendorWoChipHtml } from '../renderer/src/js/views/id-links.js';
 const require = createRequire(import.meta.url);
 const D = require('../src/writes/relay-action-draft');
 const CP = require('../src/scrapers/decisiv_case_page');
@@ -12,6 +12,7 @@ const NOW = new Date(2026, 10, 19, 12, 0, 0);
 const WR = '0a1b2c3d-1111-2222-3333-444455556666';
 const VOLVO = 'https://volvopg.asist.decisiv.net/fleet/estimates/21383146';
 const PACCAR = 'https://paccarpg.decisiv.net/fleet/estimates/21467830';
+const DTNA = 'https://dtna.my.site.com/Servicetracker/s/case/500gx000002E4U5AAK/detail';
 
 const ROWS = [
   ['Decisiv estimate URL', { workRequestId: WR, offsiteShopEventUrl: VOLVO }, '21383146'],
@@ -21,6 +22,13 @@ const ROWS = [
   ['URL owned by another WR', { workRequestId: WR, _offsiteWrId: 'other', offsiteShopEventUrl: VOLVO, vendorWorkOrderId: 'RO-2' }, 'RO-2'],
   ['URL owned by this WR', { workRequestId: WR, _offsiteWrId: WR, offsiteShopEventUrl: VOLVO }, '21383146'],
   ['DTNA URL', { workRequestId: WR, offsiteShopEventUrl: 'https://dtna.my.site.com/s/case/500X', vendorWorkOrderId: 'DT-3' }, 'DT-3'],
+  // Phase D: an owned DTNA case URL + its case number -> the case number (never the RO, never the case id).
+  ['owned DTNA case + case number', { workRequestId: WR, offsiteShopEventUrl: DTNA, dtnaCaseNumber: '15667050', vendorWorkOrderId: 'RO-9' }, '15667050'],
+  ['DTNA case owned by this WR', { workRequestId: WR, _offsiteWrId: WR, savedOffsiteUrl: DTNA, dtnaCaseNumber: '15667050' }, '15667050'],
+  ['DTNA case owned by another WR', { workRequestId: WR, _offsiteWrId: 'other', offsiteShopEventUrl: DTNA, dtnaCaseNumber: '15667050', vendorWorkOrderId: 'RO-9' }, 'RO-9'],
+  ['DTNA case, no case number', { workRequestId: WR, offsiteShopEventUrl: DTNA, dtnaCaseNumber: '', vendorWorkOrderId: 'RO-9' }, 'RO-9'],
+  ['case number without a DTNA URL', { workRequestId: WR, dtnaCaseNumber: '15667050', vendorWorkOrderId: 'RO-9' }, 'RO-9'],
+  ['Decisiv estimate wins over a case number', { workRequestId: WR, offsiteShopEventUrl: VOLVO, dtnaCaseNumber: '15667050' }, '21383146'],
   ['service request URL', { workRequestId: WR, asistSrUrl: 'https://volvopg.asist.decisiv.net/service_requests/123' }, null],
   ['http (unsafe) estimate URL', { workRequestId: WR, offsiteShopEventUrl: 'http://volvopg.asist.decisiv.net/fleet/estimates/5', vendorWorkOrderId: 'RO-4' }, 'RO-4'],
   ['none', { workRequestId: WR }, null],
@@ -33,6 +41,17 @@ describe('Vendor WO parity (renderer vendorWoOf vs main collectFacts)', () => {
     for (const u of [VOLVO, PACCAR, 'https://pssmfleet.decisiv.net/fleet/estimates/77', 'https://dtna.my.site.com/x', 'x', '']) {
       expect(estimateIdFromUrl(u), u).toBe(CP.estimateIdFromUrl(u));
     }
+  });
+  it('Phase D: a secondary WR that owns the unit DTNA case shows the unit case number; the chip links the case in-app', () => {
+    const unit = { workRequestId: 'WR-P', _offsiteWrId: WR, offsiteShopEventUrl: DTNA, dtnaCaseNumber: '15667050', vendorWorkOrderId: 'R101048154' };
+    const sec = { workRequestId: WR, vendorWorkOrderId: 'RO-S' };
+    expect(vendorWoOf(sec, unit)).toEqual({ id: '15667050', url: DTNA, kind: 'dtna' });
+    // The unit's own (primary) WR does not own the case: no case number for it.
+    expect(vendorWoOf(unit, unit)).toEqual({ id: 'R101048154', url: '', kind: 'rg' });
+    const html = vendorWoChipHtml(vendorWoOf(sec, unit));
+    expect(html).toContain('data-id-link="' + DTNA + '"');
+    expect(html).toContain('>15667050<');
+    expect(html).not.toContain('500gx000002E4U5AAK<');
   });
   for (const [name, row, want] of ROWS) {
     it(name, () => {

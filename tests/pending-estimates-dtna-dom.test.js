@@ -33,9 +33,9 @@ const row = (o) => Object.assign({ aaid: '', assetUrl: '', serviceUrl: '', vendo
   offsiteDone: false, statusMismatch: false, notInRg: false }, o);
 const ROWS = [
   row({ key: 'wr:' + wr(70), workRequestId: wr(70), equipmentId: 'D700', source: 'dtna', offsiteShopEventUrl: DURL(CASE), offsite: dOff({}),
-    dtnaCaseId: CASE, dtnaRepairOrderNo: 'R101048154' }),
+    dtnaCaseId: CASE, dtnaCaseNumber: '15667050' }),
   row({ key: 'wr:' + wr(71), workRequestId: wr(71), equipmentId: 'D710', source: 'both', rgPending: true, rgPendingCost: 300,
-    offsiteShopEventUrl: DURL(CASE2), offsite: dOff({ caseId: CASE2, url: DURL(CASE2), repairStatus: 'In Repair' }), dtnaCaseId: CASE2, dtnaRepairOrderNo: 'R2' }),
+    offsiteShopEventUrl: DURL(CASE2), offsite: dOff({ caseId: CASE2, url: DURL(CASE2), repairStatus: 'In Repair' }), dtnaCaseId: CASE2, dtnaCaseNumber: '15667051' }),
   row({ key: 'wr:' + wr(61), workRequestId: wr(61), equipmentId: 'T610', vendor: 'Volvo (ASIST)', vendorKind: 'volvo', source: 'decisiv',
     offsiteShopEventUrl: VOLVO_URL, offsite: { ok: true, fleetStatus: 'Approved', repairStatus: 'Waiting', total: 1000, scrapedAt: iso(NOW - H) } }),
 ];
@@ -100,17 +100,37 @@ describe('DTNA rows in Pending Estimates', () => {
     expect(q('#pe-meta').textContent).toContain('DTNA as of 11/19 12:00');
   });
 
-  it('the DTNA Vendor-WO chip shows the RO and opens the case in-app', async () => {
+  it('the DTNA Vendor-WO chip shows the DTNA case number (not the RO, not the case id) and opens the case in-app', async () => {
     make();
     ctl.open();
     await ctl.whenLoaded();
     const chip = tr('D700').querySelector('[data-id-link-field="vendor-wo"]');
-    expect(chip.textContent).toBe('Vendor WOR101048154');
+    expect(chip.textContent).toBe('Vendor WO15667050');
+    expect(chip.textContent).not.toContain('R101048154');
+    expect(chip.textContent).not.toContain(CASE);
     expect(chip.getAttribute('data-id-link')).toBe(DURL(CASE));
     chip.click();
     expect(openUrl).toHaveBeenCalledTimes(1);
     expect(openUrl).toHaveBeenCalledWith(DURL(CASE), { zoom: true });
     expect(window.files.openExternal).not.toHaveBeenCalled();
+  });
+
+  it('Phase D: DTNA rows from the normal scan are listed with no manual pull (no DTNA call from the panel)', async () => {
+    make({ asOf: STALE_AS_OF });
+    ctl.open();
+    await ctl.whenLoaded();
+    await flush();
+    expect(runScan).toHaveBeenCalled();
+    expect(units()).toEqual(['D700', 'D710', 'T610']);
+    expect(dtnaNetCalls()).toBe(0);
+  });
+
+  it('Phase D: a signed-out scan says "sign in to refresh DTNA" in the meta line', async () => {
+    make();
+    getScan.mockReturnValue(SCAN({ cached: true, dtnaAuto: 'signed-out' }));
+    ctl.open();
+    await ctl.whenLoaded();
+    expect(q('#pe-meta').textContent).toContain('sign in to refresh DTNA');
   });
 
   it('Vendor filter dtna and Source filter dtna', async () => {

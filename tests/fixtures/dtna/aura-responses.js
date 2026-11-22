@@ -95,7 +95,15 @@ export function getItemsAction(params = {}) {
   };
 }
 
-/** listResult(ids) -> getItems returnValue shape (records with Id + fields). */
-export function listResult(ids) {
-  return { result: ids.map((id) => ({ record: { Id: id, CaseNumber: 'x', fields: { Id: { value: id } } } })), totalCount: ids.length };
+/** listResult(ids, numbers?) -> getItems returnValue shape (records with Id + fields); numbers[id] = CaseNumber. */
+export function listResult(ids, numbers) {
+  const n = numbers || {};
+  return {
+    result: ids.map((id) => ({ record: { Id: id, CaseNumber: 'x', fields: n[id] ? { Id: { value: id }, CaseNumber: { value: n[id] } } : { Id: { value: id } } } })),
+    totalCount: ids.length,
+  };
 }
+
+// Phase D: the human case number of CASE_ID (RecordUi getRecordWithFields, fields ['Case.CaseNumber']).
+export const CASE_NUMBER = '15667050';
+export const CASE_NUMBER_RECORD = { apiName: 'Case', id: CASE_ID, fields: { CaseNumber: { value: CASE_NUMBER, displayValue: null } } };

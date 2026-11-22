@@ -66,10 +66,9 @@ function _isDecisivHost(url) {
 
 // Vendor WO of WO object `o` (unit, or planned/secondary WR of `unit`):
 // owned Decisiv estimate URL -> { id: estimate id, url, kind: 'decisiv' };
-// else (Pending Estimates scan rows only) dtnaRepairOrderNo + an owned DTNA case URL ->
-// { id: RO number (or case number), url: case URL, kind: 'dtna' };
+// else dtnaCaseNumber + an owned DTNA case URL -> { id: DTNA case number, url: case URL, kind: 'dtna' }
+// (fleet rows and Pending Estimates scan rows carry it; never the RO number, never the case id);
 // else vendorWorkOrderId -> { id, url: first safe owned offsite URL or '', kind: 'rg' }; else null.
-// Fleet rows never carry dtnaRepairOrderNo, so the main-side mirror is unchanged for them.
 // "Owned" keeps the _offsiteWrId rule; a planned/secondary WR owns the unit's offsite
 // when unit._offsiteWrId === its workRequestId. Mirrored main-side in relay-action-draft.js.
 export function vendorWoOf(o, unit) {
@@ -85,7 +84,9 @@ export function vendorWoOf(o, unit) {
     const id = estimateIdFromUrl(c);
     if (id && isSafeIdLinkUrl(c) && _isDecisivHost(c)) return { id, url: c, kind: 'decisiv' };
   }
-  const dtnaNo = String(w.dtnaRepairOrderNo == null ? '' : w.dtnaRepairOrderNo).trim();
+  const viaUnit = !!(u && u !== w && u._offsiteWrId && w.workRequestId && String(u._offsiteWrId) === String(w.workRequestId));
+  const dtnaRaw = owned && w.dtnaCaseNumber ? w.dtnaCaseNumber : (viaUnit ? u.dtnaCaseNumber : '');
+  const dtnaNo = String(dtnaRaw == null ? '' : dtnaRaw).trim();
   if (dtnaNo) {
     const c = list.find((x) => _DTNA_CASE_RE.test(x) && isSafeIdLinkUrl(x));
     if (c) return { id: dtnaNo, url: c, kind: 'dtna' };

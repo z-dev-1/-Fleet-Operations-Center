@@ -38,6 +38,7 @@ function applyCaseToRow(row, entry, opts) {
   row.offsiteStage = _str(entry.offsiteStage);
   row.offsiteStageDetail = _str(entry.caseStatus);
   row.offsiteStageSince = _str(entry.stageSince);
+  row.dtnaCaseNumber = _str(entry.caseNumber);
   row._stageReadAt = new Date(nowMs).toISOString();
   if (!row.dealerName && entry.dealerName) row.dealerName = _str(entry.dealerName);
   if (!row.dealerCode && entry.dealerCode) row.dealerCode = _str(entry.dealerCode);

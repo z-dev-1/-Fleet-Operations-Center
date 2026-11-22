@@ -2,8 +2,9 @@
 /**
  * src/dtna/client.js — DTNA case reads built on the Aura transport.
  *
- * Reads only: case record, repair order id, comments. Every call starts from a user action (a unit
- * "Pull DTNA" or the bulk tool). Pulled cases go to the dtnaCaseCache store. Logs carry caseTag,
+ * Reads only: case record, repair order id, comments, case number. Calls start from a user action (a unit
+ * "Pull DTNA" or the bulk tool) or from the sync pass through src/dtna/auto.js with {silent:true}
+ * (session-gated, never a sign-in). Pulled cases go to the dtnaCaseCache store. Logs carry caseTag,
  * counts, codes and ms only (never comment text, names or ids).
  */
 const C = require('./constants');
@@ -40,15 +41,18 @@ function _firstObject(v) {
   return null;
 }
 
-async function getCaseRecord(caseId) {
-  const r = await _aura().callApex('getCaseRecord', { caseId });
+// Transport options: only {silent:true} (the sync pass, src/dtna/auto.js) is forwarded.
+function _tx(opts) { return opts && opts.silent ? { silent: true } : undefined; }
+
+async function getCaseRecord(caseId, opts) {
+  const r = await _aura().callApex('getCaseRecord', { caseId }, _tx(opts));
   if (!r.ok) return r;
   return { ok: true, value: _firstObject(r.value) };
 }
 
 /** getRepairOrderId(caseId) -> {ok, value: { Id, Name? } | null} */
-async function getRepairOrderId(caseId) {
-  const r = await _aura().callApex('getRepairOrderId', { caseId });
+async function getRepairOrderId(caseId, opts) {
+  const r = await _aura().callApex('getRepairOrderId', { caseId }, _tx(opts));
   if (!r.ok) return r;
   const v = r.value;
   if (typeof v === 'string') return { ok: true, value: /^[A-Za-z0-9]{15,18}$/.test(v) ? { Id: v } : null };
@@ -59,8 +63,8 @@ async function getRepairOrderId(caseId) {
   return { ok: true, value: out };
 }
 
-async function getComments(caseId) {
-  const r = await _aura().callApex('getCommentsByCaseRepairOrder', { caseId });
+async function getComments(caseId, opts) {
+  const r = await _aura().callApex('getCommentsByCaseRepairOrder', { caseId }, _tx(opts));
   if (!r.ok) return r;
   const v = r.value;
   const list = Array.isArray(v) ? v : (v && typeof v === 'object' && Array.isArray(v.comments) ? v.comments : []);
@@ -71,6 +75,20 @@ async function getComment(commentId) {
   const r = await _aura().callApex('getComment', { commentId });
   if (!r.ok) return r;
   return { ok: true, value: _firstObject(r.value) };
+}
+
+const CASE_NUMBER_RE = /^\d{1,12}$/;
+function _caseNo(v) {
+  const s = _str(v && typeof v === 'object' ? (v.value != null ? v.value : v.displayValue) : v).trim();
+  return CASE_NUMBER_RE.test(s) ? s : '';
+}
+
+/** getCaseNumber(caseId, {silent}) -> {ok:true, value: '15667050' | ''} | {ok:false, code} */
+async function getCaseNumber(caseId, opts) {
+  const r = await _aura().getCaseNumberRecord(caseId, _tx(opts));
+  if (!r.ok) return r;
+  const f = r.value && typeof r.value === 'object' && r.value.fields && typeof r.value.fields === 'object' ? r.value.fields.CaseNumber : null;
+  return { ok: true, value: _caseNo(f) };
 }
 
 // ── Normalize ──────────────────────────────────────────────────────────────
@@ -169,24 +187,43 @@ function normalizeCase(record, ro, comments, opts) {
 }
 
 // ── Pull ───────────────────────────────────────────────────────────────────
-/** pullCase(caseId, {includeComments=true, signal}) -> {ok:true, entry} | {ok:false, code} */
+// Cases whose case-number read came back empty or refused this run: not asked again until restart.
+const _noNumber = new Set();
+
+/**
+ * _caseNumberFor(caseId, entry, last, tx) -> {ok:true, value} | {ok:false, code} (FATAL codes only).
+ * Case numbers never change: the record, then the previous cache entry, then the list harvest, and only
+ * when all are empty one getRecordWithFields read.
+ */
+async function _caseNumberFor(caseId, entry, last, tx) {
+  const known = _caseNo(entry.caseNumber) || _caseNo(last && last.caseNumber) || caseNumberFromList(caseId);
+  if (known || _noNumber.has(caseId)) return { ok: true, value: known };
+  const r = await getCaseNumber(caseId, tx);
+  if (r.ok && r.value) return r;
+  if (!r.ok && FATAL.has(r.code)) return { ok: false, code: r.code };
+  _noNumber.add(caseId);
+  return { ok: true, value: '' };
+}
+
+/** pullCase(caseId, {includeComments=true, signal, silent}) -> {ok:true, entry} | {ok:false, code} */
 async function pullCase(caseId, opts) {
   const o = opts || {};
   const includeComments = o.includeComments !== false;
+  const tx = _tx(o);
   if (!C.CASE_ID_RE.test(_str(caseId))) return { ok: false, code: 'DTNA_INVALID_INPUT' };
   if (o.signal && o.signal.aborted) return { ok: false, code: 'DTNA_CANCELLED' };
   const t0 = _now();
-  const rec = await getCaseRecord(caseId);
+  const rec = await getCaseRecord(caseId, tx);
   if (!rec.ok) return { ok: false, code: rec.code };
   let ro = null;
-  const r1 = await getRepairOrderId(caseId);
+  const r1 = await getRepairOrderId(caseId, tx);
   if (r1.ok) ro = r1.value;
   else if (FATAL.has(r1.code)) return { ok: false, code: r1.code };
   let comments = [];
   let prev = null;
   let commentsCode = '';
   if (includeComments) {
-    const r2 = await getComments(caseId);
+    const r2 = await getComments(caseId, tx);
     if (r2.ok) comments = r2.value;
     else if (FATAL.has(r2.code)) return { ok: false, code: r2.code };
     else commentsCode = _str(r2.code) || 'DTNA_APEX_ERROR';
@@ -205,10 +242,13 @@ async function pullCase(caseId, opts) {
       if (prev[k] !== undefined && prev[k] !== '') entry[k] = prev[k];
     }
   }
+  const cn = await _caseNumberFor(caseId, entry, _store().get(caseId), tx);
+  if (!cn.ok) return { ok: false, code: cn.code };
+  entry.caseNumber = cn.value;
   const saved = _store().put(entry, { now: _now() }) || entry;
   try { _session().notePulled(saved.pulledAt); } catch (e) { log.warn('[dtna] status', safeErr(e)); }
   const stale = includeComments && !!prev;
-  const info = { caseTag: caseTag(caseId), comments: saved.commentCount, hasRo: !!saved.repairOrderId, ms: _now() - t0 };
+  const info = { caseTag: caseTag(caseId), comments: saved.commentCount, hasRo: !!saved.repairOrderId, hasCaseNumber: !!saved.caseNumber, ms: _now() - t0 };
   if (commentsCode) { info.commentsKept = stale; info.code = commentsCode; }
   log.info('[dtna] pull', info);
   const out = { ok: true, entry: saved };
@@ -219,6 +259,7 @@ async function pullCase(caseId, opts) {
 
 // ── List ───────────────────────────────────────────────────────────────────
 let _listMemo = null; // { key, at, ids }
+const _listNumbers = new Map(); // caseId -> case number seen on a list record (digits only)
 
 function _collectIds(v, out, depth) {
   if (depth > 12 || v == null || typeof v !== 'object') return;
@@ -227,13 +268,20 @@ function _collectIds(v, out, depth) {
     const x = v[k];
     if (k === 'Id' || k === 'id') {
       const s = typeof x === 'string' ? x : (x && typeof x === 'object' && typeof x.value === 'string' ? x.value : '');
-      if (/^500[A-Za-z0-9]{15}$/.test(s)) out.add(s);
+      if (/^500[A-Za-z0-9]{15}$/.test(s)) {
+        out.add(s);
+        const n = _caseNo(v.CaseNumber);
+        if (n) _listNumbers.set(s, n);
+      }
     }
     if (x && typeof x === 'object') _collectIds(x, out, depth + 1);
   }
 }
 
-/** listCaseIds({filterId, force}) -> {ok:true, ids} | {ok:false, code}. Memoized 30 min in memory. */
+/** caseNumberFromList(caseId) -> the case number a list read showed for this case | ''. No network. */
+function caseNumberFromList(caseId) { return _listNumbers.get(_str(caseId)) || ''; }
+
+/** listCaseIds({filterId, force, silent}) -> {ok:true, ids} | {ok:false, code}. Memoized 30 min in memory. */
 async function listCaseIds(opts) {
   const o = opts || {};
   const filterId = typeof o.filterId === 'string' && /^[A-Za-z0-9]{15,18}$/.test(o.filterId) ? o.filterId : '';
@@ -256,7 +304,7 @@ async function listCaseIds(opts) {
         p.currentPage = base + page;
       }
     };
-    const r = await _aura().replayGetItems(mutate);
+    const r = await _aura().replayGetItems(mutate, _tx(o));
     if (!r.ok) {
       if (i === 0) return { ok: false, code: r.code };
       break;
@@ -294,7 +342,9 @@ async function resolveCaseForRow(row) {
     await Promise.all(batch.map(async (id) => {
       const r = await getCaseRecord(id);
       if (!r.ok) { if (FATAL.has(r.code)) fatal = r.code; return; }
-      const e = _store().put(normalizeCase(r.value, null, [], { caseId: id, now: _now() }), { now: _now() });
+      const n = normalizeCase(r.value, null, [], { caseId: id, now: _now() });
+      if (!_caseNo(n.caseNumber)) n.caseNumber = caseNumberFromList(id);
+      const e = _store().put(n, { now: _now() });
       if (e && J.findCaseForRow(row, [e])) found.push(e);
     }));
     if (found.length) {
@@ -404,9 +454,9 @@ function toTSV(results, opts) {
   return lines.join('\r\n') + '\r\n';
 }
 
-function _resetForTests() { _deps = {}; _listMemo = null; }
+function _resetForTests() { _deps = {}; _listMemo = null; _listNumbers.clear(); _noNumber.clear(); }
 
 module.exports = {
-  getCaseRecord, getRepairOrderId, getComments, getComment, normalizeCase, pullCase, listCaseIds,
+  getCaseRecord, getRepairOrderId, getComments, getComment, getCaseNumber, normalizeCase, pullCase, listCaseIds, caseNumberFromList,
   resolveCaseForRow, bulkPull, toTSV, exportRows, CASE_COLUMNS, COMMENT_COLUMNS, _setDeps, _resetForTests,
 };

@@ -202,6 +202,57 @@ describe('callApex', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('Phase D: {silent:true} reaches both ensureContext calls; without it the args are unchanged', async () => {
+    await seed();
+    const responses = [res(200, invalidSession()), res(200, success({ Id: CASE_ID }))];
+    const fetch = vi.fn(async () => responses.shift());
+    const session = fakeSession(() => seed());
+    aura._setDeps({ fetch, session });
+    expect((await aura.callApex('getCaseRecord', { caseId: CASE_ID }, { silent: true })).ok).toBe(true);
+    expect(session.ensureContext.mock.calls).toEqual([[{ silent: true }], [{ force: true, silent: true }]]);
+    session.ensureContext.mockClear();
+    responses.push(res(200, invalidSession()), res(200, success({ Id: CASE_ID })));
+    expect((await aura.callApex('getCaseRecord', { caseId: CASE_ID })).ok).toBe(true);
+    expect(session.ensureContext.mock.calls).toEqual([[], [{ force: true }]]);
+    session.ensureContext.mockClear();
+    await seed({ message: { actions: [getItemsAction()] }, url: AURA_URL + '?r=3&ui-force-components-controllers-lists-selectableListDataProvider.SelectableListDataProvider.getItems=1' });
+    responses.push(res(200, success(listResult([CASE_ID]), { raw: true })));
+    await aura.replayGetItems(null, { silent: true });
+    expect(session.ensureContext.mock.calls).toEqual([[{ silent: true }]]);
+  });
+
+  it('Phase D: getCaseNumberRecord posts the RecordUi getRecordWithFields action for Case.CaseNumber', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ apiName: 'Case', id: CASE_ID, fields: { CaseNumber: { value: '15667050', displayValue: null } } }, { raw: true })));
+    const session = fakeSession();
+    aura._setDeps({ fetch, session });
+    const r = await aura.getCaseNumberRecord(CASE_ID, { silent: true });
+    expect(r).toMatchObject({ ok: true, value: { fields: { CaseNumber: { value: '15667050' } } } });
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toMatch(/^https:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/sfsites\/aura\?r=\d+&aura\.RecordUi\.getRecordWithFields=1$/);
+    const msg = JSON.parse(new URLSearchParams(init.body).get('message'));
+    expect(msg.actions).toHaveLength(1);
+    expect(msg.actions[0]).toMatchObject({
+      descriptor: 'aura://RecordUiController/ACTION$getRecordWithFields', callingDescriptor: 'UNKNOWN',
+      params: { recordId: CASE_ID, fields: ['Case.CaseNumber'], optionalFields: [] },
+    });
+    expect(session.ensureContext.mock.calls).toEqual([[{ silent: true }]]);
+    const line = logger.lines.filter((l) => l.args[0] === '[dtna] apex').pop().args[1];
+    expect(Object.keys(line).sort()).toEqual(['caseTag', 'code', 'method', 'ms', 'status']);
+    expect(line).toMatchObject({ method: 'getRecordWithFields', caseTag: '4U5AAK', code: 'OK', status: 200 });
+    expect(logger.text()).not.toContain('15667050');
+  });
+
+  it('Phase D: getCaseNumberRecord refuses a bad case id with zero fetch calls', async () => {
+    await seed();
+    const fetch = vi.fn();
+    const session = fakeSession();
+    aura._setDeps({ fetch, session });
+    for (const bad of ['001xx0000000001AAA', '', null, 5]) expect((await aura.getCaseNumberRecord(bad)).code).toBe('DTNA_INVALID_INPUT');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(session.ensureContext).not.toHaveBeenCalled();
+  });
+
   it('expired: clears the capture, forces ensureContext once, retries once', async () => {
     await seed();
     const responses = [res(200, invalidSession()), res(200, success({ Id: CASE_ID }))];

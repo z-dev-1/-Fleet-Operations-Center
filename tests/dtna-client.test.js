@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { freshDtna } from './fixtures/dtna/fake-electron.js';
 import {
-  CASE_ID, NO_RO_CASE_ID, RO_ID, CASE_RECORD, NO_RO_RECORD, RO_LIST, COMMENTS, NO_RO_COMMENTS, getItemsAction, listResult,
+  CASE_ID, NO_RO_CASE_ID, RO_ID, CASE_RECORD, NO_RO_RECORD, RO_LIST, COMMENTS, NO_RO_COMMENTS, getItemsAction, listResult, CASE_NUMBER,
 } from './fixtures/dtna/aura-responses.js';
 
 const require = createRequire(import.meta.url);
@@ -43,8 +43,10 @@ function fakeAura(o = {}) {
     calls: [],
     inflight: 0,
     maxInflight: 0,
-    callApex: vi.fn(async (name, p) => {
+    txs: [],
+    callApex: vi.fn(async (name, p, tx) => {
       a.calls.push([name, p.caseId || p.commentId]);
+      a.txs.push(tx);
       a.inflight++;
       a.maxInflight = Math.max(a.maxInflight, a.inflight);
       try {
@@ -61,15 +63,24 @@ function fakeAura(o = {}) {
         a.inflight--;
       }
     }),
-    replayGetItems: vi.fn(async (mutate) => {
+    // Phase D: Case.CaseNumber read (RecordUi getRecordWithFields). o.caseNumbers[id] | o.numberFail.
+    getCaseNumberRecord: vi.fn(async (caseId, tx) => {
+      a.numberCalls.push([caseId, tx]);
+      if (o.numberFail) return { ok: false, code: o.numberFail };
+      const v = o.caseNumbers && o.caseNumbers[caseId] != null ? o.caseNumbers[caseId] : null;
+      return { ok: true, value: { apiName: 'Case', id: caseId, fields: { CaseNumber: { value: v, displayValue: null } } } };
+    }),
+    numberCalls: [],
+    replayGetItems: vi.fn(async (mutate, tx) => {
+      a.listTx = tx;
       const action = getItemsAction(o.listParams || {});
       if (mutate) mutate(action.params);
       a.lastParams = Object.assign({}, action.params);
       if (o.listFail) return { ok: false, code: o.listFail };
       const ids = o.ids || [CASE_ID, NO_RO_CASE_ID];
-      if (!('pageSize' in action.params)) return { ok: true, value: listResult(ids) };
+      if (!('pageSize' in action.params)) return { ok: true, value: listResult(ids, o.listNumbers) };
       const start = (action.params.currentPage || 0) * action.params.pageSize;
-      return { ok: true, value: listResult(ids.slice(start, start + action.params.pageSize)) };
+      return { ok: true, value: listResult(ids.slice(start, start + action.params.pageSize), o.listNumbers) };
     }),
   };
   return a;
@@ -204,6 +215,70 @@ describe('pullCase', () => {
     const a = useAura(fakeAura());
     expect(await client.pullCase('nope')).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });
     expect(a.callApex).not.toHaveBeenCalled();
+  });
+});
+
+describe('Phase D: case number + silent pulls', () => {
+  // The real getCaseRecord value has no CaseNumber (probe D1).
+  const { CaseNumber: _drop, ...REAL_RECORD } = CASE_RECORD;
+  const realRecord = (n) => (n === 'getCaseRecord' ? { ok: true, value: REAL_RECORD } : null);
+
+  it('first pull of 500gx000002E4U5AAK stores caseNumber 15667050; a second pull makes no number read', async () => {
+    const a = useAura(fakeAura({ fail: realRecord, caseNumbers: { [CASE_ID]: CASE_NUMBER } }));
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(r.entry.caseNumber).toBe('15667050');
+    expect(dstore.get(CASE_ID).caseNumber).toBe('15667050');
+    expect(r.entry.repairOrderNo).toBe('R101048154'); // the RO stays its own field
+    expect(a.numberCalls).toEqual([[CASE_ID, undefined]]);
+    await client.pullCase(CASE_ID);
+    expect(a.numberCalls).toHaveLength(1);
+  });
+
+  it('an empty or failed case-number read still saves the entry with caseNumber "" and is not retried this run', async () => {
+    const a = useAura(fakeAura({ fail: realRecord }));
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(r.entry.caseNumber).toBe('');
+    await client.pullCase(CASE_ID);
+    expect(a.numberCalls).toHaveLength(1);
+    client._resetForTests();
+    store.save('dtnaCaseCache', { version: 1, cases: {} });
+    useAura(fakeAura({ fail: realRecord, numberFail: 'DTNA_APEX_ERROR' }));
+    const r2 = await client.pullCase(CASE_ID);
+    expect(r2.ok).toBe(true);
+    expect(dstore.get(CASE_ID).caseNumber).toBe('');
+  });
+
+  it('a sign-in failure on the case-number read fails the pull (same rule as the RO read)', async () => {
+    useAura(fakeAura({ fail: realRecord, numberFail: 'DTNA_SIGNIN_REQUIRED' }));
+    expect(await client.pullCase(CASE_ID)).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+  });
+
+  it('only digits are accepted as a case number', async () => {
+    useAura(fakeAura({ fail: realRecord, caseNumbers: { [CASE_ID]: '500gx000002E4U5AAK' } }));
+    expect((await client.pullCase(CASE_ID)).entry.caseNumber).toBe('');
+  });
+
+  it('silent:true is forwarded to every read; a manual pull passes no transport options', async () => {
+    const a = useAura(fakeAura({ fail: realRecord, caseNumbers: { [CASE_ID]: CASE_NUMBER } }));
+    await client.pullCase(CASE_ID, { silent: true });
+    expect(a.txs).toEqual([{ silent: true }, { silent: true }, { silent: true }]);
+    expect(a.numberCalls[0][1]).toEqual({ silent: true });
+    a.txs.length = 0;
+    await client.pullCase(CASE_ID);
+    expect(a.txs).toEqual([undefined, undefined, undefined]);
+    await client.listCaseIds({ silent: true });
+    expect(a.listTx).toEqual({ silent: true });
+  });
+
+  it('the list harvest fills caseNumber without a per-case number read', async () => {
+    const a = useAura(fakeAura({ fail: realRecord, listNumbers: { [CASE_ID]: CASE_NUMBER } }));
+    await client.listCaseIds();
+    expect(client.caseNumberFromList(CASE_ID)).toBe('15667050');
+    const r = await client.pullCase(CASE_ID);
+    expect(r.entry.caseNumber).toBe('15667050');
+    expect(a.numberCalls).toHaveLength(0);
   });
 });
 

@@ -90,6 +90,10 @@ function makeDeps(over = {}) {
     rowIsMine: vi.fn((kind, row, sites, carriers) => carriers.has(row.scac)),
     fleetRows: () => FLEET(),
     log: { info() {}, warn() {} },
+    // DTNA signed out unless a test opens the gate (Phase D).
+    dtnaGate: vi.fn(() => ({ ok: false, code: 'DTNA_AUTO_SIGNED_OUT' })),
+    dtnaRefresh: vi.fn(async () => { throw new Error('dtnaRefresh must not run while signed out'); }),
+    dtnaDiscover: vi.fn(async () => { throw new Error('dtnaDiscover must not run while signed out'); }),
   };
   Object.assign(deps, over);
   return { deps, store, setNow: (t) => { now = t; } };
@@ -361,11 +365,13 @@ const dtnaEntry = (o) => Object.assign({
 }, o);
 
 describe('pending_est_sources: DTNA (findings §6b, §5.3)', () => {
-  it('a joined RG-pending WR -> source both, Total null, status from the case, chip RO from the entry', async () => {
-    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry()] });
+  it('a joined RG-pending WR -> source both, Total null, status from the case, chip = the DTNA case number', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry({ caseNumber: '15667050' })] });
     const scan = await src.scanTeamPending({}, deps);
     const g = byKey(scan)['wr:WR_G'];
-    expect(g).toMatchObject({ source: 'both', vendorKind: 'dtna', dtnaCaseId: DCASE(1), dtnaRepairOrderNo: 'R101048154', offsiteShopEventUrl: DURL(DCASE(1)), notInRg: false });
+    expect(g).toMatchObject({ source: 'both', vendorKind: 'dtna', dtnaCaseId: DCASE(1), dtnaCaseNumber: '15667050', offsiteShopEventUrl: DURL(DCASE(1)), notInRg: false });
+    expect(g.dtnaRepairOrderNo).toBeUndefined();
+    expect(scan.dtnaAuto).toBe('signed-out');
     expect(g.offsite).toMatchObject({ source: 'dtna', total: null, totalSource: 'none', fleetStatus: '', repairStatus: 'Arrived', stage: 'arrival',
       updatedAt: '2026-11-19T15:00:00.000Z', scrapedAt: '2026-11-20T16:00:00.000Z', roNumber: 'R101048154' });
     expect(g.offsiteDone).toBe(false);
@@ -450,6 +456,139 @@ describe('pending_est_sources: DTNA (findings §6b, §5.3)', () => {
     const scan = await src.scanTeamPending({}, deps);
     expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), source: 'both' });
     expect(Object.keys(require.cache).filter((k) => NET.test(k))).toEqual([]);
+  });
+});
+
+// ── Phase D: DTNA cases refresh on the scan, with the Decisiv case rules ────
+describe('pending_est_sources: DTNA auto refresh (Phase D)', () => {
+  const MIN = 60e3;
+  function dtnaWorld(entries, o = {}) {
+    const cache = new Map(entries.map((e) => [e.caseId, e]));
+    const dtnaRefresh = vi.fn(async (id, opts) => {
+      const hit = cache.get(id);
+      if (hit && T0 - Date.parse(hit.pulledAt) < opts.freshMs) return { ok: true, entry: hit, live: false };
+      if (o.fail) return o.fail(id);
+      const e = dtnaEntry(Object.assign({}, hit || (o.fresh ? o.fresh(id) : {}), { caseId: id, caseNumber: '15667050', pulledAt: new Date(T0).toISOString() }));
+      cache.set(id, e);
+      return { ok: true, entry: e, live: true };
+    });
+    return {
+      cache,
+      deps: {
+        dtnaGate: vi.fn(() => ({ ok: true })),
+        dtnaRefresh,
+        dtnaDiscover: vi.fn(async () => ({ pulled: 0, code: 'OK' })),
+        loadDtnaCases: () => [...cache.values()],
+      },
+    };
+  }
+  const ago = (m) => new Date(T0 - m * MIN).toISOString();
+
+  it('signed in + stale cases -> refreshed stalest first with the CASE_TTL_MS window; rows from the refreshed cache', async () => {
+    const w = dtnaWorld([
+      dtnaEntry({ caseId: DCASE(1), pulledAt: ago(20) }),
+      dtnaEntry({ caseId: DCASE(8), unitId: 'D400', pulledAt: ago(60) }),
+    ]);
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh.mock.calls.map((c) => c[0])).toEqual([DCASE(8), DCASE(1)]);
+    expect(w.deps.dtnaRefresh.mock.calls[0][1]).toEqual({ freshMs: 15 * MIN });
+    expect(scan.dtnaAuto).toBe('ok');
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), dtnaCaseNumber: '15667050' });
+    expect(scan.dtnaAsOf).toBe(new Date(T0).toISOString());
+  });
+
+  it('a fresh case (5 min) is not re-read (throttle honored)', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(5) })]);
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).not.toHaveBeenCalled();
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1) });
+  });
+
+  it('signed out -> no refresh, no discovery, dtnaAuto signed-out, no dtna error; rows still from the cache', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(300) })]);
+    w.deps.dtnaGate.mockReturnValue({ ok: false, code: 'DTNA_AUTO_SIGNED_OUT' });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).not.toHaveBeenCalled();
+    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+    expect(scan.dtnaAuto).toBe('signed-out');
+    expect(scan.errors.filter((e) => e.stage === 'dtna')).toEqual([]);
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1), source: 'both' });
+  });
+
+  it('a case named in WR comments with no cache entry is read and its row appears in the same scan (no manual pull)', async () => {
+    const w = dtnaWorld([], { fresh: () => ({ unitId: 'EQ-WR_G' }) });
+    const details = Object.assign({}, DETAILS, { WR_G: comment('DTNA case ' + DURL(DCASE(9))) });
+    const { deps } = makeDeps(Object.assign(w.deps, { getService: vi.fn(async (id) => details[id] || { workRequest: { comments: [] } }) }));
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh.mock.calls.map((c) => c[0])).toEqual([DCASE(9)]);
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ source: 'both', vendorKind: 'dtna', dtnaCaseId: DCASE(9), dtnaCaseNumber: '15667050', offsiteShopEventUrl: DURL(DCASE(9)) });
+    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+  });
+
+  it('a FREIGHTLINER WR whose unit has no case -> one bounded discovery for that unit', async () => {
+    const w = dtnaWorld([]);
+    const { deps } = makeDeps(w.deps);
+    await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaDiscover).toHaveBeenCalledTimes(1);
+    const arg = w.deps.dtnaDiscover.mock.calls[0][0];
+    expect(arg.units).toEqual(['EQ-WR_G']);
+    expect(arg.budget).toBeGreaterThan(0);
+    expect(arg.budget).toBeLessThanOrEqual(250);
+  });
+
+  it('a sign-in failure mid-refresh stops the refresh quietly (signed-out, no dtna error)', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(60) }), dtnaEntry({ caseId: DCASE(8), unitId: 'D400', pulledAt: ago(90) })],
+      { fail: () => ({ ok: false, live: true, code: 'DTNA_SIGNIN_REQUIRED' }) });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).toHaveBeenCalledTimes(1);
+    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+    expect(scan.dtnaAuto).toBe('signed-out');
+    expect(scan.errors.filter((e) => e.stage === 'dtna')).toEqual([]);
+  });
+
+  it('a per-case read failure is counted as a dtna error and the next case is still tried', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(60) }), dtnaEntry({ caseId: DCASE(8), unitId: 'D400', pulledAt: ago(90) })],
+      { fail: () => ({ ok: false, live: true, code: 'DTNA_APEX_ERROR' }) });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).toHaveBeenCalledTimes(2);
+    expect(scan.errors).toContainEqual({ stage: 'dtna', code: 'DTNA_APEX_ERROR', n: 2 });
+    expect(scan.dtnaAuto).toBe('ok');
+  });
+
+  it('a timeout / network failure stops the DTNA refresh for this scan', async () => {
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(60) }), dtnaEntry({ caseId: DCASE(8), unitId: 'D400', pulledAt: ago(90) })],
+      { fail: () => ({ ok: false, live: true, code: 'DTNA_TIMEOUT' }) });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).toHaveBeenCalledTimes(1);
+    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+    expect(scan.errors).toContainEqual({ stage: 'dtna', code: 'DTNA_TIMEOUT', n: 1 });
+    expect(scan.dtnaAuto).toBe('error');
+  });
+
+  it('the Decisiv case reads are identical with DTNA signed in or out', async () => {
+    const a = makeDeps();
+    await src.scanTeamPending({}, a.deps);
+    src._resetForTests();
+    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(60) })]);
+    const b = makeDeps(w.deps);
+    await src.scanTeamPending({}, b.deps);
+    expect(b.deps.getCasePage.mock.calls).toEqual(a.deps.getCasePage.mock.calls);
+    expect(b.deps.getCaseStatusSummary.mock.calls).toEqual(a.deps.getCaseStatusSummary.mock.calls);
+  });
+
+  it('the default gate (real src/dtna/auto.js) on a fresh run reads signed-out and loads no DTNA client / aura module', async () => {
+    const { deps } = makeDeps({ loadDtnaCases: () => [dtnaEntry({ pulledAt: ago(300) })] });
+    delete deps.dtnaGate; delete deps.dtnaRefresh; delete deps.dtnaDiscover;
+    const scan = await src.scanTeamPending({}, deps);
+    expect(scan.dtnaAuto).toBe('signed-out');
+    expect(byKey(scan)['wr:WR_G']).toMatchObject({ dtnaCaseId: DCASE(1) });
+    expect(Object.keys(require.cache).filter((k) => /[\\/]src[\\/]dtna[\\/](aura|client)\.js$/.test(k))).toEqual([]);
   });
 });
 

@@ -2,7 +2,8 @@
 /**
  * src/dtna/constants.js — DTNA Service Tracker (Salesforce Experience Cloud, Aura) constants. Pure, no requires.
  *
- * Every DTNA network call is user-initiated (a click behind it); nothing here schedules anything.
+ * DTNA network calls come from a user action (a click behind it) or from the normal sync pass while the
+ * user is signed in (src/dtna/auto.js, session-gated, never a sign-in); nothing here schedules anything.
  */
 
 const HOST = 'dtna.my.site.com';
@@ -96,6 +97,12 @@ const CASE_FIELDS = Object.freeze({
   steps: Object.freeze(['steps', 'Steps', 'caseSteps', 'statusSteps', 'milestones']),
 });
 
+// The human case number (e.g. 15667050) is the standard Case.CaseNumber field, which getCaseRecord does not
+// return. The portal reads Case fields with this RecordUi action (dtna-post-probe 2026-11-22 pageDescriptors:
+// params { recordId, fields, optionalFields }); the value is at returnValue.fields.CaseNumber.value.
+// STATE: value not yet live-verified (case 15667050 = 500gx000002E4U5AAK).
+const CASE_NUMBER_READ = Object.freeze({ descriptor: 'aura://RecordUiController/ACTION$getRecordWithFields', field: 'Case.CaseNumber' });
+
 // dtna-probe 2026-11-21: D2/D4 found no estimate amount on 2026-11-21 (D4 source 'none'; no money-looking
 // field on getCaseRecord, getRepairOrderId or getCommentsByCaseRepairOrder; the bundle exposes no estimate/EA
 // read method). Phase B ships DTNA Total = '—' with status from case (CASE_FIELDS.caseStatus).
@@ -162,7 +169,7 @@ module.exports = {
   CASE_ID_RE, COMMENT_ID_RE, DTNA_CASE_URL_RE, caseUrl, LOGIN_HOST_RE,
   READ_METHODS, APEX_CLASS, WRITE_RE,
   CONTEXT_MAX_AGE_MS, HIDDEN_WAIT_MS, SIGNIN_WINDOW_MS, CALL_TIMEOUT_MS, CONCURRENCY, BATCH_GAP_MS,
-  THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
+  THREAD_MAX, OFFSITE_TEXT_MAX, COMMENT_MAX, CASE_FIELDS, CASE_NUMBER_READ, ESTIMATE_FIELDS, POST_COMMENT_PARAMS,
   WRITE_METHODS, POST_COMMENT_MAX, CASE_STAGES, caseStageOf, stageIndex, isForwardStage, STAGE_CHANGE_PARAMS,
   SESSION_TIME_URL, SESSION_TIME_TIMEOUT_MS, SESSION_PREFLIGHT_MIN_SEC,
 };

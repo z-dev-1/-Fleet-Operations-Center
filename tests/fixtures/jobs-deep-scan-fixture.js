@@ -121,6 +121,13 @@ export function installStubs() {
       return { ok: true, offsiteText: 'DTNA case feed: battery tested, awaiting dealer diagnosis.', scrapedAt: new Date(FIXED).toISOString(), bestLabel: 'DTNA Case', offsiteStage: 'diagnosis' };
     },
   });
+  // DTNA Phase D: the session-gated sync-pass module (cache join + live pull) never runs in the golden.
+  inject('src/dtna/auto', {
+    applyCachedCase: () => ({ applied: false, reason: 'stub' }),
+    pullIfStale: async () => ({ ok: false, entry: null, live: false }),
+    gate: () => ({ ok: false, code: 'DTNA_AUTO_SIGNED_OUT' }),
+    discover: async () => ({ pulled: 0, code: 'DTNA_AUTO_SIGNED_OUT' }),
+  });
   inject('src/orcha/repair-history', {
     addEvent: (id, ev) => { rec.addEvent.push([id, clone(ev)]); },
   });

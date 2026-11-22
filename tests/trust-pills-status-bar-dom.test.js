@@ -219,7 +219,7 @@ describe('DTNA pill -> DTNA panel (user-initiated only)', () => {
     const pill = container.querySelector('#tb-dtna');
     expect(pill && pill.tagName).toBe('BUTTON');
     expect(container.querySelector('.sb-trust #tb-dtna')).toBe(pill);
-    expect(pill.textContent).toBe('DTNA: Signed out');
+    expect(pill.textContent).toBe('DTNA: Signed out \u00b7 sign in to refresh');
     expect(pill.className).toBe('tb-dtna tb-dtna--grey');
     expect(pill.getAttribute('aria-haspopup')).toBe('dialog');
     vi.advanceTimersByTime(3000);
@@ -244,7 +244,7 @@ describe('DTNA pill -> DTNA panel (user-initiated only)', () => {
     expect(ov.getAttribute('aria-modal')).toBe('true');
     await flush();
     expect(m.dtna.status).toHaveBeenCalledTimes(1);
-    expect(ov.querySelector('#dtna-panel-state').textContent).toBe('DTNA: Signed out');
+    expect(ov.querySelector('#dtna-panel-state').textContent).toBe('DTNA: Signed out \u00b7 sign in to refresh');
     expect(ov.querySelector('#dtna-panel-last').textContent).toBe('never');
     expect(ov.querySelector('#dtna-panel-signin')).toBeTruthy();
     expect(ov.querySelector('#dtna-panel-pull')).toBeTruthy();
@@ -274,7 +274,7 @@ describe('DTNA pill -> DTNA panel (user-initiated only)', () => {
     container.querySelector('#tb-dtna').click();
     await flush();
     m.dtnaCb({ ok: true, state: 'expired', lastPullAt: null });
-    expect(dtnaOverlay().querySelector('#dtna-panel-state').textContent).toBe('DTNA: Expired');
+    expect(dtnaOverlay().querySelector('#dtna-panel-state').textContent).toBe('DTNA: Expired \u00b7 sign in to refresh');
   });
 
   it('advancing fake timers 10 min never calls status again', async () => {
