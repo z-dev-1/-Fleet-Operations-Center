@@ -489,7 +489,12 @@ function start(opts) {
         if (r && r.ok) go();
         else {
           _ran = true;
-          _lastRun = _write(D, log, { version: 1, at: new Date(D.now()).toISOString(), code: (r && r.code) || 'APERIA_SIGNIN_FAILED' }, [], observer);
+          // Diagnostics for a failed sign-in: what the passive observer saw (shapes/counts only, redacted).
+          const diag = observer ? {
+            scripts: observer.scripts, apiCalls: observer.apiCalls(),
+            ws: { sockets: Array.from(observer.sockets.values()), frames: observer.frames },
+          } : { observer: 'NONE' };
+          _lastRun = _write(D, log, Object.assign({ version: 1, at: new Date(D.now()).toISOString(), code: (r && r.code) || 'APERIA_SIGNIN_FAILED' }, diag), [], observer);
         }
       })
       .catch((e) => { log.warn('[aperia-probe] sign-in threw: ' + _errName(e)); });
