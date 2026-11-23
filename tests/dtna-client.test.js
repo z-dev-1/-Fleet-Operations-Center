@@ -313,6 +313,42 @@ describe('listCaseIds', () => {
     expect(a.lastParams.filterName).toBe('00B6T000007X74uUAC');
   });
 
+  it('ListViewDataManager response: ids from recordIdActionsList[].recordId, pages while hasMoreData (173 -> 4 pages)', async () => {
+    const ids = Array.from({ length: 173 }, (_, i) => id(i));
+    const a = useAura(fakeAura({ ids }));
+    const offsets = [];
+    a.replayGetItems.mockImplementation(async (mutate) => {
+      const p = { filterName: '00B6T000007X74uUAC', entityName: 'Case', pageSize: 50, layoutType: 'LIST', sortBy: null, getCount: false, enableRowActions: false, offset: 0 };
+      mutate(p);
+      offsets.push(p.offset);
+      const slice = ids.slice(p.offset, p.offset + p.pageSize);
+      return { ok: true, value: {
+        orderedByInfo: [], scope: 'everything', filteredByLabels: [], columnWidthMapping: {}, wrappedColumns: [], fields: [],
+        recordIdActionsList: slice.map((recordId) => ({ recordId, actions: [] })),
+        totalCount: 173, offset: p.offset, hasMoreData: p.offset + p.pageSize < 173, filterTitle: 'All Open Cases', isErrorListView: false, entityLabelPlural: 'Cases',
+      } };
+    });
+    const r = await client.listCaseIds({ force: true });
+    expect(r.ids).toHaveLength(173);
+    expect(new Set(r.ids)).toEqual(new Set(ids));
+    expect(offsets).toEqual([0, 50, 100, 150]);
+  });
+
+  it('hasMoreData true on a short page keeps paging; false on a full page stops', async () => {
+    const ids = Array.from({ length: 60 }, (_, i) => id(i));
+    const a = useAura(fakeAura({ ids }));
+    const offsets = [];
+    a.replayGetItems.mockImplementation(async (mutate) => {
+      const p = { entityName: 'Case', pageSize: 50, offset: 0 };
+      mutate(p);
+      offsets.push(p.offset);
+      const page = offsets.length === 1 ? ids.slice(0, 30) : ids.slice(30, 60);
+      return { ok: true, value: { recordIdActionsList: page.map((recordId) => ({ recordId })), totalCount: 60, hasMoreData: offsets.length === 1 } };
+    });
+    expect((await client.listCaseIds({ force: true })).ids).toHaveLength(60);
+    expect(offsets).toEqual([0, 50]);
+  });
+
   it('_listShape: key paths, array lengths and id counts only (id-like keys masked, no values)', () => {
     const v = { result: [{ record: { Id: '500ABCDEFGHIJKL', CaseNumber: '01234567', Unit__c: 'UNIT-SECRET' } }], byId: { '500ABCDEFGHIJKLMNO': { x: 1 } }, totalCount: 1 };
     const s = client._listShape(v);

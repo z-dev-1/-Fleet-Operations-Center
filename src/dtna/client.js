@@ -267,7 +267,8 @@ function _collectIds(v, out, depth) {
   if (Array.isArray(v)) { for (const x of v) _collectIds(x, out, depth + 1); return; }
   for (const k of Object.keys(v)) {
     const x = v[k];
-    if (k === 'Id' || k === 'id') {
+    // recordId: ListViewDataManager getItems lists its rows under recordIdActionsList[].recordId.
+    if (k === 'Id' || k === 'id' || k === 'recordId') {
       const s = typeof x === 'string' ? x : (x && typeof x === 'object' && typeof x.value === 'string' ? x.value : '');
       if (/^500[A-Za-z0-9]{15}$/.test(s)) {
         out.add(s);
@@ -324,6 +325,7 @@ async function _listPass(filter, o) {
   let base = 0;
   let page = 0;
   let size = LIST_PAGE_SIZE;
+  let total = null;
   let templateFilter;
   for (let i = 0; i < LIST_MAX_PAGES; i++) {
     const mutate = (p) => {
@@ -359,10 +361,16 @@ async function _listPass(filter, o) {
     _collectIds(r.value, got, 0);
     if (i === 0 && !got.size) { try { log.info('[dtna] list-shape', _listShape(r.value)); } catch (_) { /* diagnostic only */ } }
     for (const id of got) ids.add(id);
-    if (!paged || got.size < size || ids.size === before) break;
+    const v = r.value && typeof r.value === 'object' ? r.value : {};
+    if (Number.isFinite(Number(v.totalCount)) && v.totalCount !== null) total = Number(v.totalCount);
+    // hasMoreData (ListViewDataManager) is authoritative when present; else a short page ends the list.
+    // totalCount is the list total only alongside hasMoreData (other list actions report the page count).
+    const lvdm = typeof v.hasMoreData === 'boolean';
+    const more = lvdm ? v.hasMoreData : got.size >= size;
+    if (!paged || !more || ids.size === before || (lvdm && total != null && total > 0 && ids.size >= total)) break;
     page++;
   }
-  return { ok: true, ids: Array.from(ids), pages: page + 1, templateFilter };
+  return { ok: true, ids: Array.from(ids), pages: page + 1, total, templateFilter };
 }
 
 /**
@@ -391,7 +399,7 @@ async function listCaseIds(opts) {
   let built = false;
   try { built = !!(_aura().listTemplateBuilt && _aura().listTemplateBuilt()); } catch (_) { built = false; }
   if (built) info = { entity: 'Case', filter: 'default' };
-  log.info('[dtna] list', { count: list.length, pages: r.pages, filter, fallback, built, entity: info.entity || null, listFilter: info.filter || null });
+  log.info('[dtna] list', { count: list.length, pages: r.pages, total: r.total == null ? null : r.total, filter, fallback, built, entity: info.entity || null, listFilter: info.filter || null });
   return { ok: true, ids: list.slice() };
 }
 
