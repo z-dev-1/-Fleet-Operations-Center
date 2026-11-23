@@ -129,7 +129,11 @@ async function listAttachments(caseId, rawComments, opts) {
   const cfg = _listConfig();
   if (!_isObj(cfg) || (cfg.source !== 'apex' && cfg.source !== 'comments')) return { ok: false, code: 'DTNA_ATTACHMENTS_NOT_CONFIGURED' };
   if (!C.CASE_ID_RE.test(_str(caseId))) return { ok: false, code: 'DTNA_INVALID_INPUT' };
-  if (cfg.source === 'comments') return { ok: true, list: parseAttachmentList(null, cfg, rawComments) };
+  if (cfg.source === 'comments') {
+    // No comment rows (the read failed or came back empty over a cached thread): the caller keeps its list.
+    if (!Array.isArray(rawComments)) return { ok: false, code: 'DTNA_COMMENTS_UNAVAILABLE' };
+    return { ok: true, list: parseAttachmentList(null, cfg, rawComments) };
+  }
   const r = await _aura().listAttachmentsRaw(caseId, opts && opts.silent ? { silent: true } : undefined);
   if (!r || !r.ok) return { ok: false, code: _str((r && r.code) || 'DTNA_INTERNAL').slice(0, 40) };
   return { ok: true, list: parseAttachmentList(r.value, cfg) };

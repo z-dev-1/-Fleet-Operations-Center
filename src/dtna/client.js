@@ -387,7 +387,8 @@ async function pullCase(caseId, opts) {
   if (includeComments) {
     // Case files (estimate PDFs) ride on the same per-case pull: same throttle and slot, no extra cycle.
     try {
-      Object.assign(entry, await syncAttachments(caseId, comments, _store().get(caseId), tx));
+      // A failed or empty comment read passes null so a comment-sourced list keeps the cached files (review B1).
+      Object.assign(entry, await syncAttachments(caseId, commentsCode ? null : comments, _store().get(caseId), tx));
     } catch (e) {
       log.warn('[dtna] attachments', safeErr(e));
     }

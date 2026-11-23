@@ -1,6 +1,6 @@
 // DTNA Phase A step 6: client (normalize, pull, list, resolve, bulk, TSV) + row-apply.
 process.env.TZ = 'America/New_York';
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -363,6 +363,60 @@ describe('Chatter + Files: attachments inside pullCase', () => {
     const r = await client.pullCase(CASE_ID, { includeComments: false });
     expect(files.listAttachments).not.toHaveBeenCalled();
     expect(r.entry.attachments.map((a) => a.versionId)).toEqual([V(1)]);
+  });
+
+  describe('comments-sourced list keeps the cached PDFs when the comment read fails or is empty (review B1)', () => {
+    const realFiles = require('../src/dtna/files.js');
+    const pending = require('../src/dtna/pending.js');
+    const LIST_CFG = { source: 'comments', field: 'Attachments', fields: { versionId: 'versionId', name: 'name', size: 'size', createdAt: 'createdAt' } };
+    const DL = { urlTemplate: 'https://dtna.my.site.com/sfc/servlet.shepherd/version/download/{versionId}' };
+    const WITH_FILES = COMMENTS.map((c, i) => (i === 1 ? Object.assign({}, c, { Attachments: [att(1)] }) : c));
+    afterEach(() => realFiles._setDeps({}));
+
+    // Real files.listAttachments over the configured comment field; download stubbed.
+    function useCommentFiles(commentsResult) {
+      const a = fakeAura({ fail: (name) => (name === 'getCommentsByCaseRepairOrder' ? commentsResult : null) });
+      realFiles._setDeps({ listConfig: LIST_CFG, downloadConfig: DL });
+      opened = 0;
+      extractor = { extract: vi.fn(async () => ({ ok: true, status: 'read', text: TEXT, truncated: false })), close: vi.fn() };
+      files = {
+        listAttachments: vi.fn(realFiles.listAttachments),
+        downloadPdf: vi.fn(async () => ({ ok: true, buffer: Buffer.from('%PDF-1.4 SENTINEL_BYTES') })),
+        isPdf: realFiles.isPdf,
+      };
+      const estimatePdf = { openExtractor: () => { opened++; return extractor; }, parseEstimateText: require('../src/dtna/estimate-pdf.js').parseEstimateText };
+      session = { notePulled: vi.fn() };
+      client._setDeps({ aura: a, session, now: () => NOW, sleep: async () => {}, files, estimatePdf });
+    }
+
+    for (const [label, result] of [['failed', { ok: false, code: 'DTNA_APEX_ERROR' }], ['empty', { ok: true, value: [] }]]) {
+      it('a ' + label + ' comment read: attachments, DTNA Total and estimate text unchanged, no download', async () => {
+        useCommentFiles({ ok: true, value: WITH_FILES });
+        await client.pullCase(CASE_ID);
+        const before = dstore.get(CASE_ID);
+        expect(before.attachments).toHaveLength(1);
+        expect(before.attachments[0]).toMatchObject({ status: 'read', total: 1234.56 });
+        expect(files.downloadPdf).toHaveBeenCalledTimes(1);
+        const rowBefore = { equipmentId: '122269', workRequestId: 'w1', vendor: 'FREIGHTLINER' };
+        rowApply.applyCaseToRow(rowBefore, before, { now: NOW });
+        expect(rowBefore.dtnaEstimateText).toContain('Grand Total');
+
+        useCommentFiles(result);
+        const r = await client.pullCase(CASE_ID);
+        expect(r.ok).toBe(true);
+        expect(r.commentsStale).toBe(true);
+        expect(files.downloadPdf).not.toHaveBeenCalled();
+        expect(opened).toBe(0);
+        const after = dstore.get(CASE_ID);
+        expect(after.attachments).toEqual(before.attachments);
+        expect(after.attachmentsCode).toBe('DTNA_COMMENTS_UNAVAILABLE');
+        expect(pending.dtnaTotal(after)).toEqual(pending.dtnaTotal(before));
+        expect(pending.dtnaTotal(after).source).toBe('pdf');
+        const rowAfter = Object.assign({}, rowBefore);
+        rowApply.applyCaseToRow(rowAfter, after, { now: NOW });
+        expect(rowAfter.dtnaEstimateText).toBe(rowBefore.dtnaEstimateText);
+      });
+    }
   });
 
   it('a throwing extractor never fails the pull; logs carry counts only', async () => {
