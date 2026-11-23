@@ -268,7 +268,11 @@ function previewOf(kind, payload, meta) {
   const towTo = [p.towToStreet, p.towToCity, p.towToState, p.towToZip].map(_str).map((s) => s.trim()).filter(Boolean).join(', ');
   const items = (Array.isArray(p.areaPairs) ? p.areaPairs : [])
     .filter((x) => x && (x.area || x.subcategory))
-    .map((x) => [x.area, x.subcategory, x.subSubcategory].map(_str).filter(Boolean).join(' / '));
+    .map((x) => {
+      const { levelText } = require('../scrapers/avm-text');
+      const sub = { level1: x.area, isSub: true };
+      return [levelText(x.area), levelText(x.subcategory, sub), levelText(x.subSubcategory, sub)].filter(Boolean).join(' / ');
+    });
   const urgent = _str(p.urgent).toLowerCase() === 'yes';
   const comment = _str(p.comments).trim();
   const atts = Array.isArray(p.attachments) ? p.attachments : [];

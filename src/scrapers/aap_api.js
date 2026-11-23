@@ -714,6 +714,7 @@ async function getAvmTree(equipmentType, opts = {}) {
   });
   const reasons = (raw && raw.reasonsForRepair || []).map((r) => (typeof r === 'string' ? { code: r, displayName: r } : { code: r.code, displayName: r.displayName || r.code }));
   const tree = { l1, l2ByParent, l3ByParent, reasons };
+  require('./avm-text').rememberTree(type, tree);
   _wrLookupCache.avm[type] = { tree, at: now };
   return tree;
 }
@@ -2076,14 +2077,11 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   const needByIso = new Date(Math.floor(now / 1000) * 1000 + 4 * 3600 * 1000).toISOString();
   const aaid = opts.aaid || _aaidFromUrl(opts.assetUrl);
 
-  // areaPairs values are now AAP AVM CODES (L1/L2/L3) from the WR modal's live
-  // cascading dropdowns — level1=area, level2=subcategory, level3=subSubcategory
-  // (L3 is '' for the common case; only categories like Tires carry an L3).
-  // TOW is a passthrough (not an avmCode) and still flows straight through as
-  // level1='TOW', level2=<tow reason>.
-  const suggestedItems = (opts.areaPairs || [])
-    .filter(p => p && (p.area || p.subcategory))
-    .map(p => ({ level1: p.area || '', level2: p.subcategory || '', level3: p.subSubcategory || '' }));
+  // The WR modal submits AVM codes (area=L1, subcategory=L2, subSubcategory=L3).
+  // AAP stores the text it is sent, so send the display text like the wizard:
+  // the AVM tree displayName, else underscores -> spaces; tire positions stay
+  // as codes. TOW (not an avmCode) passes through as level1='TOW'.
+  const suggestedItems = require('./avm-text').suggestedItemsFrom(opts.areaPairs);
 
   // AAP's CreateRepairInput.comments is a list of Comment OBJECTS, not strings
   // (confirmed by a live 500: "Cannot construct instance of Comment ... no
@@ -2129,8 +2127,7 @@ function _buildWoBody(opts, assetFull, vendorCode) {
   // EXACTLY (captured live 2026-10-18). Key fixes vs. our earlier (rejected)
   // body: field is `calltype` (lowercase); `destination` is a full zeroed
   // object (NOT null); NO `source` field; currentLocation carries real GPS +
-  // full address + timeZone. suggestedItems level1/level2 are DISPLAY NAMES
-  // ("Chassis", "Check Engine Light") — not avmCodes.
+  // full address + timeZone. suggestedItems: see the avm-text note above.
   return {
     aaid,
     title: String(opts.title || '').slice(0, 90),
