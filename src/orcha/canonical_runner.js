@@ -25,7 +25,7 @@ const GAP_MS = 6 * 3600 * 1000;
 // Fields deep-scan updates on its in-memory rows (offsite enrich + case stage).
 const DS_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince',
   'asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl',
-  'offsiteFacts', 'offsiteStageHistory'];
+  'offsiteFacts', 'offsiteStageHistory', 'dtnaEstimateText'];
 
 /**
  * overlayDeepScanFields(liveRows, scannedRows) -> number of rows updated.
@@ -39,7 +39,7 @@ const DS_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince',
 // overwritten by the deep-scan's stale in-memory "ready". Newer read wins.
 // relay-extract §12.1: the offsite fact block travels with the notes, the stage
 // history with the stage trio.
-const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl', 'offsiteFacts'];
+const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel', 'asistSrUrl', 'offsiteFacts', 'dtnaEstimateText'];
 const STAGE_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'offsiteStageHistory'];
 const _t = (v) => { const n = v ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : 0; };
 
@@ -56,7 +56,7 @@ const _dtnaUrl = (row) => {
 // link: adopt the link, its owner WR and the case fields on the stored row (same WR only).
 const DTNA_JOIN_FIELDS = ['offsiteShopEventUrl', 'savedOffsiteUrl', 'asistSrUrl', 'asistSource', 'asistLabel',
   'asistNotes', 'asistScrapedAt', 'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt',
-  'dtnaCaseNumber', 'offsiteFacts'];
+  'dtnaCaseNumber', 'offsiteFacts', 'dtnaEstimateText'];
 function _adoptDtnaJoin(r, s) {
   if (_dtnaUrl(r) || r.offsiteShopEventUrl || r.savedOffsiteUrl || r.asistSrUrl) return false;
   if (s.asistSource !== 'dtna' || !_dtnaUrl(s)) return false;

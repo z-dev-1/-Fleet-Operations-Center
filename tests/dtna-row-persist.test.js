@@ -57,6 +57,17 @@ describe('DTNA case number persistence (overlayDeepScanFields)', () => {
     expect(stored[0].dtnaCaseNumber).toBeUndefined();
   });
 
+  it('Chatter + Files: the extracted estimate text survives the post-scan save (newer notes) and the join adopt', () => {
+    const stored = [dtnaRow()];
+    cr.overlayDeepScanFields(stored, [dtnaRow({ dtnaEstimateText: '[E101.pdf] Grand total $1,234.56', asistScrapedAt: '2026-11-23T07:00:00.000Z' })]);
+    expect(stored[0].dtnaEstimateText).toBe('[E101.pdf] Grand total $1,234.56');
+    const fresh = [{ equipmentId: 'FLD1', vendor: 'FREIGHTLINER', workRequestId: 'WR1' }];
+    cr.overlayDeepScanFields(fresh, [dtnaRow({ dtnaEstimateText: 'est' })]);
+    expect(fresh[0].dtnaEstimateText).toBe('est');
+    expect(cr.DS_FIELDS).toContain('dtnaEstimateText');
+    expect(require('../src/utils/offsite-owner.js').OFFSITE_FIELDS).toContain('dtnaEstimateText');
+  });
+
   it('a row whose offsite is another DTNA case keeps its own number', () => {
     const other = 'https://dtna.my.site.com/Servicetracker/s/case/500AB00000ZZZZZZZZ/view';
     const stored = [dtnaRow({ offsiteShopEventUrl: other, savedOffsiteUrl: other, asistSrUrl: other, dtnaCaseNumber: '1' })];

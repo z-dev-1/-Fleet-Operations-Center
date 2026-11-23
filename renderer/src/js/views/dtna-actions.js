@@ -2,9 +2,12 @@
 // unit's DTNA Service Tracker case. The comment is VISIBLE TO THE DEALER.
 //
 // Trimmed copy of relay-actions.js openCommentModal. "AI draft" only fills the textarea
-// (window.dtna.draftComment, text only). Send closes this modal and calls
-// window.dtna.postComment -> dtna:post-comment -> write gate, which ALWAYS shows the
-// approval modal with the exact text. Nothing auto-sends.
+// (window.dtna.draftComment, text only). The channel row shows where the post goes:
+// window.dtna.channels picks Chatter (case feed) when external communication is on for the
+// case and Chatter posting is set up, else the case comment; the user may pick the other
+// one when both are available. Send closes this modal and calls window.dtna.postChatter
+// (dtna:post-chatter) or window.dtna.postComment (dtna:post-comment) -> write gate, which
+// ALWAYS shows the approval modal with the exact text and the channel. Nothing auto-sends.
 import modalDefault from '../components/modal.js';
 import { outcomeMessage } from './relay-actions.js';
 
@@ -31,9 +34,33 @@ export function dtnaPostButtonHtml(unit, offsiteUrl) {
     ' title="Write a comment on this DTNA case (visible to the dealer; you approve the exact text first)">\uD83D\uDCAC Post to DTNA</button>';
 }
 
+// Why a channel cannot be used (dtna:channels reason codes).
+const CHANNEL_REASON = {
+  DTNA_CHATTER_NOT_CONFIGURED: 'Chatter posting is not set up yet.',
+  DTNA_CHATTER_DISABLED: 'External communication is off for this case.',
+  DTNA_CHATTER_UNKNOWN: 'Could not check whether Chatter is on for this case.',
+  DTNA_POST_NOT_CONFIGURED: 'Case comments are not set up yet.',
+  DTNA_NO_REPAIR_ORDER: 'This case has no repair order.',
+  DTNA_NOT_PULLED: 'Pull DTNA for this unit first.',
+};
+const CHANNEL_LABEL = { chatter: 'Chatter (case feed)', comment: 'Case comment' };
+
+/** channelReasonText(code) -> plain text for a channel reason code ('' for none). */
+export function channelReasonText(code) {
+  if (!code) return '';
+  return CHANNEL_REASON[code] || 'Unavailable (' + String(code).replace(/[^A-Z0-9_]/g, '').slice(0, 40) + ').';
+}
+
 export function dtnaCommentModalBody() {
   return '<div class="ra-modal ra-modal--cm">' +
     '<p class="ra-hint" role="note"><strong>Visible to the dealer (DTNA Service Tracker).</strong> Nothing is sent until you approve the exact text.</p>' +
+    '<div class="dp-escalate__row" role="radiogroup" aria-label="Post channel">' +
+      '<label><input type="radio" name="dtna-ch" id="dtna-ch-chatter" value="chatter" disabled> ' + CHANNEL_LABEL.chatter + '</label>' +
+      ' <span id="dtna-ch-chatter-why" class="ra-hint">Checking\u2026</span>' +
+      ' <label><input type="radio" name="dtna-ch" id="dtna-ch-comment" value="comment" checked> ' + CHANNEL_LABEL.comment + '</label>' +
+      ' <span id="dtna-ch-comment-why" class="ra-hint"></span>' +
+    '</div>' +
+    '<p id="dtna-ch-note" class="ra-hint">Will post to: ' + CHANNEL_LABEL.comment + '</p>' +
     '<textarea id="dtna-cm-text" class="dp-escalate__comment" maxlength="' + DTNA_COMMENT_MAX + '" rows="7" aria-label="DTNA case comment" placeholder="Message to the repair facility"></textarea>' +
     '<div class="dp-escalate__row"><button type="button" id="dtna-cm-draft" class="dp-escalate__btn dp-ra-btn">AI draft</button>' +
       // Attachments are a fast-follow: wired placeholder, disabled until the upload path ships (files: [] today).
@@ -62,11 +89,15 @@ function _draftErr(r) {
   return 'AI draft failed: ' + c;
 }
 
-/** postMessage(r, caseId) -> { level, text } for the dtna:post-comment result. */
-export function postMessage(r, caseId) {
+/** postMessage(r, caseId, channel) -> { level, text } for the dtna:post-comment / dtna:post-chatter result. */
+export function postMessage(r, caseId, channel) {
   const tag = String(caseId || '').slice(-6);
   const code = r && r.code;
+  if (r && r.outcome === 'sent' && channel === 'chatter') return { level: 'success', text: 'Posted to the DTNA case Chatter feed \u2026' + tag + '.' };
   if (r && r.outcome === 'sent') return { level: 'success', text: 'Comment posted to DTNA case \u2026' + tag + '. Pull DTNA to see it in the thread.' };
+  if (code === 'DTNA_CHATTER_NOT_CONFIGURED') return { level: 'warn', text: 'Posting to the DTNA Chatter feed is not set up yet. Nothing was sent.' };
+  if (code === 'DTNA_CHATTER_DISABLED') return { level: 'warn', text: 'External communication is off for this DTNA case, so Chatter is unavailable. Post a case comment instead. Nothing was sent.' };
+  if (code === 'DTNA_CHATTER_REJECTED') return { level: 'error', text: 'DTNA did not accept the Chatter post. Check the case feed before trying again.' };
   if (code === 'DTNA_POST_NOT_CONFIGURED') return { level: 'warn', text: 'Posting to DTNA is not set up yet. Nothing was sent.' };
   if (code === 'DTNA_POST_REJECTED') return { level: 'error', text: 'DTNA did not accept the comment (message not sent to the repair facility). Pull DTNA to check the thread before trying again.' };
   if (code === 'DTNA_NOT_PULLED') return { level: 'warn', text: 'Pull DTNA for this unit first.' };
@@ -85,6 +116,41 @@ export function openDtnaCommentModal(unit, caseCtx, deps) {
   let aiDrafted = false;
   let drafting = false;
   let sending = false;
+  // The channel the send goes to: the dtna:channels auto choice, or the user's pick. Default (no probe,
+  // probe failed) = the case comment, as before Chatter existed.
+  let channel = 'comment';
+  let channelsP = null; // the pending dtna:channels probe, if any
+
+  const radio = (c) => q(c === 'chatter' ? '#dtna-ch-chatter' : '#dtna-ch-comment');
+  const note = () => { const n = q('#dtna-ch-note'); if (n) n.textContent = 'Will post to: ' + CHANNEL_LABEL[channel]; };
+  const pick = (c) => {
+    channel = c;
+    const a = radio('chatter');
+    const b = radio('comment');
+    if (a) a.checked = c === 'chatter';
+    if (b) b.checked = c === 'comment';
+    note();
+  };
+  function applyChannels(r) {
+    const why = (c, text) => { const w = q('#dtna-ch-' + c + '-why'); if (w) w.textContent = text; };
+    if (!r || !r.ok) {
+      const a = radio('chatter');
+      if (a) a.disabled = true;
+      why('chatter', 'Could not check the Chatter channel; posting as a case comment.');
+      pick('comment');
+      return;
+    }
+    const chat = r.chatter || {};
+    const com = r.comment || {};
+    const a = radio('chatter');
+    const b = radio('comment');
+    if (a) a.disabled = !chat.available;
+    // Neither available: keep the case comment selectable (the send reports why, as before).
+    if (b) b.disabled = !com.available && !!chat.available;
+    why('chatter', chat.available ? '' : channelReasonText(chat.reason));
+    why('comment', com.available ? '' : channelReasonText(com.reason));
+    pick(r.auto === 'chatter' && chat.available ? 'chatter' : 'comment');
+  }
 
   const count = () => {
     const ta = q('#dtna-cm-text');
@@ -126,9 +192,16 @@ export function openDtnaCommentModal(unit, caseCtx, deps) {
     sending = true;
     d.modal.close();
     d.toast.show('info', 'Waiting for your approval\u2026', 3000);
+    // A send before the channel probe answered waits for it, so the auto choice is used.
+    if (channelsP) { try { await channelsP; } catch (_) { /* applyChannels already fell back */ } }
+    const ch = channel === 'chatter' && typeof d.bridge.postChatter === 'function' ? 'chatter' : 'comment';
     let r;
-    try { r = await d.bridge.postComment({ equipmentId, caseId, text, aiDrafted }); } catch (_) { r = { ok: false, code: 'DTNA_INTERNAL' }; }
-    const o = postMessage(r, caseId);
+    try {
+      r = ch === 'chatter'
+        ? await d.bridge.postChatter({ equipmentId, caseId, text, aiDrafted })
+        : await d.bridge.postComment({ equipmentId, caseId, text, aiDrafted });
+    } catch (_) { r = { ok: false, code: 'DTNA_INTERNAL' }; }
+    const o = postMessage(r, caseId, ch);
     d.toast.show(o.level, o.text);
     if (r && r.code === 'DTNA_SESSION_LOW' && typeof d.bridge.login === 'function' && d.confirm('Sign in to DTNA again now?')) {
       try { await d.bridge.login(); } catch (_) { /* the sign-in window reports its own state */ }
@@ -149,6 +222,18 @@ export function openDtnaCommentModal(unit, caseCtx, deps) {
       if (ta) ta.addEventListener('input', () => { count(); if (!String(ta.value || '').trim()) aiDrafted = false; });
       const db = q('#dtna-cm-draft');
       if (db) db.addEventListener('click', () => draft());
+      for (const c of ['chatter', 'comment']) {
+        const rb = radio(c);
+        if (rb) rb.addEventListener('change', () => { if (!rb.disabled) pick(c); });
+      }
+      if (d.bridge && typeof d.bridge.channels === 'function') {
+        channelsP = Promise.resolve()
+          .then(() => d.bridge.channels({ equipmentId, caseId }))
+          .then((r) => applyChannels(r), () => applyChannels(null))
+          .finally(() => { channelsP = null; });
+      } else {
+        applyChannels(null);
+      }
     },
   });
 }

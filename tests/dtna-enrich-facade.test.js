@@ -65,8 +65,20 @@ describe('dtna_enrich facade', () => {
       estimateComments: 'Sep 24, 2026 — AFP FAS: [General] hello', offsiteStage: 'repair',
       offsiteStageDetail: 'In Repair', offsiteStageSince: '2026-11-20T12:00:00.000Z', dtnaCaseNumber: '15667050',
       bestUrl: caseUrl(CASE_ID), bestLabel: 'DTNA Case', error: null, rawThread: 'FULL THREAD',
+      estimateText: '', attachments: [],
     });
     expect(pullCase).not.toHaveBeenCalled();
+  });
+
+  it('Chatter + Files: returns the bounded estimateText and the read PDFs from the cache entry', async () => {
+    dstore.put({ caseId: CASE_ID, unitId: '122269', offsiteText: 'T', thread: 'T', pulledAt: new Date().toISOString(), attachments: [
+      { versionId: '068gx000001AbCdAAK', kind: 'pdf', status: 'read', name: 'R101048154.pdf', createdAt: '2026-11-21T09:00:00.000Z', text: 'Grand Total $1,234.56', total: 1234.56, totalLabeled: true },
+      { versionId: '068gx000001AbCeAAK', kind: 'pdf', status: 'scanned', name: 'scan.pdf', text: '' },
+    ] });
+    const r = await enrich.enrichDtna(caseUrl(CASE_ID), { freshMs: 2 * HOUR });
+    expect(r.estimateText).toContain('[R101048154.pdf, 2026-11-21] Grand total $1,234.56 (labelled)');
+    expect(r.estimateText).toContain('Grand Total $1,234.56');
+    expect(r.attachments.map((a) => a.name)).toEqual(['R101048154.pdf']);
   });
 
   it('stale cache while signed in -> one live pull, the live entry is returned', async () => {

@@ -462,6 +462,8 @@ function _buildUnitDetail(unitId, rows, notesStore, opts) {
   if (row.workDuration) detail += '  Days down: ' + row.workDuration + '\n';
   if (row.alternativeId) detail += '  Alt ID (dealer case): ' + row.alternativeId + '\n';
   if (row.offsiteShopEvent) detail += '  Offsite event: ' + row.offsiteShopEvent + '\n';
+  // DTNA estimate PDFs: text extracted from the dealer's estimate files (src/dtna/estimate-text.js).
+  if (row.dtnaEstimateText) detail += '  DTNA estimate PDFs (extracted):\n' + String(row.dtnaEstimateText).slice(0, 1500) + '\n';
 
   // READINESS SIGNAL — the OFFSITE EVENT is the source of truth for repair
   // readiness, NOT AAP. AAP's lifecycle state routinely lags: a unit can be

@@ -2,7 +2,8 @@
 /**
  * src/dtna/client.js — DTNA case reads built on the Aura transport.
  *
- * Reads only: case record, repair order id, comments, case number. Calls start from a user action (a unit
+ * Reads only: case record, repair order id, comments, case number, the feed's Chatter flag and the case
+ * files (estimate PDFs, downloaded and text-extracted inside a comments pull). Calls start from a user action (a unit
  * "Pull DTNA" or the bulk tool) or from the sync pass through src/dtna/auto.js with {silent:true}
  * (session-gated, never a sign-in). Pulled cases go to the dtnaCaseCache store. Logs carry caseTag,
  * counts, codes and ms only (never comment text, names or ids).
@@ -92,6 +93,29 @@ async function getCaseNumber(caseId, opts) {
   return { ok: true, value: _caseNo(f) };
 }
 
+function _findBool(v, key, depth) {
+  if (depth > 8 || v == null || typeof v !== 'object') return null;
+  if (!Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, key) && typeof v[key] === 'boolean') return v[key];
+  for (const k of Object.keys(v).slice(0, 200)) {
+    const x = _findBool(v[k], key, depth + 1);
+    if (x !== null) return x;
+  }
+  return null;
+}
+
+/**
+ * getChatterEnabled(caseId, {silent}) -> {ok:true, value: true|false|null} | {ok:false, code}
+ * The case feed's own config read (aura.getFeedModel); value = the boolean at CHATTER_FEED_READ.enabledKey
+ * (default isChatterEnabled) anywhere in the returned value (depth <= 8), null when absent.
+ */
+async function getChatterEnabled(caseId, opts) {
+  const r = await _aura().getFeedModel(caseId, _tx(opts));
+  if (!r || !r.ok) return { ok: false, code: _str((r && r.code) || 'DTNA_INTERNAL').slice(0, 40) };
+  const cfg = Object.prototype.hasOwnProperty.call(_deps, 'chatterFeedRead') ? _deps.chatterFeedRead : C.CHATTER_FEED_READ;
+  const key = cfg && typeof cfg.enabledKey === 'string' && /^\w{1,60}$/.test(cfg.enabledKey) ? cfg.enabledKey : 'isChatterEnabled';
+  return { ok: true, value: _findBool(r.value, key, 0) };
+}
+
 // ── Normalize ──────────────────────────────────────────────────────────────
 function _path(obj, key) {
   let cur = obj;
@@ -177,6 +201,7 @@ function normalizeCase(record, ro, comments, opts) {
     estimateNo: _newestWith(sorted, ['EstimateNo', 'EstimateNumber']),
     approvedTotal: approved ? approved.total : null,
     approvedAt: approved ? approved.at : '',
+    attachments: [],
     comments: norm,
     thread: th.thread,
     offsiteText: th.offsiteText,
@@ -188,6 +213,118 @@ function normalizeCase(record, ro, comments, opts) {
     pulledAt: new Date(Number.isFinite(o.now) ? o.now : _now()).toISOString(),
     source: 'aura',
   };
+}
+
+// ── Attachments (estimate PDFs) ────────────────────────────────────────────
+function _files() { return _deps.files || require('./files'); }
+function _estimatePdf() { return _deps.estimatePdf || require('./estimate-pdf'); }
+
+// Final statuses: reused while the file is unchanged and younger than ATTACHMENT_REFRESH_MS.
+const ATT_FINAL = new Set(['read', 'scanned', 'skipped-size', 'skipped-type']);
+// Download codes that stop the attachment step for this pull (the case pull itself still succeeds).
+const ATT_STOP = new Set(['DTNA_SESSION_EXPIRED', 'DTNA_SIGNIN_REQUIRED', 'DTNA_NETWORK', 'DTNA_TIMEOUT', 'DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED']);
+
+function _attKey(a) { return a ? _str(a.versionId || a.documentId) : ''; }
+function _attMeta(a) {
+  return { versionId: _str(a.versionId), documentId: _str(a.documentId), name: _str(a.name), ext: _str(a.ext), size: Number.isFinite(a.size) ? a.size : null, createdAt: _str(a.createdAt) };
+}
+
+/**
+ * syncAttachments(caseId, rawComments, prevEntry, {silent}) -> { attachments, attachmentsCheckedAt, attachmentsCode }
+ * Lists the case files, reuses unchanged cached extractions (same id + size, final status, younger than
+ * ATTACHMENT_REFRESH_MS), downloads and extracts at most ATTACHMENT_MAX_PER_PULL new / changed / stale /
+ * failed PDFs (newest first) through one lazily opened extractor (closed in finally). Only the newest
+ * ATTACHMENT_KEEP_TEXT PDFs keep their text. Never throws; a failure keeps the previous attachments.
+ */
+async function syncAttachments(caseId, rawComments, prevEntry, opts) {
+  const t0 = _now();
+  const prevList = prevEntry && Array.isArray(prevEntry.attachments) ? prevEntry.attachments : [];
+  const out = { attachments: prevList, attachmentsCheckedAt: new Date(_now()).toISOString(), attachmentsCode: '' };
+  const stats = { listed: 0, pdfs: 0, downloaded: 0, reused: 0, skipped: 0, failed: 0 };
+  let code = '';
+  let lr;
+  try { lr = await _files().listAttachments(caseId, rawComments, opts); } catch (_) { lr = { ok: false, code: 'DTNA_INTERNAL' }; }
+  if (!lr || !lr.ok) {
+    out.attachmentsCode = _str((lr && lr.code) || 'DTNA_INTERNAL').slice(0, 40);
+    if (out.attachmentsCode !== 'DTNA_ATTACHMENTS_NOT_CONFIGURED') {
+      log.info('[dtna] attachments', Object.assign({ caseTag: caseTag(caseId) }, stats, { code: out.attachmentsCode, ms: _now() - t0 }));
+    }
+    return out;
+  }
+  const list = Array.isArray(lr.list) ? lr.list : [];
+  stats.listed = list.length;
+  const prevBy = new Map(prevList.filter((a) => a && _attKey(a)).map((a) => [_attKey(a), a]));
+  const F = _files();
+  const pdfs = list.map((a, i) => ({ a, i })).filter((x) => F.isPdf(x.a))
+    .sort((x, y) => ((_ms(y.a.createdAt) || 0) - (_ms(x.a.createdAt) || 0)) || (x.i - y.i)).map((x) => x.a);
+  const others = list.filter((a) => !F.isPdf(a)).map((a) => Object.assign(_attMeta(a), { kind: a.ext || 'file', status: 'skipped-type', code: '' }));
+  stats.pdfs = pdfs.length;
+  stats.skipped += others.length;
+  const result = [];
+  let ex = null;
+  let stopped = false;
+  try {
+    for (const a of pdfs) {
+      const meta = Object.assign(_attMeta(a), { kind: 'pdf' });
+      const prev = prevBy.get(_attKey(a));
+      const fresh = prev && ATT_FINAL.has(prev.status) && (prev.size == null ? null : prev.size) === meta.size
+        && _now() - (_ms(prev.extractedAt) || 0) < C.ATTACHMENT_REFRESH_MS;
+      if (fresh) { result.push(Object.assign({}, prev, meta)); stats.reused++; continue; }
+      if (meta.size != null && meta.size > C.ATTACHMENT_MAX_BYTES) {
+        result.push(Object.assign(meta, { status: 'skipped-size', code: 'DTNA_ATTACHMENT_TOO_LARGE', extractedAt: new Date(_now()).toISOString() }));
+        stats.skipped++;
+        continue;
+      }
+      if (stopped || stats.downloaded >= C.ATTACHMENT_MAX_PER_PULL) {
+        // Not attempted this pull: keep what an earlier pull extracted, else retried next pull.
+        result.push(prev ? Object.assign({}, prev, meta) : Object.assign(meta, { status: 'pending', code: code || '' }));
+        continue;
+      }
+      stats.downloaded++;
+      let d;
+      try { d = await F.downloadPdf(a, { caseId }); } catch (_) { d = { ok: false, code: 'DTNA_INTERNAL' }; }
+      if (!d || !d.ok) {
+        const c = _str((d && d.code) || 'DTNA_INTERNAL').slice(0, 40);
+        if (ATT_STOP.has(c)) { stopped = true; code = c; }
+        const status = c === 'DTNA_ATTACHMENT_TOO_LARGE' ? 'skipped-size' : (c === 'DTNA_ATTACHMENT_NOT_PDF' ? 'skipped-type' : 'failed');
+        if (status === 'failed') stats.failed++; else stats.skipped++;
+        result.push(prev && status === 'failed' && prev.status === 'read'
+          ? Object.assign({}, prev, meta)
+          : Object.assign(meta, { status, code: c, extractedAt: new Date(_now()).toISOString() }));
+        continue;
+      }
+      if (!ex) ex = _estimatePdf().openExtractor(_deps.extractorDeps);
+      let x;
+      try { x = await ex.extract(d.buffer, meta.name); } catch (_) { x = { ok: false, status: 'failed', text: '', code: 'DTNA_PDF_FAILED' }; }
+      const text = _str(x && x.text);
+      const parsed = text ? _estimatePdf().parseEstimateText(text) : { total: null, totalLabeled: false, partsTotal: null, laborTotal: null, lineItems: [] };
+      if (!x || x.status === 'failed') stats.failed++;
+      result.push(Object.assign(meta, {
+        status: (x && x.status) || 'failed',
+        code: x && x.code ? _str(x.code).slice(0, 40) : '',
+        text,
+        textLen: text.length,
+        truncated: !!(x && x.truncated),
+        total: parsed.total,
+        totalLabeled: !!parsed.totalLabeled,
+        partsTotal: parsed.partsTotal,
+        laborTotal: parsed.laborTotal,
+        lineItems: parsed.lineItems,
+        extractedAt: new Date(_now()).toISOString(),
+      }));
+    }
+  } finally {
+    if (ex) { try { ex.close(); } catch (_) { /* already gone */ } }
+  }
+  // Only the newest ATTACHMENT_KEEP_TEXT PDFs keep their text (result is newest first).
+  let kept = 0;
+  for (const a of result) {
+    if (a.text) { if (kept < C.ATTACHMENT_KEEP_TEXT) kept++; else a.text = ''; }
+  }
+  out.attachments = result.concat(others);
+  out.attachmentsCode = code;
+  log.info('[dtna] attachments', Object.assign({ caseTag: caseTag(caseId) }, stats, { code: code || 'OK', ms: _now() - t0 }));
+  return out;
 }
 
 // ── Pull ───────────────────────────────────────────────────────────────────
@@ -242,8 +379,17 @@ async function pullCase(caseId, opts) {
   const entry = normalizeCase(rec.value, ro, comments, { caseId, now: _now() });
   if (prev) {
     // Case-only pull, or a failed/empty comment read: keep the comments a previous pull read.
-    for (const k of ['comments', 'thread', 'offsiteText', 'commentCount', 'lastCommentAt', 'lastCommentType', 'repairOrderNo', 'estimateNo', 'approvedTotal', 'approvedAt']) {
+    for (const k of ['comments', 'thread', 'offsiteText', 'commentCount', 'lastCommentAt', 'lastCommentType', 'repairOrderNo', 'estimateNo', 'approvedTotal', 'approvedAt',
+      'attachments', 'attachmentsCheckedAt', 'attachmentsCode']) {
       if (prev[k] !== undefined && prev[k] !== '') entry[k] = prev[k];
+    }
+  }
+  if (includeComments) {
+    // Case files (estimate PDFs) ride on the same per-case pull: same throttle and slot, no extra cycle.
+    try {
+      Object.assign(entry, await syncAttachments(caseId, comments, _store().get(caseId), tx));
+    } catch (e) {
+      log.warn('[dtna] attachments', safeErr(e));
     }
   }
   const cn = await _caseNumberFor(caseId, entry, _store().get(caseId), tx);
@@ -542,5 +688,6 @@ function _resetForTests() { _deps = {}; _listMemo = null; _listNumbers.clear(); 
 
 module.exports = {
   getCaseRecord, getRepairOrderId, getComments, getComment, getCaseNumber, normalizeCase, pullCase, listCaseIds, caseNumberFromList,
+  getChatterEnabled, syncAttachments,
   resolveCaseForRow, bulkPull, toTSV, exportRows, CASE_COLUMNS, COMMENT_COLUMNS, _setDeps, _resetForTests, _listShape,
 };

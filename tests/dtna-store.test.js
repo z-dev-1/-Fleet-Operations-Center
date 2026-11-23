@@ -62,6 +62,35 @@ describe('put / get / all / findByUnit', () => {
     expect(S.findByUnit('nope')).toHaveLength(0);
   });
 
+  it('Chatter + Files: attachments keep whitelisted scalar fields only; bytes / unknown keys / nested junk dropped; text clipped', () => {
+    const C = require('../src/dtna/constants.js');
+    const saved = S.put({
+      caseId: A, pulledAt: new Date().toISOString(), attachmentsCheckedAt: '2026-11-23T10:00:00.000Z', attachmentsCode: '',
+      attachments: [
+        {
+          versionId: '068gx000001AbCdAAK', name: 'E101.pdf', ext: 'pdf', size: 1234, createdAt: '2026-11-20T10:00:00.000Z', kind: 'pdf',
+          status: 'read', code: '', text: 'x'.repeat(C.ATTACHMENT_TEXT_MAX + 500), textLen: 8500, truncated: true, total: 1234.56,
+          totalLabeled: true, partsTotal: null, laborTotal: 312.5, extractedAt: '2026-11-23T10:00:00.000Z',
+          buffer: Buffer.from('%PDF-SENTINEL_BYTES'), bytes: 'SENTINEL_BYTES', url: 'https://x/download', nested: { token: 'SECRET_TOKEN' },
+          lineItems: [{ desc: 'Brake', amount: 245.1, kind: 'part', extra: 'S' }, 'junk'],
+        },
+        Buffer.from('SENTINEL_BYTES'),
+        'junk',
+      ],
+    });
+    expect(saved.attachments).toHaveLength(1);
+    const a = saved.attachments[0];
+    expect(Object.keys(a).sort()).toEqual(S.ATTACHMENT_FIELDS.concat(['lineItems']).sort());
+    expect(a.text.length).toBe(C.ATTACHMENT_TEXT_MAX);
+    expect(a.total).toBe(1234.56);
+    expect(a.partsTotal).toBeNull();
+    expect(a.lineItems).toEqual([{ desc: 'Brake', amount: 245.1, kind: 'part' }]);
+    expect(saved.attachmentsCheckedAt).toBe('2026-11-23T10:00:00.000Z');
+    const file = fs.readFileSync(path.join(tmp, 'dtna_case_cache.json'), 'utf8');
+    expect(file).not.toMatch(/SENTINEL_BYTES|SECRET_TOKEN|https:\/\/x\/download/);
+    expect(S.put({ caseId: A, pulledAt: new Date().toISOString() }).attachments).toEqual([]);
+  });
+
   it('refuses an invalid case id', () => {
     expect(S.put({ caseId: 'bad' })).toBeNull();
     expect(S.get('bad')).toBeNull();

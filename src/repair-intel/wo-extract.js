@@ -911,6 +911,14 @@ function extractDtnaFeed(thread, opts = {}) {
     }
     _textPass(ctx, text, prov);
   }
+  // Extracted estimate-PDF text (src/dtna/estimate-text.js readPdfs): dealer-side, one pass per PDF.
+  const atts = (Array.isArray(opts.attachments) ? opts.attachments : [])
+    .filter((a) => a && typeof a === 'object' && (a.status === undefined || a.status === 'read') && _str(a.text).trim());
+  for (const a of atts) {
+    const at = _iso(D.parseTs(a.createdAt));
+    _textPass(ctx, _str(a.text), { source: 'dtna', side: 'dealer', at, author: _clip('estimate PDF ' + _str(a.name), 60) });
+  }
+  if (atts.length) block.counts.attachments = atts.length;
   block.facts = _finishRefs(ctx.facts);
   block.counts.rejected = ctx.rejected;
   block.counts.truncated = ctx.truncated + (fallback ? 1 : 0);

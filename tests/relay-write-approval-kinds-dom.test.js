@@ -64,4 +64,19 @@ describe('approval titles', () => {
     expect(respond).toHaveBeenCalledTimes(1);
     expect(respond.mock.calls[0][1]).toBe(false);
   });
+
+  it('a DTNA Chatter post says it is dealer-visible and shows the channel in the preview', async () => {
+    respond.mockClear();
+    expect(titleFor('dtnaChatter')).toBe('Approve DTNA Chatter post (dealer-visible)');
+    const { createRequire } = await import('node:module');
+    const gate = createRequire(import.meta.url)('../src/writes/write-gate.js');
+    const preview = gate.previewOf('dtnaChatter', { caseId: '500gx000002E4U5AAK', repairOrderNo: '', text: 'Any update?' }, { unit: '122269', origin: 'unit-detail-dtna-chatter', aiDrafted: false });
+    C.showRequest({ id: 'id-chatter', kind: 'dtnaChatter', preview, aiDrafted: false });
+    const pre = /<pre class="rwa-preview"[^>]*>([\s\S]*?)<\/pre>/.exec(M.state.opts.body);
+    expect(pre[1]).toContain('Channel: Chatter (case feed)');
+    expect(pre[1]).toContain('VISIBLE TO THE DEALER (DTNA)');
+    expect(pre[1]).toContain('Any update?');
+    M.state.opts.actions.find((a) => a.label === 'Cancel').onClick();
+    expect(respond.mock.calls.every((c) => c[1] === false)).toBe(true);
+  });
 });

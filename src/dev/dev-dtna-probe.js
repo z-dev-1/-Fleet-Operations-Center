@@ -37,7 +37,19 @@ const ENV_FLAG = 'FLEET_DEV_DTNA_PROBE';
 // the status literals and handler names around them, the stage stepper DOM (S2, read-only) and ONE
 // getCaseRecord read for the current-stage fields. No write, no click, no _callApexRaw. Output:
 // <worktree>/.agents/tasks/dtna-aura/phase-c/stage-probe.json and <dataDir>/dev/dtna-stage-probe-<date>.json.
+// FLEET_DEV_DTNA_PROBE_MODE=chatter-files: Chatter + case files discovery (DTNA Chatter + Files Phase B).
+// Reads feed / publisher / file call sites from the bundles, the page's own getModel request (descriptor,
+// query and param KEYS) and the type/value of isChatterEnabled (boolean only) from its response, the
+// composer and file-link DOM (CF_SCRIPT, read-only), ONE getFilesOnCase read (only when its param key is
+// found) and ONE GET of the first PDF link (status, content-type, content-length, %PDF- flag; the bytes are
+// discarded). No write, no click. FLEET_DEV_DTNA_PROBE_CASE=<500... id> picks the case.
+// Output: <dataDir>/dev/dtna-chatter-files-probe-<date>.json.
 const MODE_FLAG = 'FLEET_DEV_DTNA_PROBE_MODE';
+const CASE_FLAG = 'FLEET_DEV_DTNA_PROBE_CASE';
+const MODES = ['full', 'post', 'stage', 'chatter-files'];
+const CF_TERMS = ['ForceCommunityFeedController', 'forceChatter', 'Publisher', 'FeedController', 'CommentInputController',
+  'createFeedItem', 'postFeedElement', 'isChatterEnabled', 'getFilesOnCase', 'getAttachment', 'getFileDetails', 'servlet.shepherd', 'version/download'];
+const FILES_CLASS = 'E2E_UTP_CommentController';
 const STAGE_OUT_FILE = path.resolve(__dirname, '..', '..', '.agents', 'tasks', 'dtna-aura', 'phase-c', 'stage-probe.json');
 const WINDOW_TITLE = 'DTNA discovery probe (dev, read-only)';
 const OVERALL_TIMEOUT_MS = 10 * 60e3;
@@ -135,6 +147,47 @@ const S2_SCRIPT = [
   '        add(out.hosts, tag + ": " + hostChain(el));',
   '      }',
   '      if (tag === "button" || tag === "lightning-button" || role === "button") add(out.buttons, txt(attr(el, "label") || attr(el, "title") || el.textContent));',
+  '      if (el.shadowRoot) walk(el.shadowRoot, depth + 1);',
+  '    }',
+  '  }',
+  '  walk(document, 0);',
+  '  return out;',
+  '})()',
+].join('\n');
+
+// READ-ONLY feed composer + file link inspection (chatter-files mode). Reads tags, attributes and text
+// only. Download hrefs come back as templates (ids replaced, no query); the first PDF link is returned raw
+// for the one bounded GET and never written anywhere.
+const CF_SCRIPT = [
+  '(function(){',
+  '  var out = { composer: { textareas: 0, richText: 0, hosts: [], buttons: [] }, hrefTemplates: [], links: 0, pdfHref: "", roots: 0 };',
+  '  var FEED_RE = /feed|chatter|publisher/;',
+  '  var seen = 0;',
+  '  function txt(s){ return String(s == null ? "" : s).replace(/\\s+/g, " ").trim().slice(0, 120); }',
+  '  function add(arr, v){ if (v && arr.indexOf(v) < 0 && arr.length < 40) arr.push(v); }',
+  '  function attr(el, n){ try { return el.getAttribute(n) || ""; } catch (e) { return ""; } }',
+  '  function inFeed(el){ var n = el.parentNode || null; for (var k = 0; k < 40 && n; k++) { if (n.nodeType === 11) { n = n.host || null; if (!n) break; }',
+  '    var tg = String(n.tagName || "").toLowerCase(); if (tg.indexOf("-") > 0 && FEED_RE.test(tg)) return tg; n = n.parentNode || null; } return ""; }',
+  '  function tpl(h){ return String(h).split("?")[0].split("#")[0].replace(/068[A-Za-z0-9]{12,15}/g, "{versionId}").replace(/069[A-Za-z0-9]{12,15}/g, "{documentId}").slice(0, 300); }',
+  '  function walk(root, depth){',
+  '    if (!root || depth > 25 || seen > 30000) return;',
+  '    out.roots++;',
+  '    var els = root.querySelectorAll("*");',
+  '    for (var i = 0; i < els.length; i++) {',
+  '      var el = els[i]; seen++;',
+  '      var tag = String(el.tagName || "").toLowerCase();',
+  '      var host = (tag === "textarea" || /rich-text|input-rich/.test(tag) || tag === "button" || tag === "lightning-button") ? inFeed(el) : "";',
+  '      if (host && tag === "textarea") { out.composer.textareas++; add(out.composer.hosts, host); }',
+  '      if (host && /rich-text|input-rich/.test(tag)) { out.composer.richText++; add(out.composer.hosts, host); }',
+  '      if (host && (tag === "button" || tag === "lightning-button")) add(out.composer.buttons, txt(attr(el, "label") || attr(el, "title") || el.textContent));',
+  '      if (tag === "a") {',
+  '        var h = attr(el, "href");',
+  '        if (h && (h.indexOf("servlet.shepherd") >= 0 || h.indexOf("/version/download/") >= 0)) {',
+  '          out.links++; add(out.hrefTemplates, tpl(h));',
+  '          var label = txt(el.textContent) + " " + attr(el, "title") + " " + attr(el, "download");',
+  '          if (!out.pdfHref && /\\.pdf\\b/i.test(label)) out.pdfHref = String(h).slice(0, 500);',
+  '        }',
+  '      }',
   '      if (el.shadowRoot) walk(el.shadowRoot, depth + 1);',
   '    }',
   '  }',
@@ -405,6 +458,22 @@ function createCensus() {
   }
   const scripts = { seen: 0, scanned: 0, skippedLarge: 0, failed: 0 };
 
+  // chatter-files: code excerpts around feed / publisher / file terms (code only), and the page's own
+  // getModel requests (descriptor, query keys, param keys, isChatterEnabled type/value).
+  const cfUses = {};
+  function _scanCf(u) {
+    for (const term of CF_TERMS) {
+      let i = 0;
+      const arr = cfUses[term] || (cfUses[term] = []);
+      while ((i = u.indexOf(term, i)) >= 0 && arr.length < 6) {
+        arr.push(_excerpt(u, i, 400, 900));
+        i += term.length + 900;
+      }
+    }
+  }
+  const feedModels = [];
+  function noteFeedModel(rec) { if (feedModels.length < 10) feedModels.push(rec); }
+
   function _addBundle(cls, meth, win) {
     const key = cls + '.' + meth;
     let e = bundle.get(key);
@@ -448,6 +517,7 @@ function createCensus() {
     let m;
     while ((m = pre.exec(t)) && postSites.length < 20) _addPostSite(t.slice(m.index, m.index + m[0].length + HIT_WINDOW), t.slice(Math.max(0, m.index - 400), m.index));
     _scanFeed(t);
+    _scanCf(_unescaped(t));
     if (t.includes(STAGE_IMPORT)) {
       const u = _unescaped(t);
       for (const src of (u !== t ? [u, t] : [t])) for (const r of analyzeImportCalls(src, STAGE_IMPORT)) if (stageCalls.length < 20) stageCalls.push(r);
@@ -508,8 +578,31 @@ function createCensus() {
 
   return {
     scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, uses, scripts, page, bundle,
-    stageCalls, stageImports, stageLiterals, stageHandlers,
+    stageCalls, stageImports, stageLiterals, stageHandlers, cfUses, feedModels, noteFeedModel,
   };
+}
+
+/** _findBool(v, key) -> { type, value } of the first `key` found (depth <= 8); value only when boolean. */
+function _findBool(v, key, depth) {
+  const d = depth || 0;
+  if (d > 8 || v == null || typeof v !== 'object') return null;
+  if (!Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, key)) {
+    const x = v[key];
+    return { type: x === null ? 'null' : typeof x, value: typeof x === 'boolean' ? x : null };
+  }
+  for (const k of Object.keys(v).slice(0, 200)) {
+    const r = _findBool(v[k], key, d + 1);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** _queryShape(url) -> '?r=1&<key>=1...' (keys only; values dropped). */
+function _queryShape(url) {
+  try {
+    const keys = Array.from(new URL(String(url || '')).searchParams.keys()).filter((k) => /^[\w.\-]{1,120}$/.test(k)).slice(0, 10);
+    return keys.length ? '?' + keys.map((k) => k + '=1').join('&') : '';
+  } catch (_) { return ''; }
 }
 
 /** _attachNetwork(webContents, census) -> { pending:Set<Promise>, detach } — the probe's own Network listener. */
@@ -527,13 +620,19 @@ function _attachNetwork(wc, census) {
     return params.type === 'Script' || /\/s\/sfsites\/l\/|\/components\/|\/modules\//.test(u.pathname);
   }
 
-  function _readAura(body) {
+  // requestId -> { descriptor, query, paramKeys } for the page's own feed getModel requests.
+  const feedReqs = new Map();
+
+  function _readAura(body, info) {
     const p = new URLSearchParams(String(body || ''));
     const m = safeJson(p.get('message') || '');
     const actions = m.ok && m.value && Array.isArray(m.value.actions) ? m.value.actions : [];
     for (const a of actions) {
       if (!a || typeof a !== 'object' || typeof a.descriptor !== 'string') continue;
       const prm = a.params && typeof a.params === 'object' ? a.params : {};
+      if (info && info.requestId && /\/ACTION\$getModel$/.test(a.descriptor) && /Feed|Chatter/i.test(a.descriptor) && a.descriptor.length <= 300 && feedReqs.size < 10) {
+        feedReqs.set(info.requestId, { descriptor: a.descriptor, query: _queryShape(info.url), paramKeys: Object.keys(prm).filter((k) => /^\w{1,60}$/.test(k)).slice(0, 20) });
+      }
       if (a.descriptor === APEX_DESCRIPTOR) {
         const keys = prm.params && typeof prm.params === 'object' ? Object.keys(prm.params) : [];
         census.notePageCall(String(prm.classname || ''), String(prm.method || ''), keys);
@@ -553,17 +652,33 @@ function _attachNetwork(wc, census) {
         let u;
         try { u = new URL(String(rq.url || '')); } catch (_) { return; }
         if (u.hostname !== C.HOST || u.pathname !== C.AURA_PATH) return;
-        if (typeof rq.postData === 'string' && rq.postData) _readAura(rq.postData);
+        const info = { requestId: params.requestId, url: rq.url };
+        if (typeof rq.postData === 'string' && rq.postData) _readAura(rq.postData, info);
         else if (rq.hasPostData === true) {
           track(Promise.resolve()
             .then(() => dbg.sendCommand('Network.getRequestPostData', { requestId: params.requestId }))
-            .then((r) => { if (r && typeof r.postData === 'string') _readAura(r.postData); })
+            .then((r) => { if (r && typeof r.postData === 'string') _readAura(r.postData, info); })
             .catch(() => {}));
         }
       } else if (method === 'Network.responseReceived') {
         if (_isScript(params)) { scriptReqs.add(params.requestId); census.scripts.seen++; }
       } else if (method === 'Network.loadingFinished') {
         const id = params && params.requestId;
+        if (feedReqs.has(id)) {
+          const rec = feedReqs.get(id);
+          feedReqs.delete(id);
+          track(Promise.resolve()
+            .then(() => dbg.sendCommand('Network.getResponseBody', { requestId: id }))
+            .then((r) => {
+              let text = r && typeof r.body === 'string' ? r.body : '';
+              if (r && r.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
+              const env = require('../dtna/aura').parseEnvelope(text.slice(0, BODY_MAX));
+              const found = env.ok ? _findBool(env.value, 'isChatterEnabled') : null;
+              census.noteFeedModel(Object.assign({}, rec, { isChatterEnabledType: found ? found.type : 'absent', isChatterEnabled: found ? found.value : null }));
+            })
+            .catch(() => { census.noteFeedModel(Object.assign({}, rec, { isChatterEnabledType: 'unread', isChatterEnabled: null })); }));
+          return;
+        }
         if (!scriptReqs.has(id)) return;
         scriptReqs.delete(id);
         if (Number(params.encodedDataLength) > BODY_MAX) { census.scripts.skippedLarge++; return; }
@@ -670,12 +785,15 @@ function _resolveDeps(d) {
     settleMs: Number.isFinite(x.settleMs) ? x.settleMs : SETTLE_MS,
     loadTimeoutMs: Number.isFinite(x.loadTimeoutMs) ? x.loadTimeoutMs : LOAD_TIMEOUT_MS,
     timeoutMs: Number.isFinite(x.timeoutMs) ? x.timeoutMs : OVERALL_TIMEOUT_MS,
-    mode: x.mode === 'post' || x.mode === 'stage' ? x.mode : 'full',
+    mode: _modeOf(x.mode),
     stageOutFile: typeof x.stageOutFile === 'string' && x.stageOutFile ? x.stageOutFile : STAGE_OUT_FILE,
+    caseId: typeof x.caseId === 'string' && C.CASE_ID_RE.test(x.caseId) ? x.caseId : TARGETS[0],
+    // chatter-files: the one bounded PDF GET (tests inject a stub; else the DTNA session's fetch).
+    fetch: typeof x.fetch === 'function' ? x.fetch : null,
   };
 }
 
-function _modeOf(v) { return v === 'post' || v === 'stage' ? v : 'full'; }
+function _modeOf(v) { return MODES.includes(v) ? v : 'full'; }
 
 /**
  * start({ log, env, _deps }) — the only entry point. Inert (returns false, creates nothing) unless
@@ -698,7 +816,8 @@ function start(opts) {
     stopped = true;
     _ran = true;
     try { if (unsub) unsub(); } catch (_) {}
-    _lastRun = run(Object.assign({ mode: _modeOf(env[MODE_FLAG]) }, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
+    const caseOpt = typeof env[CASE_FLAG] === 'string' && C.CASE_ID_RE.test(env[CASE_FLAG]) ? { caseId: env[CASE_FLAG] } : {};
+    _lastRun = run(Object.assign({ mode: _modeOf(env[MODE_FLAG]) }, caseOpt, deps, { log })).catch((e) => { log.warn('[dtna-probe] run threw: ' + _errName(e)); });
   };
   unsub = session.onStatus(onStatus);
   if (stopped) { try { unsub(); } catch (_) {} }
@@ -714,9 +833,11 @@ async function run(deps) {
   const D = _resolveDeps(deps);
   const at = new Date(D.now()).toISOString();
   const date = at.slice(0, 10);
-  const fileName = (D.mode === 'post' ? 'dtna-post-probe-' : D.mode === 'stage' ? 'dtna-stage-probe-' : 'dtna-probe-') + date + '.json';
+  const fileName = (D.mode === 'post' ? 'dtna-post-probe-' : D.mode === 'stage' ? 'dtna-stage-probe-'
+    : D.mode === 'chatter-files' ? 'dtna-chatter-files-probe-' : 'dtna-probe-') + date + '.json';
   const out = {
-    version: 1, at, mode: D.mode, targets: (D.mode === 'full' ? TARGETS : TARGETS.slice(0, 1)).map(caseTag),
+    version: 1, at, mode: D.mode,
+    targets: (D.mode === 'full' ? TARGETS : D.mode === 'chatter-files' ? [D.caseId] : TARGETS.slice(0, 1)).map(caseTag),
     d0: null, d1: [], d2: { repairOrders: [], calls: [], skipped: [], needsConfirmation: [] },
     d3: null, d4: null, p1: { sites: [] }, p1b: [], p2: [], classes: {},
   };
@@ -758,6 +879,7 @@ async function run(deps) {
   out.winClosedAtMs = state.closedAt ? state.closedAt - Date.parse(at) : null;
   if (code) out.code = code;
   if (D.mode === 'stage') out.stage = _stageOut(census, state);
+  if (D.mode === 'chatter-files') out.chatterFiles = _cfOut(census, state);
 
   let written = false;
   let stageWritten = false;
@@ -787,6 +909,16 @@ async function run(deps) {
     const sline = '[dtna-probe] done mode=stage keys=' + s.paramKeys.length + ' values=' + s.statusLiterals.length
       + ' file=' + (stageWritten ? path.basename(D.stageOutFile) : '-') + (code ? ' code=' + code : '');
     if (code) log.warn(sline); else log.info(sline);
+    _running = false;
+    return { ok: !code, code: code || undefined, file: written ? fileName : null };
+  }
+
+  if (D.mode === 'chatter-files') {
+    const cf = out.chatterFiles || {};
+    const cline = '[dtna-probe] done mode=chatter-files feedActions=' + out.feedActions.length + ' getModel=' + ((cf.feedModels && cf.feedModels.length) || 0)
+      + ' files=' + ((cf.files && cf.files.code) || '-') + ' download=' + ((cf.download && cf.download.status) || '-')
+      + ' file=' + (written ? fileName : '-') + (code ? ' code=' + code : '');
+    if (code) log.warn(cline); else log.info(cline);
     _running = false;
     return { ok: !code, code: code || undefined, file: written ? fileName : null };
   }
@@ -942,6 +1074,11 @@ async function _steps(D, state, census, out) {
     }
     return { code: capCode };
   }
+  if (D.mode === 'chatter-files') {
+    await _cfSteps(D, state, census, wc);
+    out.d0 = census.result();
+    return { code: capCode };
+  }
   for (const id of TARGETS) {
     if (state.aborted) break;
     await _load(D, state, C.caseUrl(id));
@@ -1064,6 +1201,120 @@ async function _steps(D, state, census, out) {
   return { code: capCode };
 }
 
+// ── chatter-files mode ────────────────────────────────────────────────────
+async function _cf(D, state) {
+  if (state.aborted || _isDestroyed(state.win)) return { code: 'DTNA_PROBE_NO_WINDOW' };
+  try {
+    const r = await Promise.race([state.win.webContents.executeJavaScript(CF_SCRIPT, true), _sleep(D.loadTimeoutMs).then(() => null)]);
+    if (!r || typeof r !== 'object') return { code: 'DTNA_PROBE_NO_RESULT' };
+    const c = r.composer && typeof r.composer === 'object' ? r.composer : {};
+    const list = (a, n, cap) => (Array.isArray(a) ? a.slice(0, n).filter((x) => typeof x === 'string').map((x) => _cap(x, cap)) : []);
+    return {
+      code: 'OK', roots: Number(r.roots) || 0,
+      composer: { textareas: Number(c.textareas) || 0, richText: Number(c.richText) || 0, hosts: list(c.hosts, 20, 120), buttons: list(c.buttons, 40, 120) },
+      // Templates only: ids replaced in-page; anything still id-like is masked here.
+      hrefTemplates: list(r.hrefTemplates, 20, 300).map((h) => h.replace(/\b(068|069|00P)[A-Za-z0-9]{12,15}\b/g, '{id}')),
+      links: Number(r.links) || 0,
+      _pdfHref: typeof r.pdfHref === 'string' ? r.pdfHref : '',
+    };
+  } catch (e) {
+    return { code: 'DTNA_PROBE_SCRIPT:' + _errName(e) };
+  }
+}
+
+/** _idCounts(value) -> counts of ContentVersion / ContentDocument / Attachment id strings (no ids). */
+function _idCounts(value) {
+  const n = { contentVersion: 0, contentDocument: 0, attachment: 0 };
+  const walk = (v, d) => {
+    if (d > 8 || v == null) return;
+    if (typeof v === 'string') {
+      if (C.CONTENT_VERSION_ID_RE.test(v)) n.contentVersion++;
+      else if (C.CONTENT_DOC_ID_RE.test(v)) n.contentDocument++;
+      else if (/^00P[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/.test(v)) n.attachment++;
+      return;
+    }
+    if (typeof v !== 'object') return;
+    for (const x of (Array.isArray(v) ? v.slice(0, 200) : Object.values(v).slice(0, 200))) walk(x, d + 1);
+  };
+  walk(value, 0);
+  return n;
+}
+
+async function _cfSteps(D, state, census, wc) {
+  try { await wc.debugger.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }); } catch (_) {}
+  const id = D.caseId;
+  state.cf = { dom: null, files: null, download: null };
+  await _load(D, state, C.caseUrl(id));
+  await _load(D, state, C.caseUrl(id) + COMMENTS_TAB_QS);
+  for (let i = 0; i < 5 && !state.aborted; i++) {
+    state.cf.dom = await _cf(D, state);
+    const dm = state.cf.dom;
+    if (dm && dm.code === 'OK' && (dm.composer.textareas || dm.composer.richText || dm.links)) break;
+    await _sleep(Math.min(3000, D.settleMs || 0));
+  }
+  if (state.net.pending.size) await Promise.allSettled(Array.from(state.net.pending));
+  if (state.aborted) return;
+  // ONE getFilesOnCase read, only when its param key is known from the bundle or the page.
+  const keys = [];
+  for (const m of [census.bundle.get(FILES_CLASS + '.getFilesOnCase'), census.page.get(FILES_CLASS + '.getFilesOnCase')]) {
+    for (const k of (m && m.paramKeys) || []) if (!keys.includes(k)) keys.push(k);
+  }
+  const key = keys.find((k) => /case|record|parent|^id$/i.test(k)) || '';
+  if (!key) state.cf.files = { code: 'DTNA_PROBE_NO_PARAM_KEY', paramKeys: keys.slice(0, 10) };
+  else if (!_isSafeRead(FILES_CLASS, 'getFilesOnCase')) state.cf.files = { code: 'DTNA_PROBE_NOT_SAFE' };
+  else {
+    const r = await D.aura._callApexRaw(FILES_CLASS, 'getFilesOnCase', { [key]: id });
+    state.cf.files = r && r.ok
+      ? { code: 'OK', paramKey: key, paramKeys: keys.slice(0, 10), shape: shapeOf(r.value, 3), ids: _idCounts(r.value) }
+      : { code: String((r && r.code) || 'DTNA_PROBE_NO_RESULT').slice(0, 60), paramKey: key };
+  }
+  if (state.aborted) return;
+  // ONE GET of the first PDF link: status, content-type, content-length and the %PDF- flag. Bytes discarded.
+  const href = state.cf.dom && state.cf.dom._pdfHref ? state.cf.dom._pdfHref : '';
+  if (state.cf.dom) delete state.cf.dom._pdfHref;
+  let url = '';
+  try { const u = new URL(href, C.BASE + '/'); if (u.protocol === 'https:' && u.hostname === C.HOST) url = u.href; } catch (_) { url = ''; }
+  if (!href || !url) { state.cf.download = { status: href ? 'bad-host' : 'no-pdf-link' }; return; }
+  try {
+    const f = D.fetch || ((u, init) => D.session.getSession().fetch(u, init));
+    const res = await Promise.race([f(url, { method: 'GET', credentials: 'include', redirect: 'manual' }), _sleep(D.loadTimeoutMs).then(() => null)]);
+    if (!res) { state.cf.download = { status: 'timeout' }; return; }
+    const get = (h) => { try { return res.headers && typeof res.headers.get === 'function' ? String(res.headers.get(h) || '') : ''; } catch (_) { return ''; } };
+    const rec = { status: Number(res.status) || 0, contentType: _cap(get('content-type').split(';')[0], 60), contentLength: Number(get('content-length')) || null, startsWithPdf: false };
+    if (rec.status === 200 && typeof res.arrayBuffer === 'function') {
+      let buf = Buffer.from(await res.arrayBuffer());
+      rec.startsWithPdf = buf.length >= 5 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+      rec.bytesBucket = buf.length < 1048576 ? '<1MB' : buf.length <= C.ATTACHMENT_MAX_BYTES ? '<=15MB' : '>15MB';
+      buf = null;
+    }
+    state.cf.download = rec;
+  } catch (e) {
+    state.cf.download = { status: 'error:' + _errName(e) };
+  }
+}
+
+/** _cfOut(census, state) -> the sanitized chatter-files result (descriptors, key names, types, counts). */
+function _cfOut(census, state) {
+  const cf = state.cf || {};
+  const dom = cf.dom ? Object.assign({}, cf.dom) : null;
+  if (dom) delete dom._pdfHref;
+  const bundleFiles = ['getFilesOnCase', 'getAttachment', 'getFileDetails'].map((m) => {
+    const b = census.bundle.get(FILES_CLASS + '.' + m);
+    const p = census.page.get(FILES_CLASS + '.' + m);
+    return { method: m, bundle: !!b, pageCalled: !!p, paramKeys: Array.from(new Set([...((b && b.paramKeys) || []), ...((p && p.paramKeys) || [])])).slice(0, 20) };
+  });
+  return {
+    feedModels: census.feedModels.slice(),
+    feedDescriptors: Array.from(census.descriptors.values()).filter((d) => /Feed|Chatter|Publisher/i.test(d.descriptor)),
+    uses: census.cfUses,
+    bundleFiles,
+    dom,
+    files: cf.files || null,
+    download: cf.download || null,
+    scripts: Object.assign({}, census.scripts),
+  };
+}
+
 /** _decide(out) -> D4 decision in the findings priority order. */
 function _decide(out) {
   const ok = out.d2.calls.filter((c) => c.code === 'OK');
@@ -1088,7 +1339,7 @@ function _resetForTests() { _armed = false; _ran = false; _running = false; _las
 function _lastRunForTests() { return _lastRun; }
 
 module.exports = {
-  start, run, ENV_FLAG, MODE_FLAG, WINDOW_TITLE, analyzeImportCalls, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT, S2_SCRIPT,
+  start, run, ENV_FLAG, MODE_FLAG, CASE_FLAG, WINDOW_TITLE, analyzeImportCalls, TARGETS, COMMENTS_TAB_QS, P2_SCRIPT, S2_SCRIPT, CF_SCRIPT,
   STAGE_IMPORT, STAGE_OUT_FILE,
   createCensus, _isSafeRead, _decide, _scrubDeep, _resetForTests, _lastRunForTests,
 };

@@ -331,6 +331,7 @@ describe('dtnaComment (dealer-visible DTNA case comment, findings §10)', () => 
       'DTNA write: post comment to Service Tracker case',
       'Unit: 122269',
       'DTNA case: ' + CASE + '  https://dtna.my.site.com/Servicetracker/s/case/' + CASE + '/detail',
+      'Channel: Case Comment',
       'Repair order: R101048154',
       'Comment type: (none)',
       'Visibility: VISIBLE TO THE DEALER (DTNA)',
@@ -424,11 +425,111 @@ describe('dtnaComment (dealer-visible DTNA case comment, findings §10)', () => 
   });
 
   it('EXTERNAL_KINDS holds only the DTNA kinds; addComment with requireApproval:false still sends directly', async () => {
-    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment', 'dtnaStage']);
+    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment', 'dtnaStage', 'dtnaChatter']);
     dsetup({ flags: { requireApproval: false } });
     const r = await gate.requestWrite(spec());
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('dtnaChatter (dealer-visible post to the DTNA case Chatter feed)', () => {
+  const CASE = '500gx000002E4U5AAK';
+  const CTEXT = 'Hi team, any update on unit 122269? SENTINEL_CHATTER';
+  const cspec = (o = {}) => Object.assign({
+    kind: 'dtnaChatter', origin: 'unit-detail-dtna-chatter', unit: '122269', aiDrafted: true,
+    payload: { caseId: CASE, repairOrderNo: 'R101048154', text: CTEXT }, interactive: false,
+  }, o);
+  let post;
+  function csetup(over = {}) {
+    post = vi.fn(async () => ({ ok: true, feedItemId: '0D5gx000000AbCdCAK' }));
+    setup(Object.assign({ dtnaPostChatter: post }, over));
+  }
+
+  it('previewOf shows the channel, case, unit, dealer visibility, AI-drafted flag and the exact text', () => {
+    const pv = gate.previewOf('dtnaChatter', { caseId: CASE, repairOrderNo: 'R101048154', text: CTEXT }, { unit: '122269', origin: 'unit-detail-dtna-chatter', aiDrafted: true });
+    expect(pv).toBe([
+      'DTNA write: post to the case Chatter feed',
+      'Channel: Chatter (case feed)',
+      'Unit: 122269',
+      'DTNA case: ' + CASE + '  https://dtna.my.site.com/Servicetracker/s/case/' + CASE + '/detail',
+      'Repair order: R101048154',
+      'Visibility: VISIBLE TO THE DEALER (DTNA)',
+      'AI-drafted: yes',
+      'Origin: unit-detail-dtna-chatter',
+      'Text (exact, ' + CTEXT.length + ' chars):',
+      CTEXT,
+    ].join('\n'));
+    expect(gate.previewOf('dtnaChatter', { caseId: CASE, text: 'x' }, { aiDrafted: false })).toContain('AI-drafted: no');
+  });
+
+  it('is gated even with requireApproval:false (no window -> pending-approval, nothing sent)', async () => {
+    csetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(cspec());
+    expect(r.outcome).toBe('pending-approval');
+    expect(r.error).toContain('nothing was sent to DTNA');
+    expect(post).not.toHaveBeenCalled();
+    const it0 = gate.list().items.find((i) => i.id === r.id);
+    expect(it0.kind).toBe('dtnaChatter');
+    expect(it0.preview).toContain('Channel: Chatter (case feed)');
+  });
+
+  it('approvedBy does not bypass approval (logged approvedBy-ignored)', async () => {
+    csetup({ flags: { requireApproval: false } });
+    const r = await gate.requestWrite(cspec({ approvedBy: 'some-modal' }));
+    expect(r.outcome).toBe('pending-approval');
+    expect(post).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.startsWith('[write] approvedBy-ignored kind=dtnaChatter'))).toBe(true);
+  });
+
+  it('interactive approve sends exactly once with the stored payload; a second approve is refused', async () => {
+    csetup({ flags: { requireApproval: false } });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(cspec({ interactive: true }));
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].data.kind).toBe('dtnaChatter');
+    expect(sent[0].data.preview).toContain('VISIBLE TO THE DEALER (DTNA)');
+    expect(post).not.toHaveBeenCalled();
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r).toMatchObject({ ok: true, outcome: 'sent', result: { feedItemId: '0D5gx000000AbCdCAK' } });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][0]).toEqual({ caseId: CASE, repairOrderNo: 'R101048154', text: CTEXT });
+    const again = await gate.approve(r.id);
+    expect(again.outcome).toBe('skipped-not-approved');
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it('the token is single-use and cannot be replayed into aura.callChatterWrite', async () => {
+    const aura = require('../src/dtna/aura.js');
+    let token = null;
+    let accepted = null;
+    csetup({ dtnaPostChatter: vi.fn(async (_p, t) => { token = t; accepted = gate.isApprovalToken(t); return { ok: true, feedItemId: '' }; }) });
+    const r = await gate.requestWrite(cspec());
+    await gate.approve(r.id);
+    expect(accepted).toBe(true);
+    expect(gate.isApprovalToken(token)).toBe(false);
+    const fetch = vi.fn();
+    aura._setDeps({ fetch, chatterConfig: { transport: 'apex', classname: 'E2E_X', method: 'postX', params: {} }, isApprovalToken: gate.isApprovalToken });
+    try {
+      expect(await aura.callChatterWrite({ caseId: CASE, text: 'x' }, token)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { aura._setDeps({}); }
+  });
+
+  it('a failed / throwing post -> code only (DTNA_INTERNAL for a throw); logs never carry the text', async () => {
+    csetup({ dtnaPostChatter: vi.fn(async () => ({ ok: false, code: 'DTNA_CHATTER_REJECTED', message: 'x ' + CTEXT })) });
+    const r = await gate.requestWrite(cspec());
+    expect(await gate.approve(r.id)).toEqual({ ok: false, outcome: 'send-failed', id: r.id, result: null, error: 'DTNA_CHATTER_REJECTED' });
+    csetup({ dtnaPostChatter: vi.fn(async () => { throw new Error('boom ' + CTEXT); }) });
+    const r2 = await gate.requestWrite(cspec());
+    expect(await gate.approve(r2.id)).toMatchObject({ ok: false, outcome: 'send-failed', error: 'DTNA_INTERNAL' });
+    csetup();
+    const r3 = await gate.requestWrite(cspec());
+    await gate.approve(r3.id);
+    expect(logs.some((l) => l.startsWith('[write] sent kind=dtnaChatter') && l.includes('len=' + CTEXT.length))).toBe(true);
+    expect(logs.join('\n')).not.toContain('SENTINEL_CHATTER');
   });
 });
 

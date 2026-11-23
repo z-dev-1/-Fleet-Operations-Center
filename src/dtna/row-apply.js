@@ -7,6 +7,7 @@
  */
 const C = require('./constants');
 const { canWriteDtnaOffsite, caseIdFromUrl } = require('./join');
+const { estimateContextText, readPdfs } = require('./estimate-text');
 
 function _str(v) { return v == null ? '' : String(v); }
 
@@ -39,12 +40,15 @@ function applyCaseToRow(row, entry, opts) {
   row.offsiteStageDetail = _str(entry.caseStatus);
   row.offsiteStageSince = _str(entry.stageSince);
   row.dtnaCaseNumber = _str(entry.caseNumber);
+  // Extracted estimate-PDF context; rows without estimate PDFs get no field, a stale one is cleared.
+  const est = estimateContextText(entry);
+  if (est || row.dtnaEstimateText) row.dtnaEstimateText = est;
   row._stageReadAt = new Date(nowMs).toISOString();
   if (!row.dealerName && entry.dealerName) row.dealerName = _str(entry.dealerName);
   if (!row.dealerCode && entry.dealerCode) row.dealerCode = _str(entry.dealerCode);
   const wrId = _str(o.wrId) || _str(row.workRequestId);
   if (o.extract) {
-    row.offsiteFacts = require('../repair-intel/wo-extract').extractDtnaFeed(_str(entry.thread), { now: nowMs, wrCreatedAt: _wrCreatedAt(row, wrId) });
+    row.offsiteFacts = require('../repair-intel/wo-extract').extractDtnaFeed(_str(entry.thread), { now: nowMs, wrCreatedAt: _wrCreatedAt(row, wrId), attachments: readPdfs(entry) });
   }
   row._offsiteWrId = wrId;
   return { applied: true, reason: 'ok' };

@@ -210,6 +210,104 @@ describe('stage change (Phase C)', () => {
   });
 });
 
+describe('Chatter post (postApprovedChatter)', () => {
+  const AURA_CFG = {
+    transport: 'aura', descriptor: 'serviceComponent://ui.chatter.components.aura.components.forceChatter.publisher.PublisherController/ACTION$postFeedElement',
+    query: '?r=1&x=1', params: { subjectId: '$caseId', body: { messageSegments: [{ type: 'Text', text: '$text' }] }, visibility: 'AllUsers' },
+    success: { idPath: 'id' },
+  };
+  const APEX_CFG = { transport: 'apex', classname: 'E2E_UTP_ChatterController', method: 'postToFeed', params: { caseId: '$caseId', body: '$text', files: [] }, success: { value: 201 } };
+  const CP = { caseId: CASE_ID, repairOrderNo: 'R101048154', text: 'Chatter hello SENTINEL_TEXT' };
+  const FEED_ID = '0D5gx000000AbCdCAK';
+
+  it('shipped CHATTER_POST_PARAMS is null -> not configured, zero aura calls', async () => {
+    expect(C.CHATTER_POST_PARAMS).toBeNull();
+    const aura = { callChatterWrite: vi.fn() };
+    writes._setDeps({ aura });
+    expect(writes.isChatterConfigured()).toBe(false);
+    expect(await writes.postApprovedChatter(CP, {})).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(aura.callChatterWrite).not.toHaveBeenCalled();
+  });
+
+  it('buildChatterParams: nested substitution (aura and apex shapes)', () => {
+    expect(writes.buildChatterParams(AURA_CFG, CP)).toEqual({ subjectId: CASE_ID, body: { messageSegments: [{ type: 'Text', text: CP.text }] }, visibility: 'AllUsers' });
+    expect(writes.buildChatterParams(APEX_CFG, CP)).toEqual({ caseId: CASE_ID, body: CP.text, files: [] });
+  });
+
+  it('buildChatterParams: unknown placeholder, missing $text / $caseId, bad key, bad case id -> null', () => {
+    expect(writes.buildChatterParams({ params: { subjectId: '$caseId', body: '$text', x: '$other' } }, CP)).toBeNull();
+    expect(writes.buildChatterParams({ params: { subjectId: '$caseId' } }, CP)).toBeNull();
+    expect(writes.buildChatterParams({ params: { body: '$text' } }, CP)).toBeNull();
+    expect(writes.buildChatterParams({ params: { 'bad key': '$caseId', body: '$text' } }, CP)).toBeNull();
+    expect(writes.buildChatterParams(AURA_CFG, Object.assign({}, CP, { caseId: 'nope' }))).toBeNull();
+    let deep = '$text';
+    for (let i = 0; i < 8; i++) deep = { n: deep };
+    expect(writes.buildChatterParams({ params: { subjectId: '$caseId', deep } }, CP)).toBeNull();
+  });
+
+  it('isChatterConfigured needs a valid transport (REST is not one)', () => {
+    writes._setDeps({ chatterConfig: AURA_CFG });
+    expect(writes.isChatterConfigured()).toBe(true);
+    writes._setDeps({ chatterConfig: APEX_CFG });
+    expect(writes.isChatterConfigured()).toBe(true);
+    writes._setDeps({ chatterConfig: Object.assign({}, AURA_CFG, { transport: 'rest' }) });
+    expect(writes.isChatterConfigured()).toBe(false);
+    writes._setDeps({ chatterConfig: Object.assign({}, APEX_CFG, { classname: 'Other' }) });
+    expect(writes.isChatterConfigured()).toBe(false);
+  });
+
+  it('success.idPath: a FeedItem id -> sent with feedItemId; anything else -> DTNA_CHATTER_REJECTED; the token passes through untouched', async () => {
+    const token = {};
+    const aura = { callChatterWrite: vi.fn(async () => ({ ok: true, value: { id: FEED_ID } })) };
+    writes._setDeps({ aura, chatterConfig: AURA_CFG });
+    expect(await writes.postApprovedChatter(CP, token)).toEqual({ ok: true, feedItemId: FEED_ID });
+    expect(aura.callChatterWrite).toHaveBeenCalledTimes(1);
+    expect(aura.callChatterWrite.mock.calls[0][1]).toBe(token);
+    expect(aura.callChatterWrite.mock.calls[0][0]).toEqual(writes.buildChatterParams(AURA_CFG, CP));
+    aura.callChatterWrite.mockResolvedValueOnce({ ok: true, value: { id: 'a1Agx0000000099AAA' } });
+    expect(await writes.postApprovedChatter(CP, token)).toEqual({ ok: false, code: 'DTNA_CHATTER_REJECTED' });
+    expect(logger.text()).not.toContain('SENTINEL_TEXT');
+    expect(logger.text()).toContain('[dtna] post-chatter');
+  });
+
+  it('success.value: match -> sent; mismatch -> DTNA_CHATTER_REJECTED; transport codes pass through', async () => {
+    const aura = { callChatterWrite: vi.fn(async () => ({ ok: true, value: 201 })) };
+    writes._setDeps({ aura, chatterConfig: APEX_CFG });
+    expect(await writes.postApprovedChatter(CP, {})).toEqual({ ok: true, feedItemId: '' });
+    aura.callChatterWrite.mockResolvedValueOnce({ ok: true, value: 500 });
+    expect(await writes.postApprovedChatter(CP, {})).toEqual({ ok: false, code: 'DTNA_CHATTER_REJECTED' });
+    aura.callChatterWrite.mockResolvedValueOnce({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(await writes.postApprovedChatter(CP, {})).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    aura.callChatterWrite.mockRejectedValueOnce(new Error('boom'));
+    expect(await writes.postApprovedChatter(CP, {})).toEqual({ ok: false, code: 'DTNA_INTERNAL' });
+  });
+
+  it('too long / empty / bad case id are refused before any call', async () => {
+    const aura = { callChatterWrite: vi.fn() };
+    writes._setDeps({ aura, chatterConfig: AURA_CFG });
+    expect(await writes.postApprovedChatter(Object.assign({}, CP, { text: 'x'.repeat(C.CHATTER_POST_MAX + 1) }), {})).toEqual({ ok: false, code: 'DTNA_TEXT_TOO_LONG' });
+    expect(await writes.postApprovedChatter(Object.assign({}, CP, { text: '  ' }), {})).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });
+    expect(await writes.postApprovedChatter(Object.assign({}, CP, { caseId: 'x' }), {})).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT' });
+    expect(aura.callChatterWrite).not.toHaveBeenCalled();
+  });
+});
+
+describe('static: callChatterWrite has one caller', () => {
+  it('under src/, only src/dtna/writes.js calls callChatterWrite( outside src/dtna/aura.js', () => {
+    const SRC = path.join(WT_ROOT, 'src');
+    const hits = [];
+    const walk = (d) => {
+      for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, f.name);
+        if (f.isDirectory()) walk(p);
+        else if (f.name.endsWith('.js') && fs.readFileSync(p, 'utf8').includes('callChatterWrite(')) hits.push(path.relative(SRC, p).replace(/\\/g, '/'));
+      }
+    };
+    walk(SRC);
+    expect(hits.filter((h) => h !== 'dtna/aura.js')).toEqual(['dtna/writes.js']);
+  });
+});
+
 describe('static: callWrite has one caller', () => {
   it('under src/, only src/dtna/writes.js calls callWrite( outside src/dtna/aura.js', () => {
     const SRC = path.join(WT_ROOT, 'src');

@@ -218,6 +218,162 @@ describe('pullCase', () => {
   });
 });
 
+describe('Chatter + Files: getChatterEnabled', () => {
+  it('parses a nested isChatterEnabled; null when absent; read codes pass through', async () => {
+    const a = fakeAura();
+    a.getFeedModel = vi.fn(async () => ({ ok: true, value: { model: { feed: { config: { isChatterEnabled: false } } } } }));
+    useAura(a);
+    expect(await client.getChatterEnabled(CASE_ID)).toEqual({ ok: true, value: false });
+    a.getFeedModel.mockResolvedValueOnce({ ok: true, value: [{ x: 1 }, { isChatterEnabled: true }] });
+    expect(await client.getChatterEnabled(CASE_ID)).toEqual({ ok: true, value: true });
+    a.getFeedModel.mockResolvedValueOnce({ ok: true, value: { isChatterEnabled: 'yes' } });
+    expect(await client.getChatterEnabled(CASE_ID)).toEqual({ ok: true, value: null });
+    a.getFeedModel.mockResolvedValueOnce({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(await client.getChatterEnabled(CASE_ID)).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    a.getFeedModel.mockResolvedValueOnce({ ok: true, value: {} });
+    expect(await client.getChatterEnabled(CASE_ID, { silent: true })).toEqual({ ok: true, value: null });
+    expect(a.getFeedModel.mock.calls.at(-1)).toEqual([CASE_ID, { silent: true }]);
+  });
+});
+
+describe('Chatter + Files: attachments inside pullCase', () => {
+  const V = (n) => '068gx0000' + String(n).padStart(6, '0') + 'AAK';
+  const att = (n, o = {}) => Object.assign({ versionId: V(n), documentId: '', name: 'E10' + n + '.pdf', ext: 'pdf', size: 1000 + n, createdAt: '2026-09-2' + n + 'T10:00:00.000Z' }, o);
+  const TEXT = 'Dealer estimate\nBrake chamber P/N K123-456 $245.10\nGrand Total $1,234.56';
+  let files;
+  let extractor;
+  let opened;
+  function useFiles(list, o = {}) {
+    const a = fakeAura();
+    opened = 0;
+    extractor = { extract: vi.fn(async () => (o.extract ? o.extract() : { ok: true, status: 'read', text: TEXT, truncated: false })), close: vi.fn() };
+    files = {
+      listAttachments: vi.fn(async () => (o.listResult || { ok: true, list })),
+      downloadPdf: vi.fn(async (x) => (o.download ? o.download(x) : { ok: true, buffer: Buffer.from('%PDF-1.4 SENTINEL_BYTES') })),
+      isPdf: require('../src/dtna/files.js').isPdf,
+    };
+    const estimatePdf = { openExtractor: () => { opened++; return extractor; }, parseEstimateText: require('../src/dtna/estimate-pdf.js').parseEstimateText };
+    session = { notePulled: vi.fn() };
+    client._setDeps({ aura: a, session, now: () => (o.now || NOW), sleep: async () => {}, files, estimatePdf });
+    return a;
+  }
+
+  it('unconfigured list (shipped) -> pull identical plus attachments: [], no download, no extractor', async () => {
+    useAura(fakeAura());
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(r.entry.attachments).toEqual([]);
+    expect(r.entry.attachmentsCode).toBe('DTNA_ATTACHMENTS_NOT_CONFIGURED');
+    expect(r.entry.commentCount).toBe(3);
+  });
+
+  it('stores attachments[] with text, line items and the labelled total; one extractor, closed after use', async () => {
+    useFiles([att(1), att(2), { versionId: V(9), name: 'photo.jpg', ext: 'jpg', size: 5 }]);
+    const r = await client.pullCase(CASE_ID);
+    expect(files.listAttachments).toHaveBeenCalledTimes(1);
+    expect(files.listAttachments.mock.calls[0][0]).toBe(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(2);
+    expect(opened).toBe(1);
+    expect(extractor.close).toHaveBeenCalledTimes(1);
+    const list = dstore.get(CASE_ID).attachments;
+    expect(list.map((a) => a.name)).toEqual(['E102.pdf', 'E101.pdf', 'photo.jpg']);
+    expect(list[0]).toMatchObject({ kind: 'pdf', status: 'read', textLen: TEXT.length, total: 1234.56, totalLabeled: true });
+    expect(list[0].text).toBe(TEXT);
+    expect(list[0].lineItems[0]).toEqual({ desc: 'Brake chamber P/N K123-456', amount: 245.1, kind: 'part' });
+    expect(list[2]).toMatchObject({ status: 'skipped-type', kind: 'jpg' });
+    expect(JSON.stringify(dstore.get(CASE_ID))).not.toContain('SENTINEL_BYTES');
+  });
+
+  it('an unchanged attachment set within 7 days -> zero downloads on the next pull', async () => {
+    useFiles([att(1)]);
+    await client.pullCase(CASE_ID);
+    useFiles([att(1)], { now: NOW + 6 * 864e5 });
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).not.toHaveBeenCalled();
+    expect(opened).toBe(0);
+    expect(dstore.get(CASE_ID).attachments[0].text).toBe(TEXT);
+  });
+
+  it('a changed size, a new versionId or a stale (8 days) extraction -> re-download', async () => {
+    useFiles([att(1)]);
+    await client.pullCase(CASE_ID);
+    useFiles([att(1, { size: 9999 })]);
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(1);
+    useFiles([att(1, { size: 9999 }), att(3)]);
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(1);
+    expect(files.downloadPdf.mock.calls[0][0].versionId).toBe(V(3));
+    useFiles([att(1, { size: 9999 }), att(3)], { now: NOW + 8 * 864e5 });
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed download is retried on the next pull', async () => {
+    useFiles([att(1)], { download: () => ({ ok: false, code: 'DTNA_HTTP_ERROR' }) });
+    await client.pullCase(CASE_ID);
+    expect(dstore.get(CASE_ID).attachments[0]).toMatchObject({ status: 'failed', code: 'DTNA_HTTP_ERROR' });
+    useFiles([att(1)]);
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(1);
+    expect(dstore.get(CASE_ID).attachments[0].status).toBe('read');
+  });
+
+  it('at most ATTACHMENT_MAX_PER_PULL downloads per pull, newest first; the rest are pending', async () => {
+    const C = require('../src/dtna/constants.js');
+    useFiles([1, 2, 3, 4, 5, 6].map((n) => att(n)));
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(C.ATTACHMENT_MAX_PER_PULL);
+    expect(files.downloadPdf.mock.calls.map((c) => c[0].versionId)).toEqual([V(6), V(5), V(4), V(3)]);
+    expect(dstore.get(CASE_ID).attachments.filter((a) => a.status === 'pending').length).toBe(2);
+  });
+
+  it('only the newest ATTACHMENT_KEEP_TEXT PDFs keep their text', async () => {
+    const C = require('../src/dtna/constants.js');
+    useFiles([1, 2, 3, 4].map((n) => att(n)));
+    await client.pullCase(CASE_ID);
+    useFiles([1, 2, 3, 4, 5, 6].map((n) => att(n)));
+    await client.pullCase(CASE_ID);
+    const list = dstore.get(CASE_ID).attachments;
+    expect(list.filter((a) => a.text).length).toBe(C.ATTACHMENT_KEEP_TEXT);
+    expect(list[list.length - 1].text).toBe('');
+    expect(list[list.length - 1].total).toBe(1234.56);
+  });
+
+  it('a declared size over 15MB is skipped-size with no download', async () => {
+    useFiles([att(1, { size: 16 * 1024 * 1024 })]);
+    await client.pullCase(CASE_ID);
+    expect(files.downloadPdf).not.toHaveBeenCalled();
+    expect(dstore.get(CASE_ID).attachments[0].status).toBe('skipped-size');
+  });
+
+  it('a FATAL download code stops the attachment step but the case pull succeeds', async () => {
+    useFiles([att(1), att(2)], { download: () => ({ ok: false, code: 'DTNA_SESSION_EXPIRED' }) });
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(r.entry.commentCount).toBe(3);
+    expect(files.downloadPdf).toHaveBeenCalledTimes(1);
+    expect(r.entry.attachmentsCode).toBe('DTNA_SESSION_EXPIRED');
+  });
+
+  it('includeComments:false keeps the previous attachments (no list read)', async () => {
+    useFiles([att(1)]);
+    await client.pullCase(CASE_ID);
+    useFiles([att(1), att(2)]);
+    const r = await client.pullCase(CASE_ID, { includeComments: false });
+    expect(files.listAttachments).not.toHaveBeenCalled();
+    expect(r.entry.attachments.map((a) => a.versionId)).toEqual([V(1)]);
+  });
+
+  it('a throwing extractor never fails the pull; logs carry counts only', async () => {
+    useFiles([att(1)], { extract: () => { throw new Error('boom SENTINEL_MSG'); } });
+    const r = await client.pullCase(CASE_ID);
+    expect(r.ok).toBe(true);
+    expect(dstore.get(CASE_ID).attachments[0].status).toBe('failed');
+    expect(extractor.close).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Phase D: case number + silent pulls', () => {
   // The real getCaseRecord value has no CaseNumber (probe D1).
   const { CaseNumber: _drop, ...REAL_RECORD } = CASE_RECORD;

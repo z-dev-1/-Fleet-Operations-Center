@@ -12,7 +12,8 @@
  *
  * Returns: { ok, caseUrl, source:'dtna', scrapedAt, offsiteText, statusText,
  *            estimateComments, offsiteStage, offsiteStageDetail, offsiteStageSince,
- *            dtnaCaseNumber, bestUrl, bestLabel, error, rawThread }
+ *            dtnaCaseNumber, bestUrl, bestLabel, error, rawThread,
+ *            estimateText (bounded extracted estimate-PDF context), attachments (the read PDFs) }
  * No entry returns ok:false with error 'no DTNA pull yet' (signed in) or
  * 'DTNA signed out'. Opt out with DTNA_ENRICH=0.
  */
@@ -22,7 +23,7 @@ const DTNA_CASE_RE = /https?:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/(
 function _empty(caseUrl, err) {
   return { ok: false, caseUrl: caseUrl || '', source: caseUrl ? 'dtna' : 'none',
     scrapedAt: new Date().toISOString(), offsiteText: '', statusText: '',
-    estimateComments: '', offsiteStage: '', error: err || null };
+    estimateComments: '', offsiteStage: '', estimateText: '', attachments: [], error: err || null };
 }
 
 /**
@@ -45,6 +46,8 @@ async function enrichDtna(caseUrl, opts) {
     offsiteStage: entry.offsiteStage || '', offsiteStageDetail: entry.caseStatus || '',
     offsiteStageSince: entry.stageSince || '', dtnaCaseNumber: entry.caseNumber || '',
     bestUrl: caseUrl, bestLabel: 'DTNA Case', error: null, rawThread: entry.thread,
+    estimateText: require('../dtna/estimate-text').estimateContextText(entry),
+    attachments: require('../dtna/estimate-text').readPdfs(entry),
   };
 }
 

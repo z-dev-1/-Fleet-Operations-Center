@@ -41,6 +41,21 @@ function headers() {
 }
 function resp(status, body) { return { status, type: 'basic', headers: headers(), text: async () => body }; }
 
+// Chatter + Files sentinels: file name, extracted PDF text, a $ amount and the ContentVersion id.
+const CF_FILE_NAME = 'SENTINEL_FILE_NAME_fn3q';
+const CF_PDF_TEXT = 'SENTINEL_PDF_TEXT_pt7w';
+const CF_AMOUNT = '$987,654.32';
+const CF_VERSION_ID = '068gx000009ZzYyAAK';
+const cf = {
+  feedReads: 0, chatterCalls: [], downloads: [], chatterOn: true,
+  pdf: require('./helpers/dtna-estimate-pdf.cjs').makeEstimatePdf([
+    'Dealer estimate E101048154 for unit 122269 at the dealer repair location',
+    CF_PDF_TEXT + ' brake chamber P/N K123-456  $245.10',
+    'Labor 2.5 hrs  $312.50',
+    'Grand Total  ' + CF_AMOUNT,
+  ]),
+};
+
 let fetchCount = 0;
 let postCalls = [];
 let stageCalls = [];
@@ -56,6 +71,12 @@ async function fetchImpl(_url, init) {
     if (mode === 'servletExpiredOnce') { mode = 'ok'; return resp(200, SERVLET_BODY.replace('"sr":27120', '"sr":0')); }
     return resp(200, SERVLET_BODY);
   }
+  // Chatter + Files: the authenticated PDF download (bytes carry the sentinel text, name and amount).
+  if (String(_url).includes('/version/download/')) {
+    cf.downloads.push(_url);
+    const buf = cf.pdf;
+    return { status: 200, type: 'basic', headers: headers(), arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
+  }
   if (mode === 'invalidOnce') { mode = 'ok'; return resp(200, invalidSession()); }
   if (mode === 'invalid') return resp(200, invalidSession());
   if (mode === 'sync') return resp(200, outOfSync());
@@ -67,7 +88,19 @@ async function fetchImpl(_url, init) {
   if (/RecordUiController\/ACTION\$getRecordWithFields$/.test(action.descriptor)) {
     return resp(200, success({ apiName: 'Case', id: action.params.recordId, fields: { CaseNumber: { value: '15667050', displayValue: null }, Owner: { value: SENTINEL_EMAIL } } }, { raw: true }));
   }
+  // Chatter + Files: the feed config read (sentinels next to isChatterEnabled) and the Chatter post.
+  if (/ACTION\$getModel$/.test(action.descriptor)) {
+    cf.feedReads++;
+    return resp(200, success({ feed: { isChatterEnabled: cf.chatterOn, title: SENTINEL_COMMENT, owner: SENTINEL_EMAIL, token: SENTINEL_TOKEN } }, { raw: true }));
+  }
+  if (/ACTION\$postFeedElement$/.test(action.descriptor)) {
+    cf.chatterCalls.push(action.params);
+    return resp(200, success({ id: '0D5gx000000AbCdCAK', body: { text: SENTINEL_COMMENT }, actor: SENTINEL_EMAIL }, { raw: true }));
+  }
   const { method, params } = action.params;
+  if (method === 'getFilesOnCase') {
+    return resp(200, success([{ ContentVersionId: CF_VERSION_ID, Title: CF_FILE_NAME + '.pdf', FileExtension: 'pdf', ContentSize: cf.pdf.length, CreatedDate: '2026-09-25T08:00:00.000Z', Owner: SENTINEL_EMAIL }]));
+  }
   const isMain = params.caseId === CASE_ID;
   if (method === 'getCaseRecord') {
     const rec = Object.assign({}, isMain ? CASE_RECORD : NO_RO_RECORD, { CreatedBy: { Email: SENTINEL_EMAIL }, Portal_User_Email__c: SENTINEL_EMAIL },
@@ -622,7 +655,149 @@ describe('DTNA redaction: background sign-in (Phase E)', () => {
   });
 });
 
+// ── Chatter + Files: the channel probe, the gated Chatter post and the estimate-PDF pull ──
+describe('DTNA redaction: Chatter + attachments', () => {
+  const gate = require('../src/writes/write-gate');
+  const FEED = { descriptor: 'serviceComponent://ui.chatter.components.aura.components.forceChatter.chatter.ForceCommunityFeedController/ACTION$getModel', query: '?r=1&getModel=1', params: { subjectId: '$caseId' }, enabledKey: 'isChatterEnabled' };
+  const POST = {
+    transport: 'aura', descriptor: 'serviceComponent://ui.chatter.components.aura.components.forceChatter.publisher.PublisherController/ACTION$postFeedElement',
+    query: '?r=1&postFeedElement=1', params: { subjectId: '$caseId', body: { text: '$text' } }, success: { idPath: 'id' },
+  };
+  const LIST = { source: 'apex', classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { caseId: '$caseId' },
+    fields: { versionId: 'ContentVersionId', name: 'Title', ext: 'FileExtension', size: 'ContentSize', createdAt: 'CreatedDate' } };
+  const DL = { urlTemplate: 'https://dtna.my.site.com/Servicetracker/sfc/servlet.shepherd/version/download/{versionId}' };
+  const TEXT = 'Chatter update ' + SENTINEL_COMMENT;
+  // Strings that must never reach a log, an IPC result or a sendToWindow payload.
+  const FILE_SENTINELS = [CF_FILE_NAME, CF_PDF_TEXT, CF_AMOUNT, '987654.32', CF_VERSION_ID, 'servlet.shepherd', '%PDF-', 'BaseFont'];
+  let approvals;
+
+  async function cfSetup({ configured = true } = {}) {
+    setup();
+    approvals = [];
+    cf.feedReads = 0; cf.chatterCalls = []; cf.downloads = []; cf.chatterOn = true;
+    gate._setDepsForTest({
+      flags: { requireApproval: false },   // dealer-visible: must still be gated
+      notify: () => {},
+      log: (m) => logger.lines.push({ ns: 'write-gate', level: 'info', args: [m] }),
+    });
+    gate.setWindowGetter(() => ({ isDestroyed: () => false, webContents: { send: (ch, d) => { if (ch === 'relayWrites:approval-request') approvals.push(d); } } }));
+    if (configured) {
+      require('../src/dtna/aura')._setDeps({ chatterFeedRead: FEED, chatterConfig: POST, attachmentListRead: LIST });
+      require('../src/dtna/writes')._setDeps({ chatterConfig: POST });
+      require('../src/dtna/files')._setDeps({ listConfig: LIST, downloadConfig: DL });
+      // Real pdfjs worker; a longer parse timer so a loaded machine (full suite) does not time it out.
+      require('../src/dtna/client')._setDeps({ extractorDeps: { spawnWorker: require('./helpers/jmctx-worker.cjs').spawnRealWorker, getChildRss: () => undefined, limits: { PARSE_TIMEOUT_MS: 100000 } } });
+    }
+    await signIn();
+  }
+
+  afterEach(() => { gate._setDepsForTest({}); gate.setWindowGetter(null); });
+
+  function assertNoFileData(results) {
+    const t = logger.text();
+    for (const s of FILE_SENTINELS) expect(t, s).not.toContain(s);
+    for (const r of results.concat(ctx.sent.map((x) => x[1]))) {
+      const j = JSON.stringify(r);
+      for (const s of FILE_SENTINELS) expect(j, s).not.toContain(s);
+    }
+  }
+
+  it('pull-unit downloads + extracts the estimate PDF: text only in the cache entry and the row; no name, text, $ or bytes in logs / IPC / status', async () => {
+    await cfSetup();
+    const r = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(r).toMatchObject({ ok: true, caseId: CASE_ID });
+    expect(cf.downloads).toHaveLength(1);
+    const entry = store.load('dtnaCaseCache', {}).cases[CASE_ID];
+    expect(entry.attachments[0]).toMatchObject({ status: 'read', kind: 'pdf', total: 987654.32, totalLabeled: true });
+    expect(entry.attachments[0].text).toContain(CF_PDF_TEXT);
+    const row = store.load('fleetData', {}).rows.find((x) => x.equipmentId === '122269');
+    expect(row.dtnaEstimateText).toContain(CF_PDF_TEXT);
+    expect(row.dtnaEstimateText).toContain(CF_AMOUNT);
+    // The pushed partial row is the row itself (allowed); it carries no auth value.
+    expect(containsSentinel(ctx.pushed, AUTH_SENTINELS)).toBe(null);
+    // The cache stores no bytes and no download URL.
+    const cacheText = JSON.stringify(store.load('dtnaCaseCache', {}));
+    expect(cacheText).not.toContain('%PDF-');
+    expect(cacheText).not.toContain('servlet.shepherd');
+    expect(logger.lines.some((l) => l.args[0] === '[dtna] attachments')).toBe(true);
+    expect(logger.lines.some((l) => l.args[0] === '[dtna] attachment')).toBe(true);
+    const s = await call('dtna:status');
+    assertClean([r, s]);
+    assertNoFileData([r, s]);
+    assertStoresHaveNoAuth();
+    // A second pull of the unchanged set re-uses the extraction (no second download).
+    await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(cf.downloads).toHaveLength(1);
+  }, 120000);
+
+  it('channels + post-chatter: gated with requireApproval:false, one Chatter write after approval; logs and results clean', async () => {
+    await cfSetup();
+    expect((await call('dtna:pull-unit', { equipmentId: '122269' })).ok).toBe(true);
+    logger.clear();
+    const ch = await call('dtna:channels', { equipmentId: '122269', caseId: CASE_ID });
+    expect(ch).toEqual({ ok: true, auto: 'chatter', chatter: { available: true, reason: '' }, comment: { available: true, reason: '' } });
+    const pending = call('dtna:post-chatter', { equipmentId: '122269', caseId: CASE_ID, text: TEXT, aiDrafted: true });
+    await until(() => approvals.length === 1);
+    expect(cf.chatterCalls).toHaveLength(0);                 // nothing sent before approval
+    expect(approvals[0].kind).toBe('dtnaChatter');
+    expect(approvals[0].preview).toContain('Channel: Chatter (case feed)');
+    expect(approvals[0].preview).toContain('VISIBLE TO THE DEALER (DTNA)');
+    expect(approvals[0].preview).toContain(TEXT);
+    gate.respond(approvals[0].id, true);
+    const r = await pending;
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: approvals[0].id, feedItemId: '0D5gx000000AbCdCAK' });
+    expect(cf.chatterCalls).toEqual([{ subjectId: CASE_ID, body: { text: TEXT } }]);
+    const t = logger.text();
+    expect(t).toContain('len=' + TEXT.length);
+    expect(t).not.toContain('Chatter update');
+    assertClean([ch, r]);
+    assertNoFileData([ch, r]);
+    assertStoresHaveNoAuth();
+    // External communication off: the case comment is the auto choice and post-chatter asks nothing.
+    cf.chatterOn = false;
+    const ch2 = await call('dtna:channels', { equipmentId: '122269', caseId: CASE_ID });
+    expect(ch2).toMatchObject({ auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_DISABLED' } });
+    expect(await call('dtna:post-chatter', { equipmentId: '122269', caseId: CASE_ID, text: TEXT })).toEqual({ ok: false, code: 'DTNA_CHATTER_DISABLED' });
+    expect(approvals).toHaveLength(1);
+    expect(cf.chatterCalls).toHaveLength(1);
+    assertClean([ch2]);
+  }, 120000);
+
+  it('unconfigured (shipped) Chatter and files: no prompt, zero feed / file fetches; the pull is unchanged', async () => {
+    await cfSetup({ configured: false });
+    const p = await call('dtna:pull-unit', { equipmentId: '122269' });
+    expect(p.ok).toBe(true);
+    expect(cf.downloads).toHaveLength(0);
+    expect(store.load('dtnaCaseCache', {}).cases[CASE_ID].attachments).toEqual([]);
+    fetchCount = 0;
+    const ch = await call('dtna:channels', { equipmentId: '122269', caseId: CASE_ID });
+    expect(ch).toMatchObject({ auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_NOT_CONFIGURED' } });
+    const r = await call('dtna:post-chatter', { equipmentId: '122269', caseId: CASE_ID, text: TEXT });
+    expect(r).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(approvals).toHaveLength(0);
+    expect(fetchCount).toBe(0);
+    expect(cf.feedReads).toBe(0);
+    assertClean([p, ch, r]);
+  });
+});
+
 describe('DTNA static guards', () => {
+  it('Chatter + Files: files.js / estimate-pdf.js have no JSON.parse( or console-message; pending.js / estimate-text.js require no network module; only files.js downloads', () => {
+    const D = path.join(WT_ROOT, 'src', 'dtna');
+    for (const f of ['files.js', 'estimate-pdf.js']) {
+      const src = fs.readFileSync(path.join(D, f), 'utf8');
+      expect(src, f).not.toContain('JSON.parse(');
+      expect(src, f).not.toContain('console-message');
+    }
+    const NET = /require\(\s*['"]\.\/(aura|client|session|capture|files|writes)(\.js)?['"]\s*\)/;
+    for (const f of ['pending.js', 'estimate-text.js']) expect(fs.readFileSync(path.join(D, f), 'utf8'), f).not.toMatch(NET);
+    const shepherd = fs.readdirSync(D).filter((f) => f.endsWith('.js') && fs.readFileSync(path.join(D, f), 'utf8').includes('servlet.shepherd'));
+    expect(shepherd.filter((f) => f !== 'files.js')).toEqual([]);
+    // The only GET of file bytes under src/dtna is files.js downloadPdf; estimate-pdf.js never fetches.
+    expect(fs.readFileSync(path.join(D, 'estimate-pdf.js'), 'utf8')).not.toMatch(/\.fetch\(|getSession\(/);
+    expect(fs.readFileSync(path.join(D, 'files.js'), 'utf8')).toContain("method: 'GET'");
+  });
+
   it('no src/**/*.js names the OIDC user-info handler (the app never reads the OIDC id token)', () => {
     const SRC = path.join(WT_ROOT, 'src');
     const out = [];

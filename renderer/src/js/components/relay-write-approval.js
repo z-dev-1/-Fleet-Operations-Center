@@ -43,6 +43,7 @@ export function _esc(s) {
 
 function _title(kind) {
   if (kind === 'dtnaComment') return 'Approve DTNA comment (dealer-visible)';
+  if (kind === 'dtnaChatter') return 'Approve DTNA Chatter post (dealer-visible)';
   if (kind === 'dtnaStage') return 'Approve DTNA stage change (dealer-visible)';
   if (kind === 'updateEscalations') return 'Approve Relay escalation';
   if (kind === 'setLifecycle') return 'Approve AAP lifecycle change';

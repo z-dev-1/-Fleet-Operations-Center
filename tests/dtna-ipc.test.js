@@ -76,23 +76,25 @@ beforeEach(() => {
   ctx.lastData = { rows: [] };
 });
 
-const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:change-stage', 'dtna:draft-comment', 'dtna:export', 'dtna:list-cases', 'dtna:login',
-  'dtna:post-comment', 'dtna:pull-unit', 'dtna:session-time', 'dtna:stage-options', 'dtna:status'];
+const CHANNELS = ['dtna:bulk-cancel', 'dtna:bulk-pull', 'dtna:change-stage', 'dtna:channels', 'dtna:draft-comment', 'dtna:export', 'dtna:list-cases', 'dtna:login',
+  'dtna:post-chatter', 'dtna:post-comment', 'dtna:pull-unit', 'dtna:session-time', 'dtna:stage-options', 'dtna:status'];
 
 describe('registration and preload', () => {
-  it('registers exactly the twelve dtna:* channels', () => {
+  it('registers exactly the fourteen dtna:* channels', () => {
     expect(Object.keys(handlers).filter((k) => k.startsWith('dtna:')).sort()).toEqual(CHANNELS);
     expect(Object.keys(handlers).sort()).toEqual(CHANNELS);
   });
 
-  it('preload exposes dtna with exactly the fourteen keys on their channels (no raw callApex / callWrite)', () => {
+  it('preload exposes dtna with exactly the sixteen keys on their channels (no raw callApex / callWrite)', () => {
     const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8');
     const m = pre.match(/expose\('dtna',\s*\{([\s\S]*?)\n\}\);/);
     expect(m).toBeTruthy();
     const keys = [...m[1].matchAll(/^\s*(\w+)\s*:/gm)].map((x) => x[1]);
     expect(keys).toEqual(['status', 'login', 'pullUnit', 'listCases', 'bulkPull', 'bulkCancel', 'exportBulk', 'draftComment', 'postComment',
-      'stageOptions', 'changeStage', 'sessionTime', 'onStatus', 'onProgress']);
-    expect(m[1]).not.toMatch(/callApex|callWrite|_callApexRaw/);
+      'postChatter', 'channels', 'stageOptions', 'changeStage', 'sessionTime', 'onStatus', 'onProgress']);
+    expect(m[1]).not.toMatch(/callApex|callWrite|_callApexRaw|callChatterWrite/);
+    expect(m[1]).toMatch(/postChatter:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:post-chatter',\s*p \|\| \{\}\)/);
+    expect(m[1]).toMatch(/channels:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('dtna:channels',\s*p \|\| \{\}\)/);
     const b = m[1];
     expect(b).toMatch(/status:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:status'\)/);
     expect(b).toMatch(/login:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('dtna:login'\)/);
@@ -458,6 +460,113 @@ describe('dtna:draft-comment / dtna:post-comment', () => {
     sessionTime.preflight.mockRejectedValueOnce(new Error('x'));
     expect((await c2('dtna:post-comment', OK)).outcome).toBe('sent');
     expect(writeGate.requestWrite).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Chatter + Files: dtna:channels / dtna:post-chatter', () => {
+  const h = {};
+  const writeGate = { requestWrite: vi.fn(async () => ({ ok: true, outcome: 'sent', id: 'rw_9', result: { feedItemId: '0D5gx000000AbCdCAK' } })) };
+  const cache = { [CASE_ID]: ENTRY, [NO_RO_CASE_ID]: ENTRY2 };
+  const dtnaStore = { get: vi.fn((id) => cache[id] || null) };
+  let chatterConfigured = true;
+  let commentConfigured = true;
+  const fakeWrites = { isChatterConfigured: vi.fn(() => chatterConfigured), isPostConfigured: vi.fn(() => commentConfigured) };
+  let enabled = { ok: true, value: true };
+  const chatterClient = Object.assign({}, client, { getChatterEnabled: vi.fn(async () => enabled) });
+  const ctx3 = { lastData: { rows: [] }, sendToWindow: vi.fn() };
+  const session3 = Object.assign({}, session, { onStatus: () => () => {} });
+  require('../src/ipc/dtna').registerDtnaIPC(ctx3, { handle: (ch, fn) => { h[ch] = fn; }, client: chatterClient, session: session3, deepScan, writeGate, writes: fakeWrites, dtnaStore, sessionTime });
+  const c = (ch, p) => h[ch]({}, p);
+  const OK = { equipmentId: '122269', caseId: CASE_ID, text: 'Any update? SENTINEL_CHATTER_TEXT', aiDrafted: true };
+  beforeEach(() => {
+    chatterConfigured = true; commentConfigured = true; enabled = { ok: true, value: true };
+    writeGate.requestWrite.mockClear(); chatterClient.getChatterEnabled.mockClear(); dtnaStore.get.mockClear();
+  });
+
+  it('channels: Chatter when the case feed says isChatterEnabled; codes and booleans only', async () => {
+    const r = await c('dtna:channels', { equipmentId: '122269', caseId: CASE_ID });
+    expect(r).toEqual({ ok: true, auto: 'chatter', chatter: { available: true, reason: '' }, comment: { available: true, reason: '' } });
+    expect(chatterClient.getChatterEnabled).toHaveBeenCalledTimes(1);
+    expect(chatterClient.getChatterEnabled).toHaveBeenCalledWith(CASE_ID, { silent: true });
+  });
+
+  it('channels: case comment when Chatter is off; neither when also no RO', async () => {
+    enabled = { ok: true, value: false };
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: CASE_ID })).toEqual({
+      ok: true, auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_DISABLED' }, comment: { available: true, reason: '' },
+    });
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: NO_RO_CASE_ID })).toMatchObject({ auto: null, comment: { available: false, reason: 'DTNA_NO_REPAIR_ORDER' } });
+  });
+
+  it('channels: Chatter not configured -> no feed read (no network); read failure -> unknown, comment fallback', async () => {
+    chatterConfigured = false;
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: CASE_ID })).toMatchObject({ auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_NOT_CONFIGURED' } });
+    expect(chatterClient.getChatterEnabled).not.toHaveBeenCalled();
+    chatterConfigured = true;
+    enabled = { ok: false, code: 'DTNA_TIMEOUT' };
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: CASE_ID })).toMatchObject({ auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_UNKNOWN' } });
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: '500gx0000000000ZZZ' })).toMatchObject({ comment: { available: false, reason: 'DTNA_NOT_PULLED' } });
+  });
+
+  it('channels / post-chatter: invalid inputs -> DTNA_INVALID_INPUT with the field, no read, no request', async () => {
+    expect(await c('dtna:channels', { caseId: CASE_ID })).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'equipmentId' });
+    expect(await c('dtna:channels', { equipmentId: '122269', caseId: 'bad' })).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'caseId' });
+    expect(await c('dtna:channels', 'x')).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field: 'payload' });
+    const cases = [
+      [{ caseId: CASE_ID, text: 'x' }, 'equipmentId'],
+      [Object.assign({}, OK, { caseId: 'bad' }), 'caseId'],
+      [Object.assign({}, OK, { text: '   ' }), 'text'],
+      [Object.assign({}, OK, { text: 'x'.repeat(2001) }), 'text'],
+      [Object.assign({}, OK, { aiDrafted: 'yes' }), 'aiDrafted'],
+    ];
+    for (const [p, field] of cases) expect(await c('dtna:post-chatter', p)).toEqual({ ok: false, code: 'DTNA_INVALID_INPUT', field });
+    expect(chatterClient.getChatterEnabled).not.toHaveBeenCalled();
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('post-chatter: shipped (unconfigured) Chatter -> DTNA_CHATTER_NOT_CONFIGURED, no prompt, no network, no cache read', async () => {
+    const h4 = {};
+    require('../src/ipc/dtna').registerDtnaIPC(ctx3, { handle: (ch, fn) => { h4[ch] = fn; }, client: chatterClient, session: session3, deepScan, writeGate, dtnaStore, sessionTime });
+    expect(await h4['dtna:post-chatter']({}, OK)).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+    expect(chatterClient.getChatterEnabled).not.toHaveBeenCalled();
+    expect(dtnaStore.get).not.toHaveBeenCalled();
+    // Shipped channels: Chatter unconfigured -> the case comment (the shipped POST_COMMENT_PARAMS).
+    expect(await h4['dtna:channels']({}, { equipmentId: '122269', caseId: CASE_ID })).toMatchObject({ auto: 'comment', chatter: { reason: 'DTNA_CHATTER_NOT_CONFIGURED' } });
+  });
+
+  it('post-chatter: disabled (or unknown) at send time -> no approval request', async () => {
+    enabled = { ok: true, value: false };
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, code: 'DTNA_CHATTER_DISABLED' });
+    enabled = { ok: true, value: null };
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, code: 'DTNA_CHATTER_UNKNOWN' });
+    enabled = { ok: false, code: 'DTNA_SIGNIN_REQUIRED' };
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(await c('dtna:post-chatter', Object.assign({}, OK, { caseId: '500gx0000000000ZZZ' }))).toEqual({ ok: false, code: 'DTNA_NOT_PULLED' });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+  });
+
+  it('post-chatter: configured + enabled -> exactly one interactive dtnaChatter request (no RO needed); result carries no text', async () => {
+    const r = await c('dtna:post-chatter', Object.assign({}, OK, { caseId: NO_RO_CASE_ID }));
+    expect(r).toEqual({ ok: true, outcome: 'sent', id: 'rw_9', feedItemId: '0D5gx000000AbCdCAK' });
+    expect(writeGate.requestWrite).toHaveBeenCalledTimes(1);
+    expect(writeGate.requestWrite.mock.calls[0][0]).toEqual({
+      kind: 'dtnaChatter', origin: 'unit-detail-dtna-chatter', unit: '122269', interactive: true, aiDrafted: true,
+      payload: { caseId: NO_RO_CASE_ID, repairOrderNo: String(ENTRY2.repairOrderNo || ''), text: OK.text },
+    });
+    expect(JSON.stringify(r)).not.toContain('SENTINEL_CHATTER_TEXT');
+    expect(chatterClient.getChatterEnabled).toHaveBeenCalledTimes(1);
+    expect(chatterClient.getChatterEnabled).toHaveBeenCalledWith(NO_RO_CASE_ID);   // the send-time re-read is not silent
+  });
+
+  it('post-chatter: low session -> DTNA_SESSION_LOW before any prompt; only DTNA_* gate errors become code', async () => {
+    sessionTime.preflight.mockResolvedValueOnce({ block: true, code: 'DTNA_SESSION_LOW', remainingSec: 30 });
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: 30 });
+    expect(writeGate.requestWrite).not.toHaveBeenCalled();
+    writeGate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'send-failed', id: 'rw_10', result: null, error: 'DTNA_CHATTER_REJECTED' });
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, outcome: 'send-failed', id: 'rw_10', code: 'DTNA_CHATTER_REJECTED' });
+    writeGate.requestWrite.mockResolvedValueOnce({ ok: false, outcome: 'skipped-not-approved', id: 'rw_11', error: 'Not approved; nothing was sent to DTNA' });
+    expect(await c('dtna:post-chatter', OK)).toEqual({ ok: false, outcome: 'skipped-not-approved', id: 'rw_11' });
   });
 });
 

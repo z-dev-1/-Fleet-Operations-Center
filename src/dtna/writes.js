@@ -1,7 +1,8 @@
 'use strict';
 /**
- * src/dtna/writes.js — the DTNA writes: post a comment on a Service Tracker case, and move a case
- * forward to a later stage (postApprovedStageChange, below). Both are dealer-visible and approval-gated.
+ * src/dtna/writes.js — the DTNA writes: post a comment on a Service Tracker case, post to the case
+ * Chatter feed (postApprovedChatter), and move a case forward to a later stage (postApprovedStageChange,
+ * below). All are dealer-visible and approval-gated.
  *
  * postApprovedComment is called ONLY by src/writes/write-gate.js _send('dtnaComment') after the user
  * approved the exact text. It passes the gate's single-use token on to aura.callWrite, which refuses a
@@ -13,8 +14,8 @@ const C = require('./constants');
 const { caseTag } = require('./redact');
 const log = require('../utils/logger')('dtna');
 
-// Test seam: { aura, config, stageConfig } (config / stageConfig override constants.POST_COMMENT_PARAMS /
-// STAGE_CHANGE_PARAMS; null keeps them unset).
+// Test seam: { aura, config, stageConfig, chatterConfig } (override constants.POST_COMMENT_PARAMS /
+// STAGE_CHANGE_PARAMS / CHATTER_POST_PARAMS; null keeps them unset).
 let _deps = {};
 function _setDeps(d) { _deps = d || {}; }
 function _aura() { return _deps.aura || require('./aura'); }
@@ -223,7 +224,114 @@ async function postApprovedStageChange(payload, token) {
   return r;
 }
 
+// ── Post to the case Chatter feed (dealer-visible) ─────────────────────────
+// postApprovedChatter is called ONLY by src/writes/write-gate.js _send('dtnaChatter') after the user
+// approved the exact text, and is the only caller of aura.callChatterWrite. The action and params come
+// from constants.CHATTER_POST_PARAMS; while that is null nothing can be sent (DTNA_CHATTER_NOT_CONFIGURED).
+// Logs: caseTag, len, code, ms only.
+function _chatterConfig() { return Object.prototype.hasOwnProperty.call(_deps, 'chatterConfig') ? _deps.chatterConfig : C.CHATTER_POST_PARAMS; }
+
+const CHATTER_MAX_DEPTH = 6;
+
+/**
+ * buildChatterParams(cfg, payload) -> params (deep copy of cfg.params with '$caseId' / '$text' resolved) | null.
+ * null when cfg is missing, a '$...' string is not one of the two placeholders, '$text' or '$caseId' is
+ * absent, the template is too deep / not JSON-safe, or the payload case id is invalid.
+ */
+function buildChatterParams(cfg, payload) {
+  if (!cfg || typeof cfg !== 'object' || !cfg.params || typeof cfg.params !== 'object' || Array.isArray(cfg.params)) return null;
+  const p = payload && typeof payload === 'object' ? payload : {};
+  if (!C.CASE_ID_RE.test(_str(p.caseId))) return null;
+  const seen = { text: false, caseId: false };
+  let bad = false;
+  const walk = (v, depth) => {
+    if (bad) return null;
+    if (depth > CHATTER_MAX_DEPTH) { bad = true; return null; }
+    if (v === '$caseId') { seen.caseId = true; return _str(p.caseId); }
+    if (v === '$text') { seen.text = true; return _str(p.text); }
+    if (typeof v === 'string') { if (v.startsWith('$') || v.length > 200) bad = true; return v; }
+    if (v === null || typeof v === 'boolean') return v;
+    if (typeof v === 'number') { if (!Number.isFinite(v)) bad = true; return v; }
+    if (Array.isArray(v)) { if (v.length > 20) bad = true; return v.map((x) => walk(x, depth + 1)); }
+    if (typeof v === 'object') {
+      const out = {};
+      const keys = Object.keys(v);
+      if (keys.length > 20) bad = true;
+      for (const k of keys) {
+        if (!/^\w{1,60}$/.test(k)) { bad = true; return null; }
+        out[k] = walk(v[k], depth + 1);
+      }
+      return out;
+    }
+    bad = true;
+    return null;
+  };
+  const out = walk(cfg.params, 0);
+  if (bad || !seen.text || !seen.caseId) return null;
+  return out;
+}
+
+function _chatterTransportOk(cfg) {
+  if (!cfg || typeof cfg !== 'object') return false;
+  if (cfg.transport === 'aura') return typeof cfg.descriptor === 'string' && /^(aura|serviceComponent):\/\/[\w.\/]+\/ACTION\$\w{1,80}$/.test(cfg.descriptor);
+  if (cfg.transport === 'apex') return typeof cfg.classname === 'string' && /^E2E_\w{1,80}$/.test(cfg.classname) && typeof cfg.method === 'string' && /^\w{1,80}$/.test(cfg.method);
+  return false;
+}
+
+/** isChatterConfigured() -> true only when CHATTER_POST_PARAMS has a valid transport and builds params for a dummy payload. */
+function isChatterConfigured() {
+  const cfg = _chatterConfig();
+  return _chatterTransportOk(cfg) && !!buildChatterParams(cfg, DUMMY);
+}
+
+function _pathOf(v, dotted) {
+  let cur = v;
+  for (const part of String(dotted || '').split('.')) {
+    if (!part || cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[part];
+  }
+  return cur;
+}
+
+/**
+ * postApprovedChatter(payload, token) -> {ok:true, feedItemId} | {ok:false, code}
+ * payload: { caseId, repairOrderNo, text } (the write gate's stored payload).
+ */
+async function postApprovedChatter(payload, token) {
+  const t0 = Date.now();
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const tag = caseTag(_str(p.caseId));
+  const text = _str(p.text);
+  const cfg = _chatterConfig();
+  let r;
+  if (!isChatterConfigured()) r = { ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' };
+  else if (!C.CASE_ID_RE.test(_str(p.caseId)) || !text.trim()) r = { ok: false, code: 'DTNA_INVALID_INPUT' };
+  else if (text.length > C.CHATTER_POST_MAX) r = { ok: false, code: 'DTNA_TEXT_TOO_LONG' };
+  else {
+    const params = buildChatterParams(cfg, p);
+    if (!params) r = { ok: false, code: 'DTNA_INVALID_INPUT' };
+    else {
+      let a;
+      try { a = await _aura().callChatterWrite(params, token); } catch (_) { a = { ok: false, code: 'DTNA_INTERNAL' }; }
+      const success = cfg.success && typeof cfg.success === 'object' ? cfg.success : null;
+      if (!a || !a.ok) r = { ok: false, code: _str((a && a.code) || 'DTNA_INTERNAL').slice(0, 40) };
+      else if (success && (typeof success.value === 'number' || typeof success.value === 'string') && String(a.value) !== String(success.value)) r = { ok: false, code: 'DTNA_CHATTER_REJECTED' };
+      else if (success && typeof success.idPath === 'string') {
+        const id = _str(_pathOf(a.value, success.idPath));
+        r = C.FEED_ITEM_ID_RE.test(id) ? { ok: true, feedItemId: id } : { ok: false, code: 'DTNA_CHATTER_REJECTED' };
+      } else {
+        const v = a.value;
+        const id = typeof v === 'string' ? v : (v && typeof v === 'object' ? _str(v.id || v.Id) : '');
+        r = { ok: true, feedItemId: C.FEED_ITEM_ID_RE.test(id) ? id : '' };
+      }
+    }
+  }
+  log.info('[dtna] post-chatter', { caseTag: tag, len: text.length, code: r.ok ? 'OK' : r.code, ms: Date.now() - t0 });
+  return r;
+}
+
 module.exports = {
+  buildChatterParams, isChatterConfigured, postApprovedChatter,
   buildPostParams, isPostConfigured, postApprovedComment, PLACEHOLDERS,
   buildStageParams, isStageConfigured, stageTargets, postApprovedStageChange, STAGE_PLACEHOLDERS,
   _setDeps,

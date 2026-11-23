@@ -66,6 +66,8 @@ function _aiInputSig(u, ns) {
     u.offsiteShopEventUrl || u.asistSrUrl || '', u.asistNotes || '',
     JSON.stringify((ns && ns.manualEntries) || null), JSON.stringify((ns && ns.hiddenEntries) || null),
   ];
+  // Only when present, so rows without DTNA estimate PDFs keep their existing signature.
+  if (u.dtnaEstimateText) parts.push(u.dtnaEstimateText);
   return crypto.createHash('sha1').update(parts.map((p) => String(p || '')).join('\u0001')).digest('hex').slice(0, 16);
 }
 
@@ -740,11 +742,14 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
         if (dr.offsiteStageDetail) u.offsiteStageDetail = dr.offsiteStageDetail;
         if (dr.offsiteStageSince) u.offsiteStageSince = dr.offsiteStageSince;
         if (dr.dtnaCaseNumber) u.dtnaCaseNumber = dr.dtnaCaseNumber;
+        // Extracted estimate-PDF context from the case cache (bounded; never logged). Rows without
+        // estimate PDFs get no field; a stale one is cleared.
+        if (dr.estimateText || u.dtnaEstimateText) u.dtnaEstimateText = dr.estimateText || '';
         // relay-extract: DTNA facts from the 20000-char raw thread (else the 8000-char text).
         if (_xf && _xf.enabled) {
           try {
             const b = require('../repair-intel/wo-extract').extractDtnaFeed(dr.rawThread || dr.offsiteText,
-              { now: Date.now(), wrCreatedAt: (u.relayFacts && u.relayFacts.wrCreatedAt) || u.created });
+              { now: Date.now(), wrCreatedAt: (u.relayFacts && u.relayFacts.wrCreatedAt) || u.created, attachments: dr.attachments || [] });
             if (b && ((b.facts && b.facts.length) || (b.events && b.events.length))) u.offsiteFacts = b;
           } catch (e) { logger.warn('[DS] DTNA extract failed for ' + u.equipmentId + ' (' + (e && e.name) + ')'); }
         }
@@ -756,11 +761,15 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
   }
   // Fresh cached notes skip the read above: still fill a missing DTNA case number (Vendor WO) and
   // case stage from the case cache (no network). Never blanks a value already on the row.
-  if (offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl) && (!u.dtnaCaseNumber || !u.offsiteStage)) {
+  if (offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl) && (!u.dtnaCaseNumber || !u.offsiteStage || !u.dtnaEstimateText)) {
     try {
       const cid = require('../dtna/join').caseIdFromUrl(offsiteUrl);
       const ce = cid ? require('../dtna/store').get(cid) : null;
       if (ce && !u.dtnaCaseNumber && ce.caseNumber) u.dtnaCaseNumber = String(ce.caseNumber);
+      if (ce && !u.dtnaEstimateText) {
+        const et = require('../dtna/estimate-text').estimateContextText(ce);
+        if (et) u.dtnaEstimateText = et;
+      }
       if (ce && !u.offsiteStage && ce.offsiteStage) {
         u.offsiteStage = String(ce.offsiteStage);
         if (ce.caseStatus) u.offsiteStageDetail = String(ce.caseStatus);
@@ -911,7 +920,8 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
     (hasSecondary ? secondaryConvs.map(function (s) {
       return 'RELAY GARAGE CONVERSATION (' + s.label + ' WR -- ' + s.vendor + '):\n' + s.conv + '\n\n';
     }).join('') : '') +
-    (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '');
+    (offsiteText ? 'OFFSITE/VENDOR NOTES (Decisiv/ASIST):\n' + offsiteText + '\n\n' : '') +
+    (u.dtnaEstimateText ? 'DTNA ESTIMATE PDFs (extracted text, dealer-supplied):\n' + String(u.dtnaEstimateText).substring(0, 3000) + '\n\n' : '');
   if (_tl) {
     try {
       _tl.ctx = _tl.O.factContext(_tl.fs, { promptText: sourceData, sheetText: _tl.sheet.text, rowDates: _tl.sheet.rowDates, today: _todayYmd });

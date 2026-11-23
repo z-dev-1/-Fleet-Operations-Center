@@ -20,6 +20,8 @@ const OFFSITE_FIELDS = [
   'offsiteFacts', 'offsiteStageHistory', 'dealerCode', 'decisivDealerId',
   // DTNA Phase D: the DTNA case number shown as Vendor WO.
   'dtnaCaseNumber',
+  // DTNA Chatter + Files: extracted estimate-PDF context (src/dtna/estimate-text.js).
+  'dtnaEstimateText',
 ];
 
 function offsiteUrlOf(row) {

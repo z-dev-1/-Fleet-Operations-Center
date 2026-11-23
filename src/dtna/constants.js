@@ -166,6 +166,55 @@ const STAGE_CHANGE_PARAMS = Object.freeze({
   }),
 });
 
+// ── Chatter (case feed) ─────────────────────────────────────────────────────
+// The case feed's own config read (2026-11-23, not yet configured). Known from the 2026-11-22 post probe:
+// the portal feed calls ForceCommunityFeedController/ACTION$getModel with param key subjectId (the case id)
+// and its value carries isChatterEnabled (external communication on/off for the case). The full descriptor
+// prefix and the action query were not recorded, so this stays null until live discovery (Phase B).
+// null -> client.getChatterEnabled returns DTNA_CHATTER_NOT_CONFIGURED with no request; Chatter then
+// counts as unavailable and posting falls back to the case comment.
+// Shape: { descriptor: 'aura://...|serviceComponent://.../ACTION$getModel', query: '?r=1&...',
+//          params: { <key>: '$caseId' | literal string|number|boolean|null }, enabledKey: 'isChatterEnabled' }
+const CHATTER_FEED_READ = null;
+// Post to the case Chatter feed (2026-11-23). STATE: unset, not discovered yet. Live discovery records the
+// portal composer's own call here; until then Chatter posting returns DTNA_CHATTER_NOT_CONFIGURED (no
+// approval prompt, no network) and the "Post to DTNA" modal falls back to the case comment.
+// Connect REST / ui-api are blocked for the portal user (findings §8), so REST is NOT a supported transport.
+// Shape (src/dtna/writes.js buildChatterParams resolves the '$' placeholders):
+//   { transport: 'aura', descriptor, query, params, success? }
+//   | { transport: 'apex', classname: 'E2E_...', method, params, success? }
+//   params: JSON template (nested objects/arrays allowed, depth <= 6); a string value of exactly '$caseId'
+//   or '$text' is substituted, any other '$...' string is refused. success?: { value } (the returnValue
+//   that means posted) | { idPath } (dotted path to the new FeedItem id 0D5...).
+const CHATTER_POST_PARAMS = null;
+
+// ── Case attachments (estimate PDFs) ────────────────────────────────────────
+// How to list a case's files (2026-11-23, not yet configured). Candidate reads seen only in the portal
+// bundle: E2E_UTP_CommentController.getFilesOnCase / getAttachment / getFileDetails (param keys unknown);
+// or the Attachments field on each comment row. null -> DTNA_ATTACHMENTS_NOT_CONFIGURED, no request.
+// Shape: { source: 'apex', classname: 'E2E_...', method: 'get...', params: { <key>: '$caseId' }, listPath?,
+//          fields: { versionId, documentId?, name, ext?, size?, createdAt? } }
+//      | { source: 'comments', field: 'Attachments', listPath?, fields: { ... } }
+const ATTACHMENT_LIST_READ = null;
+// How to download one file through the authenticated persist:vendor-dtna session (2026-11-23, not yet
+// configured; e.g. the site's Salesforce ContentVersion "version/download/{versionId}" servlet). Placeholder {versionId}
+// or {documentId} only; the host must be HOST. null -> DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED, no request.
+// Shape: { urlTemplate }
+const ATTACHMENT_DOWNLOAD = null;
+const ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024;
+const ATTACHMENT_MAX_PER_PULL = 4;
+const ATTACHMENT_KEEP_TEXT = 4;
+const ATTACHMENT_LIST_MAX = 50;
+const ATTACHMENT_TEXT_MAX = 8000;
+const ATTACHMENT_REFRESH_MS = 7 * 24 * 3600e3;
+const ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30e3;
+const ESTIMATE_CONTEXT_MAX = 3000;
+const ESTIMATE_LINE_ITEMS_MAX = 40;
+const CHATTER_POST_MAX = POST_COMMENT_MAX;
+const CONTENT_VERSION_ID_RE = /^068[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+const CONTENT_DOC_ID_RE = /^069[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+const FEED_ITEM_ID_RE = /^0D5[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+
 // Session timer: cookie-only servlet returning { sp: period secs, sr: remaining secs } behind 'while(1);'.
 const SESSION_TIME_URL = BASE + '/_nc_external/system/security/session/SessionTimeServlet';
 const SESSION_TIME_TIMEOUT_MS = 10e3;
@@ -195,4 +244,8 @@ module.exports = {
   SESSION_TIME_URL, SESSION_TIME_TIMEOUT_MS, SESSION_PREFLIGHT_MIN_SEC,
   BG_LOGIN_WAIT_MS, BG_STARTUP_DELAY_MS, BG_MIN_GAP_MS, BG_FAIL_COOLDOWN_MS, BG_ACTION_COOLDOWN_MS,
   BG_EXPIRY_SLACK_MS, BG_EXPIRY_MAX_MS,
+  CHATTER_FEED_READ, CHATTER_POST_PARAMS, CHATTER_POST_MAX, FEED_ITEM_ID_RE,
+  ATTACHMENT_LIST_READ, ATTACHMENT_DOWNLOAD, ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_PER_PULL, ATTACHMENT_KEEP_TEXT,
+  ATTACHMENT_LIST_MAX, ATTACHMENT_TEXT_MAX, ATTACHMENT_REFRESH_MS, ATTACHMENT_DOWNLOAD_TIMEOUT_MS,
+  ESTIMATE_CONTEXT_MAX, ESTIMATE_LINE_ITEMS_MAX, CONTENT_VERSION_ID_RE, CONTENT_DOC_ID_RE,
 };

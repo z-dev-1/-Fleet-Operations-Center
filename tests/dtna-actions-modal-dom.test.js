@@ -162,3 +162,138 @@ describe('openDtnaCommentModal', () => {
     expect(bridge.draftComment).not.toHaveBeenCalled();
   });
 });
+
+describe('channel row (Chatter vs case comment)', () => {
+  const BOTH = { ok: true, auto: 'chatter', chatter: { available: true, reason: '' }, comment: { available: true, reason: '' } };
+  const OFF = { ok: true, auto: 'comment', chatter: { available: false, reason: 'DTNA_CHATTER_DISABLED' }, comment: { available: true, reason: '' } };
+  function openCh(channelsResult, over = {}) {
+    sel = {
+      '#dtna-cm-text': el(), '#dtna-cm-draft': el(), '#dtna-cm-count': el(),
+      '#dtna-ch-chatter': Object.assign(el(), { checked: false, disabled: true }),
+      '#dtna-ch-comment': Object.assign(el(), { checked: true }),
+      '#dtna-ch-chatter-why': el(), '#dtna-ch-comment-why': el(), '#dtna-ch-note': el(),
+    };
+    fakeModal.st.panel = { querySelector: (s) => sel[s] || null };
+    toast = { show: vi.fn() };
+    confirm = vi.fn(() => true);
+    bridge = Object.assign({
+      draftComment: vi.fn(async () => ({ ok: true, aiDrafted: true, draft: 'Could you share the ETA?', noUpdate: false, droppedCount: 0 })),
+      postComment: vi.fn(async () => ({ ok: true, outcome: 'sent', id: 'rw_1' })),
+      postChatter: vi.fn(async () => ({ ok: true, outcome: 'sent', id: 'rw_2', feedItemId: '0D5gx000000AbCdCAK' })),
+      channels: vi.fn(async () => channelsResult),
+    }, over.bridge || {});
+    A.openDtnaCommentModal(UNIT, { caseId: CASE }, { modal: fakeModal, toast, bridge, confirm });
+  }
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+  it('the body has both radios and the "Will post to" line; the probe is called once with the unit and case', async () => {
+    openCh(BOTH);
+    const b = fakeModal.st.opts.body;
+    expect(b).toContain('id="dtna-ch-chatter"');
+    expect(b).toContain('Chatter (case feed)');
+    expect(b).toContain('id="dtna-ch-comment"');
+    expect(b).toContain('Case comment');
+    expect(b).toContain('id="dtna-ch-note"');
+    await settle();
+    expect(bridge.channels).toHaveBeenCalledTimes(1);
+    expect(bridge.channels).toHaveBeenCalledWith({ equipmentId: '122269', caseId: CASE });
+    expect(bridge.postChatter).not.toHaveBeenCalled();
+    expect(bridge.postComment).not.toHaveBeenCalled();
+  });
+
+  it('auto Chatter is preselected and Send routes to postChatter', async () => {
+    openCh(BOTH);
+    await settle();
+    expect(sel['#dtna-ch-chatter'].checked).toBe(true);
+    expect(sel['#dtna-ch-chatter'].disabled).toBe(false);
+    expect(sel['#dtna-ch-note'].textContent).toBe('Will post to: Chatter (case feed)');
+    sel['#dtna-cm-text'].value = 'Any update?';
+    await action('Send to DTNA').onClick();
+    expect(bridge.postChatter).toHaveBeenCalledTimes(1);
+    expect(bridge.postChatter).toHaveBeenCalledWith({ equipmentId: '122269', caseId: CASE, text: 'Any update?', aiDrafted: false });
+    expect(bridge.postComment).not.toHaveBeenCalled();
+    expect(toast.show).toHaveBeenLastCalledWith('success', 'Posted to the DTNA case Chatter feed \u2026' + CASE.slice(-6) + '.');
+  });
+
+  it('Chatter off: case comment preselected, Chatter disabled with the reason; Send routes to postComment', async () => {
+    openCh(OFF);
+    await settle();
+    expect(sel['#dtna-ch-comment'].checked).toBe(true);
+    expect(sel['#dtna-ch-chatter'].disabled).toBe(true);
+    expect(sel['#dtna-ch-chatter-why'].textContent).toBe('External communication is off for this case.');
+    expect(sel['#dtna-ch-note'].textContent).toBe('Will post to: Case comment');
+    sel['#dtna-cm-text'].value = 'x';
+    await action('Send to DTNA').onClick();
+    expect(bridge.postComment).toHaveBeenCalledTimes(1);
+    expect(bridge.postChatter).not.toHaveBeenCalled();
+  });
+
+  it('an explicit switch to the case comment while Chatter is auto routes to postComment', async () => {
+    openCh(BOTH);
+    await settle();
+    await sel['#dtna-ch-comment'].fire('change');
+    expect(sel['#dtna-ch-note'].textContent).toBe('Will post to: Case comment');
+    sel['#dtna-cm-text'].value = 'x';
+    await action('Send to DTNA').onClick();
+    expect(bridge.postComment).toHaveBeenCalledTimes(1);
+    expect(bridge.postChatter).not.toHaveBeenCalled();
+  });
+
+  it('a disabled Chatter radio cannot be picked', async () => {
+    openCh(OFF);
+    await settle();
+    await sel['#dtna-ch-chatter'].fire('change');
+    sel['#dtna-cm-text'].value = 'x';
+    await action('Send to DTNA').onClick();
+    expect(bridge.postComment).toHaveBeenCalledTimes(1);
+    expect(bridge.postChatter).not.toHaveBeenCalled();
+  });
+
+  it('a failed or throwing probe falls back to the case comment with Chatter disabled', async () => {
+    openCh({ ok: false, code: 'DTNA_INTERNAL' });
+    await settle();
+    expect(sel['#dtna-ch-chatter'].disabled).toBe(true);
+    expect(sel['#dtna-ch-comment'].checked).toBe(true);
+    openCh(null, { bridge: { channels: vi.fn(async () => { throw new Error('x'); }) } });
+    await settle();
+    expect(sel['#dtna-ch-chatter'].disabled).toBe(true);
+    sel['#dtna-cm-text'].value = 'x';
+    await action('Send to DTNA').onClick();
+    expect(bridge.postComment).toHaveBeenCalledTimes(1);
+  });
+
+  it('the AI draft fills the text and sends aiDrafted:true on either channel', async () => {
+    openCh(BOTH);
+    await settle();
+    await sel['#dtna-cm-draft'].fire('click');
+    expect(sel['#dtna-cm-text'].value).toBe('Could you share the ETA?');
+    await action('Send to DTNA').onClick();
+    expect(bridge.postChatter).toHaveBeenCalledWith({ equipmentId: '122269', caseId: CASE, text: 'Could you share the ETA?', aiDrafted: true });
+    openCh(OFF);
+    await settle();
+    await sel['#dtna-cm-draft'].fire('click');
+    await action('Send to DTNA').onClick();
+    expect(bridge.postComment).toHaveBeenCalledWith({ equipmentId: '122269', caseId: CASE, text: 'Could you share the ETA?', aiDrafted: true });
+  });
+
+  it('a send before the probe answers waits for it and uses the auto choice', async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    openCh(null, { bridge: { channels: vi.fn(async () => { await gate; return BOTH; }) } });
+    sel['#dtna-cm-text'].value = 'x';
+    const p = action('Send to DTNA').onClick();
+    await settle();
+    expect(bridge.postChatter).not.toHaveBeenCalled();
+    expect(bridge.postComment).not.toHaveBeenCalled();
+    release();
+    await p;
+    expect(bridge.postChatter).toHaveBeenCalledTimes(1);
+  });
+
+  it('postMessage: Chatter codes', () => {
+    expect(A.postMessage({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' }, CASE, 'chatter').level).toBe('warn');
+    expect(A.postMessage({ ok: false, code: 'DTNA_CHATTER_DISABLED' }, CASE, 'chatter').text).toContain('External communication is off');
+    expect(A.postMessage({ ok: false, code: 'DTNA_CHATTER_REJECTED' }, CASE, 'chatter').level).toBe('error');
+    expect(A.postMessage({ ok: true, outcome: 'sent' }, CASE, 'comment').text).toContain('Comment posted to DTNA case');
+  });
+});

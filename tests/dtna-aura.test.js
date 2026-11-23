@@ -549,3 +549,150 @@ describe('callWrite (the only DTNA write path)', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('Chatter + Files transport (configured in constants; null = zero requests)', () => {
+  function gateTokens() {
+    const live = new WeakSet();
+    return {
+      mint: () => { const t = {}; live.add(t); return t; },
+      isApprovalToken: (t) => { if (!t || typeof t !== 'object' || !live.has(t)) return false; live.delete(t); return true; },
+    };
+  }
+  const FEED = { descriptor: 'serviceComponent://ui.chatter.components.aura.components.forceChatter.chatter.ForceCommunityFeedController/ACTION$getModel', query: '?r=1&ui-chatter.ForceCommunityFeed.getModel=1', params: { subjectId: '$caseId', type: 'Record' }, enabledKey: 'isChatterEnabled' };
+  const AURA_POST = { transport: 'aura', descriptor: 'serviceComponent://ui.chatter.components.aura.components.forceChatter.publisher.PublisherController/ACTION$postFeedElement', query: '?r=1&x=1', params: {} };
+  const APEX_POST = { transport: 'apex', classname: 'E2E_UTP_ChatterController', method: 'postToFeed', params: {} };
+  const CPARAMS = { subjectId: CASE_ID, body: { messageSegments: [{ type: 'Text', text: 'Hello dealer' }] }, visibility: 'AllUsers' };
+
+  it('shipped configs are null: each function returns its coded error with zero fetches', async () => {
+    expect(C.CHATTER_FEED_READ).toBeNull();
+    expect(C.CHATTER_POST_PARAMS).toBeNull();
+    expect(C.ATTACHMENT_LIST_READ).toBeNull();
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
+    expect(await aura.getFeedModel(CASE_ID)).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(await aura.listAttachmentsRaw(CASE_ID)).toEqual({ ok: false, code: 'DTNA_ATTACHMENTS_NOT_CONFIGURED' });
+    expect(await aura.callChatterWrite(CPARAMS, g.mint())).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('getFeedModel: one read with the configured descriptor, query and $caseId substituted', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ feed: { isChatterEnabled: true } }, { raw: true })));
+    aura._setDeps({ fetch, session: fakeSession(), chatterFeedRead: FEED });
+    const r = await aura.getFeedModel(CASE_ID, { silent: true });
+    expect(r).toMatchObject({ ok: true, value: { feed: { isChatterEnabled: true } } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe(AURA_URL + FEED.query);
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0]).toMatchObject({ descriptor: FEED.descriptor, params: { subjectId: CASE_ID, type: 'Record' } });
+  });
+
+  it('getFeedModel refuses a write-like or malformed descriptor and a bad case id with zero fetches', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    for (const d of [FEED.descriptor.replace('getModel', 'postModel'), 'https://evil/ACTION$getModel', 'aura://X/ACTION$getModel;drop', 'aura://X/ACTION$setModel']) {
+      aura._setDeps({ fetch, session: fakeSession(), chatterFeedRead: Object.assign({}, FEED, { descriptor: d }) });
+      expect((await aura.getFeedModel(CASE_ID)).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    }
+    aura._setDeps({ fetch, session: fakeSession(), chatterFeedRead: FEED });
+    expect((await aura.getFeedModel('nope')).code).toBe('DTNA_INVALID_INPUT');
+    aura._setDeps({ fetch, session: fakeSession(), chatterFeedRead: Object.assign({}, FEED, { params: { subjectId: '$other' } }) });
+    expect((await aura.getFeedModel(CASE_ID)).code).toBe('DTNA_INVALID_INPUT');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('listAttachmentsRaw: E2E_ class + get/list/fetch method only; one read with the case id', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success([])));
+    const cfg = { source: 'apex', classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { recordId: '$caseId' } };
+    for (const bad of [{ method: 'deleteFiles' }, { method: 'postFiles' }, { classname: 'Other' }, { method: 'filesOnCase' }]) {
+      aura._setDeps({ fetch, session: fakeSession(), attachmentListRead: Object.assign({}, cfg, bad) });
+      expect((await aura.listAttachmentsRaw(CASE_ID)).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    aura._setDeps({ fetch, session: fakeSession(), attachmentListRead: cfg });
+    expect((await aura.listAttachmentsRaw(CASE_ID)).ok).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0].params).toMatchObject({ classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { recordId: CASE_ID } });
+  });
+
+  it('callChatterWrite: no / forged / reused token -> DTNA_WRITE_NOT_APPROVED with zero fetches', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ id: '0D5gx000000AbCdCAK' })));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: AURA_POST });
+    expect(await aura.callChatterWrite(CPARAMS)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(await aura.callChatterWrite(CPARAMS, {})).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    const t = g.mint();
+    expect((await aura.callChatterWrite(CPARAMS, t)).ok).toBe(true);
+    expect(await aura.callChatterWrite(CPARAMS, t)).toEqual({ ok: false, code: 'DTNA_WRITE_NOT_APPROVED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // The real write-gate check refuses a forged token too.
+    aura._setDeps({ fetch, session: fakeSession(), chatterConfig: AURA_POST });
+    expect((await aura.callChatterWrite(CPARAMS, {})).code).toBe('DTNA_WRITE_NOT_APPROVED');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('callChatterWrite (aura): exactly one POST with the configured descriptor and params; logs carry no text', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({ id: '0D5gx000000AbCdCAK' })));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: AURA_POST });
+    await aura.callChatterWrite(CPARAMS, g.mint());
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toBe(AURA_URL + '?r=1&x=1');
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0]).toMatchObject({ descriptor: AURA_POST.descriptor, params: CPARAMS });
+    expect(logger.text()).not.toContain('Hello dealer');
+    expect(logger.text()).not.toContain(TOK);
+  });
+
+  it('callChatterWrite (apex): ApexActionController with the configured class / method', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success(201)));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: APEX_POST });
+    expect((await aura.callChatterWrite({ caseId: CASE_ID, text: 'Hi' }, g.mint())).ok).toBe(true);
+    const msg = JSON.parse(new URLSearchParams(fetch.mock.calls[0][1].body).get('message'));
+    expect(msg.actions[0].params).toMatchObject({ classname: 'E2E_UTP_ChatterController', method: 'postToFeed', params: { caseId: CASE_ID, text: 'Hi' } });
+  });
+
+  it('callChatterWrite: an expired session is not retried', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, invalidSession()));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: AURA_POST });
+    expect(await aura.callChatterWrite(CPARAMS, g.mint())).toMatchObject({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('callChatterWrite: an invalid id key, no case id, too deep or a bad transport -> refused with zero fetches', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    const g = gateTokens();
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: AURA_POST });
+    expect((await aura.callChatterWrite({ subjectId: 'nope', text: 'x' }, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    expect((await aura.callChatterWrite({ text: 'x' }, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    let deep = { caseId: CASE_ID };
+    for (let i = 0; i < 8; i++) deep = { n: deep };
+    expect((await aura.callChatterWrite(deep, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    expect((await aura.callChatterWrite({ caseId: CASE_ID, t: 'x'.repeat(13000) }, g.mint())).code).toBe('DTNA_INVALID_INPUT');
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken, chatterConfig: { transport: 'rest', url: 'https://x' } });
+    expect((await aura.callChatterWrite(CPARAMS, g.mint())).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('callApex / _callApexRaw still refuse the Chatter post names; callWrite still allows only postComment / changeStatus', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success({})));
+    aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: () => true });
+    expect((await aura.callApex('postToFeed', { caseId: CASE_ID })).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect((await aura._callApexRaw('E2E_UTP_ChatterController', 'postToFeed', { caseId: CASE_ID })).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect((await aura.callWrite('postToFeed', { caseId: CASE_ID }, {})).code).toBe('DTNA_METHOD_NOT_ALLOWED');
+    expect(Object.keys(C.WRITE_METHODS)).toEqual(['postComment', 'changeStatus']);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});

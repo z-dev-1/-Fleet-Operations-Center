@@ -8,7 +8,11 @@
  * DTNA_POST_NOT_CONFIGURED until constants.POST_COMMENT_PARAMS is filled), dtna:stage-options (cache
  * only, no network), dtna:change-stage (forward-only stage change: dealer-visible, ALWAYS through the
  * write gate's approval modal; DTNA_STAGE_NOT_CONFIGURED until constants.STAGE_CHANGE_PARAMS is filled)
- * and dtna:session-time (the SessionTimeServlet seconds left; user-initiated).
+ * dtna:session-time (the SessionTimeServlet seconds left; user-initiated), dtna:channels (which channel a
+ * post uses: Chatter when configured and the case feed says isChatterEnabled, else the case comment; one
+ * feed read, none when Chatter is not configured) and dtna:post-chatter (dealer-visible case-feed post,
+ * ALWAYS through the write gate's approval modal; DTNA_CHATTER_NOT_CONFIGURED until
+ * constants.CHATTER_POST_PARAMS is filled, DTNA_CHATTER_DISABLED when the case feed is off).
  * Before a stage change, a comment post or a bulk pull, a session pre-flight checks the session; when it
  * is (nearly) expired, one gated hidden background sign-in runs and the pre-flight is read again, and
  * only if it still blocks is the user asked to sign in. A failed pre-flight read never blocks.
@@ -37,7 +41,7 @@ function _payload(p) {
 /**
  * registerDtnaIPC(ctx, deps)
  * deps (tests): { handle, client, session, store, electron, rowApply, deepScan, writeGate, writes, commentDraft, dtnaStore,
- *   sessionTime, pending }
+ *   sessionTime, pending, channels }
  */
 function registerDtnaIPC(ctx, deps) {
   const d = deps || {};
@@ -294,6 +298,73 @@ function registerDtnaIPC(ctx, deps) {
     });
     const out = { ok: !!(r && r.ok), outcome: String((r && r.outcome) || 'send-failed'), id: (r && r.id) || null };
     if (r && r.ok && r.result && r.result.commentId) out.commentId = String(r.result.commentId);
+    if (r && !r.ok && typeof r.error === 'string' && /^DTNA_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
+    return done(out);
+  });
+
+  // ── Chatter: channel probe and the approval-gated, dealer-visible case-feed post ──
+  const channels = () => d.channels || require('../dtna/channels');
+  // One feed-model read: true / false / null (unknown) plus the read code. Not configured: no network.
+  // silent: the modal-open probe never opens a sign-in or auto-login window.
+  const _chatterState = async (caseId, silent) => {
+    if (!writes().isChatterConfigured()) return { configured: false, enabled: null, code: 'DTNA_CHATTER_NOT_CONFIGURED' };
+    let r;
+    try { r = await (silent ? client().getChatterEnabled(caseId, { silent: true }) : client().getChatterEnabled(caseId)); } catch (e) { log.warn('[dtna] chatter read', safeErr(e)); r = { ok: false, code: 'DTNA_INTERNAL' }; }
+    if (!r || !r.ok) return { configured: true, enabled: null, code: String((r && r.code) || 'DTNA_INTERNAL').slice(0, 40) };
+    return { configured: true, enabled: r.value === true ? true : (r.value === false ? false : null), code: '' };
+  };
+
+  wrap('dtna:channels', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    if (!_equipment(p)) return _bad('equipmentId');
+    if (typeof p.caseId !== 'string' || !C.CASE_ID_RE.test(p.caseId)) return _bad('caseId');
+    const entry = dtnaStore().get(p.caseId);
+    const cs = await _chatterState(p.caseId, true);
+    const sel = channels().selectChannel({
+      chatterConfigured: cs.configured, chatterEnabled: cs.enabled, chatterCode: cs.code,
+      commentConfigured: !!writes().isPostConfigured(), hasRepairOrder: !!(entry && entry.repairOrderId), pulled: !!entry,
+    });
+    log.info('[dtna] channels', { caseTag: caseTag(p.caseId), auto: sel.auto || 'none', chatter: sel.chatter.reason || 'OK', comment: sel.comment.reason || 'OK' });
+    return {
+      ok: true,
+      auto: sel.auto,
+      chatter: { available: !!sel.chatter.available, reason: sel.chatter.reason || '' },
+      comment: { available: !!sel.comment.available, reason: sel.comment.reason || '' },
+    };
+  });
+
+  wrap('dtna:post-chatter', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    const equipmentId = _equipment(p);
+    if (!equipmentId) return _bad('equipmentId');
+    if (typeof p.caseId !== 'string' || !C.CASE_ID_RE.test(p.caseId)) return _bad('caseId');
+    if (typeof p.text !== 'string' || !p.text.trim() || p.text.length > C.CHATTER_POST_MAX) return _bad('text');
+    if (p.aiDrafted !== undefined && typeof p.aiDrafted !== 'boolean') return _bad('aiDrafted');
+    const caseId = p.caseId;
+    const tag = caseTag(caseId);
+    const len = p.text.length;
+    const done = (r) => { log.info('[dtna] post-chatter', { caseTag: tag, code: r.code || r.outcome || 'OK', len }); return r; };
+    // Not configured: no approval prompt, no network.
+    if (!writes().isChatterConfigured()) return done({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    const entry = dtnaStore().get(caseId);
+    if (!entry) return done({ ok: false, code: 'DTNA_NOT_PULLED' });
+    // Fresh read right before the approval: external communication must still be on for the case.
+    const cs = await _chatterState(caseId);
+    if (cs.enabled !== true) return done({ ok: false, code: cs.enabled === false ? 'DTNA_CHATTER_DISABLED' : (cs.code || 'DTNA_CHATTER_UNKNOWN') });
+    const pf = await _preflight();
+    if (pf) return done({ ok: false, code: 'DTNA_SESSION_LOW', remainingSec: Number(pf.remainingSec) || 0 });
+    const r = await writeGate().requestWrite({
+      kind: 'dtnaChatter',
+      payload: { caseId, repairOrderNo: String(entry.repairOrderNo || ''), text: p.text },
+      origin: 'unit-detail-dtna-chatter',
+      unit: equipmentId,
+      interactive: true,
+      aiDrafted: p.aiDrafted === true,
+    });
+    const out = { ok: !!(r && r.ok), outcome: String((r && r.outcome) || 'send-failed'), id: (r && r.id) || null };
+    if (r && r.ok && r.result && r.result.feedItemId) out.feedItemId = String(r.result.feedItemId);
     if (r && !r.ok && typeof r.error === 'string' && /^DTNA_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
     return done(out);
   });

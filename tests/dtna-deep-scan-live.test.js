@@ -105,6 +105,30 @@ describe('deep-scan DTNA offsite pass (Decisiv-identical gating)', () => {
     expect(_pullIfStale.mock.calls[0][0]).toBe(CASE);
   });
 
+  it('Chatter + Files: the extracted estimate PDF text and its grand total reach the timeline prompt and the row', async () => {
+    const e = liveEntry();
+    e.attachments = [{
+      kind: 'pdf', status: 'read', name: 'Dealer estimate E101048154.pdf', createdAt: '2026-11-21T09:00:00.000Z',
+      text: 'Brake chamber P/N K123-456 $245.10\nGrand Total $1,234.56', total: 1234.56, totalLabeled: true,
+      lineItems: [{ desc: 'Brake chamber P/N K123-456', amount: 245.1, kind: 'part' }],
+    }];
+    _pullIfStale.mockResolvedValue({ ok: true, entry: e, live: true });
+    const row = dtnaRow({ asistNotes: STALE, asistScrapedAt: new Date(Date.now() - 5 * HOUR).toISOString() });
+    await run([row]);
+    const prompt = promptFor('122269');
+    expect(prompt).toContain('DTNA ESTIMATE PDFs (extracted text, dealer-supplied):');
+    expect(prompt).toContain('Grand total $1,234.56 (labelled)');
+    expect(prompt).toContain('Brake chamber P/N K123-456');
+    expect(row.dtnaEstimateText).toContain('Dealer estimate E101048154.pdf');
+  });
+
+  it('Chatter + Files: no read PDFs -> no estimate block in the prompt', async () => {
+    const row = dtnaRow({ asistNotes: STALE, asistScrapedAt: new Date(Date.now() - 5 * HOUR).toISOString() });
+    await run([row]);
+    expect(promptFor('122269')).not.toContain('DTNA ESTIMATE PDFs');
+    expect(row.dtnaEstimateText || '').toBe('');
+  });
+
   it('a FREIGHTLINER row with no offsite link gets the cache join; a Volvo row with no link does not', async () => {
     _applyCachedCase.mockImplementation((u) => {
       u.offsiteShopEventUrl = DURL; u.asistSrUrl = DURL; u._offsiteWrId = u.workRequestId;

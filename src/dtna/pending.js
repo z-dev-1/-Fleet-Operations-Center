@@ -4,9 +4,17 @@
  * (src/scrapers/pending_est_sources.js; findings §2.2, §5.3, §6b).
  *
  * Works on dtnaCaseCache entries only: no network, no session. Requires only ./constants and ./join.
- * DTNA exposes no estimate amount field and no approval status (discovery D2/D4). A DTNA offsite record
- * has total = the amount of the newest approval post in the case comments ('Approved for $X'; best-effort
- * text extraction, null until one exists), fleetStatus '' and the current stage of the portal's pipeline (constants.CASE_STAGES:
+ * DTNA exposes no estimate amount field and no approval status (discovery D2/D4).
+ * DTNA Total precedence (dtnaTotal):
+ *   1. the grand total of the NEWEST extracted estimate PDF (attachment createdAt, ties keep list order)
+ *      whose status is 'read' and whose total came from an explicitly LABELLED grand-total line
+ *      ('Grand Total', 'Estimate Total', 'Total Estimate', 'Total Amount', 'Total Due', 'Invoice Total')
+ *      -> totalSource 'pdf';
+ *   2. else the amount of the newest approval post in the case comments ('Approved for $X'; best-effort
+ *      text extraction) -> totalSource 'approved';
+ *   3. else null (shown as a dash) -> totalSource 'none'.
+ * An unlabelled PDF amount is never used for Total. A DTNA offsite record has that total,
+ * fleetStatus '' and the current stage of the portal's pipeline (constants.CASE_STAGES:
  * Pre-Repair > Arrived > In-Repair > Post-Repair > Ready for Pickup > Closed) as repairStatus.
  * Ready for Pickup and Closed count as done offsite.
  */
@@ -72,7 +80,8 @@ function offsiteRecord(entry) {
   const e = entry || {};
   const caseId = _str(e.caseId);
   const st = currentStage(e);
-  const total = approvedTotal(e);
+  const t = dtnaTotal(e);
+  const total = t.total;
   return {
     source: 'dtna',
     caseId,
@@ -85,9 +94,10 @@ function offsiteRecord(entry) {
     stage: _str(e.offsiteStage),
     stageStatus: '',
     stageSince: _str(e.stageSince),
-    // The amount of the newest approval post ('Approved for $X'); null (shown as a dash) until one exists.
+    // dtnaTotal precedence (file header): labelled grand total of the newest estimate PDF, else the newest
+    // approval post amount ('Approved for $X'), else null (shown as a dash).
     total,
-    totalSource: total != null ? 'approved' : 'none',
+    totalSource: t.source,
     updatedAt: _str(e.lastCommentAt),
     scrapedAt: _str(e.pulledAt),
     roNumber: _str(e.repairOrderNo),
@@ -141,6 +151,32 @@ function approvedTotal(entry) {
   if (Number.isFinite(n) && n > 0) return n;
   const a = approvedTotalOf(e.comments);
   return a ? a.total : null;
+}
+
+/**
+ * estimatePdfTotalOf(attachments) -> { total, at, name } | null: the labelled grand total of the newest
+ * 'read' PDF attachment that has one (createdAt, ties keep list order).
+ */
+function estimatePdfTotalOf(attachments) {
+  let best = null;
+  (Array.isArray(attachments) ? attachments : []).forEach((a, i) => {
+    if (!a || typeof a !== 'object' || a.kind !== 'pdf' || a.status !== 'read' || a.totalLabeled !== true) return;
+    const n = typeof a.total === 'number' ? a.total : NaN;
+    if (!Number.isFinite(n) || n <= 0) return;
+    const ms = _ms(a.createdAt);
+    if (!best || ms > best.ms || (ms === best.ms && i < best.i)) best = { total: Math.round(n * 100) / 100, at: _str(a.createdAt), name: _str(a.name), ms, i };
+  });
+  return best ? { total: best.total, at: best.at, name: best.name } : null;
+}
+
+/** dtnaTotal(entry) -> { total, source:'pdf'|'approved'|'none', at } (precedence in the file header). */
+function dtnaTotal(entry) {
+  const e = entry || {};
+  const pdf = estimatePdfTotalOf(e.attachments);
+  if (pdf) return { total: pdf.total, source: 'pdf', at: pdf.at };
+  const ap = approvedTotal(e);
+  if (ap != null) return { total: ap, source: 'approved', at: _str(e.approvedAt) };
+  return { total: null, source: 'none', at: '' };
 }
 
 const _wrId = (wo) => _str(wo && (wo.workRequestId || wo.id));
@@ -201,4 +237,4 @@ function joinCasesToWrs(o) {
   return { byWr, unjoined };
 }
 
-module.exports = { currentStage, isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, approvedTotalOf, approvedTotal, DTNA_VENDOR_RE };
+module.exports = { currentStage, isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, approvedTotalOf, approvedTotal, estimatePdfTotalOf, dtnaTotal, DTNA_VENDOR_RE };

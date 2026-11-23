@@ -24,6 +24,8 @@
  * dtnaStage (move a DTNA case to a LATER stage, src/dtna/writes.js
  * postApprovedStageChange) is dealer-visible too and in EXTERNAL_KINDS; a
  * same / earlier / unknown target stage is refused before anything is staged.
+ * dtnaChatter (a post to the DTNA case Chatter feed, src/dtna/writes.js postApprovedChatter) is
+ * dealer-visible and in EXTERNAL_KINDS too, gated exactly like dtnaComment.
  *
  * The preview is built from the stored payload only, and approve(id) sends that
  * same stored payload once, so the text shown is the text sent.
@@ -42,10 +44,10 @@ const ADD_COMMENT_PATH = '/api/v1/addComment';
 const COMMENT_MAX = 2000;
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
-const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage'];
+const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage', 'dtnaChatter'];
 // Dealer-visible writes outside Relay: ALWAYS approved by the user on the exact content.
 // settings.writes.requireApproval === false and approvedBy never bypass these.
-const EXTERNAL_KINDS = new Set(['dtnaComment', 'dtnaStage']);
+const EXTERNAL_KINDS = new Set(['dtnaComment', 'dtnaStage', 'dtnaChatter']);
 const DTNA_CASE_URL = 'https://dtna.my.site.com/Servicetracker/s/case/';
 
 let _deps = {};
@@ -108,12 +110,12 @@ function _textLen(kind, payload) {
   if (!payload) return 0;
   if (kind === 'updateEscalations') return _str(payload.comment).length;
   if (kind === 'setLifecycle' || kind === 'dtnaStage') return 0;
-  return (kind === 'addComment' || kind === 'dtnaComment') ? _str(payload.text).length : _str(payload.comments).trim().length;
+  return (kind === 'addComment' || kind === 'dtnaComment' || kind === 'dtnaChatter') ? _str(payload.text).length : _str(payload.comments).trim().length;
 }
 function _target(kind, payload, spec) {
   if (kind === 'addComment' || kind === 'updateEscalations') return _str(payload.workRequestId);
   if (kind === 'setLifecycle') return _str(payload.aaid || payload.assetUrl || payload.equipmentId);
-  if (kind === 'dtnaComment' || kind === 'dtnaStage') return _str(payload.caseId);
+  if (kind === 'dtnaComment' || kind === 'dtnaStage' || kind === 'dtnaChatter') return _str(payload.caseId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
 // Dedup key for a work-order write: the fields that define WHAT is requested.
@@ -165,6 +167,13 @@ function _normalizePayload(kind, payload) {
     return {
       caseId: _str(p.caseId),
       repairOrderId: _str(p.repairOrderId),
+      repairOrderNo: _str(p.repairOrderNo),
+      text: _str(p.text).slice(0, COMMENT_MAX),
+    };
+  }
+  if (kind === 'dtnaChatter') {
+    return {
+      caseId: _str(p.caseId),
       repairOrderNo: _str(p.repairOrderNo),
       text: _str(p.text).slice(0, COMMENT_MAX),
     };
@@ -230,8 +239,23 @@ function previewOf(kind, payload, meta) {
     lines.push('DTNA write: post comment to Service Tracker case');
     lines.push('Unit: ' + (m.unit || '-'));
     lines.push('DTNA case: ' + cid + '  ' + DTNA_CASE_URL + cid + '/detail');
+    lines.push('Channel: Case Comment');
     lines.push('Repair order: ' + (_str(p.repairOrderNo) || '(none)'));
     lines.push('Comment type: (none)');
+    lines.push('Visibility: VISIBLE TO THE DEALER (DTNA)');
+    lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
+    lines.push('Origin: ' + (m.origin || 'unknown'));
+    lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
+    lines.push(_str(p.text));
+    return lines.join('\n');
+  }
+  if (kind === 'dtnaChatter') {
+    const cid = _str(p.caseId);
+    lines.push('DTNA write: post to the case Chatter feed');
+    lines.push('Channel: Chatter (case feed)');
+    lines.push('Unit: ' + (m.unit || '-'));
+    lines.push('DTNA case: ' + cid + '  ' + DTNA_CASE_URL + cid + '/detail');
+    lines.push('Repair order: ' + (_str(p.repairOrderNo) || '(none)'));
     lines.push('Visibility: VISIBLE TO THE DEALER (DTNA)');
     lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
     lines.push('Origin: ' + (m.origin || 'unknown'));
@@ -360,6 +384,25 @@ async function _send(f, payload) {
       if (r && r.ok) {
         _logLine('sent', f, 'len=' + _textLen(f.kind, payload));
         return { ok: true, outcome: 'sent', id: f.id, result: { commentId: _str(r.commentId) } };
+      }
+      const code = _str((r && r.code) || 'DTNA_INTERNAL').replace(/[^A-Z0-9_]/g, '').slice(0, 40) || 'DTNA_INTERNAL';
+      _logLine('send-failed', f, 'error=' + code);
+      return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
+    }
+    if (f.kind === 'dtnaChatter') {
+      // Single-use token: src/dtna/aura.js callChatterWrite refuses a write without it.
+      const token = {};
+      _tokens.add(token);
+      let r;
+      try {
+        const post = _deps.dtnaPostChatter || ((p, t) => require('../dtna/writes').postApprovedChatter(p, t));
+        r = await post(payload, token);
+      } finally {
+        _tokens.delete(token);
+      }
+      if (r && r.ok) {
+        _logLine('sent', f, 'len=' + _textLen(f.kind, payload));
+        return { ok: true, outcome: 'sent', id: f.id, result: { feedItemId: _str(r.feedItemId) } };
       }
       const code = _str((r && r.code) || 'DTNA_INTERNAL').replace(/[^A-Z0-9_]/g, '').slice(0, 40) || 'DTNA_INTERNAL';
       _logLine('send-failed', f, 'error=' + code);

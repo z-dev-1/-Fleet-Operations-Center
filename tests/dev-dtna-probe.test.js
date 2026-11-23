@@ -431,6 +431,134 @@ describe('stage mode (Phase C, read-only changeStatus discovery)', () => {
   });
 });
 
+describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', () => {
+  const FEED_DESC = 'serviceComponent://ui.chatter.components.aura.components.forceChatter.chatter.ForceCommunityFeedController/ACTION$getModel';
+  const SENT_NAME = 'SENTINEL_FILE_NAME_pq1';
+  const SENT_BYTES = 'SENTINEL_BYTES_bx2';
+  const VID = '068gx000009ZzYyAAK';
+  const CF_BUNDLE = [
+    '{"classname":"E2E_UTP_CommentController","method":"getFilesOnCase","params":{"recordId":x}}',
+    'var feed="ForceCommunityFeedController"; if (m.isChatterEnabled) { publisher.postFeedElement({ subjectId: this.recordId, body: t }); }',
+  ].join('\n');
+
+  function cfSetup(o = {}) {
+    const scripts = [];
+    let n = 0;
+    const fetches = [];
+    const fx = createFakeElectron({
+      onLoad(win, url) {
+        const wc = win.webContents;
+        wc.executeJavaScript = async (s) => {
+          scripts.push(s);
+          if (s !== probe.CF_SCRIPT) return null;
+          return {
+            roots: 3, composer: { textareas: 1, richText: 0, hosts: ['forcechatter-publisher'], buttons: ['Share'] },
+            hrefTemplates: ['/Servicetracker/sfc/servlet.shepherd/version/download/{versionId}', '/x/' + VID],
+            links: 2, pdfHref: o.pdfHref === undefined ? '/Servicetracker/sfc/servlet.shepherd/version/download/' + VID : o.pdfHref,
+          };
+        };
+        if (n++ === 0 && url === C.LIST_URL) {
+          emitScript(wc, 's1', CF_BUNDLE);
+          const dbg = wc.debugger;
+          dbg.emitRequest({
+            requestId: 'gm1', url: C.AURA_URL + '?r=7&ui-chatter-components-aura-components-forceChatter-chatter.ForceCommunityFeed.getModel=1', method: 'POST',
+            postData: auraPostData({ context: SENTINEL_CONTEXT, token: SENTINEL_TOKEN, pageURI: SENTINEL_PAGEURI,
+              message: { actions: [{ id: '1;a', descriptor: FEED_DESC, params: { subjectId: CASE1, feedType: 'Record' } }] } }),
+          });
+          dbg.bodies.set('gm1', { body: JSON.stringify({ actions: [{ id: '1;a', state: 'SUCCESS', returnValue: { feed: { isChatterEnabled: true, title: SENT_NAME } } }] }), base64Encoded: false });
+          dbg.emit('message', {}, 'Network.loadingFinished', { requestId: 'gm1' });
+        }
+      },
+    });
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtna-probe-cf-'));
+    const aura = fakeAura();
+    aura.callWrite = vi.fn(async () => { throw new Error('callWrite must not be used'); });
+    aura.callChatterWrite = vi.fn(async () => { throw new Error('callChatterWrite must not be used'); });
+    aura._callApexRaw = vi.fn(async (classname, method, params) => {
+      aura.calls.push({ classname, method, params });
+      return { ok: true, value: [{ ContentVersionId: VID, Title: SENT_NAME + '.pdf', ContentDocumentId: '069gx000009ZzYyAAK' }] };
+    });
+    const fetch = vi.fn(async (url, init) => {
+      fetches.push({ url, init });
+      const buf = Buffer.from('%PDF-1.4 ' + SENT_BYTES);
+      return { status: 200, headers: { get: (k) => ({ 'content-type': 'application/pdf; charset=binary', 'content-length': String(buf.length) })[k.toLowerCase()] || null }, arrayBuffer: async () => buf };
+    });
+    const deps = {
+      electron: fx.electron, session: fakeSession(), capture: fakeCapture(), client: fakeClient(), aura, fetch,
+      getDataDir: () => dataDir, settleMs: 0, loadTimeoutMs: 1000, timeoutMs: 60_000, mode: 'chatter-files',
+    };
+    return { fx, deps, dataDir, scripts, fetches };
+  }
+
+  it('start(): FLEET_DEV_DTNA_PROBE_MODE=chatter-files + FLEET_DEV_DTNA_PROBE_CASE pick the mode and the case', async () => {
+    const { fx, deps, dataDir } = cfSetup();
+    delete deps.mode;
+    const log = recordingLog();
+    expect(probe.start({ env: { FLEET_DEV_DTNA_PROBE: '1', FLEET_DEV_DTNA_PROBE_MODE: 'chatter-files', FLEET_DEV_DTNA_PROBE_CASE: CASE2 }, log, _deps: deps })).toBe(true);
+    deps.session.emit('connected');
+    await probe._lastRunForTests();
+    expect(fx.windows[0].loads).toEqual([C.LIST_URL, C.caseUrl(CASE2), C.caseUrl(CASE2) + COMMENTS_QS()]);
+    const out = JSON.parse(fs.readFileSync(path.join(dataDir, 'dev', 'dtna-chatter-files-probe-' + new Date().toISOString().slice(0, 10) + '.json'), 'utf8'));
+    expect(out.mode).toBe('chatter-files');
+    expect(out.targets).toEqual([CASE2.slice(-6)]);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('records getModel (descriptor, query keys, param keys, isChatterEnabled boolean), composer DOM, files shape and the PDF GET flags; no write; no bytes / names / ids in the output or logs', async () => {
+    const { deps, dataDir, scripts, fetches } = cfSetup();
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log }, deps));
+    expect(r.ok).toBe(true);
+    expect(r.file).toBe('dtna-chatter-files-probe-' + new Date().toISOString().slice(0, 10) + '.json');
+    const file = path.join(dataDir, 'dev', r.file);
+    expect(file.startsWith(dataDir)).toBe(true);
+    const text = fs.readFileSync(file, 'utf8');
+    const out = JSON.parse(text);
+    const cf = out.chatterFiles;
+    expect(cf.feedModels).toEqual([{ descriptor: FEED_DESC, query: '?r=1&ui-chatter-components-aura-components-forceChatter-chatter.ForceCommunityFeed.getModel=1', paramKeys: ['subjectId', 'feedType'], isChatterEnabledType: 'boolean', isChatterEnabled: true }]);
+    expect(cf.dom).toMatchObject({ code: 'OK', composer: { textareas: 1, buttons: ['Share'] }, links: 2 });
+    expect(cf.dom.hrefTemplates).toEqual(['/Servicetracker/sfc/servlet.shepherd/version/download/{versionId}', '/x/{id}']);
+    expect(cf.files).toMatchObject({ code: 'OK', paramKey: 'recordId', ids: { contentVersion: 1, contentDocument: 1, attachment: 0 } });
+    expect(cf.download).toEqual({ status: 200, contentType: 'application/pdf', contentLength: 9 + SENT_BYTES.length, startsWithPdf: true, bytesBucket: '<1MB' });
+    expect(cf.uses.isChatterEnabled.length).toBeGreaterThan(0);
+    expect(cf.bundleFiles.find((b) => b.method === 'getFilesOnCase')).toMatchObject({ bundle: true, paramKeys: ['recordId'] });
+    // Read-only: one getFilesOnCase read, one GET; never a write.
+    expect(deps.aura.calls).toEqual([{ classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { recordId: CASE1 } }]);
+    expect(deps.aura.callWrite).not.toHaveBeenCalled();
+    expect(deps.aura.callChatterWrite).not.toHaveBeenCalled();
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0].url).toBe('https://dtna.my.site.com/Servicetracker/sfc/servlet.shepherd/version/download/' + VID);
+    expect(fetches[0].init).toMatchObject({ method: 'GET', redirect: 'manual' });
+    expect(scripts.filter((s) => s === probe.CF_SCRIPT).length).toBeGreaterThan(0);
+    // Secrets / data: no bytes, file names, raw ids or auth values in the output file or logs.
+    for (const s of [SENT_BYTES, SENT_NAME, VID]) {
+      expect(text, s).not.toContain(s);
+      expect(log.lines.join('\n'), s).not.toContain(s);
+    }
+    expect(containsSentinel(text, AUTH_SENTINELS)).toBe(null);
+    expect(containsSentinel(log.lines, AUTH_SENTINELS)).toBe(null);
+    const done = log.lines.filter((l) => l.startsWith('[dtna-probe] done'));
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatch(/^\[dtna-probe\] done mode=chatter-files feedActions=\d+ getModel=1 files=OK download=200 file=dtna-chatter-files-probe-\d{4}-\d{2}-\d{2}\.json$/);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('a PDF link on another host is never fetched', async () => {
+    const { deps, dataDir, fetches } = cfSetup({ pdfHref: 'https://evil.example/download/' + VID });
+    const r = await probe.run(Object.assign({ log: recordingLog() }, deps));
+    const out = JSON.parse(fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8'));
+    expect(out.chatterFiles.download).toEqual({ status: 'bad-host' });
+    expect(fetches).toHaveLength(0);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('CF_SCRIPT is read-only', () => {
+    for (const bad of ['.click(', 'submit(', 'dispatchEvent', '.focus(', '.value =', '.value=', 'fetch(', 'XMLHttpRequest']) expect(probe.CF_SCRIPT).not.toContain(bad);
+  });
+});
+
+function COMMENTS_QS() { return probe.COMMENTS_TAB_QS; }
+
 describe('app.js wiring', () => {
   const APP_SRC = fs.readFileSync(path.join(WT_ROOT, 'src/app.js'), 'utf8');
   it("is gated on FLEET_DEV_DTNA_PROBE === '1' and requires the probe only inside the gate", () => {

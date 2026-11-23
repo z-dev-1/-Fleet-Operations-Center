@@ -337,6 +337,162 @@ async function _callApexRaw(classname, method, params) {
   return _run(_send(cls, meth, Object.assign({}, p)), { method: meth, caseTag: caseTag(p.caseId) });
 }
 
+// ── Chatter feed + attachments (configured in constants; null = not configured, zero requests) ──
+function _cfg(key, fallback) { return Object.prototype.hasOwnProperty.call(_deps, key) ? _deps[key] : fallback; }
+
+const READ_DESCRIPTOR_RE = /^(aura|serviceComponent):\/\/[\w.\/]+\/ACTION\$(get|list|fetch)\w*$/;
+const ANY_DESCRIPTOR_RE = /^(aura|serviceComponent):\/\/[\w.\/]+\/ACTION\$\w{1,80}$/;
+const QUERY_RE = /^\?[\w.\-=&]{0,300}$/;
+
+function _actionName(descriptor) { const i = descriptor.lastIndexOf('$'); return i >= 0 ? descriptor.slice(i + 1) : ''; }
+
+/** _flatParams(tpl, caseId) -> flat params with '$caseId' substituted | null (bad key / value / placeholder). */
+function _flatParams(tpl, caseId) {
+  if (!_isPlainObject(tpl)) return null;
+  const keys = Object.keys(tpl);
+  if (keys.length > 10) return null;
+  const out = {};
+  for (const k of keys) {
+    if (!/^\w{1,60}$/.test(k)) return null;
+    const v = tpl[k];
+    if (v === '$caseId') out[k] = caseId;
+    else if (typeof v === 'string' && v.startsWith('$')) return null;
+    else if (v === null || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && v.length <= 200)) out[k] = v;
+    else return null;
+  }
+  return out;
+}
+
+function _auraAction(descriptor, query, params) {
+  return () => {
+    const id = ++_seq;
+    const message = JSON.stringify({ actions: [{ id: id + ';a', descriptor, callingDescriptor: 'UNKNOWN', params }] });
+    return _post(typeof query === 'string' && QUERY_RE.test(query) ? query : '', message);
+  };
+}
+
+/**
+ * getFeedModel(caseId, {silent}) — the case feed's own config read (constants.CHATTER_FEED_READ). Read only.
+ * -> {ok:true, value} | {ok:false, code}. Not configured -> DTNA_CHATTER_NOT_CONFIGURED, zero requests.
+ */
+async function getFeedModel(caseId, opts) {
+  const cfg = _cfg('chatterFeedRead', C.CHATTER_FEED_READ);
+  if (!cfg) return { ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' };
+  if (typeof caseId !== 'string' || !C.CASE_ID_RE.test(caseId)) {
+    log.info('[dtna] apex', { method: 'getFeedModel', code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  const d = typeof cfg.descriptor === 'string' ? cfg.descriptor : '';
+  if (!READ_DESCRIPTOR_RE.test(d) || C.WRITE_RE.test(_actionName(d))) {
+    log.info('[dtna] apex', { method: 'refused', code: 'DTNA_METHOD_NOT_ALLOWED' });
+    return { ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' };
+  }
+  const params = _flatParams(cfg.params == null ? {} : cfg.params, caseId);
+  if (!params) {
+    log.info('[dtna] apex', { method: 'getFeedModel', code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  return _run(_auraAction(d, cfg.query, params), { method: 'getFeedModel', caseTag: caseTag(caseId), silent: !!(opts && opts.silent) });
+}
+
+/**
+ * listAttachmentsRaw(caseId, {silent}) — the case files read (constants.ATTACHMENT_LIST_READ, source 'apex').
+ * Read only, same rules as callApex. Not configured -> DTNA_ATTACHMENTS_NOT_CONFIGURED, zero requests.
+ */
+async function listAttachmentsRaw(caseId, opts) {
+  const cfg = _cfg('attachmentListRead', C.ATTACHMENT_LIST_READ);
+  if (!cfg || cfg.source !== 'apex') return { ok: false, code: 'DTNA_ATTACHMENTS_NOT_CONFIGURED' };
+  if (typeof caseId !== 'string' || !C.CASE_ID_RE.test(caseId)) {
+    log.info('[dtna] apex', { method: 'listAttachments', code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  const cls = typeof cfg.classname === 'string' ? cfg.classname : '';
+  const meth = typeof cfg.method === 'string' ? cfg.method : '';
+  if (!/^E2E_\w{1,80}$/.test(cls) || !/^\w{1,80}$/.test(meth) || !/^(get|list|fetch)/.test(meth) || C.WRITE_RE.test(meth)) {
+    log.info('[dtna] apex', { method: 'refused', code: 'DTNA_METHOD_NOT_ALLOWED' });
+    return { ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' };
+  }
+  const tpl = cfg.params == null ? {} : cfg.params;
+  const params = _isPlainObject(tpl) && Object.values(tpl).every((v) => typeof v === 'string') ? _flatParams(tpl, caseId) : null;
+  if (!params) {
+    log.info('[dtna] apex', { method: meth, code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  return _run(_send(cls, meth, params), { method: meth, caseTag: caseTag(caseId), silent: !!(opts && opts.silent) });
+}
+
+const CHATTER_PARAMS_MAX_DEPTH = 6;
+const CHATTER_PARAMS_MAX_LEN = 12000;
+const ID_KEY_RE = /caseid|subjectid|parentid|recordid/i;
+
+/** _chatterParamsOk(v, depth) -> JSON-safe, depth-bounded, every id-like key holds a case id. */
+function _chatterParamsOk(v, depth) {
+  if (depth > CHATTER_PARAMS_MAX_DEPTH) return false;
+  if (v === null || typeof v === 'boolean' || typeof v === 'string') return true;
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (Array.isArray(v)) return v.length <= 50 && v.every((x) => _chatterParamsOk(x, depth + 1));
+  if (!_isPlainObject(v)) return false;
+  const keys = Object.keys(v);
+  if (keys.length > 30) return false;
+  for (const k of keys) {
+    if (!/^\w{1,60}$/.test(k)) return false;
+    if (ID_KEY_RE.test(k) && !(typeof v[k] === 'string' && C.CASE_ID_RE.test(v[k]))) return false;
+    if (!_chatterParamsOk(v[k], depth + 1)) return false;
+  }
+  return true;
+}
+
+function _findCaseId(v, depth) {
+  if (depth > CHATTER_PARAMS_MAX_DEPTH || !v || typeof v !== 'object') return '';
+  for (const k of Object.keys(v)) {
+    if (ID_KEY_RE.test(k) && typeof v[k] === 'string' && C.CASE_ID_RE.test(v[k])) return v[k];
+    const x = _findCaseId(v[k], depth + 1);
+    if (x) return x;
+  }
+  return '';
+}
+
+/**
+ * callChatterWrite(params, token) — the ONLY Chatter write path (src/dtna/writes.js postApprovedChatter).
+ * Sends exactly the configured constants.CHATTER_POST_PARAMS action with the built params, only with a live
+ * single-use write-gate approval token, else zero requests. No retry.
+ */
+async function callChatterWrite(params, token) {
+  const cfg = _cfg('chatterConfig', C.CHATTER_POST_PARAMS);
+  if (!cfg) return { ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' };
+  const isToken = typeof _deps.isApprovalToken === 'function' ? _deps.isApprovalToken : require('../writes/write-gate').isApprovalToken;
+  let approved = false;
+  try { approved = isToken(token) === true; } catch (_) { approved = false; }
+  if (!approved) {
+    log.info('[dtna] apex', { method: 'chatterPost', code: 'DTNA_WRITE_NOT_APPROVED' });
+    return { ok: false, code: 'DTNA_WRITE_NOT_APPROVED' };
+  }
+  let send = null;
+  if (cfg.transport === 'aura' && typeof cfg.descriptor === 'string' && ANY_DESCRIPTOR_RE.test(cfg.descriptor)) {
+    send = (p) => _auraAction(cfg.descriptor, cfg.query, p);
+  } else if (cfg.transport === 'apex' && typeof cfg.classname === 'string' && /^E2E_\w{1,80}$/.test(cfg.classname)
+    && typeof cfg.method === 'string' && /^\w{1,80}$/.test(cfg.method)) {
+    send = (p) => _send(cfg.classname, cfg.method, p);
+  }
+  if (!send) {
+    log.info('[dtna] apex', { method: 'refused', code: 'DTNA_METHOD_NOT_ALLOWED' });
+    return { ok: false, code: 'DTNA_METHOD_NOT_ALLOWED' };
+  }
+  let json = '';
+  try { json = _isPlainObject(params) && _chatterParamsOk(params, 0) ? JSON.stringify(params) : ''; } catch (_) { json = ''; }
+  const caseId = json ? _findCaseId(params, 0) : '';
+  if (!json || json.length > CHATTER_PARAMS_MAX_LEN || !caseId) {
+    log.info('[dtna] apex', { method: 'chatterPost', code: 'DTNA_INVALID_INPUT' });
+    return { ok: false, code: 'DTNA_INVALID_INPUT' };
+  }
+  // A JSON round-trip copy: what is sent is what was validated.
+  const copy = safeJson(json).value;
+  return _run(send(copy), { method: 'chatterPost', caseTag: caseTag(caseId), noRetry: true });
+}
+
 function _resetForTests() { _deps = {}; _seq = 0; _listLoadP = null; _listBuilt = false; _listLoadAt = -Infinity; }
 
-module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, listTemplateBuilt, getCaseNumberRecord, _callApexRaw, _post, _setDeps, _resetForTests };
+module.exports = {
+  parseEnvelope, classify, callApex, callWrite, replayGetItems, listTemplateBuilt, getCaseNumberRecord, _callApexRaw, _post, _setDeps, _resetForTests,
+  getFeedModel, listAttachmentsRaw, callChatterWrite,
+};
