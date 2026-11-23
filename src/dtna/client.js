@@ -279,6 +279,36 @@ function _collectIds(v, out, depth) {
   }
 }
 
+/**
+ * _listShape(value) -> shape-only diagnostic for an empty list page: key names (id-like keys masked),
+ * array paths with lengths, and counts of 500-prefixed strings by length. Never a value.
+ */
+function _listShape(value) {
+  const arrays = [];
+  const idPaths = new Set();
+  let ids18 = 0;
+  let ids15 = 0;
+  const mask = (k) => (/^[A-Za-z0-9]{15,18}$/.test(k) && /\d/.test(k) ? '<id>' : String(k).slice(0, 40));
+  const walk = (v, path, depth) => {
+    if (depth > 12 || v == null) return;
+    if (typeof v === 'string') {
+      if (/^500[A-Za-z0-9]{15}$/.test(v)) { ids18++; if (idPaths.size < 6) idPaths.add(path); }
+      else if (/^500[A-Za-z0-9]{12}$/.test(v)) { ids15++; if (idPaths.size < 6) idPaths.add(path); }
+      return;
+    }
+    if (typeof v !== 'object') return;
+    if (Array.isArray(v)) {
+      if (arrays.length < 10) arrays.push({ path: path || '.', len: v.length });
+      for (const x of v.slice(0, 200)) walk(x, path + '[]', depth + 1);
+      return;
+    }
+    for (const k of Object.keys(v).slice(0, 60)) walk(v[k], path + '.' + mask(k), depth + 1);
+  };
+  walk(value, '', 0);
+  const top = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).slice(0, 15).map(mask) : [];
+  return { type: Array.isArray(value) ? 'array' : typeof value, top, arrays, ids18, ids15, idPaths: Array.from(idPaths) };
+}
+
 /** caseNumberFromList(caseId) -> the case number a list read showed for this case | ''. No network. */
 function caseNumberFromList(caseId) { return _listNumbers.get(_str(caseId)) || ''; }
 
@@ -327,6 +357,7 @@ async function _listPass(filter, o) {
     const before = ids.size;
     const got = new Set();
     _collectIds(r.value, got, 0);
+    if (i === 0 && !got.size) { try { log.info('[dtna] list-shape', _listShape(r.value)); } catch (_) { /* diagnostic only */ } }
     for (const id of got) ids.add(id);
     if (!paged || got.size < size || ids.size === before) break;
     page++;
@@ -500,5 +531,5 @@ function _resetForTests() { _deps = {}; _listMemo = null; _listNumbers.clear(); 
 
 module.exports = {
   getCaseRecord, getRepairOrderId, getComments, getComment, getCaseNumber, normalizeCase, pullCase, listCaseIds, caseNumberFromList,
-  resolveCaseForRow, bulkPull, toTSV, exportRows, CASE_COLUMNS, COMMENT_COLUMNS, _setDeps, _resetForTests,
+  resolveCaseForRow, bulkPull, toTSV, exportRows, CASE_COLUMNS, COMMENT_COLUMNS, _setDeps, _resetForTests, _listShape,
 };

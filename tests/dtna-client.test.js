@@ -313,6 +313,17 @@ describe('listCaseIds', () => {
     expect(a.lastParams.filterName).toBe('00B6T000007X74uUAC');
   });
 
+  it('_listShape: key paths, array lengths and id counts only (id-like keys masked, no values)', () => {
+    const v = { result: [{ record: { Id: '500ABCDEFGHIJKL', CaseNumber: '01234567', Unit__c: 'UNIT-SECRET' } }], byId: { '500ABCDEFGHIJKLMNO': { x: 1 } }, totalCount: 1 };
+    const s = client._listShape(v);
+    expect(s).toMatchObject({ type: 'object', top: ['result', 'byId', 'totalCount'], ids18: 0, ids15: 1 });
+    expect(s.arrays).toEqual([{ path: '.result', len: 1 }]);
+    expect(s.idPaths).toEqual(['.result[].record.Id']);
+    const text = JSON.stringify(s);
+    expect(text).not.toMatch(/500ABC|01234567|UNIT-SECRET/);
+    expect(client._listShape({ byId: { '500ABCDEFGHIJKLMNO': ['500ABCDEFGHIJKLMNO'] } }).arrays).toEqual([{ path: '.byId.<id>', len: 1 }]);
+  });
+
   it('one verbatim replay when the template has no paging; filterId sets filterName', async () => {
     const a = useAura(fakeAura({ listParams: { pageSize: undefined } }));
     a.replayGetItems.mockImplementation(async (mutate) => {
