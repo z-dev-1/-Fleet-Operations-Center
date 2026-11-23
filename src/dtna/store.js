@@ -18,6 +18,7 @@ const ENTRY_FIELDS = [
   'caseId', 'caseNumber', 'unitId', 'serial', 'vinTail', 'dealerCode', 'dealerName', 'caseStatus',
   'steps', 'repairOrderId', 'repairOrderNo', 'estimateNo', 'comments', 'thread', 'offsiteText',
   'offsiteStage', 'stageSince', 'commentCount', 'lastCommentAt', 'lastCommentType', 'pulledAt', 'source',
+  'approvedTotal', 'approvedAt',
 ];
 const STEP_FIELDS = ['name', 'status', 'at'];
 const COMMENT_FIELDS = ['id', 'type', 'at', 'from', 'text'];

@@ -11,8 +11,8 @@
  * event time). Sync / scrape times are never used as a stand-in; AAP-only pending
  * WOs show "submitted time unknown".
  *
- * DTNA work orders are listed (Phase B, findings §6b): DTNA exposes no estimate amount,
- * so a DTNA row's Total is '—' and its status is the case status from the DTNA case
+ * DTNA work orders are listed (Phase B, findings §6b): a DTNA row's Total is the amount of the newest
+ * approval post on the case ('Approved for $X', best-effort), '—' until one exists; its status is the case status from the DTNA case
  * cache (refreshed by the scan, the sync pass and "Pull DTNA"). excludedDtna stays in the result for shape compat and is always 0.
  * Scope is whatever rows the fleet slice holds (the user's settings.domiciles build);
  * nothing here widens it.
@@ -220,7 +220,7 @@ export const MISMATCH_LABEL = '\u2714 Done offsite \u00B7 RG WO still open';
 export const SORT_KEYS = ['default', 'mismatch', 'updated', 'total', 'unit', 'fas'];
 const SRC_LABEL = { rg: 'RG', decisiv: 'Decisiv', dtna: 'DTNA', both: 'both' };
 const VENDOR_OPTIONS = [['volvo', 'Volvo'], ['paccar', 'PACCAR'], ['dtna', 'DTNA'], ['other', 'Other']];
-export const DTNA_NO_TOTAL_HINT = 'DTNA does not expose an estimate amount';
+export const DTNA_NO_TOTAL_HINT = 'No approval post on the DTNA case yet';
 
 const _lc = (s) => String(s == null ? '' : s).trim().toLowerCase();
 const _str = (s) => (s == null ? '' : String(s).trim());

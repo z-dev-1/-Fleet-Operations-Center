@@ -161,6 +161,7 @@ function normalizeCase(record, ro, comments, opts) {
   const stage = T.stageFromCase({ caseStatus, steps, comments: norm, thread: th.thread });
   const vin = _field(rec, C.CASE_FIELDS.vin, /(^|_)vin/i);
   const newest = norm[0] || null;
+  const approved = require('./pending').approvedTotalOf(norm);
   return {
     caseId,
     caseNumber: _field(rec, C.CASE_FIELDS.caseNumber),
@@ -174,6 +175,8 @@ function normalizeCase(record, ro, comments, opts) {
     repairOrderId: ro && ro.Id ? _str(ro.Id) : '',
     repairOrderNo: _newestWith(sorted, ['RepairOrderNo', 'RepairOrderNumber', 'RONumber']) || (ro && ro.Name ? _str(ro.Name) : ''),
     estimateNo: _newestWith(sorted, ['EstimateNo', 'EstimateNumber']),
+    approvedTotal: approved ? approved.total : null,
+    approvedAt: approved ? approved.at : '',
     comments: norm,
     thread: th.thread,
     offsiteText: th.offsiteText,
@@ -239,7 +242,7 @@ async function pullCase(caseId, opts) {
   const entry = normalizeCase(rec.value, ro, comments, { caseId, now: _now() });
   if (prev) {
     // Case-only pull, or a failed/empty comment read: keep the comments a previous pull read.
-    for (const k of ['comments', 'thread', 'offsiteText', 'commentCount', 'lastCommentAt', 'lastCommentType', 'repairOrderNo', 'estimateNo']) {
+    for (const k of ['comments', 'thread', 'offsiteText', 'commentCount', 'lastCommentAt', 'lastCommentType', 'repairOrderNo', 'estimateNo', 'approvedTotal', 'approvedAt']) {
       if (prev[k] !== undefined && prev[k] !== '') entry[k] = prev[k];
     }
   }

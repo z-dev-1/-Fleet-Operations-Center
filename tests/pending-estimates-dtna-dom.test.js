@@ -92,7 +92,7 @@ describe('DTNA rows in Pending Estimates', () => {
     expect(c[5].textContent).toBe('\u2014');
     expect(c[6].textContent).toContain('Arrived');
     expect(c[7].textContent).toBe('\u2014');
-    expect(c[7].getAttribute('title')).toBe('DTNA does not expose an estimate amount');
+    expect(c[7].getAttribute('title')).toBe('No approval post on the DTNA case yet');
     expect(cells('D710')[3].textContent).toBe('both');
     expect(cells('D710')[6].textContent).toContain('In Repair');
     expect(cells('D710')[7].textContent).toBe('\u2014');

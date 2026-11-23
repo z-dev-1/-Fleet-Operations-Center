@@ -366,7 +366,7 @@ describe('DTNA in the merge', () => {
     const d = m().find((x) => x.unitId === 'D700');
     expect(d).toMatchObject({ src: 'dtna', vendorKind: 'dtna', total: null, fleetStatus: '', repairStatus: 'Arrived' });
     const h = L.rowHtml(d);
-    expect(h).toContain('<td class="pe-amt" title="DTNA does not expose an estimate amount">\u2014</td>');
+    expect(h).toContain('<td class="pe-amt" title="No approval post on the DTNA case yet">\u2014</td>');
     expect(h).toContain('<td>DTNA</td>');
     expect(h).toContain('<td>Arrived<div class="pe-sub2">arrival</div></td>');
     expect(h).not.toContain('$');

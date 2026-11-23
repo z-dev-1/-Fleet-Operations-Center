@@ -4,8 +4,9 @@
  * (src/scrapers/pending_est_sources.js; findings §2.2, §5.3, §6b).
  *
  * Works on dtnaCaseCache entries only: no network, no session. Requires only ./constants and ./join.
- * DTNA exposes no estimate amount and no approval status (discovery D2/D4): a DTNA offsite record has
- * total null, fleetStatus '' and the current stage of the portal's pipeline (constants.CASE_STAGES:
+ * DTNA exposes no estimate amount field and no approval status (discovery D2/D4). A DTNA offsite record
+ * has total = the amount of the newest approval post in the case comments ('Approved for $X'; best-effort
+ * text extraction, null until one exists), fleetStatus '' and the current stage of the portal's pipeline (constants.CASE_STAGES:
  * Pre-Repair > Arrived > In-Repair > Post-Repair > Ready for Pickup > Closed) as repairStatus.
  * Ready for Pickup and Closed count as done offsite.
  */
@@ -71,6 +72,7 @@ function offsiteRecord(entry) {
   const e = entry || {};
   const caseId = _str(e.caseId);
   const st = currentStage(e);
+  const total = approvedTotal(e);
   return {
     source: 'dtna',
     caseId,
@@ -83,8 +85,9 @@ function offsiteRecord(entry) {
     stage: _str(e.offsiteStage),
     stageStatus: '',
     stageSince: _str(e.stageSince),
-    total: null,
-    totalSource: 'none',
+    // The amount of the newest approval post ('Approved for $X'); null (shown as a dash) until one exists.
+    total,
+    totalSource: total != null ? 'approved' : 'none',
     updatedAt: _str(e.lastCommentAt),
     scrapedAt: _str(e.pulledAt),
     roNumber: _str(e.repairOrderNo),
@@ -107,6 +110,37 @@ function latestPulledAt(entries) {
     if (t > best) { best = t; iso = new Date(t).toISOString(); }
   }
   return iso;
+}
+
+// Approval posts in the case comments / feed: 'Approved for $3,778.83', 'Estimate Approved - $3,531.02',
+// 'Approved $X'. Best-effort text extraction.
+const APPROVED_RE = /approved(?:\s+for)?\s*[-:\u2013]?\s*\$\s?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)/i;
+
+/**
+ * approvedTotalOf(comments) -> { total, at } | null: the amount in the newest comment ({ text, at })
+ * whose text is an approval post. Undated or equal dates keep list order (entry comments are newest first).
+ */
+function approvedTotalOf(comments) {
+  let best = null;
+  for (const c of (Array.isArray(comments) ? comments : [])) {
+    if (!c || typeof c !== 'object') continue;
+    const m = APPROVED_RE.exec(_str(c.text));
+    if (!m) continue;
+    const total = Math.round(Number(m[1].replace(/,/g, '')) * 100) / 100;
+    if (!Number.isFinite(total) || total <= 0) continue;
+    const ms = _ms(c.at);
+    if (!best || ms > best.ms) best = { total, at: _str(c.at), ms };
+  }
+  return best ? { total: best.total, at: best.at } : null;
+}
+
+/** approvedTotal(entry) -> number | null: the cached approvedTotal, else parsed from the cached comments. */
+function approvedTotal(entry) {
+  const e = entry || {};
+  const n = typeof e.approvedTotal === 'number' ? e.approvedTotal : NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  const a = approvedTotalOf(e.comments);
+  return a ? a.total : null;
 }
 
 const _wrId = (wo) => _str(wo && (wo.workRequestId || wo.id));
@@ -167,4 +201,4 @@ function joinCasesToWrs(o) {
   return { byWr, unjoined };
 }
 
-module.exports = { currentStage, isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, DTNA_VENDOR_RE };
+module.exports = { currentStage, isCaseClosed, isCaseDone, isAwaitingApproval, offsiteRecord, mismatch, latestPulledAt, joinCasesToWrs, approvedTotalOf, approvedTotal, DTNA_VENDOR_RE };
