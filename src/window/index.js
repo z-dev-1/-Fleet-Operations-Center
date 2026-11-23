@@ -1264,6 +1264,16 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
         // in chunks — so every unit eventually shows PM due dates + location in
         // the table. Guarded to run once per load cycle.
         _maybeFillPmAllAsync(payload);
+        // BACKGROUND: Aperia issues read for the fleet-row units (session-gated, throttled to one
+        // read per 15 min inside sync-read), then make sure the default-on Tire Alerts run.
+        try {
+          const _aperiaT = setTimeout(() => {
+            Promise.resolve().then(() => require('../aperia/sync-read').run({ rows, ctx })).catch(() => null)
+              .then(() => { try { return require('../aperia/alerts-auto').ensure(); } catch (_) { return null; } })
+              .catch(() => null);
+          }, 20000);
+          if (_aperiaT && typeof _aperiaT.unref === 'function') _aperiaT.unref();
+        } catch (_) {}
         // Quick Volvo/PACCAR case-stage refresh (2026-10-28): reads only the
         // Decisiv status API (not notes / AI), at most every 15 min, so the
         // stage + Ready are current without waiting on deep-scan's 2h notes
@@ -1489,6 +1499,9 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
             logger.info('[offsite] cleared ' + _offsiteCleared.length + ' offsite link(s) not tied to the unit\u2019s current WR: ' + _offsiteCleared.join(', '));
           }
           logger.info('[data-source] AI timeline build: hydrated ' + hydrated + ' conversations + PM — running Orcha deep-scan');
+          // API mode skips src/sync's pass, so run the bounded DTNA discovery for FREIGHTLINER /
+          // DAIMLER fleet rows with no case here (session-gated, budget 25, 60 s cap, never throws).
+          try { await require('../dtna/auto').discoverForRows(rows); } catch (_) {}
           const { runOrchaDeepScan } = require('../orcha/deep-scan');
           await telemetry.track('deepScan.run', () => runOrchaDeepScan(rows, {
             pushData,
