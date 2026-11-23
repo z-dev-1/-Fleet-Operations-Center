@@ -13,7 +13,10 @@ const C = require('./constants');
 function _str(v) { return v == null ? '' : String(v); }
 
 /**
- * openExtractor(deps) -> { extract(buffer, name) -> Promise<{ ok, status:'read'|'scanned'|'failed', text, truncated, pages?, code? }>, close() }
+ * openExtractor(deps) -> { extract(buffer, name) -> Promise<{ ok, status:'read'|'scanned'|'failed', text, truncated, fullText?, pages?, code? }>, close() }
+ * text is clipped to ATTACHMENT_TEXT_MAX (what is stored); fullText is the worker's text (its own
+ * RAW_TEXT_MAX_CHARS cap) for parseEstimateText only, so a grand total past the clip is still found.
+ * fullText is never stored, logged or returned further.
  * deps: passed to createWorkerSession (tests: spawnWorker). The caller MUST close() in a finally.
  */
 function openExtractor(deps) {
@@ -36,12 +39,13 @@ function openExtractor(deps) {
     if (!reply || !reply.ok) out = { ok: false, status: 'failed', text: '', truncated: false, code: code(reply && reply.reason) };
     else if (reply.needsVision && reply.reason === 'PDFJS_UNAVAILABLE') out = { ok: false, status: 'failed', text: '', truncated: false, code: 'DTNA_PDF_READER_UNAVAILABLE' };
     else if (reply.needsVision) {
-      const c = clip(_str(reply.text).trim());
-      out = { ok: true, status: 'scanned', text: c.text, truncated: false };
-    } else if (!_str(reply.text).trim()) out = { ok: true, status: 'scanned', text: '', truncated: false };
+      const full = _str(reply.text).trim();
+      const c = clip(full);
+      out = { ok: true, status: 'scanned', text: c.text, truncated: false, fullText: full };
+    } else if (!_str(reply.text).trim()) out = { ok: true, status: 'scanned', text: '', truncated: false, fullText: '' };
     else {
       const c = clip(reply.text);
-      out = { ok: true, status: 'read', text: c.text, truncated: c.truncated };
+      out = { ok: true, status: 'read', text: c.text, truncated: c.truncated, fullText: _str(reply.text) };
     }
     if (pages !== undefined) out.pages = pages;
     return out;
@@ -61,7 +65,9 @@ const PARTS_LABEL = /parts\s+(?:sub)?total|total\s+parts/i;
 const LABOR_LABEL = /labou?r\s+(?:sub)?total|total\s+labou?r/i;
 const NOT_ITEM_RE = /\b(sub\s*-?total|total|tax|taxes|balance|deposit|discount)\b/i;
 const LABOR_RE = /labou?r|\bhrs?\b|hours/i;
-const PART_RE = /\bpart\b|p\/n|[A-Z0-9]{2,}-[A-Z0-9-]{2,}/;
+const PART_RE = /\b[Pp]arts?\b|[Pp]\/[Nn]|[A-Z0-9]{2,}-[A-Z0-9-]{2,}/;
+// Up to 2 trailing word-only columns (<= 12 letters each) after a line item's amount.
+const TRAIL_RE = /(?:\s+[A-Za-z]{1,12}){1,2}$/;
 
 function _num(s) {
   const n = Math.round(Number(_str(s).replace(/,/g, '')) * 100) / 100;
@@ -97,14 +103,17 @@ function parseEstimateText(text) {
     if (lineItems.length >= C.ESTIMATE_LINE_ITEMS_MAX) break;
     const line = raw.replace(/\s+/g, ' ').trim();
     if (!line || NOT_ITEM_RE.test(line)) continue;
-    const amts = line.match(AMT_RE);
+    // The amount may be followed by up to TRAIL_MAX short word columns (status / taxable flag / unit), as in
+    // the live dealer layout ('... $245.10 Pending'); those columns are dropped.
+    const head = line.replace(TRAIL_RE, '');
+    const amts = head.match(AMT_RE);
     if (!amts) continue;
     const lastAmt = amts[amts.length - 1];
-    if (!line.endsWith(lastAmt.trim())) continue;
+    if (!head.endsWith(lastAmt.trim())) continue;
     const m = new RegExp(AMT).exec(lastAmt);
     const amount = m ? _num(m[1]) : null;
     if (amount == null) continue;
-    const desc = line.slice(0, line.length - lastAmt.trim().length).replace(/[\s$:\-]+$/, '').trim().slice(0, 120);
+    const desc = head.slice(0, head.length - lastAmt.trim().length).replace(/[\s$:\-]+$/, '').trim().slice(0, 120);
     if (!desc) continue;
     const kind = LABOR_RE.test(desc) ? 'labor' : (PART_RE.test(desc) ? 'part' : 'other');
     lineItems.push({ desc, amount, kind });

@@ -433,6 +433,63 @@ describe('Chatter + Files: attachments inside pullCase', () => {
     }
   });
 
+  describe('shipped configs end to end (live shapes): comment-row files -> getAttachment base64 -> real pdfjs worker', () => {
+    const realFiles = require('../src/dtna/files.js');
+    const C = require('../src/dtna/constants.js');
+    const { makeEstimatePdf } = require('./helpers/dtna-estimate-pdf.cjs');
+    const { spawnRealWorker } = require('./helpers/jmctx-worker.cjs');
+    const quiet = { info() {}, warn() {}, error() {}, debug() {} };
+    const filler = Array.from({ length: 260 }, (_, i) => 'Line ' + i + ' inspection note without an amount');
+    const PDF = makeEstimatePdf(filler.concat(['Brake chamber 1 Ea 11/20/26 1234567 Parts $245.10 Pending', 'Grand Total  $1,234.56']));
+    // The External Communication row shape seen live (values made up).
+    const ROWS = COMMENTS.map((c, i) => (i === 1 ? Object.assign({}, c, { HasAttachment: true, LastUpdatedDate: '2026-09-24T10:00:00.000Z',
+      Attachments: [{ FileSize: PDF.length, FileName: 'estimate.pdf', ContentVersionId: null, CaseId: null, AttachmentId: '115000000000001' },
+        { FileSize: 10, FileName: 'photo.jpg', ContentVersionId: null, CaseId: null, AttachmentId: '115000000000002' }] }) : c));
+    afterEach(() => realFiles._setDeps({}));
+
+    function useShipped() {
+      const a = fakeAura({ fail: (name) => {
+        if (name === 'getCommentsByCaseRepairOrder') return { ok: true, value: ROWS };
+        if (name === 'getAttachment') return { ok: true, value: PDF.toString('base64') };
+        return null;
+      } });
+      realFiles._setDeps({ aura: a });
+      session = { notePulled: vi.fn() };
+      client._setDeps({ aura: a, session, now: () => NOW, sleep: async () => {}, files: realFiles,
+        extractorDeps: { spawnWorker: spawnRealWorker, logger: quiet, getChildRss: () => undefined, limits: { PARSE_TIMEOUT_MS: 100000 } } });
+      return a;
+    }
+
+    it('one getAttachment read; text clipped, total and line items parsed from the full text; re-pull reuses it', async () => {
+      const a = useShipped();
+      const r = await client.pullCase(CASE_ID);
+      expect(r.ok).toBe(true);
+      expect(a.callApex.mock.calls.filter((c) => c[0] === 'getAttachment').map((c) => c[1])).toEqual([{ caseId: CASE_ID, attId: '115000000000001' }]);
+      const list = dstore.get(CASE_ID).attachments;
+      expect(list.map((x) => x.status)).toEqual(['read', 'skipped-type']);
+      expect(list[0]).toMatchObject({ attId: '115000000000001', textLen: C.ATTACHMENT_TEXT_MAX, truncated: true, total: 1234.56, totalLabeled: true, parseVersion: C.ESTIMATE_PARSE_VERSION });
+      expect(list[0].lineItems).toEqual([{ desc: 'Brake chamber 1 Ea 11/20/26 1234567 Parts', amount: 245.1, kind: 'part' }]);
+      expect(list[0]).not.toHaveProperty('fullText');
+      expect(require('../src/dtna/pending.js').dtnaTotal(dstore.get(CASE_ID))).toMatchObject({ total: 1234.56, source: 'pdf' });
+      const a2 = useShipped();
+      await client.pullCase(CASE_ID);
+      expect(a2.callApex.mock.calls.filter((c) => c[0] === 'getAttachment')).toHaveLength(0);
+    }, 120000);
+
+    it('a cached read PDF from an older parse rule is re-extracted once', async () => {
+      useShipped();
+      await client.pullCase(CASE_ID);
+      const e = dstore.get(CASE_ID);
+      e.attachments[0].parseVersion = 1;
+      e.attachments[0].total = null;
+      dstore.put(e, { now: NOW });
+      const a = useShipped();
+      await client.pullCase(CASE_ID);
+      expect(a.callApex.mock.calls.filter((c) => c[0] === 'getAttachment')).toHaveLength(1);
+      expect(dstore.get(CASE_ID).attachments[0]).toMatchObject({ total: 1234.56, parseVersion: C.ESTIMATE_PARSE_VERSION });
+    }, 120000);
+  });
+
   it('a throwing extractor never fails the pull; logs carry counts only', async () => {
     useFiles([att(1)], { extract: () => { throw new Error('boom SENTINEL_MSG'); } });
     const r = await client.pullCase(CASE_ID);

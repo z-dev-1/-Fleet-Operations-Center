@@ -267,8 +267,10 @@ async function syncAttachments(caseId, rawComments, prevEntry, opts) {
     for (const a of pdfs) {
       const meta = Object.assign(_attMeta(a), { kind: 'pdf' });
       const prev = prevBy.get(_attKey(a));
+      // A 'read' PDF parsed by an older parseEstimateText rule is re-extracted once (ESTIMATE_PARSE_VERSION).
       const fresh = prev && ATT_FINAL.has(prev.status) && (prev.size == null ? null : prev.size) === meta.size
-        && _now() - (_ms(prev.extractedAt) || 0) < C.ATTACHMENT_REFRESH_MS;
+        && _now() - (_ms(prev.extractedAt) || 0) < C.ATTACHMENT_REFRESH_MS
+        && (prev.status !== 'read' || prev.parseVersion === C.ESTIMATE_PARSE_VERSION);
       if (fresh) { result.push(Object.assign({}, prev, meta)); stats.reused++; continue; }
       if (meta.size != null && meta.size > C.ATTACHMENT_MAX_BYTES) {
         result.push(Object.assign(meta, { status: 'skipped-size', code: 'DTNA_ATTACHMENT_TOO_LARGE', extractedAt: new Date(_now()).toISOString() }));
@@ -297,7 +299,10 @@ async function syncAttachments(caseId, rawComments, prevEntry, opts) {
       let x;
       try { x = await ex.extract(d.buffer, meta.name); } catch (_) { x = { ok: false, status: 'failed', text: '', code: 'DTNA_PDF_FAILED' }; }
       const text = _str(x && x.text);
-      const parsed = text ? _estimatePdf().parseEstimateText(text) : { total: null, totalLabeled: false, partsTotal: null, laborTotal: null, lineItems: [] };
+      // Parse the full worker text (a grand total at the end of a long estimate is past the stored clip);
+      // only the clipped text is kept.
+      const full = _str(x && x.fullText) || text;
+      const parsed = full ? _estimatePdf().parseEstimateText(full) : { total: null, totalLabeled: false, partsTotal: null, laborTotal: null, lineItems: [] };
       if (!x || x.status === 'failed') stats.failed++;
       result.push(Object.assign(meta, {
         status: (x && x.status) || 'failed',
@@ -311,6 +316,7 @@ async function syncAttachments(caseId, rawComments, prevEntry, opts) {
         laborTotal: parsed.laborTotal,
         lineItems: parsed.lineItems,
         extractedAt: new Date(_now()).toISOString(),
+        parseVersion: C.ESTIMATE_PARSE_VERSION,
       }));
     }
   } finally {

@@ -36,20 +36,28 @@ const DEFAULT_LINES = [
   'Grand Total  $1,234.56',
 ];
 
-/** makeEstimatePdf(lines?) -> Buffer */
+const PAGE_LINES = 40;
+
+/** makeEstimatePdf(lines?) -> Buffer (one page per PAGE_LINES lines) */
 function makeEstimatePdf(lines) {
   const ls = Array.isArray(lines) && lines.length ? lines : DEFAULT_LINES;
-  const ops = ['BT /F1 11 Tf 72 740 Td'];
-  ls.forEach((l, i) => { ops.push((i ? '0 -18 Td ' : '') + '(' + esc(l) + ') Tj'); });
-  ops.push('ET');
-  const content = Buffer.from(ops.join('\n'), 'latin1');
-  return buildPdf([
+  const pages = [];
+  for (let i = 0; i < ls.length; i += PAGE_LINES) pages.push(ls.slice(i, i + PAGE_LINES));
+  // Objects: 1 catalog, 2 pages, 3 font, then per page: page object + content stream.
+  const kids = pages.map((_, p) => (4 + p * 2) + ' 0 R').join(' ');
+  const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
-    stream(content),
+    '<< /Type /Pages /Kids [' + kids + '] /Count ' + pages.length + ' >>',
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-  ]);
+  ];
+  pages.forEach((pl, p) => {
+    const ops = ['BT /F1 11 Tf 72 740 Td'];
+    pl.forEach((l, i) => { ops.push((i ? '0 -18 Td ' : '') + '(' + esc(l) + ') Tj'); });
+    ops.push('ET');
+    objects.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ' + (5 + p * 2) + ' 0 R /Resources << /Font << /F1 3 0 R >> >> >>');
+    objects.push(stream(Buffer.from(ops.join('\n'), 'latin1')));
+  });
+  return buildPdf(objects);
 }
 
 module.exports = { makeEstimatePdf, DEFAULT_LINES };

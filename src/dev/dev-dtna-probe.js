@@ -1541,7 +1541,8 @@ async function _cfSteps(D, state, census, wc) {
     ex = ep.openExtractor(D.extractorDeps || {});
     const r = await ex.extract(pdfBuf, 'probe.pdf');
     const text = r && typeof r.text === 'string' ? r.text : '';
-    const p = text ? ep.parseEstimateText(text) : null;
+    const full = r && typeof r.fullText === 'string' && r.fullText ? r.fullText : text;
+    const p = full ? ep.parseEstimateText(full) : null;
     const kinds = { part: 0, labor: 0, other: 0 };
     for (const li of (p && p.lineItems) || []) if (li && kinds[li.kind] != null) kinds[li.kind]++;
     state.cf.extract = {

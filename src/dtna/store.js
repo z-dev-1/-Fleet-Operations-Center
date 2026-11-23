@@ -26,7 +26,7 @@ const COMMENT_FIELDS = ['id', 'type', 'at', 'from', 'text'];
 // parsed totals. Scalars only; there is no bytes field, so file bytes can never be stored.
 const ATTACHMENT_FIELDS = [
   'versionId', 'documentId', 'attId', 'name', 'ext', 'size', 'createdAt', 'kind', 'status', 'code', 'text', 'textLen',
-  'truncated', 'total', 'totalLabeled', 'partsTotal', 'laborTotal', 'extractedAt',
+  'truncated', 'total', 'totalLabeled', 'partsTotal', 'laborTotal', 'extractedAt', 'parseVersion',
 ];
 const LINE_ITEM_FIELDS = ['desc', 'amount', 'kind'];
 

@@ -44,6 +44,20 @@ describe('parseEstimateText', () => {
     expect(E.parseEstimateText('Estimate Total - $1,000.00').total).toBe(1000);
   });
 
+  it('live dealer layout: line items whose amount is followed by a short word column (made-up values)', () => {
+    const r = E.parseEstimateText([
+      'Brake chamber 30/30 1 Ea 11/20/26 1234567 Parts $245.10 Pending',
+      'Diagnose air leak 2 Hr 11/20/26 1234568 Labor $312.50 Approved',
+      'Shop supplies $25.00 Y N',
+      'Note about $10.00 deposit taken',
+    ].join('\n'));
+    expect(r.lineItems).toEqual([
+      { desc: 'Brake chamber 30/30 1 Ea 11/20/26 1234567 Parts', amount: 245.1, kind: 'part' },
+      { desc: 'Diagnose air leak 2 Hr 11/20/26 1234568 Labor', amount: 312.5, kind: 'labor' },
+      { desc: 'Shop supplies', amount: 25, kind: 'other' },
+    ]);
+  });
+
   it('unlabelled amounts only -> total null (the largest $ value is never the total)', () => {
     const r = E.parseEstimateText('Brake chamber $245.10\nSomething $9,999.99');
     expect(r.total).toBeNull();
@@ -82,6 +96,27 @@ describe('openExtractor (real worker)', () => {
     expect(child).not.toBeNull();
     for (let i = 0; i < 50 && pidAlive(child.pid); i++) await new Promise((res) => setTimeout(res, 100));
     expect(pidAlive(child.pid)).toBe(false);
+  }, 120000);
+
+  it('a long estimate: text is clipped to ATTACHMENT_TEXT_MAX, fullText keeps the grand total past the clip', async () => {
+    const C = require('../src/dtna/constants.js');
+    const filler = Array.from({ length: 260 }, (_, i) => 'Line ' + i + ' inspection note without an amount');
+    const ex = E.openExtractor({ spawnWorker: spawnRealWorker, logger: quietLogger, getChildRss: () => undefined, limits: SLOW });
+    let r;
+    try {
+      r = await ex.extract(makeEstimatePdf(filler.concat(['Brake chamber 1 Ea 11/20/26 1234567 Parts $245.10 Pending', 'Grand Total  $1,234.56'])), 'long.pdf');
+    } finally {
+      ex.close();
+    }
+    expect(r.status).toBe('read');
+    expect(r.truncated).toBe(true);
+    expect(r.text.length).toBe(C.ATTACHMENT_TEXT_MAX);
+    expect(r.text).not.toContain('Grand Total');
+    expect(r.fullText.length).toBeGreaterThan(C.ATTACHMENT_TEXT_MAX);
+    expect(E.parseEstimateText(r.text).total).toBeNull();
+    const p = E.parseEstimateText(r.fullText);
+    expect(p.total).toBe(1234.56);
+    expect(p.lineItems).toEqual([{ desc: 'Brake chamber 1 Ea 11/20/26 1234567 Parts', amount: 245.1, kind: 'part' }]);
   }, 120000);
 
   it('a scanned PDF (no text layer) -> status scanned, no text', async () => {
