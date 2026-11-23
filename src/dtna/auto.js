@@ -21,7 +21,7 @@ const { caseTag } = require('./redact');
 const { offsiteUrlOf } = require('../utils/offsite-owner');
 const log = require('../utils/logger')('dtna');
 
-// Test seam: { client, session, store, now, sleep }.
+// Test seam: { client, session, store, now, sleep, raceSleep (discoverForRows timeout) }.
 let _deps = {};
 function _setDeps(d) { _deps = d || {}; }
 function _client() { return _deps.client || require('./client'); }
@@ -131,7 +131,8 @@ async function pullIfStale(caseId, opts) {
 
 /**
  * discover({units, budget}) -> { pulled, code }
- * Signed in only. Lists the portal's cases (client.listCaseIds, memoized 30 min) and reads the
+ * Signed in only. Lists the portal's cases (client.listCaseIds: non-empty lists memoized 30 min; an
+ * empty list is retried on the next call) and reads the
  * uncached ones case-only, at most `budget`, in batches of CONCURRENCY with BATCH_GAP_MS between.
  * Stops once every requested unit has a cached case, or on a sign-in / network code.
  */
@@ -176,6 +177,42 @@ async function discover(opts) {
 }
 
 /**
+ * discoverForRows(rows, {budget=25, timeoutMs=60e3}) -> { pulled, code, units? }
+ * The sync pass's bounded discovery for the user's FREIGHTLINER / DAIMLER fleet rows that have no
+ * offsite link and no cached case. None -> no sign-in and no list call. Else discover() for those
+ * units, raced against timeoutMs (DTNA_DISCOVER_TIMEOUT). Logs counts and codes only.
+ */
+async function discoverForRows(rows, opts) {
+  const o = opts || {};
+  const budget = o.budget == null ? 25 : o.budget;
+  const timeoutMs = o.timeoutMs == null ? 60e3 : o.timeoutMs;
+  let entries = [];
+  try { entries = _store().all(); } catch (_) { entries = []; }
+  const need = (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object'
+    && P.DTNA_VENDOR_RE.test(_str(row.vendor)) && !offsiteUrlOf(row) && !J.findCaseForRow(row, entries));
+  if (!need.length) return { pulled: 0, code: 'OK', units: 0 };
+  const t0 = _now();
+  const TIMED_OUT = { pulled: 0, code: 'DTNA_DISCOVER_TIMEOUT' };
+  const ac = new AbortController();
+  // Unref'd: the race timer never keeps the process alive; aborted once discovery settles.
+  const timeout = typeof _deps.raceSleep === 'function'
+    ? Promise.resolve(_deps.raceSleep(timeoutMs)).then(() => TIMED_OUT)
+    : _wait(timeoutMs, TIMED_OUT, { ref: false, signal: ac.signal }).catch(() => TIMED_OUT);
+  let r;
+  try {
+    r = await Promise.race([discover({ units: need.map((row) => row.equipmentId), budget }), timeout]);
+  } catch (_) {
+    r = { pulled: 0, code: 'DTNA_INTERNAL' };
+  } finally {
+    ac.abort();
+  }
+  const pulled = Number(r && r.pulled) || 0;
+  const code = _str(r && r.code).slice(0, 40) || 'DTNA_INTERNAL';
+  log.info('[dtna] auto', { op: 'sync-discover', units: need.length, pulled, code, ms: _now() - t0 });
+  return { pulled, code, units: need.length };
+}
+
+/**
  * applyCachedCase(row, {extract}) -> { applied, reason }. Cache only, no network.
  * A FREIGHTLINER / DAIMLER row with no offsite link gets its unit's open cached case (unit-number
  * join, src/dtna/join.js) written through row-apply (OFFSITE_FIELDS + _offsiteWrId).
@@ -199,4 +236,4 @@ function _resetForTests() {
   _deps = {}; _lastSkip = null; _active = 0; _queue.length = 0; _inflight.clear(); _discovered.clear(); _signInP = null;
 }
 
-module.exports = { gate, ensureSignedIn, pullIfStale, discover, applyCachedCase, _setDeps, _resetForTests };
+module.exports = { gate, ensureSignedIn, pullIfStale, discover, discoverForRows, applyCachedCase, _setDeps, _resetForTests };

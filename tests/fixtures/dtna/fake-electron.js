@@ -173,7 +173,11 @@ export function emitAuraSuccess(wc, o = {}) {
     postData: o.viaCdp ? undefined : postData,
     hasPostData: o.viaCdp ? true : undefined,
   });
-  dbg.emitResponse(requestId, o.body !== undefined ? o.body : { actions: [{ id: '1;a', state: 'SUCCESS', returnValue: {} }] });
+  // Default response: SUCCESS for each request action id (the portal echoes ids), else one '1;a'.
+  const reqActions = o.message && typeof o.message === 'object' && Array.isArray(o.message.actions) ? o.message.actions : [];
+  const ids = reqActions.map((a) => a && a.id).filter(Boolean);
+  const defBody = { actions: (ids.length ? ids : ['1;a']).map((id) => ({ id, state: 'SUCCESS', returnValue: {} })) };
+  dbg.emitResponse(requestId, o.body !== undefined ? o.body : defBody);
   return requestId;
 }
 

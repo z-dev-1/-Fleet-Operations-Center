@@ -313,6 +313,48 @@ describe('listCaseIds', () => {
     useAura(fakeAura({ listFail: 'DTNA_NO_LIST_TEMPLATE' }));
     expect(await client.listCaseIds()).toEqual({ ok: false, code: 'DTNA_NO_LIST_TEMPLATE' });
   });
+
+  it('an empty list is not memoized: the next call replays getItems again', async () => {
+    const a = useAura(fakeAura({ ids: [] }));
+    expect(await client.listCaseIds()).toEqual({ ok: true, ids: [] });
+    expect(await client.listCaseIds()).toEqual({ ok: true, ids: [] });
+    expect(a.replayGetItems).toHaveBeenCalledTimes(2);
+  });
+
+  it('a non-empty list is memoized', async () => {
+    const a = useAura(fakeAura({ ids: [CASE_ID] }));
+    await client.listCaseIds();
+    expect((await client.listCaseIds()).ids).toEqual([CASE_ID]);
+    expect(a.replayGetItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('no filterId -> the all-open-cases list view filterName is sent', async () => {
+    const a = useAura(fakeAura({ ids: [CASE_ID], listParams: { filterName: '__Recent' } }));
+    await client.listCaseIds();
+    expect(a.lastParams.filterName).toBe('00B6T000007X74uUAC');
+  });
+
+  it('an empty default pass falls back once to a verbatim replay of the captured filter', async () => {
+    const a = useAura(fakeAura({ listParams: { filterName: 'x' } }));
+    const seen = [];
+    a.replayGetItems.mockImplementation(async (mutate) => {
+      const p = getItemsAction({ filterName: 'x' }).params;
+      mutate(p);
+      seen.push(p.filterName);
+      return { ok: true, value: listResult(p.filterName === 'x' ? [CASE_ID] : []) };
+    });
+    const r = await client.listCaseIds();
+    expect(seen).toEqual(['00B6T000007X74uUAC', 'x']);
+    expect(r.ids).toEqual([CASE_ID]);
+  });
+
+  it('an explicit filterId still wins (no fallback)', async () => {
+    const custom = 'a0B000000000001AAA';
+    const a = useAura(fakeAura({ ids: [], listParams: { filterName: 'x' } }));
+    await client.listCaseIds({ filterId: custom });
+    expect(a.replayGetItems).toHaveBeenCalledTimes(1);
+    expect(a.lastParams.filterName).toBe(custom);
+  });
 });
 
 describe('resolveCaseForRow', () => {

@@ -7,8 +7,9 @@
  *
  * Upgrade: the team-wide scan (window.pendingEst.get / .scan -> src/ipc/pending-est.js)
  * adds RG + Volvo/PACCAR + DTNA offsite rows for the whole team. DTNA rows come from
- * the DTNA case cache only: open, auto-scan and Refresh never make a DTNA call. The
- * header "Pull DTNA" button (window.dtna.bulkPull, user click only) refreshes that
+ * the DTNA case cache. The panel itself makes no DTNA call; the main-process scan it
+ * asks for makes session-gated DTNA reads and one bounded discovery. The header
+ * "Pull DTNA" button (window.dtna.bulkPull, user click only) force-refreshes that
  * cache, then runs one forced team scan. The Owner control
  * (Mine · Everyone · All, default Mine) and the filter bar only filter what is shown;
  * they never change the scan request. On open the cached scan (get) renders first; if

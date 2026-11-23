@@ -557,14 +557,17 @@ function createSyncEngine(ctx) {
       // Guarded by _deepScanInProgress so the next sync cycle won't launch a
       // second, competing deep-scan while this one is still running.
       _deepScanInProgress = true;
-      setTimeout(() => { runOrchaDeepScan(mergedRows, {
+      // First a bounded DTNA discovery for the FREIGHTLINER / DAIMLER fleet rows with no case yet
+      // (session-gated, budget 25, 60 s cap, never throws), so the scan's offsite pass can join them.
+      setTimeout(() => { Promise.resolve().then(() => require('../dtna/auto').discoverForRows(mergedRows)).catch(() => null)
+        .then(() => runOrchaDeepScan(mergedRows, {
         pushData:        ctx.pushData,
         pushStatus:      ctx.pushStatus,
         payload,
         uptakeCount,
         relayCount,
         durableScope: 'fleet',
-      })
+      }))
         // Timeline digests after the scan (outside it: the deep-scan golden pins every scan prompt).
         .then(() => require('../orcha/timeline-digest').refreshTimelineDigests(mergedRows, { pushData: ctx.pushData }))
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))

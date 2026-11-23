@@ -13,12 +13,13 @@ const J = require('./join');
 const { caseTag, safeErr } = require('./redact');
 const log = require('../utils/logger')('dtna');
 
-// Test seam: { aura, store, session, now, sleep }.
+// Test seam: { aura, store, session, capture, now, sleep }.
 let _deps = {};
 function _setDeps(d) { _deps = d || {}; }
 function _aura() { return _deps.aura || require('./aura'); }
 function _store() { return _deps.store || require('./store'); }
 function _session() { return _deps.session || require('./session'); }
+function _capture() { return _deps.capture || require('./capture'); }
 function _now() { return typeof _deps.now === 'function' ? _deps.now() : Date.now(); }
 function _sleep(ms) { return typeof _deps.sleep === 'function' ? _deps.sleep(ms) : new Promise((r) => setTimeout(r, ms)); }
 
@@ -281,21 +282,24 @@ function _collectIds(v, out, depth) {
 /** caseNumberFromList(caseId) -> the case number a list read showed for this case | ''. No network. */
 function caseNumberFromList(caseId) { return _listNumbers.get(_str(caseId)) || ''; }
 
-/** listCaseIds({filterId, force, silent}) -> {ok:true, ids} | {ok:false, code}. Memoized 30 min in memory. */
-async function listCaseIds(opts) {
-  const o = opts || {};
-  const filterId = typeof o.filterId === 'string' && /^[A-Za-z0-9]{15,18}$/.test(o.filterId) ? o.filterId : '';
-  const key = filterId || '-';
-  if (!o.force && _listMemo && _listMemo.key === key && _now() - _listMemo.at < LIST_TTL_MS) return { ok: true, ids: _listMemo.ids.slice() };
+/**
+ * _listPass(filterOrNull, o) -> {ok:true, ids, pages, templateFilter} | {ok:false, code}
+ * Pages through the captured getItems action. filterOrNull overrides filterName / filterId (only keys the
+ * template has); null replays the template's own filter verbatim. templateFilter: the template's own
+ * filterName before any override (internal only, never logged).
+ */
+async function _listPass(filter, o) {
   const ids = new Set();
   let paged = false;
   let base = 0;
   let page = 0;
+  let templateFilter;
   for (let i = 0; i < LIST_MAX_PAGES; i++) {
     const mutate = (p) => {
-      if (filterId) {
-        if ('filterName' in p) p.filterName = filterId;
-        if ('filterId' in p) p.filterId = filterId;
+      if (i === 0) templateFilter = p.filterName;
+      if (filter) {
+        if ('filterName' in p) p.filterName = filter;
+        if ('filterId' in p) p.filterId = filter;
       }
       if ('pageSize' in p && 'currentPage' in p) {
         if (i === 0) base = Number(p.currentPage) || 0;
@@ -316,9 +320,33 @@ async function listCaseIds(opts) {
     if (!paged || got.size < LIST_PAGE_SIZE || ids.size === before) break;
     page++;
   }
-  const list = Array.from(ids);
-  _listMemo = { key, at: _now(), ids: list };
-  log.info('[dtna] list', { count: list.length, pages: page + 1 });
+  return { ok: true, ids: Array.from(ids), pages: page + 1, templateFilter };
+}
+
+/**
+ * listCaseIds({filterId, force, silent}) -> {ok:true, ids} | {ok:false, code}.
+ * Lists with filterId, else the all-open-cases list view (C.DEFAULT_LIST_FILTER); when that default pass
+ * is empty and the captured template had another filter, one verbatim replay of the template.
+ * Non-empty lists memoized 30 min; an empty list is retried on the next call.
+ */
+async function listCaseIds(opts) {
+  const o = opts || {};
+  const filterId = typeof o.filterId === 'string' && /^[A-Za-z0-9]{15,18}$/.test(o.filterId) ? o.filterId : '';
+  const key = filterId || '-';
+  if (!o.force && _listMemo && _listMemo.key === key && _now() - _listMemo.at < LIST_TTL_MS) return { ok: true, ids: _listMemo.ids.slice() };
+  let r = await _listPass(filterId || C.DEFAULT_LIST_FILTER, o);
+  if (!r.ok) return { ok: false, code: r.code };
+  let filter = filterId ? 'custom' : 'default';
+  let fallback = false;
+  if (!r.ids.length && !filterId && r.templateFilter !== undefined && r.templateFilter !== C.DEFAULT_LIST_FILTER) {
+    const r2 = await _listPass(null, o);
+    if (r2.ok) { r = r2; filter = 'template'; fallback = true; }
+  }
+  const list = r.ids;
+  if (list.length) _listMemo = { key, at: _now(), ids: list.slice() };
+  let info = { entity: null, filter: null };
+  try { info = _capture().listInfo() || info; } catch (_) { /* capture unavailable: classification stays null */ }
+  log.info('[dtna] list', { count: list.length, pages: r.pages, filter, fallback, entity: info.entity || null, listFilter: info.filter || null });
   return { ok: true, ids: list.slice() };
 }
 

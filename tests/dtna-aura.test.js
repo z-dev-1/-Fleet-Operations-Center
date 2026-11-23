@@ -124,6 +124,42 @@ describe('capture', () => {
     expect(JSON.stringify(d)).not.toMatch(/SENTINEL|500gx/);
   });
 
+  const LIST_Q = AURA_URL + '?r=5&list.getItems=1';
+
+  it('a getItems for another entity is not kept as the Cases list template', async () => {
+    await seed({ message: { actions: [getItemsAction({ entityNameOrId: 'Account' })] }, url: LIST_Q });
+    expect(capture.current()).toMatchObject({ context: CTX });
+    expect(capture.getItemsTemplate()).toBeNull();
+    expect(capture.listInfo()).toEqual({ entity: null, filter: null });
+  });
+
+  it('a later Recently Viewed Case getItems does not replace the default-filter template', async () => {
+    await seed({ message: { actions: [getItemsAction()] }, url: LIST_Q });
+    await seed({ message: { actions: [getItemsAction({ filterName: '__Recent' })] }, url: LIST_Q });
+    expect(capture.getItemsTemplate().action.params.filterName).toBe('00B6T000007X74uUAC');
+    expect(capture.listInfo()).toEqual({ entity: 'Case', filter: 'default' });
+  });
+
+  it('a getItems whose own action is not SUCCESS in the response is not kept', async () => {
+    await seed({
+      message: { actions: [getItemsAction(), { id: '13;a', descriptor: 'aura://ApexActionController/ACTION$execute', params: { classname: 'E2E_CaseX', method: 'getCaseRecord', params: {} } }] },
+      body: { actions: [{ id: '12;a', state: 'ERROR', error: [] }, { id: '13;a', state: 'SUCCESS', returnValue: {} }] },
+      url: LIST_Q,
+    });
+    expect(capture.current()).toMatchObject({ context: CTX });
+    expect(capture.getItemsTemplate()).toBeNull();
+  });
+
+  it('describe() and listInfo() carry fixed strings only (no list-view id, no case id)', async () => {
+    await seed({ message: { actions: [getItemsAction({ filterName: '__Recent', recordId: CASE_ID })] }, url: LIST_Q });
+    expect(capture.describe()).toMatchObject({ hasGetItems: true, listEntity: 'Case', listFilter: 'recent' });
+    await seed({ message: { actions: [getItemsAction()] }, url: LIST_Q });
+    const all = JSON.stringify([capture.describe(), capture.listInfo()]);
+    expect(capture.listInfo()).toEqual({ entity: 'Case', filter: 'default' });
+    expect(all).not.toMatch(/00B[A-Za-z0-9]{12}/);
+    expect(all).not.toMatch(/500[A-Za-z0-9]{12}/);
+  });
+
   it('detach removes the listener and detaches but keeps the captured values; clear() drops them', async () => {
     const { cap, wc } = await seed();
     cap.detach();

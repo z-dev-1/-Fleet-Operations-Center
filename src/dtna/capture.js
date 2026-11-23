@@ -46,8 +46,15 @@ function _readPost(u, body) {
         _observed.set(meth, { classname: cls, paramKeys: pk });
       }
     } else if (/ACTION\$getItems$/.test(a.descriptor)) {
+      const prm = a.params && typeof a.params === 'object' ? a.params : {};
+      const ent = typeof prm.entityNameOrId === 'string' ? prm.entityNameOrId : null;
+      // A list of another object (Account, Asset, ...) is never the Cases list template.
+      if (ent != null && ent.toLowerCase() !== 'case') continue;
       const copy = safeJson(JSON.stringify(a));
-      if (copy.ok) out.getItems = { query: u.search, action: copy.value };
+      if (copy.ok) {
+        const rank = (ent != null ? 2 : 0) + (prm.filterName === C.DEFAULT_LIST_FILTER ? 1 : 0);
+        out.getItems = { query: u.search, action: copy.value, rank };
+      }
     }
   }
   return out;
@@ -56,6 +63,28 @@ function _readPost(u, body) {
 function _anySuccess(envelope) {
   const v = envelope && envelope.ok ? envelope.value : null;
   return !!(v && Array.isArray(v.actions) && v.actions.some((a) => a && a.state === 'SUCCESS'));
+}
+
+// The response holds a SUCCESS action with this action's own id.
+function _actionSucceeded(envelope, id) {
+  const v = envelope && envelope.ok ? envelope.value : null;
+  if (id == null || !(v && Array.isArray(v.actions))) return false;
+  return v.actions.some((a) => a && String(a.id) === String(id) && a.state === 'SUCCESS');
+}
+
+function _entityOf(t) {
+  const p = t && t.action && t.action.params && typeof t.action.params === 'object' ? t.action.params : null;
+  if (!p) return null;
+  return typeof p.entityNameOrId === 'string' && p.entityNameOrId.toLowerCase() === 'case' ? 'Case' : 'other';
+}
+
+function _filterOf(t) {
+  const p = t && t.action && t.action.params && typeof t.action.params === 'object' ? t.action.params : null;
+  if (!p) return null;
+  const f = typeof p.filterName === 'string' ? p.filterName : '';
+  if (f === C.DEFAULT_LIST_FILTER) return 'default';
+  if (/^__Recent/.test(f)) return 'recent';
+  return 'other';
 }
 
 /** createCapture(webContents, { onSuccess }) -> { attach, detach } */
@@ -91,9 +120,13 @@ function createCapture(webContents, opts) {
       if (r && r.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
       if (entry.pending) { try { await entry.pending; } catch (_) {} }
       const v = entry.values;
-      if (!v || !v.context || !_anySuccess(_parseEnvelope(text))) return;
+      const env = _parseEnvelope(text);
+      if (!v || !v.context || !_anySuccess(env)) return;
       _ctx = { context: v.context, token: v.token || '', pageURI: v.pageURI || '', capturedAt: Date.now() };
-      if (v.getItems) _getItems = v.getItems;
+      // The list template commits only when its own action succeeded and it ranks at least as high
+      // as the one held (a later Recently Viewed list never replaces the all-open-cases one).
+      const gi = v.getItems;
+      if (gi && _actionSucceeded(env, gi.action && gi.action.id) && (!_getItems || gi.rank >= _getItems.rank)) _getItems = gi;
       if (onSuccess) { try { onSuccess(); } catch (e) { log.warn('[dtna] capture', safeErr(e)); } }
     } catch (e) {
       log.warn('[dtna] capture', safeErr(e));
@@ -160,10 +193,15 @@ function describe() {
     hasContext: !!_ctx,
     ageSec: Number.isFinite(a) ? Math.round(a / 1000) : null,
     hasGetItems: !!_getItems,
+    listEntity: _entityOf(_getItems),
+    listFilter: _filterOf(_getItems),
     observedMethods: Array.from(_observed.keys()).sort(),
   };
 }
 
+/** listInfo() -> { entity: 'Case'|'other'|null, filter: 'default'|'recent'|'other'|null }. Never the filter value. */
+function listInfo() { return { entity: _entityOf(_getItems), filter: _filterOf(_getItems) }; }
+
 function _resetForTests() { _ctx = null; _getItems = null; _observed.clear(); }
 
-module.exports = { createCapture, current, getItemsTemplate, classFor, ageMs, clear, describe, _resetForTests };
+module.exports = { createCapture, current, getItemsTemplate, classFor, ageMs, clear, describe, listInfo, _resetForTests };

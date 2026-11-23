@@ -319,6 +319,52 @@ describe('end to end with the real session, aura and client', () => {
   });
 });
 
+describe('discoverForRows (sync pass, fleet rows)', () => {
+  it('no FREIGHTLINER / DAIMLER rows -> no sign-in, no list read', async () => {
+    const backgroundLogin = vi.fn(async () => ({ ok: true }));
+    setup({ open: false, ids: [id(1)], session: { backgroundLogin } });
+    const r = await auto.discoverForRows([{ equipmentId: '300001', vendor: 'VOLVO' }, { equipmentId: '300002', vendor: 'RUSH' }]);
+    expect(r).toEqual({ pulled: 0, code: 'OK', units: 0 });
+    expect(client.listCaseIds).not.toHaveBeenCalled();
+    expect(backgroundLogin).not.toHaveBeenCalled();
+  });
+
+  it('a FREIGHTLINER row with an offsite link or a cached case is excluded', async () => {
+    setup({ entries: [entry({ unitId: '122269' })], ids: [id(1)] });
+    const rows = [
+      { equipmentId: '300003', vendor: 'FREIGHTLINER', offsiteShopEventUrl: caseUrl(NO_RO_CASE_ID) },
+      { equipmentId: '122269', vendor: 'DAIMLER TRUCK' },
+    ];
+    expect(await auto.discoverForRows(rows)).toEqual({ pulled: 0, code: 'OK', units: 0 });
+    expect(client.listCaseIds).not.toHaveBeenCalled();
+  });
+
+  it('a FREIGHTLINER row with neither -> discover for its unit with budget 25', async () => {
+    setup({ ids: [id(1)], pull: (cid) => ({ ok: true, entry: entry({ caseId: cid, unitId: '300004' }) }) });
+    const r = await auto.discoverForRows([{ equipmentId: '300004', vendor: 'FREIGHTLINER' }, { equipmentId: '300005', vendor: 'VOLVO' }]);
+    expect(r).toEqual({ pulled: 1, code: 'OK', units: 1 });
+    expect(client.listCaseIds).toHaveBeenCalledWith({ silent: true });
+    expect(client.pullCase).toHaveBeenCalledWith(id(1), { includeComments: false, silent: true });
+    const line = logger.lines.find((l) => l.args[0] === '[dtna] auto' && l.args[1] && l.args[1].op === 'sync-discover');
+    expect(line.args[1]).toMatchObject({ op: 'sync-discover', units: 1, pulled: 1, code: 'OK' });
+  });
+
+  it('budget 25 caps the reads', async () => {
+    const ids = Array.from({ length: 40 }, (_, i) => id(i));
+    setup({ ids, pull: (cid) => ({ ok: true, entry: entry({ caseId: cid, unitId: 'U' + cid.slice(-2) }) }) });
+    const r = await auto.discoverForRows([{ equipmentId: '300006', vendor: 'FREIGHTLINER' }]);
+    expect(r.pulled).toBe(25);
+    expect(client.pullCase).toHaveBeenCalledTimes(25);
+  });
+
+  it('a list read that never resolves -> DTNA_DISCOVER_TIMEOUT', async () => {
+    setup({});
+    client.listCaseIds.mockImplementation(() => new Promise(() => {}));
+    auto._setDeps({ client, session: { canAutoSync: () => true }, store: { get: () => null, all: () => [] }, now: () => NOW, sleep: async () => {}, raceSleep: async () => {} });
+    expect(await auto.discoverForRows([{ equipmentId: '300007', vendor: 'FREIGHTLINER' }])).toEqual({ pulled: 0, code: 'DTNA_DISCOVER_TIMEOUT', units: 1 });
+  });
+});
+
 describe('static guards', () => {
   it('auto.js never opens a sign-in, never auto-logs-in, never schedules, never requires electron', () => {
     const src = fs.readFileSync(path.join(WT_ROOT, 'src', 'dtna', 'auto.js'), 'utf8');

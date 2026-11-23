@@ -467,7 +467,7 @@ describe('pending_est_sources: DTNA auto refresh (Phase D)', () => {
     const dtnaRefresh = vi.fn(async (id, opts) => {
       const hit = cache.get(id);
       if (hit && T0 - Date.parse(hit.pulledAt) < opts.freshMs) return { ok: true, entry: hit, live: false };
-      if (o.fail) return o.fail(id);
+      if (o.fail) { const f = o.fail(id); if (f) return f; }
       const e = dtnaEntry(Object.assign({}, hit || (o.fresh ? o.fresh(id) : {}), { caseId: id, caseNumber: '15667050', pulledAt: new Date(T0).toISOString() }));
       cache.set(id, e);
       return { ok: true, entry: e, live: true };
@@ -582,15 +582,41 @@ describe('pending_est_sources: DTNA auto refresh (Phase D)', () => {
     expect(scan.dtnaAuto).toBe('ok');
   });
 
-  it('a timeout / network failure stops the DTNA refresh for this scan', async () => {
-    const w = dtnaWorld([dtnaEntry({ caseId: DCASE(1), pulledAt: ago(60) }), dtnaEntry({ caseId: DCASE(8), unitId: 'D400', pulledAt: ago(90) })],
-      { fail: () => ({ ok: false, live: true, code: 'DTNA_TIMEOUT' }) });
+  const TIMEOUT = { ok: false, live: true, code: 'DTNA_TIMEOUT' };
+  // Stale cases on non-FREIGHTLINER units, so the FREIGHTLINER WR_G still needs a discovery.
+  const staleCases = (units) => units.map((u, i) => dtnaEntry({ caseId: DCASE(20 + i), unitId: u, pulledAt: ago(60 + 10 * i) }));
+
+  it('one timeout on the stalest case is skipped: the other cases are read and discovery still runs', async () => {
+    const cases = staleCases(['A100', 'B200', 'D400']);
+    const stalest = cases[2].caseId;
+    const w = dtnaWorld(cases, { fail: (id) => (id === stalest ? TIMEOUT : null) });
     const { deps } = makeDeps(w.deps);
     const scan = await src.scanTeamPending({}, deps);
-    expect(w.deps.dtnaRefresh).toHaveBeenCalledTimes(1);
-    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+    expect(w.deps.dtnaRefresh.mock.calls.map((c) => c[0])).toEqual([stalest, cases[1].caseId, cases[0].caseId]);
     expect(scan.errors).toContainEqual({ stage: 'dtna', code: 'DTNA_TIMEOUT', n: 1 });
+    expect(scan.dtnaAuto).toBe('ok');
+    expect(w.deps.dtnaDiscover).toHaveBeenCalledTimes(1);
+    expect(w.deps.dtnaDiscover.mock.calls[0][0].units).toEqual(['EQ-WR_G']);
+  });
+
+  it('3 consecutive timeouts stop the DTNA refresh for this scan (no discovery)', async () => {
+    const w = dtnaWorld(staleCases(['A100', 'B200', 'C300', 'D400', 'EQ-WR_H']), { fail: () => TIMEOUT });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh).toHaveBeenCalledTimes(3);
+    expect(w.deps.dtnaDiscover).not.toHaveBeenCalled();
+    expect(scan.errors).toContainEqual({ stage: 'dtna', code: 'DTNA_TIMEOUT', n: 3 });
     expect(scan.dtnaAuto).toBe('error');
+  });
+
+  it('alternating timeout / ok never reaches 3 in a row: every case is tried', async () => {
+    const cases = staleCases(['A100', 'B200', 'C300', 'D400']);
+    const order = cases.map((e) => e.caseId).reverse();
+    const w = dtnaWorld(cases, { fail: (id) => (order.indexOf(id) % 2 === 0 ? TIMEOUT : null) });
+    const { deps } = makeDeps(w.deps);
+    const scan = await src.scanTeamPending({}, deps);
+    expect(w.deps.dtnaRefresh.mock.calls.map((c) => c[0])).toEqual(order);
+    expect(scan.dtnaAuto).toBe('ok');
   });
 
   it('the Decisiv case reads are identical with DTNA signed in or out', async () => {

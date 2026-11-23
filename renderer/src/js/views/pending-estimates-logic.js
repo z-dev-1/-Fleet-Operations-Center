@@ -12,8 +12,8 @@
  * WOs show "submitted time unknown".
  *
  * DTNA work orders are listed (Phase B, findings §6b): DTNA exposes no estimate amount,
- * so a DTNA row's Total is '—' and its status is the case status from the user's last
- * "Pull DTNA". excludedDtna stays in the result for shape compat and is always 0.
+ * so a DTNA row's Total is '—' and its status is the case status from the DTNA case
+ * cache (refreshed by the scan, the sync pass and "Pull DTNA"). excludedDtna stays in the result for shape compat and is always 0.
  * Scope is whatever rows the fleet slice holds (the user's settings.domiciles build);
  * nothing here widens it.
  *

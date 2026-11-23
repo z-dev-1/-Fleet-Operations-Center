@@ -515,6 +515,25 @@ describe('DTNA redaction: sync pass (Phase D)', () => {
     assertStoresHaveNoAuth();
   });
 
+  it('the [dtna] list and sync-discover lines carry counts and fixed strings only (no case id, list-view id or unit)', async () => {
+    setup();
+    await signIn();
+    store.save('dtnaCaseCache', { version: 1, cases: {} });
+    const auto = require('../src/dtna/auto');
+    const r = await auto.discoverForRows([{ equipmentId: '133001', vendor: 'FREIGHTLINER' }]);
+    expect(r).toMatchObject({ code: 'OK', units: 1 });
+    const list = logger.lines.filter((l) => l.args[0] === '[dtna] list');
+    const sync = logger.lines.filter((l) => l.args[0] === '[dtna] auto' && l.args[1] && l.args[1].op === 'sync-discover');
+    expect(list).toHaveLength(1);
+    expect(sync).toHaveLength(1);
+    expect(list[0].args[1]).toMatchObject({ count: 2, filter: 'default', fallback: false, entity: 'Case', listFilter: 'default' });
+    const text = JSON.stringify(list.concat(sync));
+    expect(text).not.toMatch(/500[A-Za-z0-9]{12}/);
+    expect(text).not.toMatch(/00B[A-Za-z0-9]{12}/);
+    expect(text).not.toContain('133001');
+    expect(containsSentinel(text)).toBe(null);
+  });
+
   it('signed out (fresh run), the hidden sign-in fails: one hidden window, no DTNA fetch, from every sync-pass entry', async () => {
     setup({ attachThrows: true });
     const before = fetchCount;

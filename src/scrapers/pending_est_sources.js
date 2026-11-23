@@ -40,6 +40,9 @@ const MAX_SERVICE_CALLS = 300;
 const MAX_CASES = 250;
 const CASE_BATCH = 10;
 const CASE_BATCH_PAUSE_MS = 1500;
+// DTNA refresh: these codes in a row DTNA_MAX_CONSECUTIVE times stop it for the scan.
+const DTNA_HARD = new Set(['DTNA_NETWORK', 'DTNA_TIMEOUT', 'DTNA_CAPTURE_FAILED']);
+const DTNA_MAX_CONSECUTIVE = 3;
 const CASE_RETAIN_MS = 24 * 60 * 60 * 1000;   // the drafter ignores cases older than 24 h
 const AAP_CONCURRENCY = 6;
 
@@ -371,6 +374,7 @@ async function _scan(opts, d) {
     for (const e of known) if (openUnits.has(DJ.normUnit(e.unitId)) && !DP.isCaseClosed(e)) ids.add(e.caseId);
     const pulledMs = (id) => { const t = Date.parse((byId.get(id) && byId.get(id).pulledAt) || ''); return Number.isFinite(t) ? t : -Infinity; };
     const order = [...ids].filter((id) => DC.CASE_ID_RE.test(id)).sort((a, b) => pulledMs(a) - pulledMs(b));
+    let streak = 0; // consecutive DTNA_HARD failures
     for (const id of order) {
       const hit = byId.get(id);
       if (hit && _ageOk(hit.pulledAt, nowMs, CASE_TTL_MS)) continue;
@@ -382,8 +386,11 @@ async function _scan(opts, d) {
       const code = r && r.ok ? '' : String((r && r.code) || 'DTNA_ERROR');
       if (signedOut(code)) { dtnaAuto = 'signed-out'; break; }
       if (code) err('dtna', code);
-      // Portal unreachable: stop for this scan (same stop rule as the bulk pull); the next scan retries.
-      if (code === 'DTNA_NETWORK' || code === 'DTNA_TIMEOUT' || code === 'DTNA_CAPTURE_FAILED') { dtnaAuto = 'error'; break; }
+      // One slow or dropped case read is skipped; only DTNA_MAX_CONSECUTIVE network / timeout / capture
+      // failures in a row stop the DTNA refresh for this scan (the next scan retries).
+      if (DTNA_HARD.has(code)) streak++;
+      else streak = 0;
+      if (streak >= DTNA_MAX_CONSECUTIVE) { dtnaAuto = 'error'; break; }
     }
     // Open FREIGHTLINER / DAIMLER WRs whose unit has no case yet: one bounded discovery (unit-number join).
     if (dtnaAuto === 'ok' && caseN + dtnaLive < MAX_CASES) {
