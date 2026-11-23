@@ -43,6 +43,30 @@ const NOTE_FIELDS  = ['asistNotes', 'asistScrapedAt', 'asistSource', 'asistLabel
 const STAGE_FIELDS = ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt', 'offsiteStageHistory'];
 const _t = (v) => { const n = v ? Date.parse(v) : NaN; return Number.isFinite(n) ? n : 0; };
 
+const _DTNA_CASE_RE = /^https:\/\/dtna\.my\.site\.com\/Servicetracker\/s\/case\/500[A-Za-z0-9]{15}/;
+const _isDtnaUrl = (u) => typeof u === 'string' && _DTNA_CASE_RE.test(u);
+const _dtnaUrl = (row) => {
+  for (const k of ['offsiteShopEventUrl', 'savedOffsiteUrl', 'asistSrUrl']) {
+    const m = row && typeof row[k] === 'string' ? _DTNA_CASE_RE.exec(row[k]) : null;
+    if (m) return m[0];
+  }
+  return '';
+};
+// A DTNA case the scan joined by unit number (dtna/auto applyCachedCase) onto a row with no offsite
+// link: adopt the link, its owner WR and the case fields on the stored row (same WR only).
+const DTNA_JOIN_FIELDS = ['offsiteShopEventUrl', 'savedOffsiteUrl', 'asistSrUrl', 'asistSource', 'asistLabel',
+  'asistNotes', 'asistScrapedAt', 'offsiteStage', 'offsiteStageDetail', 'offsiteStageSince', '_stageReadAt',
+  'dtnaCaseNumber', 'offsiteFacts'];
+function _adoptDtnaJoin(r, s) {
+  if (_dtnaUrl(r) || r.offsiteShopEventUrl || r.savedOffsiteUrl || r.asistSrUrl) return false;
+  if (s.asistSource !== 'dtna' || !_dtnaUrl(s)) return false;
+  const wr = String(r.workRequestId || '');
+  if (!wr || String(s._offsiteWrId || '') !== wr) return false;
+  for (const k of DTNA_JOIN_FIELDS) if (s[k] != null && s[k] !== '') r[k] = s[k];
+  r._offsiteWrId = wr;
+  return true;
+}
+
 function overlayDeepScanFields(liveRows, scannedRows) {
   if (!Array.isArray(liveRows) || !Array.isArray(scannedRows) || !scannedRows.length) return 0;
   const byId = new Map();
@@ -54,8 +78,23 @@ function overlayDeepScanFields(liveRows, scannedRows) {
   for (const r of liveRows) {
     const s = r && byId.get(String(r.equipmentId));
     if (!s || s === r) continue;
+    let touched = _adoptDtnaJoin(r, s);
     if (String(s._offsiteWrId || '') !== String(r._offsiteWrId || '')) continue;
-    let touched = false;
+    // DTNA case number (Vendor WO): the scan sets it in memory; carry a non-empty one for the same
+    // case link so a later save never drops it. Never copied empty.
+    if (_isDtnaUrl(s.asistSrUrl || s.offsiteShopEventUrl) && _dtnaUrl(s) === _dtnaUrl(r)
+      && typeof s.dtnaCaseNumber === 'string' && s.dtnaCaseNumber.trim() && s.dtnaCaseNumber !== r.dtnaCaseNumber) {
+      r.dtnaCaseNumber = s.dtnaCaseNumber; touched = true;
+    }
+    // DTNA case stage the scan read with its notes (no _stageReadAt stamp there): a newer notes read
+    // or an empty stored stage takes it. Non-empty values only; the stamped rule below still wins.
+    if (_isDtnaUrl(s.asistSrUrl || s.offsiteShopEventUrl) && _dtnaUrl(s) === _dtnaUrl(r) && s.offsiteStage
+      && !(_t(s._stageReadAt) > _t(r._stageReadAt))
+      && (!r.offsiteStage || _t(s.asistScrapedAt) > _t(r.asistScrapedAt))) {
+      for (const k of ['offsiteStage', 'offsiteStageDetail', 'offsiteStageSince']) {
+        if (typeof s[k] === 'string' && s[k] && s[k] !== r[k]) { r[k] = s[k]; touched = true; }
+      }
+    }
     // Notes: newer asistScrapedAt wins.
     if (_t(s.asistScrapedAt) > _t(r.asistScrapedAt)) {
       for (const k of NOTE_FIELDS) if (s[k] != null && s[k] !== r[k]) { r[k] = s[k]; touched = true; }

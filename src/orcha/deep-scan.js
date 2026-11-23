@@ -754,6 +754,20 @@ async function _processUnit(u, notesStore, askOrcha, tlRun) {
       logger.warn('[DS] DTNA enrich failed for ' + u.equipmentId + ': ' + e.message);
     }
   }
+  // Fresh cached notes skip the read above: still fill a missing DTNA case number (Vendor WO) and
+  // case stage from the case cache (no network). Never blanks a value already on the row.
+  if (offsiteUrl && /dtna\.my\.site\.com\/Servicetracker\/s\/case\//i.test(offsiteUrl) && (!u.dtnaCaseNumber || !u.offsiteStage)) {
+    try {
+      const cid = require('../dtna/join').caseIdFromUrl(offsiteUrl);
+      const ce = cid ? require('../dtna/store').get(cid) : null;
+      if (ce && !u.dtnaCaseNumber && ce.caseNumber) u.dtnaCaseNumber = String(ce.caseNumber);
+      if (ce && !u.offsiteStage && ce.offsiteStage) {
+        u.offsiteStage = String(ce.offsiteStage);
+        if (ce.caseStatus) u.offsiteStageDetail = String(ce.caseStatus);
+        if (ce.stageSince) u.offsiteStageSince = String(ce.stageSince);
+      }
+    } catch (e) { logger.warn('[DS] DTNA cache fill failed for ' + u.equipmentId + ' (' + (e && e.name) + ')'); }
+  }
   // Live re-scrape failed/unavailable → fall back to the (stale) cached notes
   // rather than building the timeline with no dealer notes at all.
   if (!offsiteText && _cachedText) {

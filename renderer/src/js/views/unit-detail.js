@@ -2357,7 +2357,9 @@ export function renderRepairPane(unit){
   // Only a stage CONFIRMED by the Decisiv API (offsiteStageSince is set only by
   // the API). A stage guessed from note wording (e.g. 322504 "ready" on 10-28
   // while the case was in diagnosis) is never shown.
-  var _stg=unit.offsiteStageSince?String(unit.offsiteStage||'').toLowerCase():'';
+  // A DTNA case stage comes from the case record's own status (offsiteStageDetail), with no change time.
+  var _dtnaStage=unit.asistSource==='dtna'&&String(unit.offsiteStageDetail||'').trim();
+  var _stg=(unit.offsiteStageSince||_dtnaStage)?String(unit.offsiteStage||'').toLowerCase():'';
   var _STAGES=['arrival','diagnosis','approval','repair','ready'];
   var _si=_STAGES.indexOf(_stg);
   if(_si>=0){

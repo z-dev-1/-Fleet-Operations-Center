@@ -160,9 +160,12 @@ function _isTowOut(text) { return TOW_OUT_RE.test(String(text || '')); }
 // READY: Ready -> ready_for_pickup; any other stage means the repair is NOT
 // done, so a "ready" that only came from note wording is downgraded.
 const DECISIV_STAGES = ['arrival', 'diagnosis', 'approval', 'repair', 'ready'];
+// A DTNA case stage is read from the case record's own status (offsiteStageDetail), which has no
+// change time, so it is trusted on that instead of offsiteStageSince.
 function _apiStage(r) {
   const stg = _lc(r && r.offsiteStage).trim();
-  return (r && r.offsiteStageSince && DECISIV_STAGES.indexOf(stg) >= 0) ? stg : '';
+  const trusted = !!(r && (r.offsiteStageSince || (r.asistSource === 'dtna' && _s(r.offsiteStageDetail).trim())));
+  return (trusted && DECISIV_STAGES.indexOf(stg) >= 0) ? stg : '';
 }
 function _stageOverride(r, status) {
   const stg = _apiStage(r);

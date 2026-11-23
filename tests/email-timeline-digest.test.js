@@ -144,7 +144,7 @@ describe('322283 email timeline digest', () => {
       'renderer/src/js/views/dtna-bulk-modal.js',
       'renderer/src/js/components/aperia-panel.js', 'renderer/src/js/components/aperia-pill-logic.js',
       'renderer/src/js/views/aperia-bulk-modal.js', 'renderer/src/js/views/aperia-issues-modal.js',
-      'renderer/src/js/views/aperia-tires.js'];
+      'renderer/src/js/views/aperia-tires.js', 'src/orcha/canonical_runner.js', 'src/orcha/canonical_state.js'];
     const paths = ['renderer', 'src/orcha', 'src/scheduler', 'src/scrapers/owa-mailer.js', 'src/scrapers/relay.js',
       ':(exclude)renderer/src/js/views/relay-actions.js', ...upgraded.map((p) => ':(exclude)' + p)];
     expect(git('diff', '--name-only', '12a01de', '--', ...paths).trim()).toBe('');
