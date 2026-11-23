@@ -273,17 +273,53 @@ async function callWrite(name, params, token) {
 }
 
 /** replayGetItems(mutate, {silent}) — re-send the page's captured list action (deep copy), mutate(params) first. */
+// No list template held: one forced hidden window on the Cases list (single-flight), so the page's own
+// getItems action is captured; then the replay is retried once.
+let _listLoadP = null;
+let _listBuilt = false; // the last replay used the built template (no live capture)
+// At most one lazy list load per gap (later pages and calls use the built template meanwhile).
+const LIST_LOAD_GAP_MS = 10 * 60e3;
+let _listLoadAt = -Infinity;
+
+/** _builtListTemplate() -> { query, action } from C.LIST_ACTION_* (fresh copy). */
+function _builtListTemplate() {
+  return {
+    query: C.LIST_ACTION_QUERY,
+    action: { id: '0;a', descriptor: C.LIST_ACTION_DESCRIPTOR, callingDescriptor: 'UNKNOWN', params: Object.assign({}, C.LIST_ACTION_PARAMS) },
+    built: true,
+  };
+}
+/** listTemplateBuilt() -> true when the last list replay had no live template and used the built one. */
+function listTemplateBuilt() { return _listBuilt; }
+function _loadListTemplate(silent) {
+  if (!_listLoadP) {
+    _listLoadP = Promise.resolve()
+      .then(() => _session().ensureContext(silent ? { force: true, silent: true } : { force: true }))
+      .catch(() => null)
+      .finally(() => { _listLoadP = null; });
+  }
+  return _listLoadP;
+}
+
 async function replayGetItems(mutate, opts) {
-  const send = () => {
-    const t = capture.getItemsTemplate();
-    if (!t || !t.action) return Promise.resolve({ ok: false, code: 'DTNA_NO_LIST_TEMPLATE' });
+  const silent = !!(opts && opts.silent);
+  const send = async () => {
+    let t = capture.getItemsTemplate();
+    if ((!t || !t.action) && _now() - _listLoadAt >= LIST_LOAD_GAP_MS) {
+      _listLoadAt = _now();
+      await _loadListTemplate(silent);
+      t = capture.getItemsTemplate();
+    }
+    // Still none: the known Cases-list action, sent with the live captured aura context.
+    _listBuilt = !t || !t.action;
+    if (_listBuilt) t = _builtListTemplate();
     const action = t.action;
     action.id = (++_seq) + ';a';
     if (!_isPlainObject(action.params)) action.params = {};
     if (typeof mutate === 'function') mutate(action.params);
     return _post(t.query || '', JSON.stringify({ actions: [action] }));
   };
-  return _run(send, { method: 'getItems', caseTag: '------', silent: !!(opts && opts.silent) });
+  return _run(send, { method: 'getItems', caseTag: '------', silent });
 }
 
 /** _callApexRaw(classname, method, params) — dev probe only (src/dev/dev-dtna-probe.js). Reads only. */
@@ -301,6 +337,6 @@ async function _callApexRaw(classname, method, params) {
   return _run(_send(cls, meth, Object.assign({}, p)), { method: meth, caseTag: caseTag(p.caseId) });
 }
 
-function _resetForTests() { _deps = {}; _seq = 0; }
+function _resetForTests() { _deps = {}; _seq = 0; _listLoadP = null; _listBuilt = false; _listLoadAt = -Infinity; }
 
-module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, getCaseNumberRecord, _callApexRaw, _post, _setDeps, _resetForTests };
+module.exports = { parseEnvelope, classify, callApex, callWrite, replayGetItems, listTemplateBuilt, getCaseNumberRecord, _callApexRaw, _post, _setDeps, _resetForTests };

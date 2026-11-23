@@ -32,7 +32,8 @@ let ctx;
 function setup(o = {}) {
   fx = createFakeElectron({
     urlFor: (url) => (signedIn ? url : 'https://login.ciam.daimlertruck.com/authorize?client_id=x'),
-    onLoad: (win) => { if (signedIn) emitAuraSuccess(win.webContents); },
+    // The Cases list page's own getItems POST (the hidden window loads LIST_URL).
+    onLoad: (win) => { if (signedIn) emitAuraSuccess(win.webContents, { message: { actions: [{ id: '1;a', descriptor: C.LIST_ACTION_DESCRIPTOR, params: Object.assign({}, C.LIST_ACTION_PARAMS) }] } }); },
   });
   autoLogin = { attachAutoLogin: vi.fn(o.attach || (() => {})) };
   session._setDeps({ electron: fx.electron, autoLogin });

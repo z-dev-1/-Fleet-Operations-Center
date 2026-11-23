@@ -15,6 +15,14 @@ const PARTITION = 'persist:vendor-dtna';
 // The Cases list page: it loads the list view and issues getItems.
 const LIST_URL = BASE + '/s/case/Case/Default';
 const DEFAULT_LIST_FILTER = '00B6T000007X74uUAC';
+// The Cases list page's own getItems action (user-captured from the live portal 2026-11-23, values only,
+// no tokens). Used only when no live template was captured; the live one always wins. Offset paging.
+const LIST_ACTION_DESCRIPTOR = 'serviceComponent://ui.force.components.controllers.lists.listViewDataManager.ListViewDataManagerController/ACTION$getItems';
+const LIST_ACTION_QUERY = '?r=1&ui-force-components-controllers-lists-listViewDataManager.ListViewDataManager.getItems=1';
+const LIST_ACTION_PARAMS = Object.freeze({
+  filterName: DEFAULT_LIST_FILTER, entityName: 'Case', pageSize: 50, layoutType: 'LIST',
+  sortBy: null, getCount: false, enableRowActions: false, offset: 0,
+});
 
 const CASE_ID_RE = /^500[A-Za-z0-9]{15}$/;
 const COMMENT_ID_RE = /^[A-Za-z0-9]{15,18}$/;
@@ -178,6 +186,7 @@ const BG_EXPIRY_MAX_MS = 9 * 3600e3;
 
 module.exports = {
   HOST, BASE, AURA_PATH, AURA_URL, PARTITION, LIST_URL, DEFAULT_LIST_FILTER,
+  LIST_ACTION_DESCRIPTOR, LIST_ACTION_QUERY, LIST_ACTION_PARAMS,
   CASE_ID_RE, COMMENT_ID_RE, DTNA_CASE_URL_RE, caseUrl, LOGIN_HOST_RE,
   READ_METHODS, APEX_CLASS, WRITE_RE,
   CONTEXT_MAX_AGE_MS, HIDDEN_WAIT_MS, SIGNIN_WINDOW_MS, CALL_TIMEOUT_MS, CONCURRENCY, BATCH_GAP_MS,

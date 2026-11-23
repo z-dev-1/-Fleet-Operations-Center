@@ -47,7 +47,7 @@ function _readPost(u, body) {
       }
     } else if (/ACTION\$getItems$/.test(a.descriptor)) {
       const prm = a.params && typeof a.params === 'object' ? a.params : {};
-      const ent = typeof prm.entityNameOrId === 'string' ? prm.entityNameOrId : null;
+      const ent = _entityParam(prm);
       // A list of another object (Account, Asset, ...) is never the Cases list template.
       if (ent != null && ent.toLowerCase() !== 'case') continue;
       const copy = safeJson(JSON.stringify(a));
@@ -72,10 +72,19 @@ function _actionSucceeded(envelope, id) {
   return v.actions.some((a) => a && String(a.id) === String(id) && a.state === 'SUCCESS');
 }
 
+// The list's object: entityNameOrId (record-list actions) or entityName (ListViewDataManager getItems).
+function _entityParam(p) {
+  if (!p || typeof p !== 'object') return null;
+  if (typeof p.entityNameOrId === 'string') return p.entityNameOrId;
+  if (typeof p.entityName === 'string') return p.entityName;
+  return null;
+}
+
 function _entityOf(t) {
   const p = t && t.action && t.action.params && typeof t.action.params === 'object' ? t.action.params : null;
   if (!p) return null;
-  return typeof p.entityNameOrId === 'string' && p.entityNameOrId.toLowerCase() === 'case' ? 'Case' : 'other';
+  const e = _entityParam(p);
+  return typeof e === 'string' && e.toLowerCase() === 'case' ? 'Case' : 'other';
 }
 
 function _filterOf(t) {
@@ -87,10 +96,11 @@ function _filterOf(t) {
   return 'other';
 }
 
-/** createCapture(webContents, { onSuccess }) -> { attach, detach } */
+/** createCapture(webContents, { onSuccess, onList }) -> { attach, detach }. onList: a list template just committed. */
 function createCapture(webContents, opts) {
   const dbg = webContents && webContents.debugger;
   const onSuccess = opts && typeof opts.onSuccess === 'function' ? opts.onSuccess : null;
+  const onList = opts && typeof opts.onList === 'function' ? opts.onList : null;
   const reqs = new Map(); // requestId -> { pending, values }
   let listening = false;
 
@@ -126,8 +136,10 @@ function createCapture(webContents, opts) {
       // The list template commits only when its own action succeeded and it ranks at least as high
       // as the one held (a later Recently Viewed list never replaces the all-open-cases one).
       const gi = v.getItems;
-      if (gi && _actionSucceeded(env, gi.action && gi.action.id) && (!_getItems || gi.rank >= _getItems.rank)) _getItems = gi;
+      let listed = false;
+      if (gi && _actionSucceeded(env, gi.action && gi.action.id) && (!_getItems || gi.rank >= _getItems.rank)) { _getItems = gi; listed = true; }
       if (onSuccess) { try { onSuccess(); } catch (e) { log.warn('[dtna] capture', safeErr(e)); } }
+      if (listed && onList) { try { onList(); } catch (e) { log.warn('[dtna] capture', safeErr(e)); } }
     } catch (e) {
       log.warn('[dtna] capture', safeErr(e));
     }

@@ -295,6 +295,24 @@ describe('listCaseIds', () => {
     expect(a.replayGetItems).toHaveBeenCalledTimes(3);
   });
 
+  it('ListViewDataManager offset paging: offset 0, 50, 100 with the page size 50, stops on a short page', async () => {
+    const ids = Array.from({ length: 120 }, (_, i) => id(i));
+    const a = useAura(fakeAura({ ids }));
+    const offsets = [];
+    a.replayGetItems.mockImplementation(async (mutate) => {
+      const p = { filterName: '00B6T000007X74uUAC', entityName: 'Case', pageSize: 50, layoutType: 'LIST', sortBy: null, getCount: false, enableRowActions: false, offset: 0 };
+      mutate(p);
+      offsets.push(p.offset);
+      a.lastParams = p;
+      return { ok: true, value: { records: ids.slice(p.offset, p.offset + p.pageSize).map((x) => ({ Id: x })) } };
+    });
+    const r = await client.listCaseIds({ force: true });
+    expect(r.ids).toHaveLength(120);
+    expect(offsets).toEqual([0, 50, 100]);
+    expect(a.lastParams.pageSize).toBe(50);
+    expect(a.lastParams.filterName).toBe('00B6T000007X74uUAC');
+  });
+
   it('one verbatim replay when the template has no paging; filterId sets filterName', async () => {
     const a = useAura(fakeAura({ listParams: { pageSize: undefined } }));
     a.replayGetItems.mockImplementation(async (mutate) => {

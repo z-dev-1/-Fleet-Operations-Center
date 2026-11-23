@@ -22,10 +22,13 @@ let autoLogin;
 let signedIn;
 let responseBody;
 
+// The Cases list page's own getItems POST (the hidden window loads LIST_URL).
+const listMessage = () => ({ actions: [{ id: '1;a', descriptor: C.LIST_ACTION_DESCRIPTOR, params: Object.assign({}, C.LIST_ACTION_PARAMS) }] });
+
 function setup(extra = {}) {
   fx = createFakeElectron(Object.assign({
     urlFor: (url) => (signedIn ? url : 'https://login.ciam.daimlertruck.com/authorize?client_id=x'),
-    onLoad: (win) => { if (signedIn) emitAuraSuccess(win.webContents, { body: responseBody }); },
+    onLoad: (win) => { if (signedIn) emitAuraSuccess(win.webContents, { body: responseBody, message: responseBody === undefined ? listMessage() : undefined }); },
   }, extra));
   autoLogin = { attachAutoLogin: vi.fn() };
   session._setDeps({ electron: fx.electron, autoLogin });
@@ -168,6 +171,37 @@ describe('ensureContext', () => {
     expect(autoLogin.attachAutoLogin).toHaveBeenCalledWith(w, C.LIST_URL, { maxRetries: 2 });
     expect(session.status().state).toBe('connected');
     noConsoleListener();
+  });
+
+  it('connected with no list template yet -> resolves at once; the hidden window waits on the Cases list for getItems, then closes', async () => {
+    vi.useFakeTimers();
+    responseBody = { actions: [{ id: '1;a', state: 'SUCCESS', returnValue: {} }] }; // a bootstrap POST, no getItems
+    const p = session.ensureContext();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await p).toEqual({ ok: true });
+    expect(session.status().state).toBe('connected');
+    const w = fx.windows[0];
+    expect(w.destroyed).toBe(false);
+    expect(capture.getItemsTemplate()).toBeNull();
+    // The page's own list POST lands: the template commits and the window closes.
+    emitAuraSuccess(w.webContents, { message: listMessage() });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(capture.getItemsTemplate()).not.toBeNull();
+    expect(capture.listInfo()).toEqual({ entity: 'Case', filter: 'default' });
+    expect(w.destroyed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('no getItems ever -> the hidden window closes after the list wait (20 s), no timer left', async () => {
+    vi.useFakeTimers();
+    responseBody = { actions: [{ id: '1;a', state: 'SUCCESS', returnValue: {} }] };
+    const p = session.ensureContext();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await p).toEqual({ ok: true });
+    expect(fx.windows[0].destroyed).toBe(false);
+    await vi.advanceTimersByTimeAsync(20e3);
+    expect(fx.windows[0].destroyed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('force opens a hidden window even with a fresh capture', async () => {

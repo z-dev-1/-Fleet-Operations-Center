@@ -10,9 +10,11 @@ const require = createRequire(import.meta.url);
 let logger;
 let capture;
 let aura;
+let C;
 beforeAll(() => {
   logger = installFakeLogger(require);
   freshDtna(require);
+  C = require('../src/dtna/constants.js');
   capture = require('../src/dtna/capture.js');
   aura = require('../src/dtna/aura.js');
 });
@@ -131,6 +133,15 @@ describe('capture', () => {
     expect(capture.current()).toMatchObject({ context: CTX });
     expect(capture.getItemsTemplate()).toBeNull();
     expect(capture.listInfo()).toEqual({ entity: null, filter: null });
+  });
+
+  it('the live ListViewDataManager getItems (entityName Case) is kept and classed Case/default; entityName Account is not', async () => {
+    const lv = (entityName) => ({ id: '12;a', descriptor: C.LIST_ACTION_DESCRIPTOR, params: Object.assign({}, C.LIST_ACTION_PARAMS, { entityName }) });
+    await seed({ message: { actions: [lv('Account')] }, url: LIST_Q });
+    expect(capture.getItemsTemplate()).toBeNull();
+    await seed({ message: { actions: [lv('Case')] }, url: LIST_Q });
+    expect(capture.getItemsTemplate().action.descriptor).toBe(C.LIST_ACTION_DESCRIPTOR);
+    expect(capture.listInfo()).toEqual({ entity: 'Case', filter: 'default' });
   });
 
   it('a later Recently Viewed Case getItems does not replace the default-filter template', async () => {
@@ -381,12 +392,35 @@ describe('callApex', () => {
 });
 
 describe('replayGetItems', () => {
-  it('no captured template -> DTNA_NO_LIST_TEMPLATE without a request', async () => {
+  // Deliberate change (2026-11-23): no captured template no longer dead-ends on DTNA_NO_LIST_TEMPLATE.
+  it('no captured template -> one forced list load; still none -> the built Cases-list action with the live context', async () => {
     await seed();
-    const fetch = vi.fn();
-    aura._setDeps({ fetch, session: fakeSession() });
-    expect((await aura.replayGetItems()).code).toBe('DTNA_NO_LIST_TEMPLATE');
-    expect(fetch).not.toHaveBeenCalled();
+    const fetch = vi.fn(async () => res(200, success(listResult([CASE_ID]), { raw: true })));
+    const S = fakeSession();
+    aura._setDeps({ fetch, session: S });
+    const r = await aura.replayGetItems((p) => { p.offset = 50; });
+    expect(r.ok).toBe(true);
+    expect(S.ensureContext).toHaveBeenCalledWith({ force: true });
+    expect(aura.listTemplateBuilt()).toBe(true);
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe(AURA_URL + C.LIST_ACTION_QUERY);
+    const body = new URLSearchParams(init.body);
+    expect(body.get('aura.context')).toBeTruthy();
+    const a = JSON.parse(body.get('message')).actions[0];
+    expect(a.descriptor).toBe('serviceComponent://ui.force.components.controllers.lists.listViewDataManager.ListViewDataManagerController/ACTION$getItems');
+    expect(a.params).toEqual({ filterName: '00B6T000007X74uUAC', entityName: 'Case', pageSize: 50, layoutType: 'LIST', sortBy: null, getCount: false, enableRowActions: false, offset: 50 });
+    // A second replay inside the gap opens no second list load.
+    await aura.replayGetItems();
+    expect(S.ensureContext.mock.calls.filter((c) => c[0] && c[0].force)).toHaveLength(1);
+  });
+
+  it('no captured template, the forced load captures one -> the live template is used', async () => {
+    await seed();
+    const fetch = vi.fn(async () => res(200, success(listResult([CASE_ID]), { raw: true })));
+    aura._setDeps({ fetch, session: fakeSession(() => seed({ message: { actions: [getItemsAction()] }, url: AURA_URL + '?r=9&list.getItems=1' })) });
+    expect((await aura.replayGetItems()).ok).toBe(true);
+    expect(aura.listTemplateBuilt()).toBe(false);
+    expect(fetch.mock.calls[0][0]).toBe(AURA_URL + '?r=9&list.getItems=1');
   });
 
   it('re-sends a copy of the captured action with the captured query, mutate applied', async () => {

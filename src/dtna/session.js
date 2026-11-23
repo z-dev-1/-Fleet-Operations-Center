@@ -273,6 +273,9 @@ let _hiddenP = null;
 // Silent refresh: how long the hidden window may sit on a sign-in host (an SSO bounce passes through
 // in well under this) before it gives up with DTNA_SIGNIN_REQUIRED.
 const SILENT_LOGIN_GRACE_MS = 5e3;
+// After the first capture with no list template held: how long the hidden window stays on the Cases
+// list for the page's own getItems action.
+const LIST_CAPTURE_WAIT_MS = 20e3;
 
 // A silent (sync-pass) caller only ever sees these codes.
 function _silentResult(r) {
@@ -347,15 +350,30 @@ function _hiddenRefresh(o) {
     let grace = null;
     let cap = null;
     let win = null;
-    const finish = (r) => {
-      if (settled) return;
-      settled = true;
-      if (timer) { clearTimeout(timer); timer = null; }
-      if (grace) { clearTimeout(grace); grace = null; }
+    let linger = null; // list-capture wait after the result (window still open, hidden)
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      if (linger) { clearTimeout(linger); linger = null; }
       _cancels.delete(cancel);
       try { if (cap) cap.detach(); } catch (e) { log.warn('[dtna] detach', safeErr(e)); }
       try { if (win && !_isDestroyed(win)) win.destroy(); } catch (e) { log.warn('[dtna] destroy', safeErr(e)); }
-      log.info('[dtna] context', { op: 'hidden-refresh', code: r.ok ? 'OK' : r.code, ms: Date.now() - t0 });
+    };
+    // keepForList: resolve now but leave the hidden window on the Cases list until the page's own
+    // getItems commits (onList) or LIST_CAPTURE_WAIT_MS passes.
+    const finish = (r, keepForList) => {
+      if (settled) { if (!keepForList) close(); return; }
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (grace) { clearTimeout(grace); grace = null; }
+      if (keepForList && !closed) {
+        linger = setTimeout(() => { try { close(); } catch (e) { log.warn('[dtna] wait', safeErr(e)); } }, LIST_CAPTURE_WAIT_MS);
+        try { if (linger && typeof linger.unref === 'function') linger.unref(); } catch (_) {}
+      } else {
+        close();
+      }
+      log.info('[dtna] context', { op: 'hidden-refresh', code: r.ok ? 'OK' : r.code, list: !!capture.getItemsTemplate(), ms: Date.now() - t0 });
       resolve(r);
     };
     const cancel = () => finish({ ok: false, code: 'DTNA_SIGNIN_REQUIRED' });
@@ -371,7 +389,17 @@ function _hiddenRefresh(o) {
       const wc = win.webContents;
       wc.setWindowOpenHandler(() => ({ action: 'deny' }));
       win.on('closed', () => { try { finish({ ok: false, code: _onLoginHostSafe() ? 'DTNA_SIGNIN_REQUIRED' : 'DTNA_TIMEOUT' }); } catch (e) { log.warn('[dtna] closed', safeErr(e)); } });
-      cap = capture.createCapture(wc, { onSuccess: () => { _captured(); finish({ ok: true }); } });
+      // The first successful aura POST is a page bootstrap call, not the Cases list. The session is
+      // connected at once; with no list template held yet the hidden window stays on the Cases list
+      // until the page's getItems commits (onList closes it) or LIST_CAPTURE_WAIT_MS passes.
+      cap = capture.createCapture(wc, {
+        onSuccess: () => {
+          if (settled) return;
+          _captured();
+          finish({ ok: true }, !capture.getItemsTemplate());
+        },
+        onList: () => { if (settled) close(); },
+      });
       try {
         cap.attach();
       } catch (e) {

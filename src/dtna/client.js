@@ -293,6 +293,7 @@ async function _listPass(filter, o) {
   let paged = false;
   let base = 0;
   let page = 0;
+  let size = LIST_PAGE_SIZE;
   let templateFilter;
   for (let i = 0; i < LIST_MAX_PAGES; i++) {
     const mutate = (p) => {
@@ -306,6 +307,16 @@ async function _listPass(filter, o) {
         paged = true;
         p.pageSize = LIST_PAGE_SIZE;
         p.currentPage = base + page;
+      } else if ('pageSize' in p && 'offset' in p) {
+        // ListViewDataManager getItems pages by offset; keep the page's own pageSize.
+        if (i === 0) {
+          base = Number(p.offset) || 0;
+          const s = Number(p.pageSize);
+          size = Number.isInteger(s) && s > 0 && s <= LIST_PAGE_SIZE ? s : 50;
+        }
+        paged = true;
+        p.pageSize = size;
+        p.offset = base + page * size;
       }
     };
     const r = await _aura().replayGetItems(mutate, _tx(o));
@@ -317,7 +328,7 @@ async function _listPass(filter, o) {
     const got = new Set();
     _collectIds(r.value, got, 0);
     for (const id of got) ids.add(id);
-    if (!paged || got.size < LIST_PAGE_SIZE || ids.size === before) break;
+    if (!paged || got.size < size || ids.size === before) break;
     page++;
   }
   return { ok: true, ids: Array.from(ids), pages: page + 1, templateFilter };
@@ -346,7 +357,10 @@ async function listCaseIds(opts) {
   if (list.length) _listMemo = { key, at: _now(), ids: list.slice() };
   let info = { entity: null, filter: null };
   try { info = _capture().listInfo() || info; } catch (_) { /* capture unavailable: classification stays null */ }
-  log.info('[dtna] list', { count: list.length, pages: r.pages, filter, fallback, entity: info.entity || null, listFilter: info.filter || null });
+  let built = false;
+  try { built = !!(_aura().listTemplateBuilt && _aura().listTemplateBuilt()); } catch (_) { built = false; }
+  if (built) info = { entity: 'Case', filter: 'default' };
+  log.info('[dtna] list', { count: list.length, pages: r.pages, filter, fallback, built, entity: info.entity || null, listFilter: info.filter || null });
   return { ok: true, ids: list.slice() };
 }
 
