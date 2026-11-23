@@ -89,25 +89,53 @@ const CreateWRAutofill = {
              });
          },
 
+         // AVM codes arrive raw (BUMPER_ASSEMBLY, ELECTRICAL_SYSTEM) but AAP's
+         // wizard options are spaced, title-cased labels ("Bumper Assembly").
+         // These helpers are for MATCHING/TYPING in the wizard only; the raw
+         // code in the payload stays the source of truth. The engine is
+         // injected as raw text and cannot import avm-label.js / avm-text.js,
+         // so this mirrors formatAvmLabel's underscore/ALL_CAPS handling.
+         // _avmNorm: comparison key (lowercase, underscores/whitespace -> one space).
+         _avmNorm(v) {
+             return String(v == null ? '' : v).replace(/_/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+         },
+         // _avmLabel: human label to type into a wizard combobox.
+         _avmLabel(v) {
+             const raw = String(v == null ? '' : v);
+             const s = raw.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+             if (!s) return '';
+             // Already a spaced, mixed-case label: leave it alone.
+             if (raw.indexOf('_') === -1 && /[a-z]/.test(s)) return s;
+             return s.replace(/[A-Za-z0-9]+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+         },
+         // _avmMatch: true when an AAP option text equals the desired value
+         // after normalization (exact), or contains it when allowIncludes.
+         _avmMatch(optionText, value, allowIncludes) {
+             const o = this._avmNorm(optionText);
+             const t = this._avmNorm(value);
+             if (!o || !t) return false;
+             return o === t || (!!allowIncludes && o.includes(t));
+         },
+
          // All dropdowns on this form share the same option button pattern:
          // BUTTON[role="option"] with ariaLabel or inner text matching value
          async waitForOption(value, maxMs = 5000) {
-             const target = String(value || '').trim().toUpperCase();
+             const target = this._avmNorm(value);
              return this.waitFor(() => {
                  // Check BUTTON[role="option"]  -  confirmed selector from recording
                  const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
                  const match = btns.find(b =>
-                     (b.getAttribute('aria-label') || '').toUpperCase() === target ||
-                     (b.innerText || b.textContent || '').trim().toUpperCase() === target ||
-                     (b.innerText || b.textContent || '').trim().toUpperCase().includes(target) ||
-                     target.includes((b.innerText || b.textContent || '').trim().toUpperCase())
+                     this._avmNorm(b.getAttribute('aria-label')) === target ||
+                     this._avmNorm(b.innerText || b.textContent) === target ||
+                     this._avmNorm(b.innerText || b.textContent).includes(target) ||
+                     target.includes(this._avmNorm(b.innerText || b.textContent))
                  );
                  if (match) return match;
                  // Fallback: any visible element with matching text
                  const all = Array.from(document.querySelectorAll('[role="option"], LI, [role="listitem"]'))
                      .filter(el => el.offsetParent);
                  return all.find(el =>
-                     (el.innerText || el.textContent || '').trim().toUpperCase().includes(target)
+                     this._avmNorm(el.innerText || el.textContent).includes(target)
                  ) || null;
              }, maxMs, 50); // 50ms polling  -  catch fast-appearing options
          },
@@ -756,15 +784,16 @@ const CreateWRAutofill = {
                       if (workInput) {
                           try { workInput.focus(); } catch (e) {}
                           const ws = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                          const workSearch = pair.area.toLowerCase();
+                          // Type the spaced label (raw codes like DEVICE_REMOVAL never match AAP's options).
+                          const workSearch = this._avmLabel(pair.area);
                           try { if (ws) ws.call(workInput, workSearch); else workInput.value = workSearch; } catch (e) { workInput.value = workSearch; }
                           ['input', 'change', 'keyup'].forEach(t => { try { workInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
                           // Exact match first, then includes  -  prevents "engine" matching "Check Engine Light"
                           const workOpt = await this.waitFor(() => {
                               const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
-                              const target = pair.area.toUpperCase();
-                              return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
-                                  || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
+                              const optText = b => b.getAttribute('aria-label') || b.innerText || '';
+                              return btns.find(b => this._avmMatch(optText(b), pair.area, false))
+                                  || btns.find(b => this._avmMatch(optText(b), pair.area, true))
                                   || null;
                           }, 4000, 80);
                           if (workOpt) {
@@ -811,7 +840,7 @@ const CreateWRAutofill = {
 
                                   try { posInput.focus(); } catch (e) {}
                                   const ps = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                                  const posSearch = pair.subcategory.toLowerCase();
+                                  const posSearch = this._avmLabel(pair.subcategory);
                                   try { if (ps) ps.call(posInput, posSearch); else posInput.value = posSearch; } catch (e) { posInput.value = posSearch; }
                                   ['input', 'change', 'keyup'].forEach(t => { try { posInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
                                   const posOpt = await this.waitForOption(pair.subcategory, 4000);
@@ -863,15 +892,16 @@ const CreateWRAutofill = {
                           if (subInput) {
                               try { subInput.focus(); } catch (e) {}
                               const ss = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                              const subSearch = pair.subcategory.toLowerCase();
+                              // Type the spaced label: BUMPER_ASSEMBLY -> "Bumper Assembly" (AAP's option text).
+                              const subSearch = this._avmLabel(pair.subcategory);
                               try { if (ss) ss.call(subInput, subSearch); else subInput.value = subSearch; } catch (e) { subInput.value = subSearch; }
                               ['input', 'change', 'keyup'].forEach(t => { try { subInput.dispatchEvent(new Event(t, { bubbles: true })); } catch (e) {} });
-                              // Exact match first
+                              // Exact match first (normalized: case/underscores ignored)
                               const subOpt = await this.waitFor(() => {
                                   const btns = Array.from(document.querySelectorAll('BUTTON[role="option"]'));
-                                  const target = pair.subcategory.toUpperCase();
-                                  return btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase() === target)
-                                      || btns.find(b => (b.getAttribute('aria-label') || b.innerText || '').trim().toUpperCase().includes(target))
+                                  const optText = b => b.getAttribute('aria-label') || b.innerText || '';
+                                  return btns.find(b => this._avmMatch(optText(b), pair.subcategory, false))
+                                      || btns.find(b => this._avmMatch(optText(b), pair.subcategory, true))
                                       || null;
                               }, 4000, 80);
                               if (subOpt) { this.click(subOpt); this.log('Sub Area [' + i + ']: clicked "' + (subOpt.innerText || '').trim() + '"'); await this.sleep(300); }
