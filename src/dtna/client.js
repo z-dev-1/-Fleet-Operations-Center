@@ -224,9 +224,9 @@ const ATT_FINAL = new Set(['read', 'scanned', 'skipped-size', 'skipped-type']);
 // Download codes that stop the attachment step for this pull (the case pull itself still succeeds).
 const ATT_STOP = new Set(['DTNA_SESSION_EXPIRED', 'DTNA_SIGNIN_REQUIRED', 'DTNA_NETWORK', 'DTNA_TIMEOUT', 'DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED']);
 
-function _attKey(a) { return a ? _str(a.versionId || a.documentId) : ''; }
+function _attKey(a) { return a ? _str(a.attId ? 'att:' + a.attId : (a.versionId || a.documentId)) : ''; }
 function _attMeta(a) {
-  return { versionId: _str(a.versionId), documentId: _str(a.documentId), name: _str(a.name), ext: _str(a.ext), size: Number.isFinite(a.size) ? a.size : null, createdAt: _str(a.createdAt) };
+  return { versionId: _str(a.versionId), documentId: _str(a.documentId), attId: _str(a.attId), name: _str(a.name), ext: _str(a.ext), size: Number.isFinite(a.size) ? a.size : null, createdAt: _str(a.createdAt) };
 }
 
 /**
@@ -282,7 +282,7 @@ async function syncAttachments(caseId, rawComments, prevEntry, opts) {
       }
       stats.downloaded++;
       let d;
-      try { d = await F.downloadPdf(a, { caseId }); } catch (_) { d = { ok: false, code: 'DTNA_INTERNAL' }; }
+      try { d = await F.downloadPdf(a, { caseId, silent: !!(opts && opts.silent) }); } catch (_) { d = { ok: false, code: 'DTNA_INTERNAL' }; }
       if (!d || !d.ok) {
         const c = _str((d && d.code) || 'DTNA_INTERNAL').slice(0, 40);
         if (ATT_STOP.has(c)) { stopped = true; code = c; }

@@ -66,6 +66,9 @@ const READ_METHODS = Object.freeze({
   getRepairOrderId: Object.freeze({ params: Object.freeze(['caseId']) }),
   getCommentsByCaseRepairOrder: Object.freeze({ params: Object.freeze(['caseId']) }),
   getComment: Object.freeze({ params: Object.freeze(['commentId']) }),
+  // Comment attachment content (base64), 2026-11-23 chatter-files probe; see ATTACHMENT_DOWNLOAD.
+  getAttachment: Object.freeze({ params: Object.freeze(['caseId', 'attId']) }),
+  getFilesOnCase: Object.freeze({ params: Object.freeze(['recordId']) }),
 });
 
 // Default Apex class per read method. A class the page itself is seen calling (capture.classFor) wins.
@@ -75,6 +78,8 @@ const APEX_CLASS = Object.freeze({
   getRepairOrderId: 'E2E_CaseDetailsLWCController',
   getCommentsByCaseRepairOrder: 'E2E_UTP_CommentController',
   getComment: 'E2E_UTP_CommentController',
+  getAttachment: 'E2E_UTP_CommentController',
+  getFilesOnCase: 'E2E_UTP_CommentController',
 });
 
 const WRITE_RE = /^(post|save|update|create|delete|insert|upsert|submit|send|set|change|close|reopen|assign|approve|reject)/i;
@@ -167,18 +172,26 @@ const STAGE_CHANGE_PARAMS = Object.freeze({
 });
 
 // ── Chatter (case feed) ─────────────────────────────────────────────────────
-// The case feed's own config read (2026-11-23, not yet configured). Known from the 2026-11-22 post probe:
-// the portal feed calls ForceCommunityFeedController/ACTION$getModel with param key subjectId (the case id)
-// and its value carries isChatterEnabled (external communication on/off for the case). The full descriptor
-// prefix and the action query were not recorded, so this stays null until live discovery (Phase B).
-// null -> client.getChatterEnabled returns DTNA_CHATTER_NOT_CONFIGURED with no request; Chatter then
-// counts as unavailable and posting falls back to the case comment.
+// The case feed's own config read. Learned 2026-11-23 via the read-only chatter-files probe (cases
+// ...GUsIAM and ...1RBAA0): the portal's case page sends this action itself with the single param subjectId
+// (the case id); its returnValue.isChatterEnabled is a boolean (true on both cases). A read; it only runs
+// when Chatter posting is configured (dtna:channels checks isChatterConfigured first), which it is not.
 // Shape: { descriptor: 'aura://...|serviceComponent://.../ACTION$getModel', query: '?r=1&...',
 //          params: { <key>: '$caseId' | literal string|number|boolean|null }, enabledKey: 'isChatterEnabled' }
-const CHATTER_FEED_READ = null;
-// Post to the case Chatter feed (2026-11-23). STATE: unset, not discovered yet. Live discovery records the
-// portal composer's own call here; until then Chatter posting returns DTNA_CHATTER_NOT_CONFIGURED (no
-// approval prompt, no network) and the "Post to DTNA" modal falls back to the case comment.
+const CHATTER_FEED_READ = Object.freeze({
+  descriptor: 'serviceComponent://ui.communities.components.aura.components.forceCommunity.controller.ForceCommunityFeedController/ACTION$getModel',
+  query: '?r=1&ui-communities-components-aura-components-forceCommunity-controller.ForceCommunityFeed.getModel=1',
+  params: Object.freeze({ subjectId: '$caseId' }),
+  enabledKey: 'isChatterEnabled',
+});
+// Post to the case Chatter feed. STATE: NOT CONFIGURED (deliberately), 2026-11-23 chatter-files probe.
+// The portal case page renders no new-post composer for the site user (feed DOM: no textarea / rich-text
+// editor, only "Latest Posts" / "Filter Feed"), and the portal bundles carry no top-level post action
+// (no createFeedItem / postFeedElement / publisher post; 152 feed-family actions scanned). The only
+// post-like action is forceChatter CommentInputController/ACTION$comment { feedItemId, commentInput,
+// feedType, communityId }: a REPLY under an existing feed item, not a new case post, and its commentInput
+// body shape was not observed. No Chatter method is faked: posting returns DTNA_CHATTER_NOT_CONFIGURED (no
+// approval prompt, no network) and the "Post to DTNA" modal auto-selects the case comment (postComment).
 // Connect REST / ui-api are blocked for the portal user (findings §8), so REST is NOT a supported transport.
 // Shape (src/dtna/writes.js buildChatterParams resolves the '$' placeholders):
 //   { transport: 'aura', descriptor, query, params, success? }
@@ -189,18 +202,38 @@ const CHATTER_FEED_READ = null;
 const CHATTER_POST_PARAMS = null;
 
 // ── Case attachments (estimate PDFs) ────────────────────────────────────────
-// How to list a case's files (2026-11-23, not yet configured). Candidate reads seen only in the portal
-// bundle: E2E_UTP_CommentController.getFilesOnCase / getAttachment / getFileDetails (param keys unknown);
-// or the Attachments field on each comment row. null -> DTNA_ATTACHMENTS_NOT_CONFIGURED, no request.
+// How to list a case's files. Learned 2026-11-23 via the read-only chatter-files probe (case ...1RBAA0,
+// case number 15730628): External Communication files hang off the getCommentsByCaseRepairOrder rows
+// (the same read the pull already makes, so listing costs zero extra requests): row.Attachments =
+// [{ FileSize:number, FileName:string, ContentVersionId:null, CaseId:null, AttachmentId:string }], with
+// row.HasAttachment true; the row's LastUpdatedDate dates its files. 4 files / 3 PDFs on 2 rows, all
+// AttachmentIds external (UTP ids, not Salesforce 068/069). Chatter feed files: none found on the two probed
+// cases (feed getModel carried no file capability), so no Chatter file source is configured yet.
 // Shape: { source: 'apex', classname: 'E2E_...', method: 'get...', params: { <key>: '$caseId' }, listPath?,
-//          fields: { versionId, documentId?, name, ext?, size?, createdAt? } }
-//      | { source: 'comments', field: 'Attachments', listPath?, fields: { ... } }
-const ATTACHMENT_LIST_READ = null;
-// How to download one file through the authenticated persist:vendor-dtna session (2026-11-23, not yet
-// configured; e.g. the site's Salesforce ContentVersion "version/download/{versionId}" servlet). Placeholder {versionId}
-// or {documentId} only; the host must be HOST. null -> DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED, no request.
-// Shape: { urlTemplate }
-const ATTACHMENT_DOWNLOAD = null;
+//          fields: { versionId, documentId?, attId?, name, ext?, size?, createdAt? } }
+//      | { source: 'comments', field: 'Attachments', listPath?, rowCreatedAt?, fields: { ... } }
+const ATTACHMENT_LIST_READ = Object.freeze({
+  source: 'comments',
+  field: 'Attachments',
+  rowCreatedAt: 'LastUpdatedDate',
+  fields: Object.freeze({ attId: 'AttachmentId', name: 'FileName', size: 'FileSize' }),
+});
+// How to download one file through the authenticated persist:vendor-dtna session. Learned 2026-11-23 from
+// the portal's own c:e2E_CaseComments handleAttachmentClick and exercised live (one read, case ...1RBAA0:
+// base64 string returned, decoded bytes start with %PDF-, <1MB, pdfjs text read OK):
+//   AttachmentId '<068 ContentVersion id>_internal' -> getFilesOnCase({ recordId: <068 id> })   (base64)
+//   any other AttachmentId                         -> getAttachment({ caseId, attId: AttachmentId }) (base64)
+// Both are E2E_UTP_CommentController reads through the normal aura transport (no new auth, no servlet).
+// Shape: { source: 'apex', encoding: 'base64', internal: { method }, external: { method } }
+//      | { urlTemplate }  ('{versionId}' / '{documentId}' placeholder; host must be HOST)
+const ATTACHMENT_DOWNLOAD = Object.freeze({
+  source: 'apex',
+  encoding: 'base64',
+  internal: Object.freeze({ method: 'getFilesOnCase' }),
+  external: Object.freeze({ method: 'getAttachment' }),
+});
+// A UTP comment attachment id as the portal hands it to getAttachment / getFilesOnCase (opaque, no spaces).
+const ATTACHMENT_ID_RE = /^[A-Za-z0-9][\w.\-]{2,119}$/;
 const ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024;
 const ATTACHMENT_MAX_PER_PULL = 4;
 const ATTACHMENT_KEEP_TEXT = 4;
@@ -247,5 +280,5 @@ module.exports = {
   CHATTER_FEED_READ, CHATTER_POST_PARAMS, CHATTER_POST_MAX, FEED_ITEM_ID_RE,
   ATTACHMENT_LIST_READ, ATTACHMENT_DOWNLOAD, ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_PER_PULL, ATTACHMENT_KEEP_TEXT,
   ATTACHMENT_LIST_MAX, ATTACHMENT_TEXT_MAX, ATTACHMENT_REFRESH_MS, ATTACHMENT_DOWNLOAD_TIMEOUT_MS,
-  ESTIMATE_CONTEXT_MAX, ESTIMATE_LINE_ITEMS_MAX, CONTENT_VERSION_ID_RE, CONTENT_DOC_ID_RE,
+  ESTIMATE_CONTEXT_MAX, ESTIMATE_LINE_ITEMS_MAX, CONTENT_VERSION_ID_RE, CONTENT_DOC_ID_RE, ATTACHMENT_ID_RE,
 };

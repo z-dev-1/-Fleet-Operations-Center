@@ -26,7 +26,8 @@ function _listConfig() { return Object.prototype.hasOwnProperty.call(_deps, 'lis
 function _downloadConfig() { return Object.prototype.hasOwnProperty.call(_deps, 'downloadConfig') ? _deps.downloadConfig : C.ATTACHMENT_DOWNLOAD; }
 
 const NAME_MAX = 120;
-const FIELD_KEYS = ['versionId', 'documentId', 'name', 'ext', 'size', 'createdAt'];
+const FIELD_KEYS = ['versionId', 'documentId', 'attId', 'name', 'ext', 'size', 'createdAt'];
+const INTERNAL_SUFFIX = '_internal';
 
 function _str(v) { return v == null ? '' : String(v); }
 function _isObj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
@@ -53,7 +54,11 @@ function _usesDocumentId() {
   return !!(d && typeof d.urlTemplate === 'string' && d.urlTemplate.includes('{documentId}'));
 }
 
-function _row(raw, fields, byDoc) {
+function _isApexDownload(d) {
+  return _isObj(d) && d.source === 'apex' && _isObj(d.internal) && _isObj(d.external);
+}
+
+function _row(raw, fields, byDoc, fallbackCreatedAt) {
   if (!_isObj(raw)) return null;
   const f = _isObj(fields) ? fields : {};
   const get = (k) => {
@@ -61,17 +66,26 @@ function _row(raw, fields, byDoc) {
     const v = _path(raw, key);
     return v != null && typeof v !== 'object' ? v : undefined;
   };
-  const versionId = _str(get('versionId')).trim();
+  let versionId = _str(get('versionId')).trim();
   const documentId = _str(get('documentId')).trim();
+  // A UTP comment attachment id (only when the list config maps one): '<068 id>_internal' also names the
+  // ContentVersion; any other value is an external UTP attachment id.
+  const rawAtt = typeof f.attId === 'string' && f.attId ? _str(get('attId')).trim() : '';
+  const attId = C.ATTACHMENT_ID_RE.test(rawAtt) ? rawAtt : '';
+  if (attId.endsWith(INTERNAL_SUFFIX) && !C.CONTENT_VERSION_ID_RE.test(versionId)) {
+    const v = attId.slice(0, -INTERNAL_SUFFIX.length);
+    if (C.CONTENT_VERSION_ID_RE.test(v)) versionId = v;
+  }
   const okVersion = C.CONTENT_VERSION_ID_RE.test(versionId);
   const okDoc = C.CONTENT_DOC_ID_RE.test(documentId);
-  if (byDoc ? !okDoc : !okVersion) return null;
+  if (!attId && (byDoc ? !okDoc : !okVersion)) return null;
   const name = _str(get('name')).replace(/[\r\n\t]+/g, ' ').trim().slice(0, NAME_MAX);
   const sz = Number(get('size'));
-  const created = _str(get('createdAt')).trim();
+  const created = _str(get('createdAt')).trim() || _str(fallbackCreatedAt).trim();
   return {
     versionId: okVersion ? versionId : '',
     documentId: okDoc ? documentId : '',
+    attId,
     name,
     ext: _extOf(get('ext'), name),
     size: Number.isFinite(sz) && sz >= 0 ? Math.round(sz) : null,
@@ -95,24 +109,29 @@ function _asList(v) {
 function parseAttachmentList(value, cfg, rawComments) {
   const c = _isObj(cfg) ? cfg : {};
   const byDoc = _usesDocumentId();
+  // rows: [{ raw, at }] — at = the comment row's date (cfg.rowCreatedAt) for files that carry none.
   let rows = [];
   if (c.source === 'comments') {
     const field = typeof c.field === 'string' && /^[\w.]{1,80}$/.test(c.field) ? c.field : '';
     if (!field) return [];
+    const atKey = typeof c.rowCreatedAt === 'string' && /^[\w.]{1,80}$/.test(c.rowCreatedAt) ? c.rowCreatedAt : '';
     for (const cm of (Array.isArray(rawComments) ? rawComments : [])) {
       if (!_isObj(cm)) continue;
-      rows = rows.concat(_asList(_path(cm, field)));
+      const atV = atKey ? _path(cm, atKey) : '';
+      const at = typeof atV === 'string' ? atV : '';
+      let list = _asList(_path(cm, field));
+      if (c.listPath) list = list.flatMap((r) => _asList(_path(r, c.listPath)));
+      rows = rows.concat(list.map((raw) => ({ raw, at })));
     }
-    if (c.listPath) rows = rows.flatMap((r) => _asList(_path(r, c.listPath)));
   } else {
-    rows = _asList(_path(value, c.listPath));
+    rows = _asList(_path(value, c.listPath)).map((raw) => ({ raw, at: '' }));
   }
   const out = [];
   const seen = new Set();
   for (const r of rows) {
-    const a = _row(r, c.fields, byDoc);
+    const a = _row(r.raw, c.fields, byDoc, r.at);
     if (!a) continue;
-    const key = byDoc ? a.documentId : a.versionId;
+    const key = a.attId ? 'att:' + a.attId : (byDoc ? a.documentId : a.versionId);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(a);
@@ -210,6 +229,49 @@ async function _readCapped(res, ac) {
   return { buffer: buf, total: buf.length };
 }
 
+// Base64 length that decodes to more than ATTACHMENT_MAX_BYTES.
+const B64_MAX = Math.ceil(C.ATTACHMENT_MAX_BYTES / 3) * 4 + 4;
+
+/**
+ * _apexDownload(cfg, att, {caseId, silent}) -> { r: {ok:true, buffer} | {ok:false, code}, bytes }
+ * The portal's own rule (c:e2E_CaseComments handleAttachmentClick): attId '<068>_internal' (or a bare
+ * ContentVersion id) -> internal.method({ recordId }); any other attId -> external.method({ caseId, attId }).
+ * Both return the file as a base64 string. Reads through aura.callApex (READ_METHODS allowlist).
+ */
+async function _apexDownload(cfg, att, opts) {
+  const caseId = _str(opts && opts.caseId);
+  const attId = _str(att.attId);
+  const internal = attId ? attId.endsWith(INTERNAL_SUFFIX) : C.CONTENT_VERSION_ID_RE.test(_str(att.versionId));
+  const method = _str(internal ? cfg.internal.method : cfg.external.method);
+  let params;
+  if (internal) {
+    const vid = attId ? attId.slice(0, -INTERNAL_SUFFIX.length) : _str(att.versionId);
+    if (!C.CONTENT_VERSION_ID_RE.test(vid)) return { r: { ok: false, code: 'DTNA_INVALID_INPUT' }, bytes: 0 };
+    params = { recordId: vid };
+  } else {
+    if (!C.CASE_ID_RE.test(caseId) || !C.ATTACHMENT_ID_RE.test(attId)) return { r: { ok: false, code: 'DTNA_INVALID_INPUT' }, bytes: 0 };
+    params = { caseId, attId };
+  }
+  let res;
+  try {
+    res = await _aura().callApex(method, params, opts && opts.silent ? { silent: true } : undefined);
+  } catch (e) {
+    log.warn('[dtna] attachment', safeErr(e));
+    return { r: { ok: false, code: 'DTNA_INTERNAL' }, bytes: 0 };
+  }
+  if (!res || !res.ok) return { r: { ok: false, code: _str((res && res.code) || 'DTNA_INTERNAL').slice(0, 40) }, bytes: 0 };
+  let b64 = typeof res.value === 'string' ? res.value : '';
+  const comma = b64.startsWith('data:') ? b64.indexOf(',') : -1;
+  if (comma >= 0) b64 = b64.slice(comma + 1);
+  if (!b64) return { r: { ok: false, code: 'DTNA_ATTACHMENT_NOT_PDF' }, bytes: 0 };
+  if (b64.length > B64_MAX) return { r: { ok: false, code: 'DTNA_ATTACHMENT_TOO_LARGE' }, bytes: Math.floor(b64.length * 3 / 4) };
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(b64.slice(0, 4096))) return { r: { ok: false, code: 'DTNA_ATTACHMENT_NOT_PDF' }, bytes: 0 };
+  const buffer = Buffer.from(b64, 'base64');
+  if (buffer.length > C.ATTACHMENT_MAX_BYTES) return { r: { ok: false, code: 'DTNA_ATTACHMENT_TOO_LARGE' }, bytes: buffer.length };
+  if (buffer.length < 5 || buffer.subarray(0, 5).toString('latin1') !== '%PDF-') return { r: { ok: false, code: 'DTNA_ATTACHMENT_NOT_PDF' }, bytes: buffer.length };
+  return { r: { ok: true, buffer }, bytes: buffer.length };
+}
+
 /**
  * downloadPdf(att, {caseId}) -> {ok:true, buffer} | {ok:false, code}
  * Codes: DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED, DTNA_ATTACHMENT_NOT_PDF, DTNA_ATTACHMENT_TOO_LARGE,
@@ -223,10 +285,15 @@ async function downloadPdf(att, opts) {
   let status;
   let bytes = 0;
   const d = _downloadConfig();
-  if (!d || typeof d.urlTemplate !== 'string' || !d.urlTemplate) r = { ok: false, code: 'DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED' };
+  const apex = _isApexDownload(d);
+  if (!apex && (!d || typeof d.urlTemplate !== 'string' || !d.urlTemplate)) r = { ok: false, code: 'DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED' };
   else if (!isPdf(a)) r = { ok: false, code: 'DTNA_ATTACHMENT_NOT_PDF' };
   else if (Number.isFinite(a.size) && a.size > C.ATTACHMENT_MAX_BYTES) { r = { ok: false, code: 'DTNA_ATTACHMENT_TOO_LARGE' }; bytes = a.size; }
-  else {
+  else if (apex) {
+    const x = await _apexDownload(d, a, opts);
+    r = x.r;
+    bytes = x.bytes;
+  } else {
     const url = downloadUrl(a);
     if (!url) r = { ok: false, code: 'DTNA_INVALID_INPUT' };
     else {

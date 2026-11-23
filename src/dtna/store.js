@@ -25,7 +25,7 @@ const COMMENT_FIELDS = ['id', 'type', 'at', 'from', 'text'];
 // Case attachments (estimate PDFs): metadata, extraction status, the extracted text (for the AI) and the
 // parsed totals. Scalars only; there is no bytes field, so file bytes can never be stored.
 const ATTACHMENT_FIELDS = [
-  'versionId', 'documentId', 'name', 'ext', 'size', 'createdAt', 'kind', 'status', 'code', 'text', 'textLen',
+  'versionId', 'documentId', 'attId', 'name', 'ext', 'size', 'createdAt', 'kind', 'status', 'code', 'text', 'textLen',
   'truncated', 'total', 'totalLabeled', 'partsTotal', 'laborTotal', 'extractedAt',
 ];
 const LINE_ITEM_FIELDS = ['desc', 'amount', 'kind'];

@@ -204,7 +204,9 @@ async function callApex(name, params, opts) {
   const valid = p && keys.length === spec.params.length && spec.params.every((k) => keys.includes(k))
     && keys.every((k) => typeof p[k] === 'string')
     && (!('caseId' in p) || C.CASE_ID_RE.test(p.caseId))
-    && (!('commentId' in p) || C.COMMENT_ID_RE.test(p.commentId));
+    && (!('commentId' in p) || C.COMMENT_ID_RE.test(p.commentId))
+    && (!('attId' in p) || C.ATTACHMENT_ID_RE.test(p.attId))
+    && (!('recordId' in p) || C.CONTENT_VERSION_ID_RE.test(p.recordId));
   if (!valid) {
     log.info('[dtna] apex', { method: name, code: 'DTNA_INVALID_INPUT' });
     return { ok: false, code: 'DTNA_INVALID_INPUT' };

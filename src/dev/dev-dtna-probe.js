@@ -49,6 +49,7 @@ const CASE_FLAG = 'FLEET_DEV_DTNA_PROBE_CASE';
 const MODES = ['full', 'post', 'stage', 'chatter-files'];
 const CF_TERMS = ['ForceCommunityFeedController', 'forceChatter', 'Publisher', 'FeedController', 'CommentInputController',
   'createFeedItem', 'postFeedElement', 'isChatterEnabled', 'getFilesOnCase', 'getAttachment', 'getFileDetails', 'servlet.shepherd', 'version/download'];
+const CF_WIDE_TERMS = ['"c.comment"', 'messageSegments', 'getFilesOnCase__default.default', 'getComment__default.default', 'getAttachment__default.default'];
 const FILES_CLASS = 'E2E_UTP_CommentController';
 const STAGE_OUT_FILE = path.resolve(__dirname, '..', '..', '.agents', 'tasks', 'dtna-aura', 'phase-c', 'stage-probe.json');
 const WINDOW_TITLE = 'DTNA discovery probe (dev, read-only)';
@@ -461,6 +462,7 @@ function createCensus() {
   // chatter-files: code excerpts around feed / publisher / file terms (code only), and the page's own
   // getModel requests (descriptor, query keys, param keys, isChatterEnabled type/value).
   const cfUses = {};
+  const cfWide = {};
   function _scanCf(u) {
     for (const term of CF_TERMS) {
       let i = 0;
@@ -470,9 +472,20 @@ function createCensus() {
         i += term.length + 900;
       }
     }
+    // Wider code windows around the call sites that build a feed comment / read a comment's files.
+    for (const term of CF_WIDE_TERMS) {
+      let i = 0;
+      const arr = cfWide[term] || (cfWide[term] = []);
+      while ((i = u.indexOf(term, i)) >= 0 && arr.length < 3) {
+        arr.push(_excerpt(u, i, 1500, 3000));
+        i += term.length + 3000;
+      }
+    }
   }
   const feedModels = [];
   function noteFeedModel(rec) { if (feedModels.length < 10) feedModels.push(rec); }
+  // First feed file (PDF preferred, estimate-named first) kept in MEMORY only for the one bounded GET.
+  const cfPdf = { candidate: null };
 
   function _addBundle(cls, meth, win) {
     const key = cls + '.' + meth;
@@ -578,8 +591,140 @@ function createCensus() {
 
   return {
     scan, notePageCall, noteDescriptor, all, result, postSites, postCalls, postImports, descriptors, feedActions, uses, scripts, page, bundle,
-    stageCalls, stageImports, stageLiterals, stageHandlers, cfUses, feedModels, noteFeedModel,
+    stageCalls, stageImports, stageLiterals, stageHandlers, cfUses, cfWide, feedModels, noteFeedModel, cfPdf,
   };
+}
+
+/**
+ * _commentFilesOf(rows, cfPdf) -> names/counts summary of the attachment objects on E2E comment rows
+ * (External Communication): rows with files, file count, pdf / estimate-named counts, key union, the key
+ * holding a 068 versionId / 069 documentId, Attachments container type. Best PDF -> cfPdf.candidate
+ * (memory only; a comment-row PDF wins over a Chatter one only when the Chatter one is not estimate-named).
+ */
+function _commentFilesOf(rows, cfPdf) {
+  const out = { rowsWithFiles: 0, count: 0, pdfs: 0, estimateNamed: 0, keys: [], versionKeys: [], documentKeys: [], nameKeys: [], containers: [] };
+  const ESTIMATE_NAME = /\bE\d{6,}|\bR\d{6,}|estimate/i;
+  const seen = new Set();
+  for (const row of (Array.isArray(rows) ? rows.slice(0, 500) : [])) {
+    if (!row || typeof row !== 'object') continue;
+    let att = row.Attachments;
+    if (typeof att === 'string' && /^\s*[[{]/.test(att)) { const j = safeJson(att); att = j.ok ? j.value : null; }
+    if (att == null || att === '') continue;
+    const ct = Array.isArray(att) ? 'array' : typeof att;
+    if (!out.containers.includes(ct)) out.containers.push(ct);
+    const list = Array.isArray(att) ? att : (typeof att === 'object' ? [att] : []);
+    let any = false;
+    for (const a of list.slice(0, 50)) {
+      if (!a || typeof a !== 'object') continue;
+      let vid = '', did = '', name = '';
+      // The portal's own rule (c:e2E_CaseComments handleAttachmentClick): AttachmentId '<068...>_internal' ->
+      // getFilesOnCase({recordId: <068...>}); any other AttachmentId -> getAttachment({caseId, attId}).
+      const attId = typeof a.AttachmentId === 'string' && /^[\w.\-]{3,120}$/.test(a.AttachmentId) ? a.AttachmentId : '';
+      const internal = /_internal$/.test(attId);
+      const fname = typeof a.FileName === 'string' ? a.FileName : '';
+      if (attId) {
+        out.attIds = out.attIds || { internal: 0, external: 0, prefixes: [] };
+        out.attIds[internal ? 'internal' : 'external']++;
+        const pf = attId.slice(0, 3);
+        if (!out.attIds.prefixes.includes(pf) && out.attIds.prefixes.length < 5) out.attIds.prefixes.push(pf);
+        const key = 'att:' + attId;
+        if (!seen.has(key)) {
+          seen.add(key);
+          any = true;
+          out.count++;
+          const isPdf = /\.pdf$/i.test(fname);
+          const est = ESTIMATE_NAME.test(fname);
+          if (isPdf) out.pdfs++;
+          if (est) out.estimateNamed++;
+          for (const k of Object.keys(a).slice(0, 40)) if (/^\w{1,40}$/.test(k) && !out.keys.includes(k) && out.keys.length < 40) out.keys.push(k);
+          if (isPdf && cfPdf) {
+            const cur = cfPdf.candidate;
+            if (!cur || (est && !cur.est)) {
+              cfPdf.candidate = { attId, internal, versionId: internal ? attId.slice(0, -9) : '', documentId: '', downloadUrl: '', est,
+                size: Number(a.FileSize) || null, idPrefix: attId.slice(0, 3), source: 'comments' };
+            }
+          }
+        }
+        continue;
+      }
+      for (const k of Object.keys(a).slice(0, 40)) {
+        if (/^\w{1,40}$/.test(k) && !out.keys.includes(k) && out.keys.length < 40) out.keys.push(k);
+        const s = typeof a[k] === 'string' ? a[k] : '';
+        const m068 = /^(068[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?)(?:_\w+)?$/.exec(s);
+        if (m068) { if (!vid && m068[0] === m068[1]) { vid = m068[1]; if (!out.versionKeys.includes(k)) out.versionKeys.push(k); } }
+        else if (C.CONTENT_DOC_ID_RE.test(s)) { if (!did) did = s; if (!out.documentKeys.includes(k)) out.documentKeys.push(k); }
+        else if (/\.\w{2,5}$/.test(s) && s.length <= 200) { if (!name) name = s; if (!out.nameKeys.includes(k)) out.nameKeys.push(k); }
+      }
+      if (!vid || seen.has(vid)) continue;
+      seen.add(vid);
+      any = true;
+      out.count++;
+      const isPdf = /\.pdf$/i.test(name);
+      const est = ESTIMATE_NAME.test(name);
+      if (isPdf) out.pdfs++;
+      if (est) out.estimateNamed++;
+      if (isPdf && cfPdf) {
+        const cur = cfPdf.candidate;
+        if (!cur || (est && !cur.est)) cfPdf.candidate = { versionId: vid, documentId: did, downloadUrl: '', est, size: null, idPrefix: did ? did.slice(0, 3) : '', source: 'comments' };
+      }
+    }
+    if (any) out.rowsWithFiles++;
+  }
+  return out;
+}
+
+/**
+ * _feedFilesOf(value, cfPdf) -> a names/counts summary of the file entries (objects carrying a 068 versionId)
+ * in a feed getModel value: count, pdf/estimate-named counts, key union, normalized paths, id prefixes and
+ * downloadUrl templates (ids replaced, query keys only). Also boolean feed flags whose key looks like a
+ * post/comment capability. The best PDF candidate goes into cfPdf.candidate (memory only, never written).
+ */
+function _feedFilesOf(value, cfPdf) {
+  const out = { count: 0, pdfs: 0, estimateNamed: 0, keys: [], paths: [], downloadTemplates: [], feedElements: 0, flags: {} };
+  const ESTIMATE_NAME = /\bE\d{6,}|\bR\d{6,}|estimate/i;
+  const seen = new Set();
+  const tplOf = (u) => {
+    const s = String(u || '');
+    const [p, q] = s.split('?');
+    const keys = q ? Array.from(new URLSearchParams(q).keys()).slice(0, 6).map((k) => k + '=1').join('&') : '';
+    return (p.replace(/068[A-Za-z0-9]{12,15}/g, '{versionId}').replace(/069[A-Za-z0-9]{12,15}/g, '{documentId}').slice(0, 200)) + (keys ? '?' + keys : '');
+  };
+  const walk = (v, p, d) => {
+    if (d > 16 || v == null || typeof v !== 'object') return;
+    if (Array.isArray(v)) { v.slice(0, 200).forEach((x) => walk(x, p + '[]', d + 1)); return; }
+    if (typeof v.id === 'string' && /^0D5[A-Za-z0-9]{12,15}$/.test(v.id) && /elements\[\]$/.test(p)) out.feedElements++;
+    const vid = typeof v.versionId === 'string' && C.CONTENT_VERSION_ID_RE.test(v.versionId) ? v.versionId : '';
+    if (vid && !seen.has(vid)) {
+      seen.add(vid);
+      out.count++;
+      const ext = String(v.fileExtension || '').toLowerCase();
+      const title = String(v.title || '');
+      const isPdf = ext === 'pdf' || /\.pdf$/i.test(title) || /pdf/i.test(String(v.mimeType || ''));
+      const est = ESTIMATE_NAME.test(title);
+      if (isPdf) out.pdfs++;
+      if (est) out.estimateNamed++;
+      for (const k of Object.keys(v).slice(0, 60)) if (/^\w{1,40}$/.test(k) && !out.keys.includes(k) && out.keys.length < 60) out.keys.push(k);
+      if (!out.paths.includes(p) && out.paths.length < 10) out.paths.push(p);
+      if (typeof v.downloadUrl === 'string') { const t = tplOf(v.downloadUrl); if (!out.downloadTemplates.includes(t) && out.downloadTemplates.length < 5) out.downloadTemplates.push(t); }
+      if (isPdf && cfPdf) {
+        const cur = cfPdf.candidate;
+        if (!cur || (est && !cur.est)) {
+          cfPdf.candidate = { versionId: vid, documentId: typeof v.id === 'string' ? v.id : '', downloadUrl: typeof v.downloadUrl === 'string' ? v.downloadUrl : '', est,
+            size: Number(v.fileSize || v.contentSize) || null, idPrefix: typeof v.id === 'string' ? v.id.slice(0, 3) : '' };
+        }
+      }
+    }
+    for (const k of Object.keys(v).slice(0, 200)) {
+      const x = v[k];
+      if (typeof x === 'boolean' && /publish|canpost|cancomment|post|comment|share|chatter/i.test(k)) {
+        const fk = (p ? p + '.' : '') + k;
+        if (!(fk in out.flags) && Object.keys(out.flags).length < 40) out.flags[fk] = x;
+      }
+      walk(x, p ? p + '.' + k : k, d + 1);
+    }
+  };
+  walk(value, '', 0);
+  return out;
 }
 
 /** _findBool(v, key) -> { type, value } of the first `key` found (depth <= 8); value only when boolean. */
@@ -674,7 +819,8 @@ function _attachNetwork(wc, census) {
               if (r && r.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
               const env = require('../dtna/aura').parseEnvelope(text.slice(0, BODY_MAX));
               const found = env.ok ? _findBool(env.value, 'isChatterEnabled') : null;
-              census.noteFeedModel(Object.assign({}, rec, { isChatterEnabledType: found ? found.type : 'absent', isChatterEnabled: found ? found.value : null }));
+              const files = env.ok ? _feedFilesOf(env.value, census.cfPdf) : null;
+              census.noteFeedModel(Object.assign({}, rec, { isChatterEnabledType: found ? found.type : 'absent', isChatterEnabled: found ? found.value : null, files }));
             })
             .catch(() => { census.noteFeedModel(Object.assign({}, rec, { isChatterEnabledType: 'unread', isChatterEnabled: null })); }));
           return;
@@ -780,6 +926,8 @@ function _resolveDeps(d) {
     capture: x.capture || require('../dtna/capture'),
     client: x.client || require('../dtna/client'),
     aura: x.aura || require('../dtna/aura'),
+    // chatter-files: the PDF extractor (tests inject a stub; else src/dtna/estimate-pdf, isolated worker).
+    estimatePdf: x.estimatePdf || null,
     getDataDir: x.getDataDir || (() => require('../config/paths').getDataDir()),
     now: typeof x.now === 'function' ? x.now : () => Date.now(),
     settleMs: Number.isFinite(x.settleMs) ? x.settleMs : SETTLE_MS,
@@ -1243,8 +1391,17 @@ function _idCounts(value) {
 async function _cfSteps(D, state, census, wc) {
   try { await wc.debugger.sendCommand('Network.setCacheDisabled', { cacheDisabled: true }); } catch (_) {}
   const id = D.caseId;
-  state.cf = { dom: null, files: null, download: null };
+  state.cf = { dom: null, domFeed: null, files: null, download: null, comments: null, extract: null };
   await _load(D, state, C.caseUrl(id));
+  // The default case tab carries the Chatter feed: read its composer / file links before switching tabs.
+  for (let i = 0; i < 3 && !state.aborted; i++) {
+    await _sleep(Math.min(3000, D.settleMs || 0));
+    state.cf.domFeed = await _cf(D, state);
+    const df = state.cf.domFeed;
+    if (df && df.code === 'OK' && (df.composer.textareas || df.composer.richText || df.links)) break;
+  }
+  if (state.cf.domFeed && state.cf.domFeed._pdfHref && !state.cf.feedHref) state.cf.feedHref = state.cf.domFeed._pdfHref;
+  if (state.cf.domFeed) delete state.cf.domFeed._pdfHref;
   await _load(D, state, C.caseUrl(id) + COMMENTS_TAB_QS);
   for (let i = 0; i < 5 && !state.aborted; i++) {
     state.cf.dom = await _cf(D, state);
@@ -1269,27 +1426,164 @@ async function _cfSteps(D, state, census, wc) {
       : { code: String((r && r.code) || 'DTNA_PROBE_NO_RESULT').slice(0, 60), paramKey: key };
   }
   if (state.aborted) return;
-  // ONE GET of the first PDF link: status, content-type, content-length and the %PDF- flag. Bytes discarded.
-  const href = state.cf.dom && state.cf.dom._pdfHref ? state.cf.dom._pdfHref : '';
+  // ONE E2E comment read (a get* read): counts, HasAttachment count, Attachments value shape and id prefixes.
+  if (_isSafeRead(FILES_CLASS, 'getCommentsByCaseRepairOrder')) {
+    try {
+      const r = await D.aura._callApexRaw(FILES_CLASS, 'getCommentsByCaseRepairOrder', { caseId: id });
+      if (r && r.ok) {
+        const rows = Array.isArray(r.value) ? r.value : [];
+        const withAtt = rows.filter((x) => x && (x.HasAttachment === true || (x.Attachments != null && x.Attachments !== '')));
+        const first = withAtt.find((x) => x && x.Attachments != null);
+        let att = first ? first.Attachments : null;
+        if (typeof att === 'string' && /^\s*[[{]/.test(att)) { const j = safeJson(att); if (j.ok) att = j.value; }
+        let cfiles = _commentFilesOf(rows, census.cfPdf);
+        // Attachments null on the rows: the portal reads a comment's files with getAttachment({<key>: ...}).
+        // ONE such read (get*), param key taken from the bundle call site, value = the first HasAttachment row's id.
+        if (!cfiles.count && withAtt.length && _isSafeRead(FILES_CLASS, 'getAttachment')) {
+          const site = ((census.cfWide['getAttachment__default.default'] || [])[0]) || '';
+          const km = /getAttachment__default\.default\(\{\s*(\w{1,40})\s*:\s*([\w$.]{1,80})/.exec(site);
+          const key = km ? km[1] : '';
+          const row = withAtt[0];
+          const val = row && (typeof row.CommentId === 'string' ? row.CommentId : '');
+          const ga = { paramKey: key || null, valueFrom: km ? _cap(km[2], 80) : null };
+          if (key && val) {
+            try {
+              const g = await D.aura._callApexRaw(FILES_CLASS, 'getAttachment', { [key]: val });
+              ga.code = String((g && g.code) || (g && g.ok ? 'OK' : 'DTNA_PROBE_NO_RESULT')).slice(0, 60);
+              if (g && g.ok) {
+                let gv = g.value;
+                if (typeof gv === 'string' && /^\s*[[{]/.test(gv)) { const j = safeJson(gv); if (j.ok) gv = j.value; }
+                ga.shape = shapeOf(gv, 3);
+                ga.files = _commentFilesOf([{ Attachments: gv }], census.cfPdf);
+              }
+            } catch (e) { ga.code = 'error:' + _errName(e); }
+          } else ga.code = key ? 'DTNA_PROBE_NO_VALUE' : 'DTNA_PROBE_NO_PARAM_KEY';
+          cfiles = Object.assign({}, cfiles, { getAttachment: ga });
+        }
+        state.cf.comments = { code: 'OK', count: rows.length, hasAttachment: withAtt.length, attachmentsType: first ? typeof first.Attachments : 'none',
+          attachmentsShape: att != null ? shapeOf(att, 3) : null, ids: _idCounts(rows), files: cfiles };
+      } else state.cf.comments = { code: String((r && r.code) || 'DTNA_PROBE_NO_RESULT').slice(0, 60) };
+    } catch (e) { state.cf.comments = { code: 'error:' + _errName(e) }; }
+  }
+  if (state.aborted) return;
+  // ONE PDF: the feed model's best PDF file (estimate-named first), else the first DOM PDF link. One GET per
+  // URL form (the file's own downloadUrl, then the shepherd version/download template). Status, type,
+  // size bucket, %PDF- flag; then the bytes go through the isolated pdfjs worker and only counts are kept.
+  const cand = census.cfPdf && census.cfPdf.candidate;
+  const tries = [];
+  const viaApex = !!(cand && cand.source === 'comments' && cand.attId);
+  if (cand && cand.downloadUrl) tries.push({ form: 'downloadUrl', href: cand.downloadUrl });
+  if (cand && cand.versionId && !viaApex) tries.push({ form: 'shepherd-version', href: C.BASE + '/sfc/servlet.shepherd/version/download/' + cand.versionId });
+  if (cand && !viaApex && cand.documentId && C.CONTENT_DOC_ID_RE.test(cand.documentId)) tries.push({ form: 'shepherd-document', href: C.BASE + '/sfc/servlet.shepherd/document/download/' + cand.documentId });
+  const domHref = state.cf.feedHref || (state.cf.dom && state.cf.dom._pdfHref) || '';
   if (state.cf.dom) delete state.cf.dom._pdfHref;
-  let url = '';
-  try { const u = new URL(href, C.BASE + '/'); if (u.protocol === 'https:' && u.hostname === C.HOST) url = u.href; } catch (_) { url = ''; }
-  if (!href || !url) { state.cf.download = { status: href ? 'bad-host' : 'no-pdf-link' }; return; }
-  try {
-    const f = D.fetch || ((u, init) => D.session.getSession().fetch(u, init));
-    const res = await Promise.race([f(url, { method: 'GET', credentials: 'include', redirect: 'manual' }), _sleep(D.loadTimeoutMs).then(() => null)]);
-    if (!res) { state.cf.download = { status: 'timeout' }; return; }
-    const get = (h) => { try { return res.headers && typeof res.headers.get === 'function' ? String(res.headers.get(h) || '') : ''; } catch (_) { return ''; } };
-    const rec = { status: Number(res.status) || 0, contentType: _cap(get('content-type').split(';')[0], 60), contentLength: Number(get('content-length')) || null, startsWithPdf: false };
-    if (rec.status === 200 && typeof res.arrayBuffer === 'function') {
-      let buf = Buffer.from(await res.arrayBuffer());
-      rec.startsWithPdf = buf.length >= 5 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
-      rec.bytesBucket = buf.length < 1048576 ? '<1MB' : buf.length <= C.ATTACHMENT_MAX_BYTES ? '<=15MB' : '>15MB';
-      buf = null;
+  delete state.cf.feedHref;
+  if (!tries.length && !viaApex && domHref) tries.push({ form: 'dom-link', href: domHref });
+  if (!tries.length && !viaApex) { state.cf.download = { status: 'no-pdf-link' }; return; }
+  state.cf.download = { candidate: cand ? { source: cand.source || 'chatter', estimateNamed: !!cand.est, documentIdPrefix: cand.idPrefix, sizeBucket: cand.size == null ? null : (cand.size < 1048576 ? '<1MB' : cand.size <= C.ATTACHMENT_MAX_BYTES ? '<=15MB' : '>15MB') } : null, tries: [] };
+  let pdfBuf = null;
+  for (const t of tries) {
+    if (state.aborted) return;
+    if (pdfBuf) break;
+    let url = '';
+    try { const u = new URL(t.href, 'https://' + C.HOST + '/'); if (u.protocol === 'https:' && u.hostname === C.HOST) url = u.href; } catch (_) { url = ''; }
+    if (!url) { state.cf.download.tries.push({ form: t.form, status: 'bad-host' }); continue; }
+    try {
+      const f = D.fetch || ((u, init) => D.session.getSession().fetch(u, init));
+      const res = await Promise.race([f(url, { method: 'GET', credentials: 'include', redirect: 'manual' }), _sleep(D.loadTimeoutMs).then(() => null)]);
+      if (!res) { state.cf.download.tries.push({ form: t.form, status: 'timeout' }); continue; }
+      const get = (h) => { try { return res.headers && typeof res.headers.get === 'function' ? String(res.headers.get(h) || '') : ''; } catch (_) { return ''; } };
+      let loc = '';
+      try { const l = get('location'); if (l) { const lu = new URL(l, url); loc = lu.hostname === C.HOST ? 'same-host' : (C.LOGIN_HOST_RE.test(lu.hostname) ? 'login-host' : 'other-host'); } } catch (_) { loc = 'bad'; }
+      const rec = { form: t.form, status: Number(res.status) || 0, type: _cap(String(res.type || ''), 20), redirect: loc || null, contentType: _cap(get('content-type').split(';')[0], 60), contentLength: Number(get('content-length')) || null, startsWithPdf: false };
+      if (rec.status === 200 && typeof res.arrayBuffer === 'function') {
+        const buf = Buffer.from(await res.arrayBuffer());
+        rec.startsWithPdf = buf.length >= 5 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+        rec.bytesBucket = buf.length < 1048576 ? '<1MB' : buf.length <= C.ATTACHMENT_MAX_BYTES ? '<=15MB' : '>15MB';
+        if (rec.startsWithPdf && !pdfBuf && buf.length <= C.ATTACHMENT_MAX_BYTES) pdfBuf = buf;
+      }
+      state.cf.download.tries.push(rec);
+    } catch (e) {
+      state.cf.download.tries.push({ form: t.form, status: 'error:' + _errName(e) });
     }
-    state.cf.download = rec;
+  }
+  // Fallback: the portal's own file read, getFilesOnCase({ recordId: <contentVersionId> }) -> base64 (a get* read).
+  const external = viaApex && !cand.internal;
+  const apexMethod = external ? 'getAttachment' : 'getFilesOnCase';
+  if (!pdfBuf && cand && (cand.versionId || external) && !state.aborted && _isSafeRead(FILES_CLASS, apexMethod)) {
+    const rec = { form: 'apex-' + apexMethod };
+    try {
+      const r = await D.aura._callApexRaw(FILES_CLASS, apexMethod, external ? { caseId: id, attId: cand.attId } : { recordId: cand.versionId });
+      rec.code = String((r && r.code) || (r && r.ok ? 'OK' : 'DTNA_PROBE_NO_RESULT')).slice(0, 60);
+      if (r && r.ok) {
+        rec.valueType = Array.isArray(r.value) ? 'array' : typeof r.value;
+        rec.shape = typeof r.value === 'string' ? { type: 'string', len: r.value.length } : shapeOf(r.value, 2);
+        let b64 = typeof r.value === 'string' ? r.value : '';
+        if (!b64 && r.value && typeof r.value === 'object') {
+          const v = Array.isArray(r.value) ? r.value[0] : r.value;
+          for (const k of Object.keys(v || {})) if (typeof v[k] === 'string' && v[k].length > 100 && /^[A-Za-z0-9+/=\s]+$/.test(v[k].slice(0, 200))) { b64 = v[k]; rec.base64Key = k; break; }
+        }
+        if (b64) {
+          const buf = Buffer.from(b64.replace(/^data:[^,]*,/, ''), 'base64');
+          rec.startsWithPdf = buf.length >= 5 && buf.subarray(0, 5).toString('latin1') === '%PDF-';
+          rec.bytesBucket = buf.length < 1048576 ? '<1MB' : buf.length <= C.ATTACHMENT_MAX_BYTES ? '<=15MB' : '>15MB';
+          if (rec.startsWithPdf && buf.length <= C.ATTACHMENT_MAX_BYTES) pdfBuf = buf;
+        }
+      }
+    } catch (e) { rec.code = 'error:' + _errName(e); }
+    state.cf.download.tries.push(rec);
+  }
+  state.cf.download.status = pdfBuf ? 'pdf' : 'no-pdf';
+  if (!pdfBuf || state.aborted) return;
+  let ex = null;
+  try {
+    const ep = D.estimatePdf || require('../dtna/estimate-pdf');
+    ex = ep.openExtractor(D.extractorDeps || {});
+    const r = await ex.extract(pdfBuf, 'probe.pdf');
+    const text = r && typeof r.text === 'string' ? r.text : '';
+    const p = text ? ep.parseEstimateText(text) : null;
+    const kinds = { part: 0, labor: 0, other: 0 };
+    for (const li of (p && p.lineItems) || []) if (li && kinds[li.kind] != null) kinds[li.kind]++;
+    state.cf.extract = {
+      ok: !!(r && r.ok), status: r ? _cap(String(r.status || ''), 20) : 'none', code: r && r.code ? _cap(String(r.code), 40) : null,
+      textLen: text.length, truncated: !!(r && r.truncated), pages: r && Number.isFinite(r.pages) ? r.pages : null,
+      hasTotal: !!(p && p.total != null), totalLabeled: !!(p && p.totalLabeled), hasPartsTotal: !!(p && p.partsTotal != null), hasLaborTotal: !!(p && p.laborTotal != null),
+      lineItems: p ? p.lineItems.length : 0, kinds,
+    };
   } catch (e) {
-    state.cf.download = { status: 'error:' + _errName(e) };
+    state.cf.extract = { ok: false, status: 'error', code: _errName(e) };
+  } finally {
+    if (ex) { try { ex.close(); } catch (_) { /* gone */ } }
+    pdfBuf = null;
+  }
+  if (state.aborted) return;
+  await _cfPull(D, state, id);
+}
+
+/**
+ * _cfPull(D, state, caseId) — the product path once: client.pullCase (reads; its only write is the local
+ * dtnaCaseCache entry) and the derived estimate context. Records counts / flags only.
+ */
+async function _cfPull(D, state, id) {
+  if (!D.client || typeof D.client.pullCase !== 'function') { state.cf.pull = { code: 'DTNA_PROBE_NO_CLIENT' }; return; }
+  try {
+    const r = await D.client.pullCase(id, { includeComments: true });
+    if (!r || !r.ok) { state.cf.pull = { code: String((r && r.code) || 'DTNA_PROBE_NO_RESULT').slice(0, 60) }; return; }
+    const list = Array.isArray(r.entry && r.entry.attachments) ? r.entry.attachments : [];
+    const byStatus = {};
+    for (const a of list) { const s = String((a && a.status) || '-').slice(0, 20); byStatus[s] = (byStatus[s] || 0) + 1; }
+    const read = list.filter((a) => a && a.status === 'read');
+    let ctxLen = 0;
+    try { ctxLen = require('../dtna/estimate-text').estimateContextText(r.entry).length; } catch (_) { ctxLen = -1; }
+    state.cf.pull = {
+      code: 'OK', attachmentsCode: String((r.entry && r.entry.attachmentsCode) || '').slice(0, 40), listed: list.length, byStatus,
+      withText: read.filter((a) => a.textLen > 0).length, withTotal: read.filter((a) => a.total != null).length,
+      totalLabeled: read.filter((a) => a.totalLabeled).length, lineItems: read.reduce((n, a) => n + (Array.isArray(a.lineItems) ? a.lineItems.length : 0), 0),
+      estimateNamed: list.filter((a) => /\bE\d{6,}|\bR\d{6,}|estimate/i.test(String((a && a.name) || ''))).length,
+      estimateContextLen: ctxLen,
+    };
+  } catch (e) {
+    state.cf.pull = { code: 'error:' + _errName(e) };
   }
 }
 
@@ -1309,6 +1603,11 @@ function _cfOut(census, state) {
     uses: census.cfUses,
     bundleFiles,
     dom,
+    domFeed: cf.domFeed || null,
+    wide: census.cfWide,
+    comments: cf.comments || null,
+    extract: cf.extract || null,
+    pull: cf.pull || null,
     files: cf.files || null,
     download: cf.download || null,
     scripts: Object.assign({}, census.scripts),

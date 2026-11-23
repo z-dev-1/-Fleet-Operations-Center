@@ -465,7 +465,12 @@ describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', 
             postData: auraPostData({ context: SENTINEL_CONTEXT, token: SENTINEL_TOKEN, pageURI: SENTINEL_PAGEURI,
               message: { actions: [{ id: '1;a', descriptor: FEED_DESC, params: { subjectId: CASE1, feedType: 'Record' } }] } }),
           });
-          dbg.bodies.set('gm1', { body: JSON.stringify({ actions: [{ id: '1;a', state: 'SUCCESS', returnValue: { feed: { isChatterEnabled: true, title: SENT_NAME } } }] }), base64Encoded: false });
+          const feed = { isChatterEnabled: true, title: SENT_NAME };
+          if (o.feedFile) {
+            feed.elements = [{ id: '0D5gx00000AbCdEAAA', capabilities: { content: { versionId: VID, id: '069gx000009ZzYyAAK', title: 'E101077960-' + SENT_NAME + '.pdf',
+              fileExtension: 'pdf', fileSize: '2048', downloadUrl: '/Servicetracker/sfc/servlet.shepherd/version/download/' + VID + '?asPdf=false&operationContext=CHATTER' } } }];
+          }
+          dbg.bodies.set('gm1', { body: JSON.stringify({ actions: [{ id: '1;a', state: 'SUCCESS', returnValue: { feed } }] }), base64Encoded: false });
           dbg.emit('message', {}, 'Network.loadingFinished', { requestId: 'gm1' });
         }
       },
@@ -483,11 +488,20 @@ describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', 
       const buf = Buffer.from('%PDF-1.4 ' + SENT_BYTES);
       return { status: 200, headers: { get: (k) => ({ 'content-type': 'application/pdf; charset=binary', 'content-length': String(buf.length) })[k.toLowerCase()] || null }, arrayBuffer: async () => buf };
     });
+    const extracted = [];
+    const closed = vi.fn();
+    const estimatePdf = {
+      openExtractor: () => ({
+        extract: async (buf) => { extracted.push(buf.length); return { ok: true, status: 'read', text: 'Brake chamber P/N K123-456  $245.10\nLabor 2.5 hrs  $312.50\nGrand Total  $987,654.32 ' + SENT_NAME, truncated: false }; },
+        close: closed,
+      }),
+      parseEstimateText: require('../src/dtna/estimate-pdf').parseEstimateText,
+    };
     const deps = {
-      electron: fx.electron, session: fakeSession(), capture: fakeCapture(), client: fakeClient(), aura, fetch,
+      electron: fx.electron, session: fakeSession(), capture: fakeCapture(), client: fakeClient(), aura, fetch, estimatePdf,
       getDataDir: () => dataDir, settleMs: 0, loadTimeoutMs: 1000, timeoutMs: 60_000, mode: 'chatter-files',
     };
-    return { fx, deps, dataDir, scripts, fetches };
+    return { fx, deps, dataDir, scripts, fetches, extracted, closed };
   }
 
   it('start(): FLEET_DEV_DTNA_PROBE_MODE=chatter-files + FLEET_DEV_DTNA_PROBE_CASE pick the mode and the case', async () => {
@@ -515,15 +529,25 @@ describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', 
     const text = fs.readFileSync(file, 'utf8');
     const out = JSON.parse(text);
     const cf = out.chatterFiles;
-    expect(cf.feedModels).toEqual([{ descriptor: FEED_DESC, query: '?r=1&ui-chatter-components-aura-components-forceChatter-chatter.ForceCommunityFeed.getModel=1', paramKeys: ['subjectId', 'feedType'], isChatterEnabledType: 'boolean', isChatterEnabled: true }]);
+    expect(cf.feedModels).toHaveLength(1);
+    expect(cf.feedModels[0]).toMatchObject({ descriptor: FEED_DESC, query: '?r=1&ui-chatter-components-aura-components-forceChatter-chatter.ForceCommunityFeed.getModel=1', paramKeys: ['subjectId', 'feedType'], isChatterEnabledType: 'boolean', isChatterEnabled: true, files: { count: 0, pdfs: 0 } });
     expect(cf.dom).toMatchObject({ code: 'OK', composer: { textareas: 1, buttons: ['Share'] }, links: 2 });
+    expect(cf.domFeed).toMatchObject({ code: 'OK', links: 2 });
     expect(cf.dom.hrefTemplates).toEqual(['/Servicetracker/sfc/servlet.shepherd/version/download/{versionId}', '/x/{id}']);
     expect(cf.files).toMatchObject({ code: 'OK', paramKey: 'recordId', ids: { contentVersion: 1, contentDocument: 1, attachment: 0 } });
-    expect(cf.download).toEqual({ status: 200, contentType: 'application/pdf', contentLength: 9 + SENT_BYTES.length, startsWithPdf: true, bytesBucket: '<1MB' });
+    expect(cf.comments).toMatchObject({ code: 'OK', count: 1, hasAttachment: 0 });
+    expect(cf.download).toEqual({ candidate: null, status: 'pdf', tries: [{ form: 'dom-link', status: 200, type: '', redirect: null, contentType: 'application/pdf', contentLength: 9 + SENT_BYTES.length, startsWithPdf: true, bytesBucket: '<1MB' }] });
+    expect(cf.extract).toMatchObject({ ok: true, status: 'read', hasTotal: true, totalLabeled: true, lineItems: 2, kinds: { part: 1, labor: 1, other: 0 } });
+    expect(cf.extract.textLen).toBeGreaterThan(0);
     expect(cf.uses.isChatterEnabled.length).toBeGreaterThan(0);
     expect(cf.bundleFiles.find((b) => b.method === 'getFilesOnCase')).toMatchObject({ bundle: true, paramKeys: ['recordId'] });
-    // Read-only: one getFilesOnCase read, one GET; never a write.
-    expect(deps.aura.calls).toEqual([{ classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { recordId: CASE1 } }]);
+    // Read-only: one getFilesOnCase read, one comment read, one GET; never a write.
+    expect(deps.aura.calls).toEqual([
+      { classname: 'E2E_UTP_CommentController', method: 'getFilesOnCase', params: { recordId: CASE1 } },
+      { classname: 'E2E_UTP_CommentController', method: 'getCommentsByCaseRepairOrder', params: { caseId: CASE1 } },
+    ]);
+    expect(text).not.toContain('987,654.32');
+    expect(text).not.toContain('K123-456');
     expect(deps.aura.callWrite).not.toHaveBeenCalled();
     expect(deps.aura.callChatterWrite).not.toHaveBeenCalled();
     expect(fetches).toHaveLength(1);
@@ -539,7 +563,59 @@ describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', 
     expect(containsSentinel(log.lines, AUTH_SENTINELS)).toBe(null);
     const done = log.lines.filter((l) => l.startsWith('[dtna-probe] done'));
     expect(done).toHaveLength(1);
-    expect(done[0]).toMatch(/^\[dtna-probe\] done mode=chatter-files feedActions=\d+ getModel=1 files=OK download=200 file=dtna-chatter-files-probe-\d{4}-\d{2}-\d{2}\.json$/);
+    expect(done[0]).toMatch(/^\[dtna-probe\] done mode=chatter-files feedActions=\d+ getModel=1 files=OK download=pdf file=dtna-chatter-files-probe-\d{4}-\d{2}-\d{2}\.json$/);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('a feed-model file is summarized (counts, keys, templates only) and its downloadUrl then the shepherd form are fetched; extractor closed', async () => {
+    const { deps, dataDir, fetches, extracted, closed } = cfSetup({ feedFile: true, pdfHref: '' });
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log }, deps));
+    const text = fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8');
+    const cf = JSON.parse(text).chatterFiles;
+    expect(cf.feedModels[0].files).toMatchObject({ count: 1, pdfs: 1, estimateNamed: 1, feedElements: 1, paths: ['actions[].returnValue.feed.elements[].capabilities.content'],
+      downloadTemplates: ['/Servicetracker/sfc/servlet.shepherd/version/download/{versionId}?asPdf=1&operationContext=1'] });
+    expect(cf.feedModels[0].files.keys).toEqual(expect.arrayContaining(['versionId', 'id', 'title', 'fileExtension', 'downloadUrl']));
+    expect(cf.download.candidate).toEqual({ source: 'chatter', estimateNamed: true, documentIdPrefix: '069', sizeBucket: '<1MB' });
+    // Stops at the first form that returns a PDF.
+    expect(cf.download.tries.map((t) => t.form)).toEqual(['downloadUrl']);
+    expect(fetches.map((f) => f.url)).toEqual([
+      'https://dtna.my.site.com/Servicetracker/sfc/servlet.shepherd/version/download/' + VID + '?asPdf=false&operationContext=CHATTER',
+    ]);
+    expect(extracted).toHaveLength(1);
+    expect(closed).toHaveBeenCalledTimes(1);
+    for (const s of [SENT_BYTES, SENT_NAME, VID, '069gx000009ZzYyAAK', '0D5gx00000AbCdEAAA', 'E101077960']) {
+      expect(text, s).not.toContain(s);
+      expect(log.lines.join('\n'), s).not.toContain(s);
+    }
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('External Communication: a comment-row PDF attachment is the candidate (counts/keys only in the output)', async () => {
+    const { deps, dataDir, fetches } = cfSetup({ pdfHref: '' });
+    deps.aura._callApexRaw = vi.fn(async (classname, method, params) => {
+      deps.aura.calls.push({ classname, method, params });
+      if (method === 'getCommentsByCaseRepairOrder') {
+        return { ok: true, value: [
+          { CommentId: 'c1', HasAttachment: true, Attachments: [{ FileSize: 2048, FileName: 'R101128538-' + SENT_NAME + '.pdf', ContentVersionId: null, CaseId: null, AttachmentId: 'EXTATT123456' }] },
+          { CommentId: 'c2', HasAttachment: true, Attachments: [{ FileSize: 10, FileName: 'photo.jpg', ContentVersionId: null, CaseId: null, AttachmentId: VID + '_internal' }] },
+          { CommentId: 'c3', HasAttachment: false, Attachments: null }] };
+      }
+      if (method === 'getAttachment') return { ok: true, value: Buffer.from('%PDF-1.4 ' + SENT_BYTES).toString('base64') };
+      return { ok: true, value: [] };
+    });
+    const log = recordingLog();
+    const r = await probe.run(Object.assign({ log }, deps));
+    const text = fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8');
+    const cf = JSON.parse(text).chatterFiles;
+    expect(cf.comments.files).toMatchObject({ rowsWithFiles: 2, count: 2, pdfs: 1, estimateNamed: 1, containers: ['array'], attIds: { internal: 1, external: 1 } });
+    expect(cf.download.candidate).toMatchObject({ source: 'comments', estimateNamed: true, sizeBucket: '<1MB' });
+    // External attachment: the portal's own getAttachment({caseId, attId}) read, no URL fetch.
+    expect(fetches).toHaveLength(0);
+    expect(deps.aura.calls.find((c) => c.method === 'getAttachment')).toEqual({ classname: 'E2E_UTP_CommentController', method: 'getAttachment', params: { caseId: CASE1, attId: 'EXTATT123456' } });
+    expect(cf.download.tries).toEqual([expect.objectContaining({ form: 'apex-getAttachment', code: 'OK', valueType: 'string', startsWithPdf: true, bytesBucket: '<1MB' })]);
+    expect(cf.extract).toMatchObject({ ok: true, status: 'read' });
+    for (const s of [SENT_NAME, SENT_BYTES, VID, 'EXTATT123456', 'R101128538']) expect(text, s).not.toContain(s);
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
@@ -547,7 +623,7 @@ describe('chatter-files mode (DTNA Chatter + Files live discovery, read-only)', 
     const { deps, dataDir, fetches } = cfSetup({ pdfHref: 'https://evil.example/download/' + VID });
     const r = await probe.run(Object.assign({ log: recordingLog() }, deps));
     const out = JSON.parse(fs.readFileSync(path.join(dataDir, 'dev', r.file), 'utf8'));
-    expect(out.chatterFiles.download).toEqual({ status: 'bad-host' });
+    expect(out.chatterFiles.download).toEqual({ candidate: null, status: 'no-pdf', tries: [{ form: 'dom-link', status: 'bad-host' }] });
     expect(fetches).toHaveLength(0);
     fs.rmSync(dataDir, { recursive: true, force: true });
   });

@@ -258,12 +258,26 @@ describe('Chatter + Files: attachments inside pullCase', () => {
     return a;
   }
 
-  it('unconfigured list (shipped) -> pull identical plus attachments: [], no download, no extractor', async () => {
+  it('unconfigured list -> pull identical plus attachments: [], no download, no extractor', async () => {
+    const realFiles = require('../src/dtna/files.js');
+    realFiles._setDeps({ listConfig: null });
+    try {
+      useAura(fakeAura());
+      const r = await client.pullCase(CASE_ID);
+      expect(r.ok).toBe(true);
+      expect(r.entry.attachments).toEqual([]);
+      expect(r.entry.attachmentsCode).toBe('DTNA_ATTACHMENTS_NOT_CONFIGURED');
+      expect(r.entry.commentCount).toBe(3);
+    } finally { realFiles._setDeps({}); }
+  });
+
+  it('shipped config: comment-row files (External Communication) are listed with no extra list request', async () => {
     useAura(fakeAura());
     const r = await client.pullCase(CASE_ID);
     expect(r.ok).toBe(true);
+    // The fake comment rows carry no Attachments: an empty list, no download, no error code.
     expect(r.entry.attachments).toEqual([]);
-    expect(r.entry.attachmentsCode).toBe('DTNA_ATTACHMENTS_NOT_CONFIGURED');
+    expect(r.entry.attachmentsCode).toBe('');
     expect(r.entry.commentCount).toBe(3);
   });
 

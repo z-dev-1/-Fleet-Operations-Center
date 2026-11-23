@@ -563,15 +563,19 @@ describe('Chatter + Files transport (configured in constants; null = zero reques
   const APEX_POST = { transport: 'apex', classname: 'E2E_UTP_ChatterController', method: 'postToFeed', params: {} };
   const CPARAMS = { subjectId: CASE_ID, body: { messageSegments: [{ type: 'Text', text: 'Hello dealer' }] }, visibility: 'AllUsers' };
 
-  it('shipped configs are null: each function returns its coded error with zero fetches', async () => {
-    expect(C.CHATTER_FEED_READ).toBeNull();
+  it('shipped configs (2026-11-23 discovery): Chatter post null, feed read = the portal getModel, file list from comment rows; zero fetches for the unconfigured paths', async () => {
     expect(C.CHATTER_POST_PARAMS).toBeNull();
-    expect(C.ATTACHMENT_LIST_READ).toBeNull();
+    expect(C.CHATTER_FEED_READ).toEqual({
+      descriptor: 'serviceComponent://ui.communities.components.aura.components.forceCommunity.controller.ForceCommunityFeedController/ACTION$getModel',
+      query: '?r=1&ui-communities-components-aura-components-forceCommunity-controller.ForceCommunityFeed.getModel=1',
+      params: { subjectId: '$caseId' }, enabledKey: 'isChatterEnabled',
+    });
+    expect(C.ATTACHMENT_LIST_READ).toMatchObject({ source: 'comments', field: 'Attachments' });
     await seed();
     const fetch = vi.fn(async () => res(200, success({})));
     const g = gateTokens();
     aura._setDeps({ fetch, session: fakeSession(), isApprovalToken: g.isApprovalToken });
-    expect(await aura.getFeedModel(CASE_ID)).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
+    // The comments-sourced list never uses the apex list read.
     expect(await aura.listAttachmentsRaw(CASE_ID)).toEqual({ ok: false, code: 'DTNA_ATTACHMENTS_NOT_CONFIGURED' });
     expect(await aura.callChatterWrite(CPARAMS, g.mint())).toEqual({ ok: false, code: 'DTNA_CHATTER_NOT_CONFIGURED' });
     expect(fetch).not.toHaveBeenCalled();

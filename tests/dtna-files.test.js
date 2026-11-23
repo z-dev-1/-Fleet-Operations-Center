@@ -60,8 +60,23 @@ describe('parseAttachmentList', () => {
       'junk',
     ] };
     expect(files.parseAttachmentList(value, APEX_CFG)).toEqual([
-      { versionId: V1, documentId: D1, name: 'Dealer estimate E101048154.pdf', ext: 'pdf', size: 12345, createdAt: '2026-11-20T10:00:00.000Z' },
-      { versionId: V2, documentId: '', name: 'photo', ext: 'jpg', size: 999, createdAt: '' },
+      { versionId: V1, documentId: D1, attId: '', name: 'Dealer estimate E101048154.pdf', ext: 'pdf', size: 12345, createdAt: '2026-11-20T10:00:00.000Z' },
+      { versionId: V2, documentId: '', attId: '', name: 'photo', ext: 'jpg', size: 999, createdAt: '' },
+    ]);
+  });
+
+  it('shipped comments shape (External Communication rows): AttachmentId / FileName / FileSize, dated by the row', () => {
+    const raw = [
+      { CommentId: '1', LastUpdatedDate: '2026-11-20T10:00:00.000Z', HasAttachment: true,
+        Attachments: [{ FileSize: 43000, FileName: 'E101077960-est.pdf', ContentVersionId: null, CaseId: null, AttachmentId: '115000000000001' }] },
+      { CommentId: '2', LastUpdatedDate: '2026-11-21T10:00:00.000Z', HasAttachment: true,
+        Attachments: [{ FileSize: 10, FileName: 'photo.jpg', ContentVersionId: null, CaseId: null, AttachmentId: V2 + '_internal' },
+          { FileName: 'bad.pdf', AttachmentId: 'has space' }, { FileName: 'dup.pdf', AttachmentId: '115000000000001' }] },
+      { CommentId: '3', HasAttachment: false, Attachments: null },
+    ];
+    expect(files.parseAttachmentList(null, C.ATTACHMENT_LIST_READ, raw)).toEqual([
+      { versionId: '', documentId: '', attId: '115000000000001', name: 'E101077960-est.pdf', ext: 'pdf', size: 43000, createdAt: '2026-11-20T10:00:00.000Z' },
+      { versionId: V2, documentId: '', attId: V2 + '_internal', name: 'photo.jpg', ext: 'jpg', size: 10, createdAt: '2026-11-21T10:00:00.000Z' },
     ]);
   });
 
@@ -91,10 +106,12 @@ describe('parseAttachmentList', () => {
 });
 
 describe('listAttachments', () => {
-  it('shipped config is null -> DTNA_ATTACHMENTS_NOT_CONFIGURED with zero requests', async () => {
-    expect(C.ATTACHMENT_LIST_READ).toBeNull();
+  it('null config -> DTNA_ATTACHMENTS_NOT_CONFIGURED with zero requests; shipped comments config makes none either', async () => {
     const aura = { listAttachmentsRaw: vi.fn() };
     files._setDeps({ aura });
+    expect((await files.listAttachments(CASE_ID, [])).ok).toBe(true);
+    expect(await files.listAttachments(CASE_ID, null)).toEqual({ ok: false, code: 'DTNA_COMMENTS_UNAVAILABLE' });
+    files._setDeps({ aura, listConfig: null });
     expect(await files.listAttachments(CASE_ID, [])).toEqual({ ok: false, code: 'DTNA_ATTACHMENTS_NOT_CONFIGURED' });
     expect(aura.listAttachmentsRaw).not.toHaveBeenCalled();
   });
@@ -119,12 +136,48 @@ describe('listAttachments', () => {
 describe('downloadPdf', () => {
   const ATT = { versionId: V1, name: SENTINEL_NAME + '.pdf', ext: 'pdf', size: 1000 };
 
-  it('shipped download config is null -> DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED with zero fetches', async () => {
-    expect(C.ATTACHMENT_DOWNLOAD).toBeNull();
+  it('null download config -> DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED with zero fetches', async () => {
     const fetch = vi.fn();
-    files._setDeps({ fetch });
+    files._setDeps({ fetch, downloadConfig: null });
     expect(await files.downloadPdf(ATT, { caseId: CASE_ID })).toEqual({ ok: false, code: 'DTNA_ATTACHMENT_DOWNLOAD_NOT_CONFIGURED' });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  describe('shipped apex download (portal handleAttachmentClick rule)', () => {
+    const B64 = PDF.toString('base64');
+    it('external attId -> one getAttachment({caseId, attId}) read; base64 decoded; no URL fetch; nothing sensitive logged', async () => {
+      const fetch = vi.fn();
+      const aura = { callApex: vi.fn(async () => ({ ok: true, value: B64 })) };
+      files._setDeps({ fetch, aura });
+      const r = await files.downloadPdf({ attId: '115000000000001', name: SENTINEL_NAME + '.pdf', ext: 'pdf', size: 100 }, { caseId: CASE_ID, silent: true });
+      expect(r.ok).toBe(true);
+      expect(Buffer.compare(r.buffer, PDF)).toBe(0);
+      expect(aura.callApex).toHaveBeenCalledWith('getAttachment', { caseId: CASE_ID, attId: '115000000000001' }, { silent: true });
+      expect(fetch).not.toHaveBeenCalled();
+      const t = logger.text();
+      expect(t).toContain('[dtna] attachment');
+      for (const s of [SENTINEL_NAME, '115000000000001', B64.slice(0, 12), '%PDF']) expect(t).not.toContain(s);
+    });
+    it('internal attId (<068>_internal) -> getFilesOnCase({recordId: <068>})', async () => {
+      const aura = { callApex: vi.fn(async () => ({ ok: true, value: B64 })) };
+      files._setDeps({ aura });
+      const r = await files.downloadPdf({ attId: V1 + '_internal', versionId: V1, name: 'a.pdf', ext: 'pdf' }, { caseId: CASE_ID });
+      expect(r.ok).toBe(true);
+      expect(aura.callApex).toHaveBeenCalledWith('getFilesOnCase', { recordId: V1 }, undefined);
+    });
+    it('non-PDF bytes, oversize base64, read errors and bad ids are coded', async () => {
+      const aura = { callApex: vi.fn(async () => ({ ok: true, value: Buffer.from('GIF89a....').toString('base64') })) };
+      files._setDeps({ aura });
+      const A = { attId: '115000000000001', name: 'a.pdf', ext: 'pdf' };
+      expect((await files.downloadPdf(A, { caseId: CASE_ID })).code).toBe('DTNA_ATTACHMENT_NOT_PDF');
+      aura.callApex.mockResolvedValueOnce({ ok: true, value: 'A'.repeat(Math.ceil(C.ATTACHMENT_MAX_BYTES / 3) * 4 + 8) });
+      expect((await files.downloadPdf(A, { caseId: CASE_ID })).code).toBe('DTNA_ATTACHMENT_TOO_LARGE');
+      aura.callApex.mockResolvedValueOnce({ ok: false, code: 'DTNA_SESSION_EXPIRED' });
+      expect((await files.downloadPdf(A, { caseId: CASE_ID })).code).toBe('DTNA_SESSION_EXPIRED');
+      aura.callApex.mockClear();
+      expect((await files.downloadPdf(A, { caseId: 'bad' })).code).toBe('DTNA_INVALID_INPUT');
+      expect(aura.callApex).not.toHaveBeenCalled();
+    });
   });
 
   it('non-PDF and declared size > 15MB are skipped with zero fetches', async () => {
