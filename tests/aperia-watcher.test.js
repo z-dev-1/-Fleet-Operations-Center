@@ -55,6 +55,8 @@ function fakeSocketFactory() {
   return f;
 }
 
+const FLEET_ALL = new Set(Array.from({ length: 100 }, (_, i) => 'NP' + i).concat(['NP6923']));
+
 let tmp;
 let rows;
 let env;
@@ -71,7 +73,9 @@ function setup(watcher, o = {}) {
   const createAlertSocket = o.createAlertSocket || fakeSocketFactory();
   const send = vi.fn();
   const mainWindow = { show: vi.fn(), focus: vi.fn() };
-  const deps = { client, capture, createAlertSocket, Notification: FakeNotification, send, now: () => env.now };
+  // Fleet-row scope: by default every unit these tests use (NP0..NP99 and NP6923) is in the fleet rows.
+  const scope = o.scope || (() => FLEET_ALL);
+  const deps = { client, capture, createAlertSocket, Notification: FakeNotification, send, now: () => env.now, scope };
   if (o.constants) deps.constants = o.constants;
   watcher._setDeps(deps);
   return { client, capture, createAlertSocket, send, ctx: { mainWindow } };
@@ -486,5 +490,79 @@ describe('aperia watcher: WS-first', () => {
     watcher.stop();
     expect(logger.lines.length).toBeGreaterThan(0);
     expect(logger.text()).not.toContain(WS_TOKEN);
+  });
+});
+
+describe('aperia watcher: fleet-row scope and muted issues', () => {
+  it('a new issue on a non-fleet unit -> no Notification, id seen; on a fleet unit -> one Notification', async () => {
+    const { watcher, seenStore } = fresh();
+    const d = setup(watcher, { wsToken: null, scope: () => new Set(['NP6923']) });
+    await watcher.start({ ctx: d.ctx });
+    rows.push(issue('300', { fleetVehicleId: 'OTHER1' }));
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    expect(FakeNotification.created).toEqual([]);
+    expect(seenStore.load(env.now).has('300')).toBe(true);
+    rows.push(issue('301', { fleetVehicleId: ' np6923 ' }));
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+    expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['CRITICAL:  np6923 ']);
+    const line = logger.lines.map((l) => JSON.stringify(l)).filter((l) => l.includes('watcher poll')).pop();
+    expect(line).toContain('"scoped":1');
+    expect(line).toContain('"outOfScope"');
+  });
+
+  it('a muted issue going MAJOR -> CRITICAL by poll does not notify', async () => {
+    rows = [issue('310', { severity: 'MAJOR', muted: true })];
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null });
+    await watcher.start({ ctx: d.ctx });
+    rows = [issue('310', { severity: 'CRITICAL', muted: true })];
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    expect(FakeNotification.created).toEqual([]);
+  });
+
+  it('an issue muted in the last list escalating by a WS frame without a muted flag -> no Notification', async () => {
+    rows = [issue('320', { severity: 'MAJOR', muted: true, fleetVehicleId: 'NP32' })];
+    const { watcher } = fresh();
+    const d = setup(watcher);
+    await watcher.start({ ctx: d.ctx });
+    d.createAlertSocket.sockets[0].setState('open');
+    expect(await watcher._onWsAlert({ id: '320', severity: 'CRITICAL', state: 'LEAK', vehicleId: 'v320', fleetVehicleId: 'NP32' })).toEqual({ ok: true, notified: false });
+    expect(await watcher._onWsAlert({ id: '321', severity: 'CRITICAL', state: 'LEAK', vehicleId: 'v321', fleetVehicleId: 'NP32', muted: true })).toEqual({ ok: true, notified: false });
+    expect(FakeNotification.created).toEqual([]);
+    expect(d.client.getVehicle).not.toHaveBeenCalled();
+  });
+
+  it('a WS alert on a non-fleet or unknown unit is recorded but not notified', async () => {
+    const { watcher, seenStore } = fresh();
+    const d = setup(watcher, { scope: () => new Set(['NP6923']) });
+    await watcher.start({ ctx: d.ctx });
+    expect(await watcher._onWsAlert({ id: '330', severity: 'CRITICAL', state: 'LEAK', vehicleId: 'v330', fleetVehicleId: 'OTHER' })).toEqual({ ok: true, notified: false });
+    expect(await watcher._onWsAlert({ id: '331', severity: 'CRITICAL', state: 'LEAK' })).toEqual({ ok: true, notified: false });
+    expect(FakeNotification.created).toEqual([]);
+    expect(seenStore.load(env.now).has('330')).toBe(true);
+  });
+
+  it('an empty scope -> nothing marked seen and no Notification; the next poll with rows loaded alerts', async () => {
+    let scope = new Set();
+    const { watcher, seenStore } = fresh();
+    const d = setup(watcher, { wsToken: null, scope: () => scope });
+    await watcher.start({ ctx: d.ctx });
+    rows.push(issue('340', { fleetVehicleId: 'NP34' }));
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0, skipped: 'no-scope' });
+    expect(seenStore.load(env.now).has('340')).toBe(false);
+    expect(FakeNotification.created).toEqual([]);
+    scope = new Set(['NP34']);
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+  });
+
+  it('the default scope reads ctx.lastData.rows (normUnit) when no seam is given', async () => {
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null });
+    watcher._setDeps(Object.assign({}, { client: d.client, capture: d.capture, createAlertSocket: d.createAlertSocket, Notification: FakeNotification, send: d.send, now: () => env.now }));
+    d.ctx.lastData = { rows: [{ equipmentId: 'np350' }] };
+    await watcher.start({ ctx: d.ctx });
+    rows.push(issue('350', { fleetVehicleId: 'NP350' }), issue('351', { fleetVehicleId: 'NP351' }));
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+    expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['CRITICAL: NP350']);
   });
 });

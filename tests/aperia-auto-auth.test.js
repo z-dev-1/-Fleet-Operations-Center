@@ -82,6 +82,33 @@ describe('Aperia background sign-in triggers', () => {
     expect(watcher.status().alerts).toBe('off');
   });
 
+  it('token expiry (proactive): a connected status arms one re-login at secondsLeft + 5 s; it opens one hidden window', async () => {
+    expect(auth.EXPIRY_MIN_MS).toBe(60e3);
+    expect(auth.EXPIRY_MAX_MS).toBe(9 * 3600e3);
+    start();
+    await vi.advanceTimersByTimeAsync(C.BG_STARTUP_DELAY_MS + 10);
+    expect(fx.windows).toHaveLength(1);
+    const left = session.status().secondsLeft;
+    expect(left).toBeGreaterThan(3000);
+    await vi.advanceTimersByTimeAsync(left * 1000 - 60e3);
+    expect(fx.windows).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60e3 + 5e3 + 2e3);
+    expect(fx.windows).toHaveLength(2);
+    expect(fx.windows.every((w) => w.options.show === false)).toBe(true);
+    expect(watcher.status().alerts).toBe('off');
+  });
+
+  it('Sign out clears the expiry timer', async () => {
+    start();
+    await vi.advanceTimersByTimeAsync(C.BG_STARTUP_DELAY_MS + 10);
+    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
+    session.logout();
+    await vi.advanceTimersByTimeAsync(auth.EXPIRED_DEBOUNCE_MS + 10);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10 * 3600e3);
+    expect(fx.windows).toHaveLength(1);
+  });
+
   it('after Sign out no trigger opens a window', async () => {
     start();
     await vi.advanceTimersByTimeAsync(C.BG_STARTUP_DELAY_MS + 10);

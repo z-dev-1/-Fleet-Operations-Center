@@ -704,6 +704,8 @@ function _startAutoSync() {
     // Phase E: background DTNA / Aperia sign-in (hidden windows, a few seconds after this; never awaited).
     try { require('./dtna/auto-auth').start(_ctx); } catch (e) { log.warn('[dtna] auto-auth start failed (non-fatal): ' + (e && e.name)); }
     try { require('./aperia/auto-auth').start(_ctx); } catch (e) { log.warn('[aperia] auto-auth start failed (non-fatal): ' + (e && e.name)); }
+    // Tire Alerts on by default once Aperia is connected (unless the user switched them off).
+    try { require('./aperia/alerts-auto').start(_ctx); } catch (e) { log.warn('[aperia] alerts-auto start failed (non-fatal): ' + (e && e.name)); }
   } else {
     log.info('First launch — showing setup wizard');
     _windowApi.showSetupWizard();

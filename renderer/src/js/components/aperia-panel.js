@@ -71,8 +71,8 @@ export function open(deps) {
         <div id="aperia-panel-state" class="sd-status warn" style="margin-bottom:8px">${ap ? 'Aperia \u2026' : 'Aperia is not available in this build'}</div>
         <div class="sd-hint" style="margin-bottom:8px"><b id="aperia-panel-alerts-state">Tire Alerts: OFF</b></div>
         <div class="sd-hint" style="margin-bottom:8px">Last pull: <b id="aperia-panel-last">never</b></div>
-        <div class="sd-hint" style="margin-bottom:8px">Aperia is read only when you press a button. Sign out stops a running pull and closes the Aperia sign-in window.</div>
-        <div class="sd-hint" id="aperia-panel-alerts-note" style="margin-bottom:8px">Tire Alerts notify once per new alert, and once more each time an alert's severity goes up (for example MAJOR to CRITICAL).</div>
+        <div class="sd-hint" style="margin-bottom:8px">Aperia tires load when you open a unit, and tire issues for your fleet units refresh on each sync. Bulk / fleet pulls run only when you press their buttons. Sign out stops a running pull and closes the Aperia sign-in window.</div>
+        <div class="sd-hint" id="aperia-panel-alerts-note" style="margin-bottom:8px">Tire Alerts are on by default and only cover units in your fleet rows. Tire Alerts notify once per new alert, and once more each time an alert's severity goes up (for example MAJOR to CRITICAL).</div>
         <div class="sd-btn-row">
           <button type="button" class="sd-btn primary" id="aperia-panel-signin">Sign in</button>
           <button type="button" class="sd-btn secondary" id="aperia-panel-signout">Sign out</button>

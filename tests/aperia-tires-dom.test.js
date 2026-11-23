@@ -1,7 +1,8 @@
 // tests/aperia-tires-dom.test.js — unit detail Intel pane "Aperia tires"
 // section (renderer/src/js/views/aperia-tires.js). Opening the unit detail
-// makes no window.aperia call; only the "Load Aperia tires" click calls
-// aperia.unit({ assetId }) once. The rendered result shows the tire flags,
+// reads aperia.status(); when connected it auto-loads aperia.unit({ assetId })
+// once (5-min cache), else the "Load Aperia tires" click does. Never a sign-in.
+// The rendered result shows the tire flags,
 // GPS (outside-US warning, placeholder -> "No GPS") and the embedded issue's
 // recommended actions, all escaped. Unit results come from the real parser
 // over tests/fixtures/aperia/responses.js.
@@ -137,14 +138,78 @@ describe('wireAperiaTires', () => {
     return host;
   }
 
-  it('wiring makes no call; a click calls unit({assetId}) once, disables while loading and renders the result', async () => {
+  beforeEach(() => { at._resetAutoCacheForTests(); });
+  const connected = (ap) => { ap.status = vi.fn(async () => ({ ok: true, state: 'connected' })); return ap; };
+
+  it('connected -> wiring auto-loads once (unit called once, table rendered, button says Refresh); never signs in', async () => {
+    const ap = connected(fakeAperia(detail()));
+    globalThis.window = { aperia: ap };
+    const host = mount({ equipmentId: 'NP6923' });
+    at.wireAperiaTires(host, { equipmentId: 'NP6923' });
+    at.wireAperiaTires(host, { equipmentId: 'NP6923' }); // binds once
+    await flush();
+    expect(ap.status).toHaveBeenCalledTimes(1);
+    expect(ap.unit).toHaveBeenCalledTimes(1);
+    expect(ap.unit).toHaveBeenCalledWith({ assetId: 'NP6923' });
+    expect(host.querySelector('.dp-aperia-result').innerHTML).toContain('CRITICAL LOW');
+    expect(host.querySelector('.dp-aperia-load-btn').textContent).toBe('Refresh Aperia tires');
+    expect(ap.login).not.toHaveBeenCalled();
+  });
+
+  it('a re-mount within 5 min renders from the cache (one unit call); a click after auto-load calls unit again', async () => {
+    const ap = connected(fakeAperia(detail()));
+    globalThis.window = { aperia: ap };
+    let host = mount({ equipmentId: 'NP6923' });
+    at.wireAperiaTires(host, { equipmentId: 'NP6923' });
+    await flush();
+    host = mount({ equipmentId: 'NP6923' });
+    at.wireAperiaTires(host, { equipmentId: 'NP6923' });
+    await flush();
+    expect(ap.unit).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('.dp-aperia-result').innerHTML).toContain('CRITICAL LOW');
+    host.querySelector('.dp-aperia-load-btn').click();
+    await flush();
+    expect(ap.unit).toHaveBeenCalledTimes(2);
+    expect(ap.login).not.toHaveBeenCalled();
+  });
+
+  it('a failed auto-load is not cached (the next mount calls again)', async () => {
+    const ap = connected(fakeAperia({ ok: false, code: 'APERIA_NETWORK' }));
+    globalThis.window = { aperia: ap };
+    at.wireAperiaTires(mount({ equipmentId: 'NP1' }), { equipmentId: 'NP1' });
+    await flush();
+    at.wireAperiaTires(mount({ equipmentId: 'NP1' }), { equipmentId: 'NP1' });
+    await flush();
+    expect(ap.unit).toHaveBeenCalledTimes(2);
+  });
+
+  it('signed out -> no unit call, the Load button stays; a status read that throws is ignored', async () => {
+    const ap = fakeAperia(detail());
+    ap.status = vi.fn(async () => ({ ok: true, state: 'signed-out' }));
+    globalThis.window = { aperia: ap };
+    const host = mount({ equipmentId: 'NP6923' });
+    at.wireAperiaTires(host, { equipmentId: 'NP6923' });
+    await flush();
+    expect(ap.unit).not.toHaveBeenCalled();
+    expect(host.querySelector('.dp-aperia-load-btn').textContent).toBe('Load Aperia tires');
+    ap.status = vi.fn(async () => { throw new Error('x'); });
+    const h2 = mount({ equipmentId: 'NP2' });
+    at.wireAperiaTires(h2, { equipmentId: 'NP2' });
+    await flush();
+    expect(ap.unit).not.toHaveBeenCalled();
+    expect(ap.login).not.toHaveBeenCalled();
+  });
+
+  it('not connected: wiring reads status only; a click calls unit({assetId}) once, disables while loading and renders the result', async () => {
     const ap = fakeAperia(detail());
     const files = { openExternal: vi.fn(async () => {}) };
     globalThis.window = { aperia: ap, files };
     const host = mount({ equipmentId: 'NP6923' });
     at.wireAperiaTires(host, { equipmentId: 'NP6923' });
     at.wireAperiaTires(host, { equipmentId: 'NP6923' }); // binds once
-    for (const k of KEYS) expect(ap[k], k).not.toHaveBeenCalled();
+    await flush();
+    expect(ap.status).toHaveBeenCalledTimes(1);
+    for (const k of KEYS.filter((x) => x !== 'status')) expect(ap[k], k).not.toHaveBeenCalled();
     const btn = host.querySelector('.dp-aperia-load-btn');
     btn.click();
     expect(btn.disabled).toBe(true);
@@ -156,7 +221,7 @@ describe('wireAperiaTires', () => {
     const out = host.querySelector('.dp-aperia-result');
     expect(out.innerHTML).toContain('CRITICAL LOW');
     expect(out.innerHTML).toContain('Inflate the tire to the set point.');
-    for (const k of KEYS.filter((x) => x !== 'unit')) expect(ap[k], k).not.toHaveBeenCalled();
+    for (const k of KEYS.filter((x) => x !== 'unit' && x !== 'status')) expect(ap[k], k).not.toHaveBeenCalled();
     // Links open through window.files.openExternal.
     out.querySelector('[data-aperia-ext]').click();
     await flush();
@@ -186,7 +251,8 @@ describe('unit detail panel open (unit-detail.js)', () => {
     globalThis.document = prevDoc; globalThis.window = prevWin; globalThis.requestAnimationFrame = prevRaf;
   });
 
-  it('opening the unit makes no window.aperia call; the Intel pane has the section and its Load button works', async () => {
+  it('opening the unit while signed out reads status only; the Intel pane has the section and its Load button works', async () => {
+    at._resetAutoCacheForTests();
     const doc = createMiniDocument();
     globalThis.document = doc;
     globalThis.requestAnimationFrame = () => 0;
@@ -204,7 +270,7 @@ describe('unit detail panel open (unit-detail.js)', () => {
     expect(btn.getAttribute('data-aperia-load')).toBe('NP6923');
     expect(btn.hasAttribute('data-aperia-bound')).toBe(true);
     await flush();
-    for (const k of KEYS) expect(ap[k], k).not.toHaveBeenCalled();
+    for (const k of KEYS.filter((x) => x !== 'status')) expect(ap[k], k).not.toHaveBeenCalled();
     btn.click();
     await flush();
     expect(ap.unit).toHaveBeenCalledTimes(1);

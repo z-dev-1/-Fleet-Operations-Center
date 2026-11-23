@@ -1,9 +1,10 @@
 'use strict';
 /**
- * src/aperia/watcher.js — the opt-in tire alert watcher. OFF at load: requiring this module starts no
- * timer and makes no Aperia call.
+ * src/aperia/watcher.js — the tire alert watcher. OFF at load: requiring this module starts no
+ * timer and makes no Aperia call. src/aperia/alerts-auto.js turns it on once Aperia is connected unless the
+ * user switched alerts off (aperia_alerts_pref.json); background sign-in itself never starts it.
  *
- *   start({ minutes, ctx }) -> { ok:true, status } | { ok:true, already:true, status } | { ok:false, code }
+ *   start({ minutes, ctx, scope }) -> { ok:true, status } | { ok:true, already:true, status } | { ok:false, code }
  *     Needs a captured Bearer (APERIA_SIGNIN_REQUIRED). Primes the seen ids from one issues read WITHOUT
  *     notifying, starts the poll interval (minutes 1..60, default 5) and, when C.APERIA_WS_ENABLED and a WS
  *     token was captured, the alert socket. Every tick polls, whether or not the socket is open. A poll
@@ -12,17 +13,34 @@
  *   pollNow(ctx) -> { ok:true, newCount } | { ok:false, code }   (APERIA_ALERTS_OFF when off)
  *   status() -> { alerts:'off'|'ws'|'polling', minutes, lastPollAt, lastNewCount }
  *
- * One desktop Notification per new non-muted issue id; ids persist in aperia_seen_alerts.json so a restart
- * never re-notifies. Approved extension: when an already-seen id's severity goes UP (MINOR < MAJOR <
- * CRITICAL), one more Notification fires per step up; the highest severity per id persists with the ids. Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
+ * One desktop Notification per new non-muted issue id on a fleet-row unit (normUnit(fleetVehicleId) in
+ * the scope Set from src/aperia/fleet-scope.js, or the `scope` function passed to start); ids persist in
+ * aperia_seen_alerts.json so a restart never re-notifies. Approved extension: when an already-seen id's
+ * severity goes UP (MINOR < MAJOR < CRITICAL), one more Notification fires per step up; the highest
+ * severity per id persists with the ids. Muted issues (muted:true on the row, or muted in the last list
+ * read for a WS frame) and issues on units outside the fleet rows are marked seen and never notify,
+ * escalation included. An empty scope (fleet rows not loaded) skips the poll without marking anything
+ * seen. The poll itself stays fleet-wide on the wire (Aperia has no per-unit issues feed).
+ * Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
  * Logs carry counts and codes only.
  */
 const C0 = require('./constants');
 const { safeErr } = require('./redact');
 const log = require('../utils/logger')('aperia');
 
-// Test seam: { client, capture, seenStore, createAlertSocket, Notification, send, mainWindow, now, timers, constants }.
+// Test seam: { client, capture, seenStore, createAlertSocket, Notification, send, mainWindow, now, timers, constants, scope }.
 let _deps = {};
+let _scopeFn = null; // start({ scope }) — () => Set of normUnit ids
+function _fleetScope() { return require('./fleet-scope'); }
+/** _scopeSet() -> Set of fleet-row unit keys (never throws; failure -> empty Set). */
+function _scopeSet() {
+  try {
+    const fn = typeof _deps.scope === 'function' ? _deps.scope
+      : (typeof _scopeFn === 'function' ? _scopeFn : () => _fleetScope().fleetUnitSet(_ctx));
+    const s = fn();
+    return s instanceof Set ? s : new Set();
+  } catch (_) { return new Set(); }
+}
 function _setDeps(d) { _deps = d || {}; }
 function _C() { return _deps.constants || C0; }
 function _client() { return _deps.client || require('./client'); }
@@ -51,6 +69,7 @@ let _interval = null;
 let _socket = null;
 let _seen = new Map();
 let _sev = new Map(); // id -> highest severity seen/notified; a step up notifies once more
+let _muted = new Set(); // ids muted in the last successful list read (WS frames may lack the flag)
 let _lastPollAt = null;
 let _lastNewCount = 0;
 let _lastMode = 'off';
@@ -125,6 +144,15 @@ function _noteSev(id, severity) {
   if (k && _rank(k) > _rank(_sev.get(id))) _sev.set(id, k);
 }
 
+function _rebuildMuted(rows) {
+  const m = new Set();
+  for (const x of Array.isArray(rows) ? rows : []) {
+    const id = x && x.issueId != null ? String(x.issueId) : '';
+    if (x && x.muted === true && ID_RE.test(id)) m.add(id);
+  }
+  _muted = m;
+}
+
 function _save() { try { _seenStore().save(_seen, _now(), _sev); } catch (e) { log.warn('[aperia] watcher save', { code: 'APERIA_SEEN_WRITE_FAILED', err: safeErr(e) }); } }
 
 function _validMinutes(m) {
@@ -149,6 +177,8 @@ async function _doStart(opts) {
   if (!r || !r.ok) { log.info('[aperia] watcher start', { code: (r && r.code) || 'APERIA_INTERNAL' }); return { ok: false, code: (r && r.code) || 'APERIA_INTERNAL' }; }
   const at = _now();
   let primed = 0;
+  _rebuildMuted(r.rows);
+  _scopeFn = typeof opts.scope === 'function' ? opts.scope : null;
   for (const x of Array.isArray(r.rows) ? r.rows : []) {
     const id = x && x.issueId != null ? String(x.issueId) : '';
     if (!ID_RE.test(id)) continue;
@@ -225,22 +255,44 @@ function _poll(ctx) {
       if (SIGNIN_CODES.has(code)) _emitStatus(true);
       return { ok: false, code };
     }
+    const list = Array.isArray(r.rows) ? r.rows : [];
+    _rebuildMuted(list);
+    const scope = _scopeSet();
+    if (!scope.size) {
+      // Fleet rows not loaded yet: notify nothing and mark nothing seen, so the next poll can still alert.
+      _lastNewCount = 0;
+      log.info('[aperia] watcher poll', { rows: list.length, newCount: 0, skipped: 'no-scope' });
+      return { ok: true, newCount: 0, skipped: 'no-scope' };
+    }
     const at = _now();
     const fresh = [];
-    for (const x of Array.isArray(r.rows) ? r.rows : []) {
-      if (!x || x.muted === true) continue;
+    let dirty = false;
+    let scoped = 0; let outOfScope = 0; let muted = 0;
+    for (const x of list) {
+      if (!x) continue;
       const id = x.issueId != null ? String(x.issueId) : '';
       if (!ID_RE.test(id)) continue;
+      const isMuted = x.muted === true;
+      const inFleet = _fleetScope().inScope(scope, x.fleetVehicleId);
+      if (isMuted) muted++; else if (inFleet) scoped++; else outOfScope++;
+      if (isMuted || !inFleet) {
+        // Record without notifying (escalation included).
+        if (!_seen.has(id)) { _seen.set(id, at); dirty = true; }
+        const before = _sev.get(id);
+        _noteSev(id, x.severity);
+        if (_sev.get(id) !== before) dirty = true;
+        continue;
+      }
       if (_seen.has(id)) { if (!_escalated(id, x.severity)) continue; } else { _seen.set(id, at); _noteSev(id, x.severity); }
       fresh.push({
         id, severity: x.severity, fleetVehicleId: x.fleetVehicleId, state: x.state,
         positionName: x.positionName, domicile: x.domicile, detectedAt: x.dateDetected,
       });
     }
-    if (fresh.length) _save();
+    if (fresh.length || dirty) _save();
     _lastNewCount = fresh.length;
     for (const a of fresh) _notify(a);
-    log.info('[aperia] watcher poll', { rows: Array.isArray(r.rows) ? r.rows.length : 0, newCount: fresh.length });
+    log.info('[aperia] watcher poll', { rows: list.length, newCount: fresh.length, scoped, outOfScope, muted });
     return { ok: true, newCount: fresh.length };
   })().finally(() => { _pollP = null; });
   return _pollP;
@@ -251,11 +303,20 @@ async function pollNow(ctx) {
   return _poll(ctx || _ctx);
 }
 
-/** _onWsAlert(a) — one socket alert: skip seen ids; mark seen + save; enrich (best effort); notify. */
+/**
+ * _onWsAlert(a) — one socket alert: muted (frame flag or last list read) -> record only; skip seen ids;
+ * mark seen + save; enrich (best effort); notify only for a fleet-row unit.
+ */
 async function _onWsAlert(a) {
   if (!_on || !a) return { ok: false, code: 'APERIA_ALERTS_OFF' };
   const id = a.id != null ? String(a.id) : '';
   if (!ID_RE.test(id)) return { ok: true, notified: false };
+  if (a.muted === true || _muted.has(id)) {
+    if (!_seen.has(id)) _seen.set(id, _now());
+    _noteSev(id, a.severity);
+    _save();
+    return { ok: true, notified: false };
+  }
   if (_seen.has(id)) {
     if (!_escalated(id, a.severity)) { _save(); return { ok: true, notified: false }; }
   } else {
@@ -282,6 +343,8 @@ async function _onWsAlert(a) {
     }
   } catch (e) { log.warn('[aperia] watcher enrich', { code: 'APERIA_INTERNAL', err: safeErr(e) }); }
   if (gen !== _gen || !_on) return { ok: false, code: 'APERIA_ALERTS_OFF' };
+  // Unknown unit or a unit outside the fleet rows: already recorded as seen, no Notification.
+  if (!_fleetScope().inScope(_scopeSet(), alert.fleetVehicleId)) return { ok: true, notified: false };
   _notify(alert);
   return { ok: true, notified: true };
 }
@@ -290,7 +353,7 @@ function _resetForTests() {
   if (_interval) { try { _timers().clearInterval(_interval); } catch (_) {} }
   if (_socket) { try { _socket.close(); } catch (_) {} }
   _deps = {}; _on = false; _ctx = null; _gen = 0; _minutes = C0.ALERT_POLL_DEFAULT_MIN; _interval = null; _socket = null;
-  _seen = new Map(); _sev = new Map(); _lastPollAt = null; _lastNewCount = 0; _lastMode = 'off'; _startP = null; _pollP = null;
+  _seen = new Map(); _sev = new Map(); _muted = new Set(); _scopeFn = null; _lastPollAt = null; _lastNewCount = 0; _lastMode = 'off'; _startP = null; _pollP = null;
 }
 
 module.exports = { start, stop, pollNow, status, _onWsAlert, _setDeps, _resetForTests };

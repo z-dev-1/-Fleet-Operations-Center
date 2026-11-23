@@ -59,10 +59,13 @@ const client = {
 };
 const dtnaStore = { all: vi.fn(() => [{ unitId: '122269', caseStatus: 'Open' }]) };
 const store = { load: vi.fn(() => ({ rows: [{ equipmentId: 'STORED1' }] })) };
+const alertsPref = { load: vi.fn(() => ({ enabled: true })), save: vi.fn(() => true) };
+let syncCache = null;
+const syncRead = { cached: vi.fn(() => syncCache) };
 const ctx = { lastData: { rows: [] }, sendToWindow: vi.fn(), mainWindow: null };
-require('../src/ipc/aperia').registerAperiaIPC(ctx, { client, session, watcher, exporter, dtnaStore, store });
+require('../src/ipc/aperia').registerAperiaIPC(ctx, { client, session, watcher, exporter, dtnaStore, store, alertsPref, syncRead });
 
-const fakes = [session, watcher, client, dtnaStore, store];
+const fakes = [session, watcher, client, dtnaStore, store, alertsPref, syncRead];
 const fakeCalls = () => fakes.reduce((n, f) => n + Object.values(f).reduce((m, fn) => m + fn.mock.calls.length, 0), 0);
 const REG_CALLS = fakeCalls();
 const call = (ch, p) => handlers[ch]({}, p);
@@ -341,6 +344,50 @@ describe('alerts', () => {
     watcher.pollNow.mockResolvedValueOnce({ ok: false, code: 'APERIA_ALERTS_OFF' });
     expect(await call('aperia:poll-now')).toEqual({ ok: false, code: 'APERIA_ALERTS_OFF' });
   });
+
+  it('start-alerts saves ON (only when the start succeeded), stop-alerts saves OFF, logout leaves the choice', async () => {
+    await call('aperia:start-alerts', {});
+    expect(alertsPref.save.mock.calls).toEqual([[true]]);
+    watcher.start.mockResolvedValueOnce({ ok: false, code: 'APERIA_SIGNIN_REQUIRED' });
+    await call('aperia:start-alerts', {});
+    expect(alertsPref.save.mock.calls).toEqual([[true]]);
+    expect(await call('aperia:stop-alerts')).toEqual({ ok: true, status: { alerts: 'off', minutes: 5, lastPollAt: null, lastNewCount: 0 } });
+    expect(alertsPref.save.mock.calls).toEqual([[true], [false]]);
+    await call('aperia:logout');
+    expect(watcher.stop).toHaveBeenCalledTimes(2);
+    expect(alertsPref.save.mock.calls).toEqual([[true], [false]]);
+  });
+});
+
+describe('aperia:issues { cached:true }', () => {
+  it('no cache -> APERIA_NO_CACHE with no Aperia call', async () => {
+    syncCache = null;
+    expect(await call('aperia:issues', { cached: true })).toEqual({ ok: false, code: 'APERIA_NO_CACHE' });
+    expect(client.listIssues).not.toHaveBeenCalled();
+  });
+
+  it('serves the warm cache (issues / cross-link) with no network, keeps an export job, and does not block a running pull', async () => {
+    const cross = [{ fleetVehicleId: 'NP6923', domicile: 'ATL2', criticalCount: 1, latestDetected: '2026-11-22T13:00:00Z', latestDetectedEt: '', inFleet: true, closedDtnaCases: 0 }];
+    syncCache = { pulledAt: '2026-11-22T15:00:00.000Z', issues: [ISSUE_ROWS[0]], crossLink: cross };
+    const a = await call('aperia:issues', { type: 'active', cached: true });
+    expect(a).toEqual({ ok: true, jobId: expect.stringMatching(/^a[a-z0-9]+$/), rows: [ISSUE_ROWS[0]], domiciles: ['ATL2'], pulledAt: '2026-11-22T15:00:00.000Z', count: 1, cached: true });
+    const c = await call('aperia:issues', { type: 'critical-no-case', cached: true });
+    expect(c).toMatchObject({ ok: true, rows: cross, count: 1, cached: true });
+    expect(client.listIssues).not.toHaveBeenCalled();
+    expect(client.crossLinkCriticalNoCase).not.toHaveBeenCalled();
+    expect(await call('aperia:export', { jobId: a.jobId, format: 'tsv' })).toEqual({ ok: true, filename: expect.stringMatching(/^aperia-issues-\d{4}-\d{2}-\d{2}(-\d+)?\.tsv$/) });
+
+    const release = deferredPull(BULK_RESULTS);
+    const b = await call('aperia:bulk', { list: ['NP6923'] });
+    expect((await call('aperia:issues', { cached: true })).ok).toBe(true);
+    expect(await call('aperia:issues', {})).toEqual({ ok: false, code: 'APERIA_BUSY', jobId: b.jobId });
+    release();
+    await flush();
+    expect(progress().pop()).toMatchObject({ jobId: b.jobId, finished: true });
+    // The live path is unchanged.
+    expect((await call('aperia:issues', {})).cached).toBeUndefined();
+    syncCache = null;
+  });
 });
 
 describe('invalid inputs', () => {
@@ -365,6 +412,8 @@ describe('invalid inputs', () => {
       ['aperia:fleet-tires', 'x', 'payload'],
       ['aperia:issues', { type: 'all' }, 'type'],
       ['aperia:issues', 5, 'payload'],
+      ['aperia:issues', { cached: 'yes' }, 'cached'],
+      ['aperia:issues', { cached: 1 }, 'cached'],
       ['aperia:start-alerts', { minutes: 0 }, 'minutes'],
       ['aperia:start-alerts', { minutes: 61 }, 'minutes'],
       ['aperia:start-alerts', { minutes: 2.5 }, 'minutes'],

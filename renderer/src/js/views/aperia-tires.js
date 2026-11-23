@@ -1,8 +1,10 @@
 /**
  * aperia-tires.js — "Aperia tires" section in the unit-detail Intel pane.
  *
- * Rendering and wiring make no Aperia call. Only the "Load Aperia tires" click
- * calls window.aperia.unit({ assetId }) once and renders the tire table (flags),
+ * Rendering makes no Aperia call; wiring reads status and auto-loads once when
+ * connected (window.aperia.unit, 5-min per-unit cache so re-renders do not
+ * re-query; never a sign-in). Signed out, the "Load Aperia tires" button stays;
+ * a click always calls window.aperia.unit({ assetId }) and renders the tire table (flags),
  * GPS (outside-US warning, map links) and the unit's open tire issues with
  * their recommended actions. Every value is escaped; links carry
  * data-aperia-ext and open through window.files.openExternal (https only).
@@ -130,7 +132,18 @@ export function renderTireResult(result) {
     _tableHtml(tires) + _gpsHtml(u.gps, u.gpsReason) + _issuesHtml(issues);
 }
 
-/** wireAperiaTires(root, unit, deps) -> binds the Load button and the result links once. No Aperia call here. */
+// assetId (upper case) -> { at, result }: an auto-load within AUTO_CACHE_MS re-renders without a call.
+const AUTO_CACHE_MS = 5 * 60e3;
+const _autoCache = new Map();
+const _cacheKey = (id) => String(id || '').toUpperCase();
+
+/** _resetAutoCacheForTests() — clear the per-unit auto-load cache. */
+export function _resetAutoCacheForTests() { _autoCache.clear(); }
+
+/**
+ * wireAperiaTires(root, unit, deps) -> binds the Load button and the result links once, then reads
+ * aperia.status() and, when connected, auto-loads the unit once (5-min cache). Never signs in.
+ */
 export function wireAperiaTires(root, unit, deps) {
   if (!root || typeof root.querySelector !== 'function') return;
   const btn = root.querySelector('[data-aperia-load]');
@@ -143,20 +156,39 @@ export function wireAperiaTires(root, unit, deps) {
   const files = () => (d.files !== undefined ? d.files : win.files) || null;
   const assetId = String(btn.getAttribute('data-aperia-load') || (unit && unit.equipmentId) || '').trim();
 
-  btn.addEventListener('click', () => {
+  const key = _cacheKey(assetId);
+  const rendered = (html) => { out.innerHTML = html; btn.textContent = 'Refresh Aperia tires'; };
+
+  /** load(force) — one aperia.unit call (force: always; else a fresh cached result renders with no call). */
+  function load(force) {
     if (btn.disabled) return;
     const ap = aperia();
     if (!ap || typeof ap.unit !== 'function') {
       out.innerHTML = '<div class="dp-aperia-error">Aperia is not available in this build.</div>';
       return;
     }
+    const hit = _autoCache.get(key);
+    if (!force && hit && Date.now() - hit.at < AUTO_CACHE_MS) { rendered(renderTireResult(hit.result)); return; }
     btn.disabled = true;
     out.innerHTML = '<div class="dp-empty">Loading Aperia tires\u2026</div>';
     Promise.resolve().then(() => ap.unit({ assetId }))
-      .then((r) => { out.innerHTML = renderTireResult(r); })
-      .catch(() => { out.innerHTML = '<div class="dp-aperia-error">' + _esc(errorText('APERIA_INTERNAL')) + '</div>'; })
+      .then((r) => {
+        if (r && r.ok) _autoCache.set(key, { at: Date.now(), result: r });
+        rendered(renderTireResult(r));
+      })
+      .catch(() => { rendered('<div class="dp-aperia-error">' + _esc(errorText('APERIA_INTERNAL')) + '</div>'); })
       .finally(() => { btn.disabled = false; });
-  });
+  }
+
+  btn.addEventListener('click', () => load(true));
+
+  // Auto-load once when Aperia is already connected; otherwise the Load button stays as is.
+  const ap0 = aperia();
+  if (ap0 && typeof ap0.status === 'function') {
+    Promise.resolve().then(() => ap0.status())
+      .then((s) => { if (s && s.state === 'connected') load(false); })
+      .catch(() => {});
+  }
 
   out.addEventListener('click', (e) => {
     const t = e && e.target;

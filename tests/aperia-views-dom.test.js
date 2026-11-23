@@ -1,6 +1,7 @@
 // tests/aperia-views-dom.test.js — Aperia issues modal (aperia-issues-modal.js)
 // and bulk / full-fleet modal (aperia-bulk-modal.js). Opening either reads
-// aperia.status() only; Load / Look up / Pull full fleet are the only callers
+// aperia.status(); the issues modal, when connected, also reads the synced cache
+// (issues {cached:true}); Load / Look up / Pull full fleet are the only live callers
 // of issues / bulk / fleetTires; progress is filtered by jobId; exports carry
 // { jobId, format, domicile }. A fake modal mounts the body on the mini DOM.
 process.env.TZ = 'UTC';
@@ -91,18 +92,51 @@ describe('issues helpers (pure)', () => {
 });
 
 describe('issues modal', () => {
-  it('open calls status() only', async () => {
+  it('open while signed out calls status() only and shows nothing', async () => {
     const a = fakeAperia();
+    a.status.mockResolvedValue({ ok: true, state: 'signed-out', alerts: 'off' });
     const mm = fakeModal();
     im.openAperiaIssuesModal({ aperia: a, modal: mm });
     await flush();
     expect(a.status).toHaveBeenCalledTimes(1);
     for (const k of KEYS.filter((x) => x !== 'status')) expect(a[k], k).not.toHaveBeenCalled();
-    expect(mm.el.querySelector('#aperia-issues-state').textContent).toBe('Aperia: Connected');
     expect(mm.el.querySelector('#aperia-issues-save-tsv').disabled).toBe(true);
     expect(mm.el.querySelector('#aperia-issues-table').innerHTML).toBe('');
     const opts = mm.el.querySelector('#aperia-issues-view').querySelectorAll('option').map((o) => o.textContent);
     expect(opts).toEqual(['Active issues', 'Tire critical, no repair case']);
+  });
+
+  it('open while connected calls issues({type, cached:true}) once and renders the synced fleet rows with a note; live issues({type}) only after Load', async () => {
+    const a = fakeAperia();
+    const mm = fakeModal();
+    im.openAperiaIssuesModal({ aperia: a, modal: mm });
+    await flush();
+    const q = (s) => mm.el.querySelector(s);
+    expect(a.status).toHaveBeenCalledTimes(1);
+    expect(a.issues).toHaveBeenCalledTimes(1);
+    expect(a.issues).toHaveBeenCalledWith({ type: 'active', cached: true });
+    for (const k of KEYS.filter((x) => x !== 'status' && x !== 'issues')) expect(a[k], k).not.toHaveBeenCalled();
+    expect(q('#aperia-issues-state').textContent).toBe('Aperia: Connected');
+    expect(q('#aperia-issues-table').querySelectorAll('tbody tr').length).toBe(4);
+    expect(q('#aperia-issues-note').textContent).toBe('Your fleet units, as of 11/22/2026, 10:00 AM EST (synced). Press Load for every unit.');
+    expect(q('#aperia-issues-save-tsv').disabled).toBe(false);
+    q('#aperia-issues-load').click();
+    await flush();
+    expect(a.issues).toHaveBeenCalledTimes(2);
+    expect(a.issues).toHaveBeenLastCalledWith({ type: 'active' });
+    expect(q('#aperia-issues-note').textContent).toBe('');
+  });
+
+  it('a failed cached read on open leaves the empty view', async () => {
+    const a = fakeAperia();
+    a.issues.mockResolvedValueOnce({ ok: false, code: 'APERIA_NO_CACHE' });
+    const mm = fakeModal();
+    im.openAperiaIssuesModal({ aperia: a, modal: mm });
+    await flush();
+    expect(a.issues).toHaveBeenCalledWith({ type: 'active', cached: true });
+    expect(mm.el.querySelector('#aperia-issues-table').innerHTML).toBe('');
+    expect(mm.el.querySelector('#aperia-issues-msg').textContent).toBe('');
+    expect(mm.el.querySelector('#aperia-issues-save-tsv').disabled).toBe(true);
   });
 
   it('Load calls issues({type}) once; rows sort by severity desc (CRITICAL first), header click toggles; values escaped', async () => {

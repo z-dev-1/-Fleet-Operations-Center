@@ -2,8 +2,10 @@
  * aperia-issues-modal.js — Aperia tire issues view (opened from the Aperia
  * panel's "Tire issues" button). Pattern: dtna-bulk-modal.js + modal.js.
  *
- * Opening reads aperia.status() only. Load calls aperia.issues({ type }) once
- * for the chosen view: 'active' (every open Aperia tire issue) or
+ * Opening reads aperia.status(); when connected it calls aperia.issues({ type,
+ * cached: true }) once, which serves the sync cycle's rows for your fleet units
+ * with no Aperia call (any failure leaves the empty view). Load calls
+ * aperia.issues({ type }) (live) for the chosen view: 'active' (every open Aperia tire issue) or
  * 'critical-no-case' (units with a non-muted CRITICAL issue and no open DTNA
  * case in the local DTNA cache). Sorting and the domicile filter run in the
  * renderer; Save TSV / Save Excel call exportBulk({ jobId, format, domicile })
@@ -117,7 +119,8 @@ const BODY =
       '<button type="button" class="btn primary" id="aperia-issues-load">Load</button>' +
       '<select id="aperia-issues-domicile" disabled><option value="">All domiciles</option></select>' +
     '</div>' +
-    '<div style="margin-bottom:8px">"Tire critical, no repair case" lists units with a CRITICAL Aperia issue and no open case in your last DTNA pull. Nothing loads until you press Load.</div>' +
+    '<div style="margin-bottom:8px">"Tire critical, no repair case" lists units with a CRITICAL Aperia issue and no open case in your last DTNA pull. When Aperia is connected, your fleet units from the last sync show on open; Load reads every unit.</div>' +
+    '<div id="aperia-issues-note" style="margin:6px 0"></div>' +
     '<div id="aperia-issues-msg" style="margin:6px 0"></div>' +
     '<div id="aperia-issues-table"></div>' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' +
@@ -171,11 +174,34 @@ export function openAperiaIssuesModal(deps) {
     domicile = '';
   };
 
+  const setNote = (t) => { const el = q('#aperia-issues-note'); if (el) el.textContent = t || ''; };
+  const curView = () => { const view = q('#aperia-issues-view'); return view && view.value === 'critical-no-case' ? 'critical-no-case' : 'active'; };
+  let pressed = false;
+
+  /** showCached() — once on open when connected: the sync cycle's fleet-unit rows (no Aperia call in main). */
+  const showCached = () => {
+    if (!ap || loading || pressed || typeof ap.issues !== 'function') return;
+    const want = curView();
+    Promise.resolve().then(() => ap.issues({ type: want, cached: true })).then((r) => {
+      if (!root || loading || pressed || !r || !r.ok) return;
+      type = want;
+      jobId = r.jobId || null;
+      rows = Array.isArray(r.rows) ? r.rows : [];
+      sort = type === 'active' ? { key: 'severity', dir: 'desc' } : { key: 'detected', dir: 'desc' };
+      fillDomiciles(r.domiciles);
+      setNote('Your fleet units, as of ' + (fmtEt(r.pulledAt) || 'the last sync') + ' (synced). Press Load for every unit.');
+      setMsg(rows.length + (rows.length === 1 ? ' row' : ' rows'));
+      render();
+      refreshButtons();
+    }).catch(() => {});
+  };
+
   const load = () => {
     if (!ap || loading) return;
-    const view = q('#aperia-issues-view');
-    const want = view && view.value === 'critical-no-case' ? 'critical-no-case' : 'active';
+    const want = curView();
+    pressed = true;
     loading = true;
+    setNote('');
     setMsg('Loading\u2026');
     refreshButtons();
     Promise.resolve().then(() => ap.issues({ type: want })).then((r) => {
@@ -225,7 +251,12 @@ export function openAperiaIssuesModal(deps) {
       on('#aperia-issues-table', 'click', onSortClick);
       refreshButtons();
       if (!ap) return;
-      try { Promise.resolve(ap.status()).then((s) => { const x = q('#aperia-issues-state'); if (x) x.textContent = aperiaPill(s).text; }).catch(() => {}); } catch (_) {}
+      try {
+        Promise.resolve(ap.status()).then((s) => {
+          const x = q('#aperia-issues-state'); if (x) x.textContent = aperiaPill(s).text;
+          if (s && s.state === 'connected') showCached();
+        }).catch(() => {});
+      } catch (_) {}
     },
     onClose: () => { root = null; },
   });

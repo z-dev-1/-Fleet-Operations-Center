@@ -8,9 +8,13 @@
  * and rate limited in session.js), so no trigger can loop.
  *  - startup: C.BG_STARTUP_DELAY_MS after start.
  *  - expired: the session status turns 'expired' (a 401 cleared the Bearer), debounced EXPIRED_DEBOUNCE_MS.
+ *  - token expiry (proactive): each 'connected' status with secondsLeft > 0 re-arms one timer for
+ *    secondsLeft + 5 s (clamped 60 s .. 9 h); when it fires the session signs in again in the background
+ *    (a no-op when a fresh Bearer is already held). Any other status (sign out, expired) clears it.
  * Each session status change is pushed to the renderer as aperia:alert { type:'session' } (no other
- * field), so the pill and the panel re-read the Aperia status over IPC. Background sign-in never turns tire alerts
- * on: that stays the user's opt-in toggle. Logs: { op, reason, code } only.
+ * field), so the pill and the panel re-read the Aperia status over IPC. Background sign-in never turns tire
+ * alerts on (src/aperia/alerts-auto.js, a separate module started from src/app.js, owns the default-on).
+ * Logs: { op, reason, code } only.
  */
 const C = require('./constants');
 const { safeErr } = require('./redact');
@@ -33,11 +37,15 @@ function _disarm(t) {
 }
 
 const EXPIRED_DEBOUNCE_MS = 3e3;
+const EXPIRY_MIN_MS = 60e3;
+const EXPIRY_MAX_MS = 9 * 3600e3;
+const EXPIRY_SLACK_MS = 5e3;
 
 let _started = false;
 let _ctx = null;
 let _startupT = null;
 let _expiredT = null;
+let _expiryT = null;
 let _off = null;
 let _lastState = null;
 
@@ -66,6 +74,15 @@ function _onStatus(s) {
     _expiredT = _arm(() => { _expiredT = null; _login('expired'); }, EXPIRED_DEBOUNCE_MS);
   }
   _lastState = st;
+  if (st === 'connected' && typeof s.secondsLeft === 'number' && s.secondsLeft > 0) {
+    _disarm(_expiryT);
+    const ms = Math.min(EXPIRY_MAX_MS, Math.max(EXPIRY_MIN_MS, s.secondsLeft * 1000 + EXPIRY_SLACK_MS));
+    _expiryT = _arm(() => { _expiryT = null; _login('expired'); }, ms);
+  } else if (st !== 'connected') {
+    // Sign out / expired / connecting: the next 'connected' status re-arms it.
+    _disarm(_expiryT);
+    _expiryT = null;
+  }
 }
 
 /** start(ctx, deps) — idempotent. Arms the startup sign-in and subscribes to session status. */
@@ -87,8 +104,8 @@ function start(ctx, deps) {
 
 /** stop() — clear every timer and unsubscribe (app before-quit). */
 function stop() {
-  _disarm(_startupT); _disarm(_expiredT);
-  _startupT = null; _expiredT = null;
+  _disarm(_startupT); _disarm(_expiredT); _disarm(_expiryT);
+  _startupT = null; _expiredT = null; _expiryT = null;
   try { if (_off) _off(); } catch (_) {}
   _off = null;
   _started = false;
@@ -98,4 +115,4 @@ function stop() {
 
 function _resetForTests() { stop(); _deps = {}; }
 
-module.exports = { start, stop, _resetForTests, EXPIRED_DEBOUNCE_MS };
+module.exports = { start, stop, _resetForTests, EXPIRED_DEBOUNCE_MS, EXPIRY_MIN_MS, EXPIRY_MAX_MS };

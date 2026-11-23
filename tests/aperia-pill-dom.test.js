@@ -154,7 +154,9 @@ describe('Aperia panel', () => {
     expect(o.querySelector('#aperia-panel-state').textContent).toBe('Aperia: Signed out');
     expect(o.querySelector('#aperia-panel-alerts-state').textContent).toBe('Tire Alerts: OFF');
     expect(o.querySelector('#aperia-panel-last').textContent).toBe('never');
-    expect(o.textContent).toContain('Aperia is read only when you press a button. Sign out stops a running pull and closes the Aperia sign-in window.');
+    expect(o.textContent).toContain('Aperia tires load when you open a unit, and tire issues for your fleet units refresh on each sync. Bulk / fleet pulls run only when you press their buttons. Sign out stops a running pull and closes the Aperia sign-in window.');
+    expect(o.textContent).not.toContain('Aperia is read only when you press a button.');
+    expect(o.querySelector('#aperia-panel-alerts-note').textContent.startsWith('Tire Alerts are on by default and only cover units in your fleet rows. Tire Alerts notify once per new alert')).toBe(true);
     expect(o.querySelector('#aperia-panel-alerts-note').textContent).toContain("once more each time an alert's severity goes up");
     for (const id of ['signin', 'signout', 'issues', 'bulk', 'alerts', 'poll']) {
       expect(o.querySelector('#aperia-panel-' + id), id).toBeTruthy();

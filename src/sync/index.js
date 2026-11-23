@@ -573,6 +573,16 @@ function createSyncEngine(ctx) {
         .catch(e => logger.error('Orcha Deep Scan error (non-fatal):', e.message))
         .finally(() => { _deepScanInProgress = false; }); }, 15000); // Wait 15s for relay extraction to finish
 
+      // ── Aperia issues read for the fleet-row units — non-blocking, non-fatal ──
+      // Session-gated and throttled to one read per 15 min inside sync-read; then make sure the
+      // default-on Tire Alerts are running (alerts-auto respects the user's saved off choice).
+      const _aperiaT = setTimeout(() => {
+        Promise.resolve().then(() => require('../aperia/sync-read').run({ rows: mergedRows, ctx })).catch(() => null)
+          .then(() => { try { return require('../aperia/alerts-auto').ensure(); } catch (_) { return null; } })
+          .catch(() => null);
+      }, 20000);
+      try { if (_aperiaT && typeof _aperiaT.unref === 'function') _aperiaT.unref(); } catch (_) {}
+
       // Decisions produced by the reconcile pass this cycle, keyed by
       // equipmentId, so the canonical-state pass can reuse them instead of
       // re-reasoning (one AI call per down unit, not two). Shared across the

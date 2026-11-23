@@ -235,6 +235,20 @@ describe('Aperia redaction across the stack', () => {
     results.push(cx);
     await exportBoth(cx.jobId);
 
+    // The sync-cycle issues read (fleet-row units) and its cached IPC result.
+    const SR = require('../src/aperia/sync-read');
+    SR._setDeps({ dtnaStore: { all: () => [{ unitId: '122269', caseStatus: 'Closed' }] } });
+    const sr = await SR.run({ rows: ctx.lastData.rows, ctx });
+    expect(sr).toMatchObject({ ok: true });
+    results.push(sr);
+    expect(logger.lines.some((l) => l.args[0] === '[aperia] sync-read' && l.args[1].code === 'OK')).toBe(true);
+    for (const type of ['active', 'critical-no-case']) {
+      const ci = await call('aperia:issues', { type, cached: true });
+      expect(ci).toMatchObject({ ok: true, cached: true });
+      expect(ci.rows.every((r) => r.fleetVehicleId === 'NP6923')).toBe(true);
+      results.push(ci);
+    }
+
     expect(walkFiles(DOWNLOADS).length).toBe(8);
 
 

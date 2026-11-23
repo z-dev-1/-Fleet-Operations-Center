@@ -8,7 +8,10 @@
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Registration only registers handlers and the before-quit hook: it calls no client, session or watcher
  * function. One job runs at a time (APERIA_BUSY); the last MAX_JOBS jobs are kept for export.
- * Sign out stops the watcher and aborts a running job.
+ * aperia:issues { cached:true } makes no Aperia call: it serves the sync cycle's warm cache of fleet-row
+ * issues (src/aperia/sync-read.js) or APERIA_NO_CACHE. aperia:start-alerts / aperia:stop-alerts save the
+ * user's Tire Alerts choice (src/aperia/alerts-pref.js; alerts are on by default). Sign out stops the
+ * watcher and aborts a running job; it leaves the saved choice as is.
  */
 const { safeErr } = require('../aperia/redact');
 const log = require('../utils/logger')('aperia');
@@ -42,7 +45,7 @@ function _domiciles(rows) {
 
 /**
  * registerAperiaIPC(ctx, deps)
- * deps (tests): { handle, client, session, watcher, exporter, electron, dtnaStore, store }
+ * deps (tests): { handle, client, session, watcher, exporter, electron, dtnaStore, store, alertsPref, syncRead }
  */
 function registerAperiaIPC(ctx, deps) {
   const d = deps || {};
@@ -54,6 +57,8 @@ function registerAperiaIPC(ctx, deps) {
   const electron = () => d.electron || require('electron');
   const dtnaStore = () => d.dtnaStore || require('../dtna/store');
   const store = () => d.store || require('../store');
+  const alertsPref = () => d.alertsPref || require('../aperia/alerts-pref');
+  const syncRead = () => d.syncRead || require('../aperia/sync-read');
 
   const send = (ch, payload) => {
     try { if (ctx && typeof ctx.sendToWindow === 'function') ctx.sendToWindow(ch, payload); } catch (e) { log.warn('[aperia] send', safeErr(e)); }
@@ -179,9 +184,24 @@ function registerAperiaIPC(ctx, deps) {
     const p = _payload(payload);
     if (!p) return _bad('payload');
     if (p.type !== undefined && !ISSUE_TYPES.includes(p.type)) return _bad('type');
+    if (p.cached !== undefined && typeof p.cached !== 'boolean') return _bad('cached');
     const type = p.type || 'active';
-    if (_running) return { ok: false, code: 'APERIA_BUSY', jobId: _running.jobId };
     const kind = type === 'critical-no-case' ? 'crosslink' : 'issues';
+    if (p.cached === true) {
+      // The sync cycle's warm cache (fleet-row units only): no Aperia call, so a running pull is not
+      // blocked or replaced (the export job id is minted without taking the running slot).
+      const cache = syncRead().cached();
+      if (!cache) return { ok: false, code: 'APERIA_NO_CACHE' };
+      const picked = kind === 'crosslink' ? cache.crossLink : cache.issues;
+      const rows = Array.isArray(picked) ? picked : [];
+      const prev = _running;
+      const job = _newJob(kind);
+      _running = prev;
+      _keep(job.jobId, { kind, rows });
+      _done(job.jobId);
+      return { ok: true, jobId: job.jobId, rows, domiciles: _domiciles(rows), pulledAt: cache.pulledAt || null, count: rows.length, cached: true };
+    }
+    if (_running) return { ok: false, code: 'APERIA_BUSY', jobId: _running.jobId };
     const { jobId, ac } = _newJob(kind);
     try {
       const li = await client().listIssues(ctx, { signal: ac.signal });
@@ -213,12 +233,17 @@ function registerAperiaIPC(ctx, deps) {
     if (p.minutes !== undefined && (!Number.isInteger(p.minutes) || p.minutes < 1 || p.minutes > 60)) return _bad('minutes');
     const r = await watcher().start({ minutes: p.minutes, ctx });
     if (!r || !r.ok) return { ok: false, code: _code(r) };
+    try { alertsPref().save(true); } catch (e) { log.warn('[aperia] alerts pref', safeErr(e)); }
     const out = { ok: true, status: r.status };
     if (r.already) out.already = true;
     return out;
   });
 
-  wrap('aperia:stop-alerts', async () => watcher().stop());
+  wrap('aperia:stop-alerts', async () => {
+    const r = watcher().stop();
+    try { alertsPref().save(false); } catch (e) { log.warn('[aperia] alerts pref', safeErr(e)); }
+    return r;
+  });
 
   wrap('aperia:poll-now', async () => {
     const r = await watcher().pollNow(ctx);
