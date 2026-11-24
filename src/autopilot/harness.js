@@ -15,7 +15,10 @@
  *   - The shared mutex is held for the whole run (BUSY while a tick runs).
  *   - At most once per local day (ap_meta 'harness:<date>' -> HARNESS_ALREADY_RAN).
  *   - Runs the real open cases round-robin with trigger 'harness' and normal transitions.
- *     PAUSED cases stay paused. Harness runs are neither limited by nor charged to the
+ *     PAUSED and NEEDS_REVIEW cases are not re-run.
+ *   - The run's AbortController is the controller's in-flight one (beginExternalRun), so PAUSE,
+ *     STOP, master OFF and shutdown abort the current run and stop the loop; settings are
+ *     re-read before every run (master OFF / runState / liveReads take effect at the next run). Harness runs are neither limited by nor charged to the
  *     automatic 30-min / 6-per-day limits.
  *   - AI calls count against dailyCap inside runInvestigation (reserveAiCallAndMarkPending);
  *     once the cap is reached the remaining runs use the deterministic fallback.
@@ -45,8 +48,9 @@ const OUTBOUND_FILES = Object.freeze({
   slackDMReplies: 'slack_dm_replies.json',
 });
 
-// Not re-run by the harness: terminal, paused by the user / scope / feature, or in flight.
-const SKIP_STATES = new Set([S.RESOLVED, S.PAUSED, S.INVESTIGATING, S.ANALYZING]);
+// Not re-run by the harness: terminal, paused by the user / scope / feature, in flight, or
+// waiting for a human accept (NEEDS_REVIEW leaves only through review()).
+const SKIP_STATES = new Set([S.RESOLVED, S.PAUSED, S.INVESTIGATING, S.ANALYZING, S.NEEDS_REVIEW]);
 const DOC_KEYS = Object.freeze(['fleetData', 'canonicalState', 'longDwellStore', 'longDwellCsv', 'relayReconcileConfig', 'decisivCaseCache', 'emailEvidence', 'fasCases']);
 
 function _mb(n) { return Math.round((n / 1048576) * 10) / 10; }
@@ -114,48 +118,65 @@ async function run(opts) {
     const aiBefore = parseInt(cs.getMeta(aiKey) || '0', 10) || 0;
     cs.appendEvent({ caseId: null, at: t0, kind: 'harness', actor: 'user', reason: 'harness_start', detail: { runs } });
 
-    const ac = new AbortController();
+    // The controller's in-flight AbortController: PAUSE / STOP / master OFF / shutdown abort the
+    // harness like a tick. Settings are re-read before every run (also refreshes the liveReads gate).
+    const ext = typeof ctl.beginExternalRun === 'function' ? ctl.beginExternalRun() : null;
+    const signal = ext ? ext.signal : new AbortController().signal;
+    const reload = () => {
+      if (ext) return ext.refreshConfig();
+      return typeof o.loadConfig === 'function' ? o.loadConfig() : cfg;
+    };
     const entries = [];
     const perCase = new Map();
     let skipped = 0;
+    let stoppedBy = null;
     let k = 0;
-    for (let i = 0; i < runs; i++) {
-      const eligible = cs.listOpen().filter((c) => !SKIP_STATES.has(c.state));
-      if (!eligible.length) break;
-      const c = eligible[k % eligible.length];
-      k++;
-      const now = clock();
-      if (c.state !== S.QUEUED && !cs.requeueCases({ caseIds: [c.case_id], trigger: 'harness', actor: 'user', now }).length) { skipped++; continue; }
-      const cpu0 = process.cpuUsage();
-      let r;
-      try {
-        r = await runInvestigation(c.case_id, {
-          ports, limiter, cfg, signal: ac.signal, trigger: 'harness', owner: ctl.owner, now: clock, rand: o.rand,
-          caseStore: cs, reason: o.reason, fleet: { doc: fleet, ff }, docs, staleDays,
+    try {
+      for (let i = 0; i < runs; i++) {
+        if (signal.aborted) { stoppedBy = 'aborted:' + (typeof signal.reason === 'string' ? signal.reason : 'shutdown'); break; }
+        const runCfg = reload() || cfg;
+        if (!runCfg.enabled) { stoppedBy = 'disabled'; break; }
+        if (runCfg.runState !== 'running') { stoppedBy = 'run_state:' + runCfg.runState; break; }
+        const eligible = cs.listOpen().filter((c) => !SKIP_STATES.has(c.state));
+        if (!eligible.length) break;
+        const c = eligible[k % eligible.length];
+        k++;
+        const now = clock();
+        if (c.state !== S.QUEUED && !cs.requeueCases({ caseIds: [c.case_id], trigger: 'harness', actor: 'user', now }).length) { skipped++; continue; }
+        const cpu0 = process.cpuUsage();
+        let r;
+        try {
+          r = await runInvestigation(c.case_id, {
+            ports, limiter, cfg: runCfg, signal, trigger: 'harness', owner: ctl.owner, now: clock, rand: o.rand,
+            caseStore: cs, reason: o.reason, fleet: { doc: fleet, ff }, docs, staleDays,
+          });
+        } catch (e) {
+          r = { ok: false, caseId: c.case_id, code: (e && e.code) || 'INTERNAL' };
+        }
+        const cpu = process.cpuUsage(cpu0);
+        const runRow = r && r.runId && typeof cs.getRun === 'function' ? cs.getRun(r.runId) : null;
+        entries.push({
+          caseId: c.case_id,
+          unit: c.unit_id,
+          reasons: _codes(c.reasons),
+          plan: runRow && Array.isArray(runRow.plan) ? runRow.plan.map((p) => ({ source: p.source, status: p.status, why: p.why })) : null,
+          sourceStatus: _sourceStatus(runRow ? runRow.source_calls : null),
+          state: (r && r.state) || null,
+          outcome: (r && r.outcome) || null,
+          code: r && r.ok === false ? r.code || null : null,
+          aiStatus: (r && r.aiStatus) || null,
+          isolated: r && r.isolated != null ? !!r.isolated : null,
+          validationWarnings: r && Array.isArray(r.warnings) ? r.warnings.slice(0, 20) : [],
+          latencyMs: runRow && Number.isFinite(runRow.duration_ms) ? runRow.duration_ms : clock() - now,
+          cpuMs: runRow && Number.isFinite(runRow.cpu_ms) ? runRow.cpu_ms : Math.round((cpu.user + cpu.system) / 1000),
         });
-      } catch (e) {
-        r = { ok: false, caseId: c.case_id, code: (e && e.code) || 'INTERNAL' };
+        const pc = perCase.get(c.case_id) || { caseId: c.case_id, unit: c.unit_id, runs: 0 };
+        pc.runs++;
+        perCase.set(c.case_id, pc);
+        if (r && r.outcome === 'aborted') { stoppedBy = 'aborted:' + (r.abortReason || 'shutdown'); break; }
       }
-      const cpu = process.cpuUsage(cpu0);
-      const runRow = r && r.runId && typeof cs.getRun === 'function' ? cs.getRun(r.runId) : null;
-      entries.push({
-        caseId: c.case_id,
-        unit: c.unit_id,
-        reasons: _codes(c.reasons),
-        plan: runRow && Array.isArray(runRow.plan) ? runRow.plan.map((p) => ({ source: p.source, status: p.status, why: p.why })) : null,
-        sourceStatus: _sourceStatus(runRow ? runRow.source_calls : null),
-        state: (r && r.state) || null,
-        outcome: (r && r.outcome) || null,
-        code: r && r.ok === false ? r.code || null : null,
-        aiStatus: (r && r.aiStatus) || null,
-        isolated: r && r.isolated != null ? !!r.isolated : null,
-        validationWarnings: r && Array.isArray(r.warnings) ? r.warnings.slice(0, 20) : [],
-        latencyMs: runRow && Number.isFinite(runRow.duration_ms) ? runRow.duration_ms : clock() - now,
-        cpuMs: runRow && Number.isFinite(runRow.cpu_ms) ? runRow.cpu_ms : Math.round((cpu.user + cpu.system) / 1000),
-      });
-      const pc = perCase.get(c.case_id) || { caseId: c.case_id, unit: c.unit_id, runs: 0 };
-      pc.runs++;
-      perCase.set(c.case_id, pc);
+    } finally {
+      if (ext) ext.end();
     }
 
     const outboundAfter = snapshotOutbound();
@@ -172,7 +193,7 @@ async function run(opts) {
       mode: 'in-app',
       note: 'Shadow mode: real open cases were re-run with trigger harness and normal state transitions. Nothing was sent or written outside Autopilot.',
       startedAt, endedAt: iso, date,
-      runsRequested: runs, runsDone: entries.length, skipped,
+      runsRequested: runs, runsDone: entries.length, skipped, stoppedBy,
       cases: [...perCase.values()],
       runs: entries,
       outboundBefore, outboundAfter, outboundUnchanged,
@@ -197,7 +218,7 @@ async function run(opts) {
       ok: true,
       reportPath,
       summary: {
-        runsDone: report.runsDone, cases: report.cases.length, byState, byAiStatus, outboundUnchanged,
+        runsDone: report.runsDone, cases: report.cases.length, stoppedBy, byState, byAiStatus, outboundUnchanged,
         aiCallsUsed: report.aiCallsUsed, capReached: report.capReached, heapDeltaMb: report.heapDeltaMb,
         unitsNotInFleet: report.unitsNotInFleet,
       },

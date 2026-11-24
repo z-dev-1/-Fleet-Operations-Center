@@ -23,6 +23,29 @@ const base = (over) => Object.assign({
 }, over || {});
 
 describe('validateAiOutput', () => {
+  it('moves write / contact wording to approval whatever the actionClass the model chose', () => {
+    const act = (action, actionClass) => ({ action, rationale: 'r', owner: 'me', actionClass, evidenceIds: ['ev_a'] });
+    const risky = [
+      act('Mark the unit road-ready in AAP', 'verify_in_system'),
+      act('Clear the DOT hold', 'monitor'),
+      act('Set the lifecycle to Active', 'internal_review'),
+      act('Contact the dealer for an ETC', 'monitor'),
+      act('Email the vendor', 'monitor'),
+      act('Send a Slack note to the DSP', 'monitor'),
+      act('Message the service advisor', 'monitor'),
+      act('Approve the estimate', 'internal_review'),
+      act('Update the WO with the new ETC', 'verify_in_system'),
+      act('Create a work order for the tires', 'monitor'),
+    ];
+    const keep = [act('Keep watching the repair', 'monitor'), act('Check the Decisiv stage tomorrow', 'verify_in_system')];
+    const v = validateAiOutput(base({ recommendedActions: risky.concat(keep) }), pack);
+    expect(v.ok).toBe(true);
+    expect(v.output.recommendedActions.map((a) => a.action)).toEqual(keep.map((a) => a.action));
+    expect(v.output.actionsRequiringApproval.map((a) => a.action)).toEqual(risky.map((a) => a.action));
+    for (const a of v.output.actionsRequiringApproval) expect(a).toMatchObject({ requiresApproval: true, executed: false });
+    expect(v.warnings.filter((w) => w === 'moved_to_approval').length).toBe(risky.length);
+  });
+
   it('accepts a valid output and removes unknown evidence ids', () => {
     const v = validateAiOutput(base(), pack);
     expect(v.ok).toBe(true);

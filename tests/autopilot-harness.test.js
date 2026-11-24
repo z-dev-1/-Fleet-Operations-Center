@@ -171,6 +171,79 @@ describe('in-app harness', () => {
   });
 });
 
+describe('master controls during a harness run (AC-14)', () => {
+  const waitFor = async (cond) => {
+    for (let i = 0; i < 500 && !cond(); i++) await new Promise((r) => setTimeout(r, 10));
+    expect(cond()).toBe(true);
+  };
+  const ACTIONS = [
+    ['PAUSE', (env) => env.ap.control('pause'), 'master_pause'],
+    ['STOP', (env) => env.ap.control('stop'), 'master_stop'],
+    ['master OFF', (env) => env.ap.setConfig({ enabled: false }), 'master_stop'],
+  ];
+  for (const [name, act, why] of ACTIONS) {
+    it(name + ' mid-harness -> the in-flight case ends PAUSED; no further runs, live reads or AI calls', async () => {
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const base = F.okReason();
+      let aiCalls = 0;
+      const w = world({ aapWarm: true, aapLive: (id) => ({ ok: true, value: { workRequest: { id, assetDisplayName: '322283', lifecycleState: 'Unavailable' } } }) });
+      const env = F.mkEnv({ world: w, reason: async (o) => { aiCalls++; if (aiCalls === 1) await gate; return base(o); } });
+      F.schema.ensureSchema();
+      for (const u of UNITS) F.seedCase(u, { domicile: u === 'B13014' ? 'ROC5' : 'ABE40' });
+      const p = env.ap.harnessRun({ runs: 20 });
+      await waitFor(() => aiCalls === 1);
+      const live0 = w.calls.aapLive;
+      const res = await act(env);
+      expect(res.ok).toBe(true);
+      release();
+      const r = await p;
+      expect(r.ok).toBe(true);
+      expect(r.summary.runsDone).toBe(1);
+      expect(r.summary.stoppedBy).toBe('aborted:' + why);
+      expect(aiCalls).toBe(1);
+      expect(w.calls.aapLive).toBe(live0);
+      expect(harnessRuns().length).toBe(1);
+      const paused = F.cs.listOpen().filter((c) => c.state === 'PAUSED');
+      expect(paused.length).toBe(1);
+      expect(paused[0].pause_reason).toBe(why);
+      expect(env.ctl.isRunning()).toBe(false);
+      // The controller's in-flight slot is released: a later abort finds nothing to abort.
+      expect(env.ctl.abortInFlight('shutdown')).toBe(false);
+    });
+  }
+
+  it('settings are re-read before every run: a run-state change between runs stops the loop', async () => {
+    const env = F.mkEnv({ world: world() });
+    F.schema.ensureSchema();
+    for (const u of UNITS) F.seedCase(u, { domicile: u === 'B13014' ? 'ROC5' : 'ABE40' });
+    let n = 0;
+    const r = await harness.run({
+      runs: 20, config: F.cfgOf(), supervisorEnabled: () => true, caseStore: F.cs, now: env.clock.now, reason: env.reason,
+      controller: { withMutex: env.ctl.withMutex, ensureSchema: env.ctl.ensureSchema, ports: env.ctl.ports, limiter: env.ctl.limiter, owner: env.ctl.owner },
+      loadConfig: () => F.cfgOf(n >= 2 ? { runState: 'paused' } : {}),
+      runInvestigation: async (caseId, deps) => { n++; return env.ctl.runInvestigation(caseId, deps); },
+    });
+    expect(r.ok).toBe(true);
+    expect(n).toBe(2);
+    expect(r.summary).toMatchObject({ runsDone: 2, stoppedBy: 'run_state:paused' });
+  });
+
+  it('NEEDS_REVIEW cases are not re-run by the harness', async () => {
+    const env = F.mkEnv({ world: world(), autopilot: { maxCasesPerTick: 5 } });
+    await env.ctl.runOnce();
+    const open = F.cs.listOpen();
+    expect(open.length).toBe(3);
+    const target = open[0].case_id;
+    F.cs.transition(target, 'NEEDS_REVIEW', { reason: 'authority_tie', now: env.clock.now() });
+    const r = await env.ap.harnessRun({ runs: 20 });
+    expect(r.ok).toBe(true);
+    expect(harnessRuns().filter((x) => x.case_id === target).length).toBe(0);
+    expect(harnessRuns().length).toBe(20);
+    expect(F.cs.getCase(target).case.state).toBe('NEEDS_REVIEW');
+  });
+});
+
 describe('R5 boundary', () => {
   it('harness.js requires neither ./investigate nor ./controller; index.js injects them', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'autopilot', 'harness.js'), 'utf8');

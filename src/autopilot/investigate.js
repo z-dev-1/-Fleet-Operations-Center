@@ -40,7 +40,7 @@ const { analyze, trivial } = require('./analyze');
 const { buildPrompt } = require('./prompt');
 const { validateAiOutput } = require('./validate');
 const { deterministicRecommendation } = require('./fallback');
-const { buildConflicts } = require('./conflicts');
+const { buildConflicts, needsReview } = require('./conflicts');
 const { score } = require('./priority');
 const { newestLoggedUpdate, toMs } = require('./updates');
 
@@ -299,13 +299,18 @@ async function runInvestigation(caseId, deps) {
       const prev = rec.ai_findings || {};
       let nra = nextReviewAt(prev, rec.eta, t, rand);
       if (rec.ai_retry_at != null) nra = Math.min(nra, rec.ai_retry_at);
-      const to = rec.review_status === 'pending' ? S.RECOMMENDATION_READY : S.MONITORING;
+      // An authority tie or the AI-rejected streak still holds: stay in NEEDS_REVIEW (leaving it needs
+      // a human accept). A review the user already accepted with the same code is not re-requested.
+      const tie = needsReview(pack.conflicts && pack.conflicts.groups);
+      const reviewCode = tie ? 'authority_tie' : ((rec.ai_reject_streak || 0) >= LIMITS.aiRejectStreak ? 'ai_rejected' : null);
+      const keepReview = reviewCode != null && !(rec.review_status === 'accepted' && rec.review_accepted_code === reviewCode);
+      const to = keepReview ? S.NEEDS_REVIEW : (rec.review_status === 'pending' ? S.RECOMMENDATION_READY : S.MONITORING);
       const f = Object.assign({}, RELEASE, {
         last_checked_at: t, next_review_at: nra, attempts: 0, next_attempt_at: null, last_error_code: null,
         priority: score({ reasons: rec.reasons, daysDown: rec.days_down, trigger, aiUrgency: prev.urgency, aiInvestigation: aiOn, state: to, unchanged: true }),
       });
       if (cheap !== undefined) f.cheap_fp = cheap;
-      cs.persistRun(caseId, runId, f, to, { reason: 'unchanged', run: runMeta('unchanged'), event: { kind: 'unchanged', reason: 'evidence_unchanged' }, now: t });
+      cs.persistRun(caseId, runId, f, to, { reason: keepReview ? reviewCode : 'unchanged', run: runMeta('unchanged'), event: { kind: 'unchanged', reason: 'evidence_unchanged' }, now: t });
       try { job.complete({ outcome: 'unchanged' }); } catch (_) {}
       return done('unchanged', to);
     }

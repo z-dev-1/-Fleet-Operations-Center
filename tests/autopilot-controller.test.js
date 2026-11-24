@@ -126,6 +126,38 @@ describe('tick pipeline', () => {
     expect(openCases().map((c) => c.unit_id).sort()).toEqual(['322283', '777777']);
   });
 
+  it('set-config rejects runState (run-state changes go through control())', async () => {
+    const env = F.mkEnv();
+    env.ap.boot();
+    for (const v of ['paused', 'stopped', 'running']) {
+      expect(env.ap.setConfig({ runState: v })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'runState' });
+    }
+    expect(env.settings.doc.autopilot.runState).toBeUndefined();
+    expect(env.deferred.length).toBe(0);
+  });
+
+  it('two consecutive AAP builds with identical evidence -> no evidence_changed trigger and no second AI call', async () => {
+    const env = F.mkEnv();
+    await env.ctl.runOnce();
+    const id = only().case_id;
+    expect(env.reason.calls.length).toBe(1);
+    const fp0 = F.cs.getCase(id).case.evidence_fp;
+    const cheap0 = F.cs.getCase(id).case.cheap_fp;
+    expect(cheap0).toBeTruthy();
+    // Next AAP build: new build time and syncedAt, workDuration recomputed, nothing else changed.
+    env.clock.advance(H);
+    env.world.lastOkAt = env.clock.now() - MIN;
+    env.world.syncedAt = new Date(env.clock.now() - MIN).toISOString();
+    env.world.rows[0] = F.baseRow({ workDuration: '5d 3h 0m' });
+    env.world.gens.fleetData = (env.world.gens.fleetData || 0) + 1;
+    const out = await env.ctl.runOnce();
+    expect(out.triggers).toBe(0);
+    expect(out.investigated.length).toBe(0);
+    expect(env.reason.calls.length).toBe(1);
+    expect(F.cs.getCase(id).case.evidence_fp).toBe(fp0);
+    expect(F.cs.getCase(id).runs.filter((r) => r.trigger === 'evidence_changed').length).toBe(0);
+  });
+
   it('a successful set-config that changes scope / oosDays / features schedules one runOnce; intervalMs alone does not', async () => {
     const env = F.mkEnv();
     env.ap.boot();

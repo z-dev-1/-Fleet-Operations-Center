@@ -13,7 +13,8 @@
  *     a valid id is dropped (uncited_item); more than 50% dropped -> invalid
  *   - a confirmed fact citing only untrusted_text items, only STALE items, or any
  *     conflict member moves to inferences with confidence <= 0.5 (downgraded_fact)
- *   - write classes found in recommendedActions move to actionsRequiringApproval;
+ *   - write classes found in recommendedActions move to actionsRequiringApproval, and so do
+ *     actions whose text reads as a write or contact (APPROVAL_WORDING), whatever their class;
  *     every approval item gets requiresApproval:true, executed:false
  *   - keys outside the schema are discarded (unexpected_key:<k>)
  * The output has no field that can change case state or authorize anything.
@@ -32,6 +33,19 @@ const URGENCY = Object.freeze(['low', 'normal', 'high']);
 const ALL_CLASSES = new Set([...ACTION_CLASSES, ...WRITE_ACTION_CLASSES]);
 const WRITE = new Set(WRITE_ACTION_CLASSES);
 const IDS_MAX = 20;
+// The model picks actionClass. Action text that reads as road-ready, a DOT / lifecycle change,
+// contacting someone, an approval or a WO record change needs approval whatever its class.
+const APPROVAL_WORDING = Object.freeze([
+  /\broad[\s-]*ready\b/i,
+  /\bDOT\b/,
+  /\blifecycle\b/i,
+  /\bcontact\b/i,
+  /\be-?mail\b/i,
+  /\bmessage\b/i,
+  /\bslack\b/i,
+  /\bapprov(?:e|al)\b/i,
+  /\b(?:create|update|open|close|edit)\b[^.]{0,30}\b(?:WO|WR|work[\s-]*order|work[\s-]*request)s?\b/i,
+]);
 
 function _obj(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
 function _str(v, n) {
@@ -107,7 +121,7 @@ function validateAiOutput(data, pack) {
   const recommendedActions = [];
   const actionsRequiringApproval = [];
   for (const a of recIn) {
-    if (WRITE.has(a.actionClass)) { warnings.push('moved_to_approval'); actionsRequiringApproval.push(a); } else recommendedActions.push(a);
+    if (WRITE.has(a.actionClass) || APPROVAL_WORDING.some((re) => re.test(a.action))) { warnings.push('moved_to_approval'); actionsRequiringApproval.push(a); } else recommendedActions.push(a);
   }
   for (const a of apprIn) actionsRequiringApproval.push(a);
   for (const a of actionsRequiringApproval) { a.requiresApproval = true; a.executed = false; }

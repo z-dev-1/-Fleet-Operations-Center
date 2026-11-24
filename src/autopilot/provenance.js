@@ -54,8 +54,9 @@ function provenanceOf(source, field, ctx) {
     case 'aap_cache': return _aapCache(field, c);
     case 'aap_live': {
       const it = c.item || {};
-      const observedAt = _first(it.updated, it.timestamp) ?? readAt;
-      return { observedAt, retrievedAt: readAt, authorityTag: c.commentDerived ? 'relaygarage' : 'aap', observedFrom: null };
+      const stated = _first(it.updated, it.timestamp);
+      const observedAt = stated ?? readAt;
+      return { observedAt, retrievedAt: readAt, authorityTag: c.commentDerived ? 'relaygarage' : 'aap', observedFrom: stated == null && observedAt != null ? 'retrievedAt' : null };
     }
     case 'canonical': {
       const r = c.record || {};

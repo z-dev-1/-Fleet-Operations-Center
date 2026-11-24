@@ -3,7 +3,9 @@
  * autopilot/fingerprint.js — evidence and cheap fingerprints (§B8 step 4, §B10.3). Pure.
  *
  *   fp(pack)        sha1 over sorted (source, sourceRef, field, normalizedValue, observedAt).
- *                   retrievedAt, freshness and confidence are excluded.
+ *                   retrievedAt, freshness and confidence are excluded; so are fallback
+ *                   observedAt values (observedFrom buildAt / syncedAt / retrievedAt) and
+ *                   the value of time-derived fields (workDuration).
  *   cheapFp(input)  sha1 over the unit's row fields, its entries in the watched
  *                   store keys, its cached Aperia issues and the repair-intel
  *                   30-day summary. Slack is not included.
@@ -11,10 +13,17 @@
 
 const crypto = require('crypto');
 
-// Row fields read by the investigation (§B7.3).
+// observedAt values that are a read / build time, not a time the source stated. Every AAP build
+// (and every live read) rewrites them, so they are left out of fp().
+const FALLBACK_OBSERVED_FROM = new Set(['buildAt', 'syncedAt', 'retrievedAt']);
+// Values recomputed from the clock on every build (aap_api_mapper workDuration = now - downStart).
+// Their underlying fact (the WR's created / down-start time) is fingerprinted through 'created'.
+const TIME_DERIVED_FIELDS = new Set(['workDuration']);
+
+// Row fields read by the investigation (§B7.3). workDuration is time-derived (see above).
 const ROW_FP_FIELDS = Object.freeze([
   'lifecycleState', 'lifecycleReason', 'serviceState', 'subState', 'workRequestId', '_serviceId', '_offsiteWrId',
-  '_secondaryWRs', 'vendor', 'dealerName', 'created', 'workDuration', 'repairEtc', 'repairEtcSource', '_factEtc',
+  '_secondaryWRs', 'vendor', 'dealerName', 'created', 'repairEtc', 'repairEtcSource', '_factEtc',
   'partsEta', 'partsStatus', 'estimateStatus', 'etcMissCount', 'etcSlipCount', 'offsiteStage', 'offsiteStageSince',
   'canonicalStatus', 'canonicalConflictCount', 'factConflicts', 'completed', 'fullConversation', 'asistNotes',
   'decisivCaseId', 'vendorWorkOrderId', 'domicileSite', 'issueSummary', 'level1', 'level2',
@@ -35,10 +44,20 @@ function _normValue(it) {
   return v != null && typeof v === 'object' ? stableStringify(v) : String(v == null ? '' : v);
 }
 
+function _fpValue(it) {
+  if (TIME_DERIVED_FIELDS.has(it.field) && (it.source === 'aap_cache' || it.source === 'aap_live')) return '';
+  return _normValue(it);
+}
+
+function _fpObservedAt(it) {
+  if (it.observedAt == null || FALLBACK_OBSERVED_FROM.has(it.observedFrom)) return '';
+  return String(it.observedAt);
+}
+
 function fp(pack) {
   const items = (pack && Array.isArray(pack.items)) ? pack.items : [];
   const lines = items.filter(Boolean).map((it) => [
-    it.source || '', it.sourceRef || '', it.field || '', _normValue(it), it.observedAt == null ? '' : String(it.observedAt),
+    it.source || '', it.sourceRef || '', it.field || '', _fpValue(it), _fpObservedAt(it),
   ].join('\u0001'));
   lines.sort();
   return _sha1(lines.join('\u0002'));
@@ -60,4 +79,4 @@ function cheapFp(input) {
   }));
 }
 
-module.exports = { fp, cheapFp, stableStringify, ROW_FP_FIELDS };
+module.exports = { fp, cheapFp, stableStringify, ROW_FP_FIELDS, FALLBACK_OBSERVED_FROM, TIME_DERIVED_FIELDS };

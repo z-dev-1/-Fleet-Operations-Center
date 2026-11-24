@@ -8,7 +8,8 @@
  *   status()                  dashboard status; no ap_* SQL while the master switch is OFF
  *   runOnce(opts)             one tick through the shared mutex
  *   control(action)           pause | resume | stop | run-now | enable-supervisor
- *   setConfig(patch)          validated settings.autopilot write (+ R4 register / stop handling)
+ *   setConfig(patch)          validated settings.autopilot write (+ R4 register / stop handling);
+ *                             runState is rejected (INVALID_INPUT), it changes only through control()
  *   listCases(filter), getCase(caseId, opts), review(caseId, decision, note)
  *   harnessRun(opts)          lazily requires ./harness and injects runInvestigation + controller
  *                             hooks (R5); { ok:false, code:'UNAVAILABLE' } while ./harness is missing
@@ -129,6 +130,8 @@ function createAutopilot(deps) {
   function control(action) { return controller.control(action); }
 
   function setConfig(patch) {
+    // Run-state changes go through control() (abort, worker stop / register); set-config cannot change them.
+    if (patch && typeof patch === 'object' && Object.prototype.hasOwnProperty.call(patch, 'runState')) return { ok: false, code: 'INVALID_INPUT', field: 'runState' };
     const prev = loadCfg();
     const r = configMod.saveAutopilotPatch(patch, cfgDeps);
     if (!r.ok) return r.key ? { ok: false, code: r.code, field: r.key } : r;
@@ -184,8 +187,9 @@ function createAutopilot(deps) {
       controller: {
         withMutex: controller.withMutex, isRunning: controller.isRunning, ensureSchema: controller.ensureSchema,
         ports: controller.ports, limiter: controller.limiter, owner: controller.owner,
+        beginExternalRun: controller.beginExternalRun,
       },
-      caseStore: cs, config: cfg, now: clock, normUnit,
+      caseStore: cs, config: cfg, loadConfig: loadCfg, now: clock, normUnit,
       supervisorEnabled: () => supervisor.isEnabled(), reason: d.reason, rand: d.rand,
     }));
   }

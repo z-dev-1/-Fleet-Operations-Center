@@ -260,6 +260,70 @@ describe('target state rules', () => {
     expect(r.state).toBe('NEEDS_REVIEW');
   });
 
+  it('manual rerun of an authority_tie case on unchanged evidence stays NEEDS_REVIEW; after accept it is not re-requested', async () => {
+    const since = new Date(s.ck.now() - 2 * H).toISOString();
+    s.world.dtna['322283'] = [
+      { caseId: 'c1', unitId: '322283', offsiteStage: 'repair', stageSince: since, pulledAt: since },
+      { caseId: 'c2', unitId: '322283', offsiteStage: 'ready', stageSince: since, pulledAt: since },
+    ];
+    const { caseId } = F.seedCase();
+    expect((await inv(caseId)).state).toBe('NEEDS_REVIEW');
+    const aiCalls = s.reason.calls.length;
+    s.ck.advance(H);
+    expect(F.cs.review(caseId, 'rerun', { now: s.ck.now() }).ok).toBe(true);
+    const r = await inv(caseId, { trigger: 'manual' });
+    expect(r).toMatchObject({ outcome: 'unchanged', state: 'NEEDS_REVIEW' });
+    expect(s.reason.calls.length).toBe(aiCalls);
+    expect(F.cs.review(caseId, 'accept', { now: s.ck.now() })).toEqual({ ok: true, state: 'MONITORING' });
+    expect(caseOf(caseId).review_accepted_code).toBe('authority_tie');
+    s.ck.advance(H);
+    requeue(caseId);
+    expect((await inv(caseId, { trigger: 'manual' }))).toMatchObject({ outcome: 'unchanged', state: 'MONITORING' });
+  });
+
+  it('manual rerun of an ai_rejected case on unchanged evidence stays NEEDS_REVIEW', async () => {
+    s.reason = reasonResult({ ok: true, data: { schemaVersion: 9 } });
+    const { caseId } = F.seedCase();
+    await inv(caseId);
+    s.ck.advance(H);
+    s.world.rows[0].offsiteStageSince = new Date(s.ck.now() - H).toISOString();
+    requeue(caseId);
+    expect((await inv(caseId, { trigger: 'manual' })).state).toBe('NEEDS_REVIEW');
+    s.ck.advance(H);
+    expect(F.cs.review(caseId, 'rerun', { now: s.ck.now() }).ok).toBe(true);
+    const r = await inv(caseId, { trigger: 'manual' });
+    expect(r).toMatchObject({ outcome: 'unchanged', state: 'NEEDS_REVIEW' });
+    expect(s.reason.calls.length).toBe(2);
+  });
+
+  it('a second AAP build with the same evidence (new build time, recomputed workDuration) -> unchanged, no second AI call', async () => {
+    const { caseId } = F.seedCase();
+    await inv(caseId);
+    expect(s.reason.calls.length).toBe(1);
+    const fp0 = caseOf(caseId).evidence_fp;
+    s.ck.advance(4 * H);
+    s.world.lastOkAt = s.ck.now() - MIN;
+    s.world.syncedAt = new Date(s.ck.now() - MIN).toISOString();
+    s.world.rows[0] = F.baseRow({ workDuration: '5d 6h 0m' });
+    requeue(caseId);
+    const r = await inv(caseId, { trigger: 'evidence_changed' });
+    expect(r.outcome).toBe('unchanged');
+    expect(caseOf(caseId).evidence_fp).toBe(fp0);
+    expect(s.reason.calls.length).toBe(1);
+  });
+
+  it('a new conflict count on the row changes the evidence fingerprint', async () => {
+    const { caseId } = F.seedCase();
+    await inv(caseId);
+    const fp0 = caseOf(caseId).evidence_fp;
+    s.ck.advance(H);
+    s.world.rows[0] = F.baseRow({ canonicalConflictCount: 2 });
+    requeue(caseId);
+    const r = await inv(caseId, { trigger: 'manual' });
+    expect(r.outcome).toBe('recommendation');
+    expect(caseOf(caseId).evidence_fp).not.toBe(fp0);
+  });
+
   it('AAP Unavailable vs Decisiv ready -> cf_status in the prompt and no confirmed fact from its members (AC-6)', async () => {
     s.world.rows[0] = F.baseRow({ decisivCaseId: '21350186', asistSrUrl: SR });
     s.world.docs.decisivCaseCache = { 21350186: { stage: 'ready', scrapedAt: new Date(s.ck.now() - 2 * H).toISOString(), stageSince: new Date(s.ck.now() - 3 * H).toISOString() } };

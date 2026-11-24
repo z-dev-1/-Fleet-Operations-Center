@@ -8,7 +8,8 @@
  *   tick(ctx)               the supervisor tick; shares the _running mutex with runOnce / harness
  *   runOnce(opts)           one tick outside the schedule (BUSY when the mutex is held)
  *   withMutex(fn)           run fn under the shared mutex (harness)
- *   abortInFlight(reason)   first-reason-wins abort of the current tick / run
+ *   abortInFlight(reason)   first-reason-wins abort of the current tick / run / harness
+ *   beginExternalRun()      register the harness's AbortController as the in-flight one
  *   control(action)         pause | resume | stop | run-now | enable-supervisor (§B10.5)
  *   onConfigChanged(prev, next)  master OFF/ON and intervalMs handling (R4)
  *   status()                in-memory diagnostics (no SQL)
@@ -110,6 +111,22 @@ function createController(deps) {
     if (!_ac || _ac.signal.aborted) return false;
     _ac.abort(reason);
     return true;
+  }
+
+  /**
+   * An in-flight section outside the tick pipeline (the harness, called under withMutex).
+   * Its AbortController becomes _ac, so PAUSE / STOP / master OFF / shutdown abort it like a
+   * tick. refreshConfig() re-reads settings.autopilot and updates the _cfg the ports liveReads
+   * gate reads. end() clears _ac.
+   */
+  function beginExternalRun() {
+    const ac = new AbortController();
+    _ac = ac;
+    return {
+      signal: ac.signal,
+      refreshConfig() { _cfg = _loadCfg(); return _cfg; },
+      end() { if (_ac === ac) _ac = null; },
+    };
   }
 
   function _ensureSchema() {
@@ -486,7 +503,7 @@ function createController(deps) {
   }
 
   return {
-    ensureRegistered, spec, tick, runOnce, withMutex, isRunning, whenIdle, abortInFlight, control,
+    ensureRegistered, spec, tick, runOnce, withMutex, isRunning, whenIdle, abortInFlight, beginExternalRun, control,
     onConfigChanged, scheduleRunOnce: _scheduleRunOnce, setPendingTrigger, setCtx, status,
     ensureSchema: _ensureSchema, ports: _portsObj, limiter, owner, runInvestigation,
   };

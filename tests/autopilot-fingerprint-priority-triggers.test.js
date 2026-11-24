@@ -41,6 +41,30 @@ describe('fingerprint', () => {
     expect(cheapFp(Object.assign({}, base, { row: Object.assign({}, row, { repairEtc: '2026-11-13' }) }))).not.toBe(a);
   });
 
+  it('two AAP builds with the same underlying evidence -> same fp and cheapFp (fallback observedAt, workDuration)', () => {
+    const build = (buildAt, wd) => [
+      { source: 'aap_cache', sourceRef: 'row/lifecycleState', field: 'lifecycleState', value: 'Unavailable', observedAt: buildAt, observedFrom: 'buildAt' },
+      { source: 'aap_cache', sourceRef: 'row/workDuration', field: 'workDuration', value: wd, observedAt: buildAt, observedFrom: 'buildAt' },
+      { source: 'aap_cache', sourceRef: 'row/vendor', field: 'vendor', value: 'Penske', observedAt: buildAt + 5, observedFrom: 'syncedAt' },
+      { source: 'aap_live', sourceRef: 'aap/wr-1', field: 'lifecycleState', value: 'Unavailable', observedAt: buildAt + 9, observedFrom: 'retrievedAt', live: true },
+      { source: 'aap_cache', sourceRef: 'row/offsiteStage', field: 'offsiteStage', value: 'repair', observedAt: 100, observedFrom: 'offsiteStageSince' },
+    ];
+    const a = fp({ items: build(1000, '5d 2h 0m') });
+    expect(fp({ items: build(1000 + 4 * H, '5d 6h 0m') })).toBe(a);
+    // A source-stated time and a real value change still change the fingerprint.
+    const b = build(1000, '5d 2h 0m');
+    b[4] = Object.assign({}, b[4], { observedAt: 200 });
+    expect(fp({ items: b })).not.toBe(a);
+    const c = build(1000, '5d 2h 0m');
+    c[0] = Object.assign({}, c[0], { value: 'Active' });
+    expect(fp({ items: c })).not.toBe(a);
+
+    const row = { equipmentId: '322283', lifecycleState: 'Unavailable', workDuration: '5d 2h 0m', created: '2026-11-15T10:00:00Z', canonicalConflictCount: 0 };
+    const input = (r) => ({ row: r, slices: {}, aperiaIssues: null, riSummary: null });
+    expect(cheapFp(input(Object.assign({}, row, { workDuration: '5d 6h 0m' })))).toBe(cheapFp(input(row)));
+    expect(cheapFp(input(Object.assign({}, row, { canonicalConflictCount: 1 })))).not.toBe(cheapFp(input(row)));
+  });
+
   it('cheap fp is evaluated on the first tick after restart even with zero generations', () => {
     expect(shouldEvalCheapFp({ evaluatedOnce: false, gens: { fleetData: 0 }, prevGens: { fleetData: 0 }, now: NOW })).toBe(true);
     expect(shouldEvalCheapFp({ evaluatedOnce: true, gens: { fleetData: 0 }, prevGens: { fleetData: 0 }, lastEvalAt: NOW - MIN, now: NOW })).toBe(false);

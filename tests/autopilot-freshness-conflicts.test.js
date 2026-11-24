@@ -48,6 +48,8 @@ describe('provenance per source (§B7.4, R1)', () => {
 describe('freshness and confidence', () => {
   const it0 = (o) => Object.assign({ observedAt: NOW - DAY, retrievedAt: NOW - 1000 }, o);
   it('classes against staleDays only', () => {
+    // Pinned (§B7.4 order): LIVE takes precedence over a null observedAt; AC-5's "null -> UNKNOWN"
+    // applies to non-live items (a warm Decisiv answer without `since` is still LIVE).
     expect(freshness.classify(it0({ live: true, observedAt: null }), NOW, 3)).toBe('LIVE');
     expect(freshness.classify(it0({ observedAt: null }), NOW, 3)).toBe('UNKNOWN');
     expect(freshness.classify(it0({}), NOW, 3)).toBe('RECENT');

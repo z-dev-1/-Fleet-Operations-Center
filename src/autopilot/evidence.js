@@ -45,6 +45,8 @@ const ROW_FIELDS = Object.freeze([
   'vendor', 'dealerName', 'created', 'workDuration', 'completed', 'repairEtc', 'etcReason', 'partsEta', 'partsStatus',
   'estimateStatus', 'etcMissCount', 'etcSlipCount', 'offsiteStage', 'offsiteStageSince', 'issueSummary',
   'asistNotes', 'fullConversation',
+  // STATUS_CONFLICT inputs (detect.js): a new conflict count changes the evidence fingerprint.
+  'canonicalConflictCount', 'factConflicts',
 ]);
 const LONG_DWELL_FIELDS = Object.freeze(['delayReason', 'escalationLevel', 'summary', 'status', 'daysDown']);
 
