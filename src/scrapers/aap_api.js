@@ -266,10 +266,20 @@ function _requestScript(method, url, bodyLiteral) {
   })();`;
 }
 
-async function _request(method, path, body) {
+// Warm-only mode (fleet-autopilot): reuse the existing page only. Never opens a
+// page or window and never starts a sign-in.
+function _warmPageOrThrow() {
+  if (_page && _token) return _page;
+  throw Object.assign(new Error('AAP page is not warm'), { code: 'AAP_NOT_WARM' });
+}
+
+// opts.warmOnly (fleet-autopilot): use the already-warm page or throw
+// AAP_NOT_WARM; never report auth outcomes and never move the call counters.
+async function _request(method, path, body, opts) {
+  const warm = !!(opts && opts.warmOnly);
   return _withLock(async () => {
     try {
-      const page = await _ensureWindow();
+      const page = warm ? _warmPageOrThrow() : await _ensureWindow();
       const url = path.startsWith('http') ? path : (AAP_ORIGIN + path);
       const bodyLiteral = body != null ? JSON.stringify(JSON.stringify(body)) : 'null';
       const script = _requestScript(method, url, bodyLiteral);
@@ -286,17 +296,19 @@ async function _request(method, path, body) {
         if (!detail) detail = 'HTTP ' + (r && r.status);
         // A 401/403 or an SSO redirect body means the session lapsed mid-call.
         if (r && (r.status === 401 || r.status === 403)) {
-          _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
+          if (!warm) _reportAuth({ ok: false, err: { code: 'MIDWAY_SESSION_INVALID' }, source: 'aap-api' });
           throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
         }
-        if (r && r.timeout) _noteTimeout();
+        if (r && r.timeout && !warm) _noteTimeout();
         throw Object.assign(new Error('AAP API ' + (r && r.status) + ': ' + detail), { code: 'AAP_API_ERROR', status: r && r.status });
       }
-      _reportAuth({ ok: true, source: 'aap-api' });
-      _noteCallOk();
+      if (!warm) {
+        _reportAuth({ ok: true, source: 'aap-api' });
+        _noteCallOk();
+      }
       return r.json;
     } catch (e) {
-      if (e && e.code === 'AAP_API_TIMEOUT') _noteTimeout();
+      if (e && e.code === 'AAP_API_TIMEOUT' && !warm) _noteTimeout();
       throw e;
     }
   });
@@ -554,6 +566,18 @@ async function reverseGeocodeGps(latitude, longitude) {
 // Endpoint 2: full service aggregate (comments, estimates, AVM codes).
 function getService(serviceId) {
   return apiGet('/api/v1/serviceaggregates/' + encodeURIComponent(serviceId));
+}
+
+// fleet-autopilot: same GET as getService, but only on the already-warm page
+// (throws AAP_NOT_WARM otherwise). Reports no auth outcome, moves no counters.
+function getServiceIfWarm(serviceId) {
+  return _request('GET', '/api/v1/serviceaggregates/' + encodeURIComponent(serviceId), null, { warmOnly: true });
+}
+function isWarm() { return !!(_page && _token); }
+// Test seam: set the warm page/token directly (no provider, no window).
+function _setWarmForTest(o) {
+  _page = (o && o.page) || null;
+  _token = (o && o.token) || null;
 }
 
 // relay-extract §11.3: module-level timeout (buildFleetDataset keeps its local
@@ -3240,6 +3264,9 @@ module.exports = {
   buildFleetDataset,
   refreshUnit,
   getService,
+  getServiceIfWarm,             // fleet-autopilot: warm-only getService (never opens a page)
+  isWarm,                       // fleet-autopilot: page + token present
+  _setWarmForTest,              // test seam: set the warm page/token
   getServiceHistory,            // relay-extract §11.3: /serviceaggregates/{id}/history
   getServiceHistoryCached: _cachedServiceHistory, // per-unit callers only (8 s timeout, process cache)
   _resetHistoryCacheForTest,    // test seam: clear the process history cache

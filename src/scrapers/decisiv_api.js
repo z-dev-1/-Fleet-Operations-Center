@@ -273,6 +273,82 @@ async function _apiGet(origin, path, landingUrl) {
   });
 }
 
+// ── Warm-only reads (fleet-autopilot) ────────────────────────────────────────
+// Reuse an already-authenticated window only. These never call _ensureWindow,
+// so they never construct a BrowserWindow and never start auto-login. The warm
+// check runs inside _withLock, in the same critical section as the fetch: a
+// teardown or a concurrent 401 before the lock body makes the read fail closed.
+const WARM_FETCH_MS = 30000;   // in-lock cap: a hung fetch releases the lock (no dispose)
+
+// The warm window for `origin`: present, not destroyed and a CSRF token set.
+function _warmWin(origin) {
+  const w = _wins[origin];
+  if (w && !w.isDestroyed() && _tokens[origin]) return w;
+  return null;
+}
+
+async function _apiGetIfWarm(origin, path) {
+  return _withLock(async () => {
+    const win = _warmWin(origin);
+    if (!win) throw Object.assign(new Error('Decisiv window is not warm'), { code: 'DECISIV_NOT_WARM' });
+    const token = _tokens[origin];
+    const url = path.startsWith('http') ? path : (origin + path);
+    let timer = null;
+    const fetchP = Promise.resolve().then(() => win.webContents.executeJavaScript(_fetchScript(url, token), true));
+    fetchP.catch(() => {});   // a late rejection after the timer won is ignored
+    const timeoutP = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, status: 0, timeout: true }), WARM_FETCH_MS);
+      if (timer.unref) timer.unref();
+    });
+    let r;
+    try { r = await Promise.race([fetchP, timeoutP]); } finally { clearTimeout(timer); }
+    if (r && r.timeout) throw Object.assign(new Error('Decisiv API timed out after ' + WARM_FETCH_MS + 'ms'), { code: 'DECISIV_API_TIMEOUT' });
+    _scheduleTeardown(origin);
+    if (!r || !r.ok) {
+      const detail = (r && (r.text || r.error)) || ('HTTP ' + (r && r.status));
+      if (r && (r.status === 401 || r.status === 403)) {
+        delete _tokens[origin];
+        throw Object.assign(new Error('Decisiv API ' + r.status + ' (session/token rejected)'), { code: 'DECISIV_SESSION_INVALID' });
+      }
+      throw Object.assign(new Error('Decisiv API ' + (r && r.status) + ': ' + detail), { code: 'DECISIV_API_ERROR', status: r && r.status });
+    }
+    return r.json;
+  });
+}
+
+// Same as getCaseStatusSummary, warm window only. Never throws.
+async function getCaseStatusSummaryIfWarm(estimateId, opts = {}) {
+  const id = String(estimateId || '').trim();
+  if (!/^\d+$/.test(id)) return { ok: false, code: 'DECISIV_NO_ESTIMATE_ID' };
+  try {
+    const origin = originFor(opts.srUrl || opts.host || opts.vendor || DEFAULT_HOST);
+    const raw = await _apiGetIfWarm(origin, '/fleet/estimates/' + encodeURIComponent(id) + '/case_repair_status_changes.json');
+    const sum = summarizeCaseStatus(raw);
+    if (!sum) return { ok: false, code: 'DECISIV_UNREADABLE' };
+    return { ok: true, ...sum };
+  } catch (e) {
+    const code = (e && e.code) || 'DECISIV_API_ERROR';
+    if (code !== 'DECISIV_NOT_WARM') logger.warn('[decisiv-api] warm case status est=' + id + ': ' + code);
+    return { ok: false, code, status: e && e.status };
+  }
+}
+
+// Same path as getActivityLogs, warm window only. Returns raw JSON; throws coded errors.
+async function getActivityLogsIfWarm(estimateId, opts = {}) {
+  const id = String(estimateId || '').trim();
+  if (!id) throw Object.assign(new Error('getActivityLogsIfWarm: estimateId required'), { code: 'DECISIV_NO_ESTIMATE_ID' });
+  const origin = originFor(opts.srUrl || opts.host || opts.vendor || DEFAULT_HOST);
+  const page = opts.page || 1;
+  const perPage = opts.perPage || 50;
+  return _apiGetIfWarm(origin, `/mobilecomm/api/estimates/${encodeURIComponent(id)}/activity_logs?page=${page}&per_page=${perPage}`);
+}
+
+/** Diagnostics only: is there a warm window for this Decisiv URL / vendor? */
+function isWarm(urlOrVendor) { return !!_warmWin(originFor(urlOrVendor)); }
+
+// Test seam: the live window / token maps (tests add or remove entries).
+function _warmStateForTest() { return { wins: _wins, tokens: _tokens }; }
+
 // Same in-page fetch as _fetchScript, but for a server-rendered HTML page (the
 // case page). Keeps up to 3 MB of text instead of truncating non-JSON to 1000
 // chars, and reports the final URL so a redirect to /login is detectable.
@@ -614,6 +690,8 @@ module.exports = {
   getCaseStatus, summarizeCaseStatus, getCaseStatusSummary, STAGES,
   getCasePage,
   formatActivityLogs,
+  // fleet-autopilot warm-only reads (never open a window or sign in)
+  isWarm, getCaseStatusSummaryIfWarm, getActivityLogsIfWarm, _warmStateForTest,
   dispose,
   // exported for tests
   _plain, _noteDate, _landingUrl, _caseUrl, _setApiGetForTest, _setPageGetForTest,
