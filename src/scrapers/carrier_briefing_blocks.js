@@ -16,7 +16,9 @@
  *                    etcState, nextStep, severity:'red'|'yellow'|'white',
  *                    needsAction, actionText }],
  *           pmDue: [{ unit, items: [{ type, label, dueIso, dueLabel, days }] }],
- *           domiciles: [{ code, location }] }
+ *           domiciles: [{ code, location }],
+ *           tireActions?: [{ unit, actionText }] }  (approved, carrier-redacted Aperia
+ *             underinflation items; listed under "Needs your action" only when non-empty)
  *  ctx:   { todayIso, dateLabel, updatedLabel, ownerTag, tip, contactUrl,
  *           testPreviewChannelId, includeDown, includeDomiciles }
  */
@@ -180,7 +182,8 @@ function buildBriefingBlocks(facts, ctx) {
   const action = all.filter((d) => d.needsAction);
   let actionBlock = null;
   if (includeDown) {
-    const lines = action.map((d) => '• ' + _shortRef(d) + (d.actionText ? ' — ' + esc(clip(d.actionText, 160)) : ''));
+    const tireLines = (Array.isArray(facts.tireActions) ? facts.tireActions : []).map((t) => '• *' + esc(t.unit) + '* — 🛞 ' + esc(clip(t.actionText, 300)));
+    const lines = action.map((d) => '• ' + _shortRef(d) + (d.actionText ? ' — ' + esc(clip(d.actionText, 160)) : '')).concat(tireLines);
     actionBlock = mrkSection(lines.length
       ? joinWithin('⚠️ *Needs your action*\n', lines, '\n', MAX_TEXT)
       : '⚠️ *Needs your action*\n_Nothing needs your action today._');
@@ -236,7 +239,8 @@ function buildBriefingText(facts, ctx) {
   facts = facts || {};
   ctx = ctx || {};
   const s = _stats(facts, ctx.todayIso || '');
-  const action = (Array.isArray(facts.down) ? facts.down : []).filter((d) => d.needsAction).length;
+  const action = (Array.isArray(facts.down) ? facts.down : []).filter((d) => d.needsAction).length
+    + (Array.isArray(facts.tireActions) ? facts.tireActions.length : 0);
   const b = pmBuckets(facts.pmDue);
   const pmN = b.red.length + b.yellow.length + b.white.length;
   let t = (ctx.ownerTag ? ctx.ownerTag + ' ' : '') + '🚛 Daily Fleet Briefing — ' + (facts.operator || '') +

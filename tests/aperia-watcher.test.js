@@ -75,7 +75,7 @@ function setup(watcher, o = {}) {
   const mainWindow = { show: vi.fn(), focus: vi.fn() };
   // Fleet-row scope: by default every unit these tests use (NP0..NP99 and NP6923) is in the fleet rows.
   const scope = o.scope || (() => FLEET_ALL);
-  const deps = { client, capture, createAlertSocket, Notification: FakeNotification, send, now: () => env.now, scope };
+  const deps = { client, capture, createAlertSocket, Notification: FakeNotification, send, now: () => env.now, scope, share: 'share' in o ? o.share : null };
   if (o.constants) deps.constants = o.constants;
   watcher._setDeps(deps);
   return { client, capture, createAlertSocket, send, ctx: { mainWindow } };
@@ -558,11 +558,71 @@ describe('aperia watcher: fleet-row scope and muted issues', () => {
   it('the default scope reads ctx.lastData.rows (normUnit) when no seam is given', async () => {
     const { watcher } = fresh();
     const d = setup(watcher, { wsToken: null });
-    watcher._setDeps(Object.assign({}, { client: d.client, capture: d.capture, createAlertSocket: d.createAlertSocket, Notification: FakeNotification, send: d.send, now: () => env.now }));
+    watcher._setDeps(Object.assign({}, { client: d.client, capture: d.capture, createAlertSocket: d.createAlertSocket, Notification: FakeNotification, send: d.send, now: () => env.now, share: null }));
     d.ctx.lastData = { rows: [{ equipmentId: 'np350' }] };
     await watcher.start({ ctx: d.ctx });
     rows.push(issue('350', { fleetVehicleId: 'NP350' }), issue('351', { fleetVehicleId: 'NP351' }));
     expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
     expect(FakeNotification.created.map((n) => n.opts.title)).toEqual(['CRITICAL: NP350']);
+  });
+});
+
+describe('aperia watcher: share hook', () => {
+  const shareStub = (impl) => ({ onAlert: vi.fn(impl || (async () => ({ ok: true }))) });
+
+  it('fires on a new poll alert with vehicleId (payload unchanged), never for muted or out-of-scope', async () => {
+    const share = shareStub();
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null, share, scope: () => new Set(['NP3', 'NP6923']) });
+    await watcher.start({ ctx: d.ctx });
+    expect(share.onAlert).not.toHaveBeenCalled();             // priming never shares
+    rows.push(issue('3', { fleetVehicleId: 'NP3' }), issue('4', { fleetVehicleId: 'NP3', muted: true }), issue('5', { fleetVehicleId: 'OTHER' }));
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+    expect(share.onAlert).toHaveBeenCalledTimes(1);
+    const [a, o] = share.onAlert.mock.calls[0];
+    expect(a).toMatchObject({ id: '3', vehicleId: 'v3', fleetVehicleId: 'NP3', state: 'UNDERINFLATION_AND_LEAK', severity: 'CRITICAL' });
+    expect(o).toEqual({ ctx: d.ctx });
+    expect(alerts(d.send)[0]).not.toHaveProperty('vehicleId');
+    expect(await watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 0 });
+    expect(share.onAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires once more on a severity step up', async () => {
+    rows = [issue('90', { severity: 'MAJOR', fleetVehicleId: 'NP90' })];
+    const share = shareStub();
+    const { watcher } = fresh();
+    const d = setup(watcher, { wsToken: null, share });
+    await watcher.start({ ctx: d.ctx });
+    rows[0] = issue('90', { severity: 'CRITICAL', fleetVehicleId: 'NP90' });
+    await watcher.pollNow(d.ctx);
+    await watcher.pollNow(d.ctx);
+    expect(share.onAlert.mock.calls.map((c) => [c[0].id, c[0].severity])).toEqual([['90', 'CRITICAL']]);
+  });
+
+  it('fires for a WS alert with the frame vehicleId', async () => {
+    const share = shareStub();
+    const { watcher } = fresh();
+    const d = setup(watcher, { share });
+    await watcher.start({ ctx: d.ctx });
+    d.createAlertSocket.sockets[0].setState('open');
+    await watcher._onWsAlert({ id: '72', severity: 'CRITICAL', state: 'UNDERINFLATION', vehicleId: 'v72', fleetVehicleId: 'NP72' });
+    expect(share.onAlert).toHaveBeenCalledTimes(1);
+    expect(share.onAlert.mock.calls[0][0]).toMatchObject({ id: '72', vehicleId: 'v72' });
+  });
+
+  it('a throwing or rejecting hook does not break the poll or the notification', async () => {
+    for (const impl of [() => { throw new Error('sync boom'); }, async () => { throw new Error('async boom'); }]) {
+      const share = shareStub(impl);
+      const m = fresh();
+      const d = setup(m.watcher, { wsToken: null, share });
+      await m.watcher.start({ ctx: d.ctx });
+      const id = String(400 + FakeNotification.created.length);
+      rows.push(issue(id, { fleetVehicleId: 'NP40' }));
+      expect(await m.watcher.pollNow(d.ctx)).toEqual({ ok: true, newCount: 1 });
+      expect(share.onAlert).toHaveBeenCalledTimes(1);
+      expect(alerts(d.send).map((a) => a.id)).toEqual([id]);
+      m.watcher._resetForTests();
+    }
+    expect(FakeNotification.created).toHaveLength(2);
   });
 });

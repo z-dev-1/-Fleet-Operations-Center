@@ -186,9 +186,7 @@ function gatherOperatorFacts(operator, cfg) {
   // — so the AI/reasoning layer still sees everything.
   let _redact; try { _redact = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redact = (x) => x; }
 
-  // Block Kit fields: also drop any URL (no internal Relay/AAP links reach the
-  // carrier) before the name/$ redaction.
-  const _carrierText = (s) => _redact(String(s || '').replace(_URL_RE, ' ')).replace(/\s{2,}/g, ' ').trim();
+  // Block Kit fields also go through _carrierText (module scope, below): URL strip + the same redaction.
   const todayIso = nowInZone(cfg.timezone).date;
   const nowMs = Date.now();
 
@@ -293,6 +291,25 @@ const PARTNER_ACTION_RE = /impound|storage fee|release fee|tow(?:ing)? (?:yard )
 function _clip(s, n) {
   const t = String(s || '').trim();
   return t.length > n ? t.slice(0, n - 1).trimEnd() + '…' : t;
+}
+
+// Carrier-facing text: drop any URL (no internal Relay/AAP links reach the
+// carrier), then strip personal names + dollar amounts (redactForSharing).
+function _carrierText(s) {
+  let _redact; try { _redact = require('../orcha/redact_sharing').redactForSharing; } catch (_) { _redact = (x) => x; }
+  return _redact(String(s || '').replace(_URL_RE, ' ')).replace(/\s{2,}/g, ' ').trim();
+}
+
+// Approved Aperia underinflation items for this operator (src/aperia/share-store.js),
+// carrier-redacted, for the "Needs your action" section. [] unless the share
+// toggle is ON. Pending (unapproved) items never appear.
+function _aperiaTireActions(operator) {
+  try {
+    if (!require('../aperia/share-pref').load().enabled) return [];
+    return require('../aperia/share-store').approvedFor(operator)
+      .map((it) => ({ unit: String(it.unit || '').trim(), actionText: _clip(_carrierText(it.text), 300), id: it.id }))
+      .filter((x) => x.unit && x.actionText);
+  } catch (_) { return []; }
 }
 
 function _syncedAt() {
@@ -651,6 +668,8 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
     doLog('[CarrierBriefing] ' + operator + ': no units in fleet data — skipping');
     return { sent: false, reason: 'no-units' };
   }
+  const _tire = _aperiaTireActions(operator);
+  if (_tire.length) facts.tireActions = _tire;
 
   const tz = cfg.timezone;
   const today = nowInZone(tz).date;
@@ -738,6 +757,7 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
     l.lastRunAt = new Date().toISOString();
     _saveLog(l);
     if (aiWritten) _rememberTip(tip);
+    if (_tire.length) { try { require('../aperia/share-store').markItemsSent(_tire.map((t) => t.id)); } catch (_) {} }
   }
 
   doLog('[CarrierBriefing] ' + operator + ': ' + (opts.testToSelf ? 'TEST ' : '') + 'posted to ' +

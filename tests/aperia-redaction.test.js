@@ -41,7 +41,7 @@ class FakeWS extends EventEmitter {
 }
 FakeWS.instances = [];
 
-let logger; let fx; let handlers; let ctx; let mode; let issuesExtra; let fetches;
+let logger; let fx; let handlers; let ctx; let mode; let issuesExtra; let fetches; let shareDetail = false;
 let M = {};
 
 function freshAperia() {
@@ -67,6 +67,10 @@ function detailFor(id) {
   if (String(id) === '104') {
     const s = d.sensors.find((x) => x.position === 'L3IC');
     s.issue = { id: 9555, severity: 'CRITICAL', type: 'UNDERINFLATION', resolveBy: 'immediately', createdAt: '2026-11-22T14:00:00Z', actions: ['Check the tire', { email: 'sentinel.person@example.com' }] };
+    if (shareDetail) {
+      d.latestGeoTag = Object.assign({}, d.latestGeoTag, { latitude: 40.62660, longitude: -75.44570, locationPictureUrl: 'https://maps.googleapis.com/maps/api/staticmap?center=40.62660,-75.44570' });
+      d.sensors.find((x) => x.position === 'R1OC').issue = { id: 9888, severity: 'CRITICAL', type: 'UNDERINFLATION_AND_LEAK', resolveBy: 'immediately', createdAt: '2026-11-22T14:40:00Z', actions: ['Check the tire for leaks and repair/replace the tire immediately.'] };
+    }
   }
   return withPii(d);
 }
@@ -413,6 +417,72 @@ describe('Aperia redaction: background sign-in (Phase E)', () => {
     expect(shown()).toHaveLength(0);
     assertClean([r, M.session.status()]);
   }, 15000);
+});
+
+describe('Aperia redaction: underinflation share path', () => {
+  const ADDRESS = '1 Sentinel Way, Testville, PA 18000';
+  const SHARE_FILES = ['aperia_share.json', 'aperia_share_pref.json'];
+  const clearShare = () => { for (const f of SHARE_FILES) { try { fs.rmSync(path.join(DATA, f), { force: true }); } catch (_) {} } };
+
+  it('watcher poll -> share -> compose -> DM: no token, cookie, coordinates or address in logs or pushes', async () => {
+    clearShare();
+    setup();
+    shareDetail = true;
+    try {
+      ctx.lastData.rows[0].operator = 'GWOP';
+      const results = [];
+      expect(await call('aperia:login')).toEqual({ ok: true, state: 'connected' });
+      require('../src/aperia/share-pref').save(true);
+      const share = require('../src/aperia/share');
+      const geocode = require('../src/aperia/geocode');
+      const compose = require('../src/aperia/share-compose');
+      const reverseGeocodeGps = vi.fn(async () => ({ locLabel: ADDRESS }));
+      const ask = vi.fn(async () => '');
+      const dms = [];
+      const slack = {
+        openConversation: vi.fn(async () => 'D_OWNER'),
+        sendToChannel: vi.fn(async (ch, text, ts, o) => { dms.push({ ch, text, ts, o }); return { ok: true }; }),
+      };
+      share._setDeps({
+        geocode: { reverseGeocode: (lat, lng) => geocode.reverseGeocode(lat, lng, {}, { reverseGeocodeGps }) },
+        compose: Object.assign({}, compose, { compose: (f, a) => compose.compose(f, a, { ask }) }),
+        resolveOperatorEntry: () => ({ operator: 'GWOP', channelId: 'C_GW', ownerId: 'U_OWNER' }),
+        slack,
+        storeMod: { load: () => ({ rows: [] }) },
+      });
+      const s = await call('aperia:start-alerts', { minutes: 5 });
+      expect(s.ok).toBe(true);
+      results.push(s);
+      issuesExtra = { id: 9888, severity: 'CRITICAL', state: 'UNDERINFLATION_AND_LEAK', position: 'R1OC', positionName: 'Right Steer Outer', dateDetected: '2026-11-22T14:40:00Z' };
+      const pn = await call('aperia:poll-now');
+      expect(pn).toEqual({ ok: true, newCount: 1 });
+      results.push(pn);
+      await until(() => dms.length === 1 && logger.lines.some((l) => l.args[0] === '[aperia] share' && l.args[1].op === 'share'));
+      expect(reverseGeocodeGps).toHaveBeenCalledWith(40.6266, -75.4457);
+      expect(dms[0]).toMatchObject({ ch: 'D_OWNER', ts: null, o: { unfurl: false } });
+      expect(dms[0].text).toContain(ADDRESS);
+      expect(dms[0].text).toContain('Right Steer Outer');
+      expect(dms[0].text).not.toMatch(/40\.6266|-75\.4457/);
+      expect(ask.mock.calls[0][0]).not.toMatch(/40\.6266|-75\.4457/);
+      const shareFile = fs.readFileSync(path.join(DATA, 'aperia_share.json'), 'utf8');
+      expect(shareFile).toContain(ADDRESS);
+      results.push(await call('aperia:stop-alerts'));
+
+      const logs = logger.text();
+      for (const bad of ['40.6266', '-75.4457', ADDRESS, 'Sentinel Way']) {
+        expect(logs).not.toContain(bad);
+        expect(JSON.stringify(ctx.sent)).not.toContain(bad);
+        expect(JSON.stringify(results)).not.toContain(bad);
+      }
+      const alertPush = ctx.sent.find((x) => x[0] === 'aperia:alert' && x[1].type === 'alert');
+      expect(alertPush[1].alert).not.toHaveProperty('vehicleId');
+      assertClean(results);
+    } finally {
+      shareDetail = false;
+      try { require('../src/aperia/share')._resetForTests(); } catch (_) {}
+      clearShare();
+    }
+  });
 });
 
 describe('Aperia static guards', () => {

@@ -22,13 +22,16 @@
  * escalation included. An empty scope (fleet rows not loaded) skips the poll without marking anything
  * seen. The poll itself stays fleet-wide on the wire (Aperia has no per-unit issues feed).
  * Every on/off/mode change is sent as { type:'watcher', status } on 'aperia:alert'.
+ * Each notified alert is also handed, fire-and-forget, to src/aperia/share.js onAlert (the toggle-gated
+ * underinflation share; OFF by default), so the share reuses this de-dupe exactly. The internal alert object
+ * carries vehicleId for that; the 'aperia:alert' payload does not.
  * Logs carry counts and codes only.
  */
 const C0 = require('./constants');
 const { safeErr } = require('./redact');
 const log = require('../utils/logger')('aperia');
 
-// Test seam: { client, capture, seenStore, createAlertSocket, Notification, send, mainWindow, now, timers, constants, scope }.
+// Test seam: { client, capture, seenStore, createAlertSocket, Notification, send, mainWindow, now, timers, constants, scope, share }.
 let _deps = {};
 let _scopeFn = null; // start({ scope }) — () => Set of normUnit ids
 function _fleetScope() { return require('./fleet-scope'); }
@@ -54,6 +57,7 @@ function _timers() {
     clearInterval: (t) => globalThis.clearInterval(t),
   }, _deps.timers || {});
 }
+function _share() { return 'share' in _deps ? _deps.share : require('./share'); }
 function _Notification() {
   if ('Notification' in _deps) return _deps.Notification;
   try { return require('electron').Notification; } catch (_) { return null; }
@@ -119,6 +123,10 @@ function _notify(alert) {
       positionName: alert.positionName || '', domicile: alert.domicile || '', detectedAt: alert.detectedAt || '',
     },
   });
+  try {
+    const s = _share();
+    if (s && typeof s.onAlert === 'function') Promise.resolve(s.onAlert(alert, { ctx: _ctx })).catch(() => {});
+  } catch (_) {}
 }
 
 const SEV_RANK = Object.freeze({ MINOR: 1, MAJOR: 2, CRITICAL: 3 });
@@ -286,7 +294,7 @@ function _poll(ctx) {
       if (_seen.has(id)) { if (!_escalated(id, x.severity)) continue; } else { _seen.set(id, at); _noteSev(id, x.severity); }
       fresh.push({
         id, severity: x.severity, fleetVehicleId: x.fleetVehicleId, state: x.state,
-        positionName: x.positionName, domicile: x.domicile, detectedAt: x.dateDetected,
+        positionName: x.positionName, domicile: x.domicile, detectedAt: x.dateDetected, vehicleId: x.vehicleId,
       });
     }
     if (fresh.length || dirty) _save();
@@ -327,7 +335,7 @@ async function _onWsAlert(a) {
   const gen = _gen;
   const alert = {
     id, severity: a.severity, fleetVehicleId: a.fleetVehicleId, state: a.state,
-    positionName: '', domicile: '', detectedAt: new Date(_now()).toISOString(),
+    positionName: '', domicile: '', detectedAt: new Date(_now()).toISOString(), vehicleId: a.vehicleId || '',
   };
   try {
     const r = a.vehicleId ? await _client().getVehicle(a.vehicleId, _ctx) : null;
