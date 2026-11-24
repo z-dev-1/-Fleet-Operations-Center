@@ -176,17 +176,20 @@ describe('N13 rollback: records written by a flagged build are handled with all 
 });
 
 describe('N14 jobs status with all flags OFF', () => {
-  it('matches the baseline (FEAT-008 adds only the single inert types.emailTriage entry)', () => {
-    // NFR-12: the only difference is the new job type itself (its inert summary entry, its slot in the
-    // type list, its env name and its default-false flag). Everything else is the base document.
+  it('matches the baseline (FEAT-008 adds only the inert types.emailTriage entry, fleet-autopilot only types.autopilotInvestigate)', () => {
+    // NFR-12: the only difference is the new job types themselves (their inert summary entries, their slots in the
+    // type list, their env names and their default-false flags). Everything else is the base document.
     const expected = JSON.parse(JSON.stringify(baseline.N14));
     expected.summary.types.emailTriage = { flag: false, effective: false, adopted: true, mode: 'off' };
-    expected.jobTypes = expected.jobTypes.concat(['emailTriage']);
+    expected.summary.types.autopilotInvestigate = { flag: false, effective: false, adopted: true, mode: 'off' };
+    expected.jobTypes = expected.jobTypes.concat(['emailTriage', 'autopilotInvestigate']);
     expected.jobEnv.emailTriage = 'FLEET_JOBS_EMAIL_TRIAGE';
+    expected.jobEnv.autopilotInvestigate = 'FLEET_JOBS_AUTOPILOT_INVESTIGATE';
     expected.resolveJobsDefault.types.emailTriage = false;
+    expected.resolveJobsDefault.types.autopilotInvestigate = false;
     expect(cur.N14).toEqual(expected);
     const added = Object.keys(cur.N14.summary.types).filter((k) => !(k in baseline.N14.summary.types));
-    expect(added).toEqual(['emailTriage']);
+    expect(added).toEqual(['emailTriage', 'autopilotInvestigate']);
     expect(cur.N14.init).toEqual(baseline.N14.init);
     expect(cur.N14.status).toEqual(baseline.N14.status);
   });

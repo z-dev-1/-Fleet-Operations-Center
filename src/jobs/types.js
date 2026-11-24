@@ -26,9 +26,12 @@ const _registry = {
   // emailTriage (email-intel): one mailbox scan (scope 'mailbox'). Reads the mailbox and writes local
   // stores only; timeline writes are idempotent (ledger + marker); sends are never jobs.
   emailTriage: Object.freeze({ leaseMs: 10 * MIN, maxRunMs: 30 * MIN, maxAttempts: 3, resumeMaxAgeMs: 2 * H, sideEffects: 'none-external', recovery: 'retry', adopted: true }),
+  // autopilotInvestigate (fleet-autopilot): one shadow-mode case investigation (scope 'case:<id>').
+  // Reads caches and warm-only transports, writes local ap_* rows only.
+  autopilotInvestigate: Object.freeze({ leaseMs: 10 * MIN, maxRunMs: 30 * MIN, maxAttempts: 3, resumeMaxAgeMs: 30 * MIN, sideEffects: 'none-external', recovery: 'retry', adopted: true }),
 };
 
-const ADOPTED = Object.freeze({ deepScan: true, repairIntel: true, rcaAutofill: true, longDwellAiFill: true, emailTriage: true });
+const ADOPTED = Object.freeze({ deepScan: true, repairIntel: true, rcaAutofill: true, longDwellAiFill: true, emailTriage: true, autopilotInvestigate: true });
 
 function get(type) {
   return typeof type === 'string' && Object.prototype.hasOwnProperty.call(_registry, type) ? _registry[type] : null;

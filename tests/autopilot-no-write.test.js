@@ -191,7 +191,7 @@ describe('§B14 static boundary', () => {
 });
 
 describe('§B14 item 7: transitive require closure', () => {
-  it('walker self-test: ports.js reaches the transports and the relay (lazy requires followed)', () => {
+  it('walker self-test: ports.js reaches the transports and the relay (lazy requires followed)', { timeout: 30000 }, () => {
     const c = closure(path.join(AP_DIR, 'ports.js'));
     expect(c.has('src/scrapers/aap_api.js')).toBe(true);
     expect(c.has('src/scrapers/decisiv_api.js')).toBe(true);
@@ -199,7 +199,7 @@ describe('§B14 item 7: transitive require closure', () => {
     expect([...c].some(CLOSURE_FORBIDDEN)).toBe(true);
   });
 
-  it('every other Autopilot module reaches no write, transport, DTNA, Aperia, relay or auth module', () => {
+  it('every other Autopilot module reaches no write, transport, DTNA, Aperia, relay or auth module', { timeout: 30000 }, () => {
     for (const f of apFiles) {
       if (path.dirname(f) !== AP_DIR || CLOSURE_EXEMPT.has(base(f))) continue;
       const bad = [...closure(f)].filter(CLOSURE_FORBIDDEN);

@@ -433,13 +433,14 @@ function loadAuthPropagation(deps = {}) {
 // src/jobs/index.js init() and memoized (restart to change).
 // emailTriage (email-intel FEAT-008, NFR-12): settings.jobs.emailTriage.durable /
 // FLEET_JOBS_EMAIL_TRIAGE; used only by src/email-intel/reliability/job.js.
-const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage'];
+const JOB_TYPES = ['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage', 'autopilotInvestigate'];
 const JOB_ENV = {
   deepScan: 'FLEET_JOBS_DEEP_SCAN',
   repairIntel: 'FLEET_JOBS_REPAIR_INTEL',
   longDwellAiFill: 'FLEET_JOBS_LONG_DWELL_AI_FILL',
   rcaAutofill: 'FLEET_JOBS_RCA_AUTOFILL',
   emailTriage: 'FLEET_JOBS_EMAIL_TRIAGE',
+  autopilotInvestigate: 'FLEET_JOBS_AUTOPILOT_INVESTIGATE',
 };
 
 function resolveJobsFlags(settings, env) {

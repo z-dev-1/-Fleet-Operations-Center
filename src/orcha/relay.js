@@ -273,6 +273,7 @@ const SOURCE_PRIORITY = Object.freeze({
   'reason:tasks': 'low',
   fas_shadow: 'low',
   offline_rewrite: 'low',
+  autopilot: 'low',
 });
 
 function _normSource(s) {

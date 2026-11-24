@@ -685,6 +685,36 @@ function runsSince(caseId, sinceMs) {
   return _all('SELECT run_id, trigger, started_at FROM ap_run WHERE case_id = ? AND started_at >= ? ORDER BY started_at', caseId, sinceMs);
 }
 
+/** One run, parsed, or null. */
+function getRun(runId) {
+  return _parseRun(_get('SELECT * FROM ap_run WHERE run_id = ?', runId));
+}
+
+/** Findings of one run as pack items (used to resume from a checkpoint). */
+function findingsForRun(runId) {
+  return _all('SELECT * FROM ap_finding WHERE run_id = ? ORDER BY id', runId).map((f) => ({
+    evidenceId: f.evidence_id, source: f.source, sourceRef: f.source_ref, field: f.field, value: f.value_text,
+    observedAt: f.observed_at, retrievedAt: f.retrieved_at, live: false, freshness: f.freshness, confidence: f.confidence,
+    trust: f.trust, authorityTag: f.authority_tag, conflictGroup: f.conflict_group,
+    flags: f.flags ? String(f.flags).split(',').filter(Boolean) : [],
+  }));
+}
+
+/** Set of 'caseId|YYYY-MM-DD' for eta_due triggers already fired since sinceMs. */
+function etaDueFired(sinceMs) {
+  const out = new Set();
+  for (const r of _all("SELECT case_id, reason_code FROM ap_event WHERE kind = 'transition' AND at >= ? AND substr(reason_code, 1, 8) = 'eta_due:'", sinceMs)) {
+    out.add(r.case_id + '|' + String(r.reason_code).slice(8));
+  }
+  return out;
+}
+
+/** ap_run AI columns since sinceMs (diagnostics). */
+function aiRunStats(sinceMs) {
+  return _all('SELECT ai_status, ai_latency_ms, ai_lane, trigger, outcome, source_calls_json FROM ap_run WHERE started_at >= ?', sinceMs)
+    .map((r) => ({ ai_status: r.ai_status, ai_latency_ms: r.ai_latency_ms, ai_lane: r.ai_lane, trigger: r.trigger, outcome: r.outcome, source_calls: _parse(r.source_calls_json) }));
+}
+
 module.exports = {
   // writes (one transaction each)
   upsertDetected, transition, persistRun, reserveAiCallAndMarkPending, sweepResolution,
@@ -692,5 +722,6 @@ module.exports = {
   recoverAbandoned, prune, review, bumpCounter, setMeta, appendEvent,
   // reads
   getMeta, listCases, getCase, counts, listOpen, pickQueued, findResumable, runsSince,
+  getRun, findingsForRun, etaDueFired, aiRunStats,
   ISSUE_KEY,
 };

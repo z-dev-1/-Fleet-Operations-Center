@@ -14,8 +14,8 @@ const jobs = require('../src/jobs');
 
 describe('T8 resolveJobsFlags', () => {
   it('everything defaults off', () => {
-    expect(pf.resolveJobsFlags({}, {})).toEqual({ enabled: false, types: { deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false, emailTriage: false } });
-    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage']);
+    expect(pf.resolveJobsFlags({}, {})).toEqual({ enabled: false, types: { deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false, emailTriage: false, autopilotInvestigate: false } });
+    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage', 'autopilotInvestigate']);
     expect(pf.JOB_ENV.longDwellAiFill).toBe('FLEET_JOBS_LONG_DWELL_AI_FILL');
     expect(pf.JOB_ENV.emailTriage).toBe('FLEET_JOBS_EMAIL_TRIAGE');
   });

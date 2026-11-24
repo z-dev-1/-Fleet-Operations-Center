@@ -103,8 +103,8 @@ describe('R8.7 / NFR-1 resolveEmailIntelFlags', () => {
   });
 
   it('existing resolvers are unchanged; JOB_TYPES only gains emailTriage (FEAT-008)', () => {
-    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage']);
-    expect(pf.resolveJobsFlags({}, {}).types).toEqual({ deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false, emailTriage: false });
+    expect(pf.JOB_TYPES).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage', 'autopilotInvestigate']);
+    expect(pf.resolveJobsFlags({}, {}).types).toEqual({ deepScan: false, repairIntel: false, longDwellAiFill: false, rcaAutofill: false, emailTriage: false, autopilotInvestigate: false });
     expect(pf.resolveWorkerFlags({}, {}).supervisorEnabled).toBe(false);
   });
 
@@ -115,7 +115,7 @@ describe('R8.7 / NFR-1 resolveEmailIntelFlags', () => {
       jobs._resetForTests({ flags: { enabled: false, types: {} } });
       expect(jobs.init()).toEqual({ mode: 'off' });
       const sum = jobs.getSummary(Date.now());
-      expect(Object.keys(sum.types)).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage']);
+      expect(Object.keys(sum.types)).toEqual(['deepScan', 'repairIntel', 'longDwellAiFill', 'rcaAutofill', 'emailTriage', 'autopilotInvestigate']);
       expect(sum.types.emailTriage).toEqual({ flag: false, effective: false, adopted: true, mode: 'off' });
       expect(jobs.begin({ type: 'emailTriage', scopeKey: 'mailbox' })).toBe(jobs.NOOP_HANDLE);
       expect(jobs.isEffective('emailTriage')).toBe(false);
