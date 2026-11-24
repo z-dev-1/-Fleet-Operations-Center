@@ -144,7 +144,8 @@ export function open(deps) {
     }
     if (reviewBtn) {
       reviewBtn.textContent = 'Carrier-briefing items (' + pending + ')';
-      reviewBtn.disabled = !ap || pending === 0 || typeof ap.shareItems !== 'function';
+      // Enabled at 0 pending too, so approved-but-unsent items stay reviewable.
+      reviewBtn.disabled = !ap || typeof ap.shareItems !== 'function';
     }
   };
   const apply = (s) => {

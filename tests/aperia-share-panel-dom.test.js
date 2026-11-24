@@ -78,8 +78,21 @@ describe('Aperia panel: Tire Alerts + Share underinflation alerts toggles', () =
     expect(q('#aperia-panel-share-note').textContent.startsWith('Off by default.')).toBe(true);
     expect(q('#aperia-panel-share-note').textContent).toContain('Settings \u2192 Operator Channels');
     expect(q('#aperia-panel-share-review').textContent).toBe('Carrier-briefing items (0)');
-    expect(q('#aperia-panel-share-review').disabled).toBe(true);
+    expect(q('#aperia-panel-share-review').disabled).toBe(false);
     expect(q('#aperia-panel-share-list')).toBeTruthy();
+  });
+
+  it('with 0 pending the review button still opens the list so approved-but-unsent items can be dismissed', async () => {
+    m.s.items = [{ ...ITEM, status: 'approved' }];
+    m.s.cur = { ...BASE, share: true, sharePending: 0 };
+    await openPanel();
+    const review = q('#aperia-panel-share-review');
+    expect(review.textContent).toBe('Carrier-briefing items (0)');
+    expect(review.disabled).toBe(false);
+    review.click();
+    await flush();
+    expect(m.aperia.shareItems).toHaveBeenCalledTimes(1);
+    expect(q('#aperia-panel-share-list').textContent).toContain('Status: approved');
   });
 
   it('a status without share reads OFF', async () => {

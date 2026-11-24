@@ -39,7 +39,7 @@ const logger = require('../utils/logger').createLogger('carrier_briefing');
 const { getOperatorChannels, resolveOperatorEntry } = require('./pm_alert_reply');
 // Block Kit redesign (2026-11-17): the layout is now deterministic Block Kit
 // (carrier_briefing_blocks.js); the AI writes only the safety tip.
-const { buildBriefingBlocks, buildBriefingText, PM_TYPES, PM_WINDOW_DAYS } = require('./carrier_briefing_blocks');
+const { buildBriefingBlocks, buildBriefingText, renderedTireActions, PM_TYPES, PM_WINDOW_DAYS } = require('./carrier_briefing_blocks');
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG = {
@@ -757,7 +757,14 @@ async function sendOperatorBriefing(operator, deps, opts, log) {
     l.lastRunAt = new Date().toISOString();
     _saveLog(l);
     if (aiWritten) _rememberTip(tip);
-    if (_tire.length) { try { require('../aperia/share-store').markItemsSent(_tire.map((t) => t.id)); } catch (_) {} }
+    // Only the tire items that were actually rendered are marked sent; the rest
+    // (includeDown off, or cut by the Needs-your-action cap) stay approved.
+    if (_tire.length) {
+      try {
+        const _shown = renderedTireActions(facts, ctx).map((t) => t.id).filter(Boolean);
+        if (_shown.length) require('../aperia/share-store').markItemsSent(_shown);
+      } catch (_) {}
+    }
   }
 
   doLog('[CarrierBriefing] ' + operator + ': ' + (opts.testToSelf ? 'TEST ' : '') + 'posted to ' +

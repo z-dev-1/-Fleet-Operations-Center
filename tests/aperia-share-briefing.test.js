@@ -114,6 +114,47 @@ describe('carrier briefing + Aperia share items', () => {
     expect(shareStore.list()[0].status).toBe('approved');
   });
 
+  it('includeDown off -> the item is not rendered and stays approved after a real send', async () => {
+    pref.save(true);
+    store.save('carrierBriefingConfig', { enabled: true, tipEnabled: false, includeDown: false });
+    const it0 = addItem();
+    shareStore.decide(it0.id, 'approve');
+    const r = await cb.sendOperatorBriefing('GWOP', deps, {}, () => {});
+    expect(r.sent).toBe(true);
+    expect(JSON.stringify(deps.sendBlocksToChannel.mock.calls[0][1])).not.toContain('🛞');
+    expect(shareStore.list()[0]).toMatchObject({ status: 'approved', text: ITEM_TEXT });
+  });
+
+  it('over the Needs-your-action cap: tire lines come first and only the rendered ones are marked sent', async () => {
+    pref.save(true);
+    const long = (n) => 'A100 tire ' + n + ' is at 70 PSI vs 100 target. ' + 'inflate the tire to the set point now. '.repeat(7);
+    const ids = [];
+    for (let i = 0; i < 14; i++) {
+      const it = addItem({ issueId: 'iss' + i, text: long(i) });
+      shareStore.decide(it.id, 'approve');
+      ids.push(it.id);
+    }
+    const r = await cb.sendOperatorBriefing('GWOP', deps, {}, () => {});
+    expect(r.sent).toBe(true);
+    const act = actionText(deps.sendBlocksToChannel.mock.calls[0][1]);
+    expect(act.length).toBeLessThanOrEqual(2900);
+    expect(act).toMatch(/and \d+ others$/);
+    expect(act.split('\n')[1]).toContain('🛞');                     // first line is a tire item
+    const shown = (act.match(/🛞/g) || []).length;
+    expect(shown).toBeGreaterThan(0);
+    expect(shown).toBeLessThan(14);
+    const byStatus = (s) => shareStore.list().filter((x) => x.status === s).length;
+    expect(byStatus('sent')).toBe(shown);
+    expect(byStatus('approved')).toBe(14 - shown);
+  });
+
+  it('renderedTireActions matches what buildBriefingBlocks renders', () => {
+    const facts = { operator: 'GWOP', totalUnits: 1, downCount: 0, down: [], pmDue: [], domiciles: [], tireActions: [{ unit: 'A100', actionText: 'x', id: 's1' }] };
+    expect(R.renderedTireActions(facts, {}).map((t) => t.id)).toEqual(['s1']);
+    expect(R.renderedTireActions(facts, { includeDown: false })).toEqual([]);
+    expect(R.renderedTireActions(Object.assign({}, facts, { tireActions: [] }), {})).toEqual([]);
+  });
+
   it('another operator\'s approved item is not included', async () => {
     pref.save(true);
     const it0 = addItem({ operator: 'OTHEROP' });

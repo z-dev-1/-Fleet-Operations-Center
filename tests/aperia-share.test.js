@@ -177,6 +177,32 @@ describe('aperia share: toggle ON', () => {
     expect(logger.text()).not.toContain('slack down');
   });
 
+  it('a Slack send failure schedules one 60 s retry that DMs the owner once Slack is back', async () => {
+    pref.save(true);
+    let fail = true;
+    setup({ sendToChannel: async () => { if (fail) throw new Error('slack down'); return { ok: true }; } });
+    expect(await share.onAlert(alert(), { ctx })).toMatchObject({ code: 'APERIA_SHARE_SEND_FAILED' });
+    expect(d.timers).toHaveLength(1);
+    expect(d.timers[0].ms).toBe(60e3);
+    fail = false;
+    await d.timers[0].fn();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(d.slack.sendToChannel).toHaveBeenCalledTimes(2);
+    expect(store.shouldSend('9001', 'CRITICAL')).toBe(false);
+    expect(store.list()).toHaveLength(1);                      // one item per issue + severity
+    expect(d.timers).toHaveLength(1);
+  });
+
+  it('an escalated alert gets its own retry after the lower severity used its one', async () => {
+    pref.save(true);
+    setup({ getVehicle: async () => ({ ok: false, code: 'APERIA_NETWORK' }) });
+    await share.onAlert(alert({ severity: 'MAJOR' }), { ctx });
+    await share.onAlert(alert({ severity: 'MAJOR' }), { ctx });
+    expect(d.timers).toHaveLength(1);
+    await share.onAlert(alert({ severity: 'CRITICAL' }), { ctx });
+    expect(d.timers).toHaveLength(2);
+  });
+
   it('a failed vehicle read schedules one retry in 60 s; vehicleId missing uses lookupUnit', async () => {
     pref.save(true);
     setup({ getVehicle: async () => ({ ok: false, code: 'APERIA_NETWORK' }) });

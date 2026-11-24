@@ -12,7 +12,8 @@
  *     6. the detail's issue type must be shareable too
  *     7. street address from the unit GPS (omitted when it cannot be resolved)
  *     8. AI-composed text (validated; deterministic fallback)
- *     9. Slack DM to the operator owner (Settings -> Operator Channels); the ledger is marked only after the send
+ *     9. Slack DM to the operator owner (Settings -> Operator Channels); the ledger is marked only after the send;
+ *        a failed send schedules the same ONE 60 s retry (per id + severity)
  *    10. a 'pending' carrier-briefing item when the operator has a carrier channel; it never posts by itself
  *
  * One run per issue id at a time. Logs { op:'share', code, dm, item, ms } only.
@@ -59,10 +60,14 @@ function _done(t0, r) {
   return r;
 }
 
+// One retry per alert id + severity, so an escalated alert gets its own retry.
+// The key set is bounded (oldest keys dropped first).
+const RETRY_KEYS_MAX = 2000;
 function _scheduleRetry(alert, ctx) {
-  const id = String(alert.id);
-  if (_retried.has(id)) return;
-  _retried.add(id);
+  const key = String(alert.id) + '|' + String(alert.severity || '?').toUpperCase();
+  if (_retried.has(key)) return;
+  _retried.add(key);
+  while (_retried.size > RETRY_KEYS_MAX) _retried.delete(_retried.values().next().value);
   try {
     const t = _setTimeout()(() => { onAlert(alert, { ctx, _retry: true }).catch(() => {}); }, RETRY_MS);
     if (t && typeof t.unref === 'function') t.unref();
@@ -119,6 +124,7 @@ async function _run(alert, opts) {
       } catch (_) {
         out.ok = false;
         out.code = 'APERIA_SHARE_SEND_FAILED';
+        if (!(opts && opts._retry)) _scheduleRetry(alert, ctx);
       }
     } else {
       out.code = 'no-owner';

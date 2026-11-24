@@ -17,8 +17,9 @@
  *                    needsAction, actionText }],
  *           pmDue: [{ unit, items: [{ type, label, dueIso, dueLabel, days }] }],
  *           domiciles: [{ code, location }],
- *           tireActions?: [{ unit, actionText }] }  (approved, carrier-redacted Aperia
- *             underinflation items; listed under "Needs your action" only when non-empty)
+ *           tireActions?: [{ unit, actionText, id? }] }  (approved, carrier-redacted Aperia
+ *             underinflation items; listed first under "Needs your action" only when
+ *             non-empty; renderedTireActions(facts, ctx) returns the ones that fit)
  *  ctx:   { todayIso, dateLabel, updatedLabel, ownerTag, tip, contactUrl,
  *           testPreviewChannelId, includeDown, includeDomiciles }
  */
@@ -56,16 +57,41 @@ const context = (texts) => ({ type: 'context', elements: texts.map((t) => ({ typ
 
 // Join `items` with `sep` after `prefix`, stopping before `max` chars and
 // naming how many were left out ("and N others").
-function joinWithin(prefix, items, sep, max) {
+function joinWithin(prefix, items, sep, max) { return _fit(prefix, items, sep, max).text; }
+// Same as joinWithin, plus `shown` = how many leading items made it in.
+function _fit(prefix, items, sep, max) {
   let out = prefix;
   for (let i = 0; i < items.length; i++) {
     const piece = (i ? sep : '') + items[i];
     const after = items.length - i - 1;
     const reserve = after ? (sep + 'and ' + after + ' others').length : 0;
-    if ((out + piece).length + reserve > max) return out + (i ? sep : '') + 'and ' + (items.length - i) + ' others';
+    if ((out + piece).length + reserve > max) return { text: out + (i ? sep : '') + 'and ' + (items.length - i) + ' others', shown: i };
     out += piece;
   }
-  return out;
+  return { text: out, shown: items.length };
+}
+
+// "Needs your action" lines. Approved Aperia tire items go FIRST so the
+// 2900-char cap truncates down-unit lines before them.
+function _actionLines(facts, action) {
+  const tires = Array.isArray(facts.tireActions) ? facts.tireActions : [];
+  const tireLines = tires.map((t) => '• *' + esc(t.unit) + '* — 🛞 ' + esc(clip(t.actionText, 300)));
+  const downLines = action.map((d) => '• ' + _shortRef(d) + (d.actionText ? ' — ' + esc(clip(d.actionText, 160)) : ''));
+  return { tires, lines: tireLines.concat(downLines) };
+}
+
+// The facts.tireActions entries that buildBriefingBlocks(facts, ctx) actually
+// renders: [] when includeDown is off, and only the lines before any
+// "and N others" truncation. Callers mark only these as sent.
+function renderedTireActions(facts, ctx) {
+  facts = facts || {};
+  ctx = ctx || {};
+  if (ctx.includeDown === false) return [];
+  const action = _sortDown(Array.isArray(facts.down) ? facts.down : []).filter((d) => d.needsAction);
+  const { tires, lines } = _actionLines(facts, action);
+  if (!tires.length) return [];
+  const { shown } = _fit('⚠️ *Needs your action*\n', lines, '\n', MAX_TEXT);
+  return tires.slice(0, Math.min(shown, tires.length));
 }
 
 function _sortDown(down) {
@@ -182,8 +208,7 @@ function buildBriefingBlocks(facts, ctx) {
   const action = all.filter((d) => d.needsAction);
   let actionBlock = null;
   if (includeDown) {
-    const tireLines = (Array.isArray(facts.tireActions) ? facts.tireActions : []).map((t) => '• *' + esc(t.unit) + '* — 🛞 ' + esc(clip(t.actionText, 300)));
-    const lines = action.map((d) => '• ' + _shortRef(d) + (d.actionText ? ' — ' + esc(clip(d.actionText, 160)) : '')).concat(tireLines);
+    const { lines } = _actionLines(facts, action);
     actionBlock = mrkSection(lines.length
       ? joinWithin('⚠️ *Needs your action*\n', lines, '\n', MAX_TEXT)
       : '⚠️ *Needs your action*\n_Nothing needs your action today._');
@@ -255,6 +280,7 @@ function buildBriefingText(facts, ctx) {
 module.exports = {
   buildBriefingBlocks,
   buildBriefingText,
+  renderedTireActions,
   MAX_BLOCKS,
   MAX_UNIT_ROWS,
   PM_TYPES,
