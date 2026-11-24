@@ -76,8 +76,10 @@ function createAutopilot(deps) {
     try {
       const fleet = ports ? ports.readStore('fleetData') : null;
       const rows = fleet && Array.isArray(fleet.rows) ? fleet.rows : [];
-      out.scope = { unitsNotInFleet: unitsNotInFleet(buildScope(cfg), rows), units: cfg.scope.units.length, domicile: cfg.scope.domicile, allUnits: cfg.scope.allUnits };
-    } catch (_) { out.scope = { unitsNotInFleet: [], units: cfg.scope.units.length, domicile: cfg.scope.domicile, allUnits: cfg.scope.allUnits }; }
+      let fleetDown = 0;
+      for (const r of rows) { try { if (ports.isDown(r)) fleetDown++; } catch (_) {} }
+      out.scope = { unitsNotInFleet: unitsNotInFleet(buildScope(cfg), rows), units: cfg.scope.units.length, domicile: cfg.scope.domicile, allUnits: cfg.scope.allUnits, fleetDown };
+    } catch (_) { out.scope = { unitsNotInFleet: [], units: cfg.scope.units.length, domicile: cfg.scope.domicile, allUnits: cfg.scope.allUnits, fleetDown: null }; }
     try { const j = require('../jobs').getSummary(clock()); out.jobs = j && j.types ? j.types.autopilotInvestigate || null : null; } catch (_) { out.jobs = null; }
     try { out.auth = ports ? ports.authState() : null; } catch (_) { out.auth = null; }
     let isolatedAvailable = null;
@@ -91,6 +93,7 @@ function createAutopilot(deps) {
     if (!controller.ensureSchema()) { out.degraded = 'storage_unavailable'; return out; }
     const now = clock();
     out.counts = cs.counts();
+    out.harnessRanToday = !!cs.getMeta('harness:' + localDate(now));
     const runs = cs.aiRunStats(now - 24 * HOUR);
     const outcomes = {};
     const lanes = {};
@@ -183,6 +186,7 @@ function createAutopilot(deps) {
         ports: controller.ports, limiter: controller.limiter, owner: controller.owner,
       },
       caseStore: cs, config: cfg, now: clock, normUnit,
+      supervisorEnabled: () => supervisor.isEnabled(), reason: d.reason, rand: d.rand,
     }));
   }
 

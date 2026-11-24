@@ -87,6 +87,7 @@ function registerAllIPC(ctx) {
   registerContactsHandlers();
   registerAuthHealthIPC(ctx);
   registerRepairIntelIPC(ctx);
+  try { require('./autopilot').registerAutopilotIPC(ctx); } catch (e) { logger.warn('Autopilot IPC registration failed: ' + e.message); }
   registerAssistantIPC(ctx);
   registerTelemetryIPC(ctx);
   registerWorkersIPC(ctx);

@@ -1,9 +1,10 @@
-// tests/autopilot-no-write.test.js — fleet-autopilot §B14 items 1-7 (static part) and plan R12.
+// tests/autopilot-no-write.test.js — fleet-autopilot §B14 items 1-7 (static part), plan R12, the
+// harness.js file-write exception, and the runtime part: a full controller run over the real port
+// object with throwing write spies leaves every outbound store byte-identical.
 // No Autopilot file may require or reference a write module, a sign-in function or a
 // window-creating read. ports.js is the only file with network / session requires and it
-// reads members only through pick(mod, 'name') with the pinned names below. Files that do
-// not exist yet (later FEATs) are skipped.
-import { describe, it, expect } from 'vitest';
+// reads members only through pick(mod, 'name') with the pinned names below.
+import { describe, it, expect, vi } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -33,6 +34,8 @@ const requiresOf = (src) => [...src.matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/
 // §B14 item 1 (+ item 7 narrowing).
 const COMMON = new Set(['crypto', '../jobs', '../telemetry', '../utils/logger', '../ai/authority', '../ai/trace', '../email-intel/untrusted']);
 function allowedFor(file, r) {
+  // src/ipc/autopilot.js: the IPC wrapper, the facade, the pure constants and the logger only.
+  if (file === IPC_FILE) return ['./_safe', '../autopilot', '../autopilot/constants', '../utils/logger'].includes(r);
   const f = base(file);
   if (r.startsWith('./')) return true;
   if (COMMON.has(r)) return true;
@@ -354,5 +357,92 @@ describe('ports gates (evaluated right before each live call)', () => {
     expect(p.readStore('relayWritesPending')).toBe(null);
     p.readStore('fleetData');
     expect(loads).toEqual(['fleetData']);
+  });
+});
+
+describe('§B14 item 1 exception: harness.js writes only autopilot-harness-*.json under paths.dataDir', () => {
+  const HARNESS = path.join(AP_DIR, 'harness.js');
+  it('harness.js exists, requires neither ./investigate nor ./controller (R5), and has exactly one fs write', () => {
+    expect(fs.existsSync(HARNESS)).toBe(true);
+    const src = read(HARNESS);
+    const reqs = requiresOf(src);
+    expect(reqs).not.toContain('./investigate');
+    expect(reqs).not.toContain('./controller');
+    expect(reqs).not.toContain('./ports');
+    expect([...src.matchAll(/\bfs\.(\w+)\(/g)].map((m) => m[1]).filter((n) => !/^(readFileSync|existsSync)$/.test(n))).toEqual(['writeFileSync']);
+    expect(src).not.toMatch(/\b(appendFile|mkdir|rename|unlink|rmSync|rm\(|copyFile|createWriteStream)/);
+    expect(src).toMatch(/path\.join\(paths\.getDataDir\(\), REPORT_PREFIX \+ /);
+    expect(require('../src/autopilot/harness').REPORT_PREFIX).toBe('autopilot-harness-');
+  });
+
+  it('the outbound file names match the store registry entries', () => {
+    const { OUTBOUND_FILES } = require('../src/autopilot/harness');
+    const store = require('../src/store');
+    for (const k of Object.keys(OUTBOUND_FILES)) expect(path.basename(store.REGISTRY[k]()), k).toBe(OUTBOUND_FILES[k]);
+    expect(Object.keys(OUTBOUND_FILES).sort()).toEqual(['emailIntelSends', 'fasApprovalQueue', 'relayWritesPending', 'slackDMReplies']);
+  });
+});
+
+describe('runtime: a full controller run calls no write function and leaves the outbound stores byte-identical', () => {
+  it('throwing write spies are never called; relayWritesPending / fasApprovalQueue / emailIntelSends / slackDMReplies unchanged', { timeout: 30000 }, async () => {
+    const F = require('./helpers/autopilot-fakes.cjs');
+    F.freshDb('nowrite');
+    const store = require('../src/store');
+    const thrower = (name) => vi.fn(() => { throw new Error(name + ' must not be called'); });
+    const inject = (rel, exp) => {
+      const resolved = require.resolve(rel);
+      const prev = require.cache[resolved];
+      require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exp };
+      return () => { if (prev) require.cache[resolved] = prev; else delete require.cache[resolved]; };
+    };
+    const aap = {
+      isWarm: () => true,
+      getServiceIfWarm: vi.fn(async (id) => ({ workRequest: { id, assetDisplayName: '322283', lifecycleState: 'Unavailable' } })),
+      apiPost: thrower('apiPost'), apiPut: thrower('apiPut'), createWorkOrder: thrower('createWorkOrder'), updateWork: thrower('updateWork'),
+    };
+    const slack = { sendMessage: thrower('slack_send.sendMessage'), postMessage: thrower('slack_send.postMessage') };
+    const mailer = { sendMail: thrower('owa-mailer.sendMail'), send: thrower('owa-mailer.send') };
+    const restore = [
+      inject('../src/scrapers/aap_api', aap),
+      inject('../src/scrapers/slack_send', slack),
+      inject('../src/scrapers/owa-mailer', mailer),
+    ];
+    try {
+      store.save('fleetData', { rows: [F.baseRow(), F.baseRow({ equipmentId: 'B13014', domicileSite: 'ROC5', _serviceId: 'svc-2' })], syncedAt: new Date(F.T0 - F.H).toISOString(), source: 'aap-api' });
+      store.save('relayWritesPending', { items: [{ id: 'w1', unit: '322283', kind: 'addComment', text: 'pending' }] });
+      store.save('fasApprovalQueue', { items: [{ id: 'f1', status: 'pending' }] });
+      store.save('emailIntelSends', { sent: [{ id: 'e1', at: 1 }] });
+      store.save('slackDMReplies', { replies: [{ ts: '1.2', text: 'x' }] });
+      const OUT = ['relayWritesPending', 'fasApprovalQueue', 'emailIntelSends', 'slackDMReplies'];
+      const snap = () => Object.fromEntries(OUT.map((k) => [k, fs.readFileSync(store.REGISTRY[k]()).toString('base64')]));
+      const before = snap();
+
+      const NULLS2 = Object.fromEntries(Object.keys(PINNED_PICKS).map((k) => [k, null]));
+      const ports = require('../src/autopilot/ports').create(Object.assign(NULLS2, {
+        store,
+        fleetFreshness: { evaluate: () => ({ level: 'green', reasons: [], intervalMs: 600000 }), getSnapshot: () => ({ lastOkAt: F.T0 - F.H }), RED_AGE_FACTOR: 3 },
+        canonicalState: { getCanonical: () => null, isDown: (r) => /unavail/i.test(String((r && r.lifecycleState) || '')) },
+        riStore: { eventsForUnit: () => [], getAiAnalysis: () => null },
+        riTrends: { repeatOffenders: () => ({ offenders: [] }) },
+        slackSearch: { searchSlack: async () => ({ ok: true, results: [] }) },
+        dtnaStore: { findByUnit: () => [] },
+        aapApi: aap,
+        midway: { getState: () => 'HEALTHY' },
+        cluster: { mayLivePull: () => true },
+        offline: { isOffline: () => false },
+        relay: { queueStats: () => ({ active: 0, waiting: 0, max: 4, reserve: 1, byPriority: {}, flags: { priorities: false } }), getStatus: () => ({ model: 'm', backends: { claude: true } }), isolatedLaneAvailable: () => true },
+        liveReads: true,
+      }));
+      const env = F.mkEnv({ ports, autopilot: { maxCasesPerTick: 5 } });
+      env.ap.boot();
+      const r = await env.supervisor.runTick();
+      expect(r.investigated.length).toBe(2);
+      for (const x of r.investigated) expect(x).toMatchObject({ ok: true });
+      expect(aap.getServiceIfWarm).toHaveBeenCalled();   // the warm-only read path really ran
+      for (const fn of [aap.apiPost, aap.apiPut, aap.createWorkOrder, aap.updateWork, slack.sendMessage, slack.postMessage, mailer.sendMail, mailer.send]) expect(fn).not.toHaveBeenCalled();
+      expect(snap()).toEqual(before);
+    } finally {
+      for (const f of restore) f();
+    }
   });
 });

@@ -852,7 +852,9 @@ describe('DTNA static guards', () => {
 
   it('only src/ipc/dtna.js, src/dev/dev-dtna-probe.js and src/dtna/** require dtna/client|aura|session|capture', () => {
     const RE = /require\(\s*['"][^'"]*dtna\/(client|aura|session|capture)(\.js)?['"]\s*\)/;
-    const allowed = (r) => r === 'ipc/dtna.js' || r === 'dev/dev-dtna-probe.js' || r.startsWith('dtna/');
+    // Fleet Autopilot V1: autopilot/ports.js requires dtna/session to pick only status() (its pinned picks
+    // are enforced by tests/autopilot-no-write.test.js; no sign-in or context function is reachable).
+    const allowed = (r) => r === 'ipc/dtna.js' || r === 'dev/dev-dtna-probe.js' || r.startsWith('dtna/') || r === 'autopilot/ports.js';
     const offenders = files(SRC).filter((p) => RE.test(fs.readFileSync(p, 'utf8'))).map(rel).filter((r) => !allowed(r));
     expect(offenders).toEqual([]);
     // The facade deep-scan uses reaches the network only through src/dtna/auto.js (Phase D).

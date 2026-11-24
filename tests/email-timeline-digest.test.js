@@ -146,7 +146,11 @@ describe('322283 email timeline digest', () => {
       'renderer/src/js/views/aperia-bulk-modal.js', 'renderer/src/js/views/aperia-issues-modal.js',
       'renderer/src/js/views/aperia-tires.js', 'src/orcha/canonical_runner.js', 'src/orcha/canonical_state.js',
       // DTNA Chatter + Files: the unit AI context gains the extracted estimate-PDF lines (no timeline change).
-      'src/orcha/ai-context.js'];
+      'src/orcha/ai-context.js',
+      // Fleet Autopilot V1 adds the low-priority 'autopilot' relay source, the opts.isolated pass-through in
+      // reason.js askOpts, the Autopilot dashboard view files and its two app.js init lines on purpose; same rule.
+      'src/orcha/relay.js', 'src/orcha/reason.js', 'renderer/src/js/app.js', 'renderer/src/js/views/autopilot.js',
+      'renderer/src/js/views/autopilot-logic.js', 'renderer/src/js/views/autopilot-api.js'];
     const paths = ['renderer', 'src/orcha', 'src/scheduler', 'src/scrapers/owa-mailer.js', 'src/scrapers/relay.js',
       ':(exclude)renderer/src/js/views/relay-actions.js', ...upgraded.map((p) => ':(exclude)' + p)];
     expect(git('diff', '--name-only', '12a01de', '--', ...paths).trim()).toBe('');

@@ -541,6 +541,18 @@ expose('zoomMeet', {
   onState:       (cb)      => on('zoomMeet:state', cb),
 });
 
+// ── Fleet Autopilot V1 (read-only / shadow mode; local dashboard only, nothing is sent) ──
+expose('autopilot', {
+  status:     ()                        => ipcRenderer.invoke('autopilot:status'),
+  cases:      (filter)                  => ipcRenderer.invoke('autopilot:cases', filter || {}),
+  getCase:    (caseId, opts)            => ipcRenderer.invoke('autopilot:case', Object.assign({ caseId }, opts || {})),
+  setConfig:  (patch)                   => ipcRenderer.invoke('autopilot:set-config', patch),
+  control:    (action)                  => ipcRenderer.invoke('autopilot:control', { action }),
+  review:     (caseId, decision, note)  => ipcRenderer.invoke('autopilot:review', { caseId, decision, note }),
+  harnessRun: (opts)                    => ipcRenderer.invoke('autopilot:harness-run', opts || {}),
+  onChanged:  (cb)                      => on('autopilot:changed', cb),
+});
+
 // ── QuickSight DBR DATA (Daily Call) ──────────────────────────────────────────
 // captureAfp/captureDsp return raw page text (QuickSight's pivot-table DOM
 // has no stable selector shape); the renderer feeds that text to AI to

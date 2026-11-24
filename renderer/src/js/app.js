@@ -46,6 +46,7 @@ import { init as initDbrView }            from './views/dbr-view.js';
 import { init as initMeetings }           from './views/meetings.js';
 import { init as initWorkflowIntel }      from './views/workflow-intelligence.js';
 import { init as initTrends }             from './views/trends.js';
+import { init as initAutopilot }          from './views/autopilot.js';
 import { boot as bootZoomHub }            from './views/zoom-hub-boot.js';
 
 function boot() {
@@ -147,6 +148,7 @@ initStatusBar(document.getElementById('status-bar-mount'));
   initMeetings(viewsMount).catch((e) => console.warn('[meetings] init failed:', e && e.message));
   initWorkflowIntel(viewsMount);
   initTrends(viewsMount);
+  initAutopilot(viewsMount);
   bootZoomHub(viewsMount);   // flag-gated (zoom.*); does nothing unless an area is effective
 
   // ── Settings drawer ────────────────────────────────────────────────────────
