@@ -134,3 +134,19 @@ describe('validateAiOutput', () => {
     expect(b.warnings).toEqual(a.warnings);
   });
 });
+
+describe('deterministic fallback traceability', () => {
+  const { deterministicRecommendation } = require('../src/autopilot/fallback');
+  it('a STATUS_CONFLICT from the row counters only cites the counter evidence', () => {
+    const p = { items: [
+      it_('ev_life', 'structured', { field: 'lifecycleState', value: 'Unavailable' }),
+      it_('ev_ccc', 'structured', { field: 'canonicalConflictCount', value: 2, confidence: 0.65 }),
+      it_('ev_fc', 'structured', { field: 'factConflicts', value: 1, confidence: 0.65 }),
+    ] };
+    const out = deterministicRecommendation({ unitId: '39351', reasons: ['OOS', 'STATUS_CONFLICT'], conflictGroups: [] }, p, { now: Date.parse('2026-11-24T12:00:00Z') });
+    const act = out.recommendedActions.find((a) => a.action.startsWith('Review the conflicting status'));
+    expect(act.action).toBe('Review the conflicting status reported on the row.');
+    expect(act.evidenceIds).toEqual(['ev_ccc', 'ev_fc']);
+    for (const a of [...out.recommendedActions, ...out.actionsRequiringApproval]) expect(a.evidenceIds.length, a.action).toBeGreaterThan(0);
+  });
+});

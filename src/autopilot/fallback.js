@@ -104,6 +104,8 @@ function deterministicRecommendation(analysis, pack, opts) {
         if (p.evidenceId) ids.push(p.evidenceId);
       }
     }
+    // STATUS_CONFLICT from the row counters only (no conflict group): cite the counters.
+    if (!ids.length) ids.push(..._ids(_find(pack, 'aap_cache', 'canonicalConflictCount'), _find(pack, 'aap_cache', 'factConflicts')));
     push(_action('internal_review', _clip('Review the conflicting status' + (pos.length ? ': ' + pos.join('; ') : ' reported on the row.'), 300),
       'Sources disagree; Autopilot does not pick one.', 'fleet', ids.slice(0, 10)));
   }
