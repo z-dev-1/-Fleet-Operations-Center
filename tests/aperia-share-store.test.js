@@ -139,6 +139,26 @@ describe('share items', () => {
     expect(store.list().some((x) => x.issueId === 'n204')).toBe(true);
   });
 
+  it('retries a transiently locked file and never overwrites a store it could not read', () => {
+    store.addItem(Object.assign({}, base, { issueId: 'a' }));
+    const realRename = fs.renameSync;
+    const realRead = fs.readFileSync;
+    let fails = 2;
+    fs.renameSync = (...a) => { if (fails-- > 0) { const e = new Error('locked'); e.code = 'EPERM'; throw e; } return realRename(...a); };
+    try { store.addItem(Object.assign({}, base, { issueId: 'b' })); } finally { fs.renameSync = realRename; }
+    expect(store.list().map((x) => x.issueId)).toEqual(['a', 'b']);
+    fs.readFileSync = (f, ...a) => {
+      if (String(f) === store.filePath()) { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }
+      return realRead(f, ...a);
+    };
+    try {
+      expect(store.addItem(Object.assign({}, base, { issueId: 'c' }))).toBe(null);
+      expect(store.shouldSend('never-sent', 'CRITICAL')).toBe(false);
+    } finally { fs.readFileSync = realRead; }
+    expect(store.list().map((x) => x.issueId)).toEqual(['a', 'b']);
+    expect(logger.text()).toContain('APERIA_SHARE_STORE_UNREADABLE');
+  });
+
   it('logs never carry item text', () => {
     store.addItem(base);
     fs.writeFileSync(store.filePath(), '{broken');

@@ -41,9 +41,29 @@ function _str(v, max) { return v === null || v === undefined ? '' : String(v).sl
 
 function _empty() { return { version: 1, sent: {}, items: [] }; }
 
+// Windows: AV/indexers briefly lock the file or the tmp, so read/rename can throw EPERM/EACCES/EBUSY.
+// Retry those a few times (sync, ~25 ms apart) instead of dropping a write or reading the store as empty.
+const TRANSIENT = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const _sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+function _retry(fn) {
+  for (let i = 0; ; i++) {
+    try { return fn(); } catch (e) {
+      if (i >= 4 || !e || !TRANSIENT.has(e.code)) throw e;
+      Atomics.wait(_sleepBuf, 0, 0, 25);
+    }
+  }
+}
+
+const UNREADABLE = Symbol('unreadable');
+
 function _read() {
   let text;
-  try { text = fs.readFileSync(filePath(), 'utf8'); } catch (_) { return _empty(); }
+  try { text = _retry(() => fs.readFileSync(filePath(), 'utf8')); } catch (e) {
+    const d = _empty();
+    // A locked (not missing) file must not be overwritten with an empty store.
+    if (!e || e.code !== 'ENOENT') d[UNREADABLE] = true;
+    return d;
+  }
   const p = safeJson(text);
   if (!p.ok || !p.value || typeof p.value !== 'object' || Array.isArray(p.value)) {
     log.warn('[aperia] share-store load', { code: 'APERIA_SHARE_STORE_CORRUPT' });
@@ -71,11 +91,15 @@ function _prune(d, now) {
 function _write(d, now) {
   const file = filePath();
   const tmp = file + '.tmp';
+  if (d[UNREADABLE]) {
+    log.warn('[aperia] share-store save', { code: 'APERIA_SHARE_STORE_UNREADABLE' });
+    return false;
+  }
   try {
     _prune(d, now);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(d), 'utf8');
-    fs.renameSync(tmp, file);
+    _retry(() => fs.writeFileSync(tmp, JSON.stringify(d), 'utf8'));
+    _retry(() => fs.renameSync(tmp, file));
     return true;
   } catch (e) {
     log.warn('[aperia] share-store save', { code: 'APERIA_SHARE_STORE_WRITE_FAILED', err: safeErr(e) });
@@ -88,6 +112,7 @@ function shouldSend(issueId, severity) {
     const id = _str(issueId, 64);
     if (!id) return false;
     const d = _read();
+    if (d[UNREADABLE]) return false;
     if (!(id in d.sent)) return true;
     return _rank(_sev(severity)) > _rank(d.sent[id]);
   } catch (_) { return false; }
@@ -130,8 +155,7 @@ function addItem(item, now) {
       createdAt: _now(now), decidedAt: null, sentAt: null,
     };
     d.items.push(out);
-    _write(d, now);
-    return Object.assign({}, out);
+    return _write(d, now) ? Object.assign({}, out) : null;
   } catch (_) { return null; }
 }
 
