@@ -8,6 +8,12 @@
  * and open their modal (which itself reads nothing but status() until Load /
  * Look up is pressed). Every action ends with a status() re-read and
  * deps.onChange(status) so the pill refreshes.
+ *
+ * Two labeled toggles: "Tire Alerts" and "Share underinflation alerts" (OFF by
+ * default; aperia.setShare). The share row also has a "Carrier-briefing items
+ * (N)" button that loads the pending / approved items (aperia.shareItems) into
+ * #aperia-panel-share-list, each with Approve / Dismiss (aperia.shareItem).
+ * Item fields render with textContent only.
  */
 import { aperiaPill, alertsLabel, alertsOn, fmtEt } from './aperia-pill-logic.js';
 
@@ -30,6 +36,7 @@ const MESSAGES = {
   APERIA_SESSION_EXPIRED: 'Aperia session expired. Press Sign in.',
   APERIA_ALERTS_OFF: 'Tire Alerts are off.',
   APERIA_BUSY: 'An Aperia pull is already running.',
+  APERIA_SHARE_OFF: 'Turn sharing ON to approve carrier-briefing items.',
 };
 const _msgFor = (code) => MESSAGES[code] || ('Aperia request failed (' + String(code || 'unknown') + ')');
 
@@ -69,6 +76,7 @@ export function open(deps) {
       <div class="sd-section">
         <div class="sd-section-title" id="aperia-panel-title">Aperia HALO Connect</div>
         <div id="aperia-panel-state" class="sd-status warn" style="margin-bottom:8px">${ap ? 'Aperia \u2026' : 'Aperia is not available in this build'}</div>
+        <div class="sd-section-title" id="aperia-panel-alerts-label">Tire Alerts</div>
         <div class="sd-hint" style="margin-bottom:8px"><b id="aperia-panel-alerts-state">Tire Alerts: OFF</b></div>
         <div class="sd-hint" style="margin-bottom:8px">Last pull: <b id="aperia-panel-last">never</b></div>
         <div class="sd-hint" style="margin-bottom:8px">Aperia tires load when you open a unit, and tire issues for your fleet units refresh on each sync. Bulk / fleet pulls run only when you press their buttons. Sign out stops a running pull and closes the Aperia sign-in window.</div>
@@ -81,6 +89,14 @@ export function open(deps) {
           <button type="button" class="sd-btn secondary" id="aperia-panel-alerts">Turn Tire Alerts ON</button>
           <button type="button" class="sd-btn secondary" id="aperia-panel-poll" disabled>Check now</button>
         </div>
+        <div class="sd-section-title" id="aperia-panel-share-label">Share underinflation alerts</div>
+        <div class="sd-hint" style="margin-bottom:8px"><b id="aperia-panel-share-state">Share underinflation alerts: OFF</b></div>
+        <div class="sd-hint" id="aperia-panel-share-note" style="margin-bottom:8px">Off by default. When on, an UNDERINFLATION or UNDERINFLATION AND LEAK alert on your fleet units auto-sends a Slack DM to the unit's operator owner (Settings \u2192 Operator Channels) and adds a carrier-briefing item that waits for your approval. Needs Tire Alerts on.</div>
+        <div class="sd-btn-row">
+          <button type="button" class="sd-btn secondary" id="aperia-panel-share">Turn sharing ON</button>
+          <button type="button" class="sd-btn secondary" id="aperia-panel-share-review" disabled>Carrier-briefing items (0)</button>
+        </div>
+        <div id="aperia-panel-share-list"></div>
         <div class="sd-btn-row">
           <button type="button" class="sd-btn secondary" id="aperia-panel-issues">Tire issues</button>
           <button type="button" class="sd-btn secondary" id="aperia-panel-bulk">Bulk / fleet tires</button>
@@ -101,6 +117,10 @@ export function open(deps) {
   const pollBtn = q('#aperia-panel-poll');
   const issuesBtn = q('#aperia-panel-issues');
   const bulkBtn = q('#aperia-panel-bulk');
+  const shareEl = q('#aperia-panel-share-state');
+  const shareBtn = q('#aperia-panel-share');
+  const reviewBtn = q('#aperia-panel-share-review');
+  const listEl = q('#aperia-panel-share-list');
   let last = null;
   let busy = false;
 
@@ -116,6 +136,16 @@ export function open(deps) {
     if (signoutBtn) signoutBtn.disabled = !ap || busy;
     if (issuesBtn) issuesBtn.disabled = !ap;
     if (bulkBtn) bulkBtn.disabled = !ap;
+    const shareOn = !!(last && last.share === true);
+    const pending = Number(last && last.sharePending) || 0;
+    if (shareBtn) {
+      shareBtn.textContent = shareOn ? 'Turn sharing OFF' : 'Turn sharing ON';
+      shareBtn.disabled = !ap || busy || typeof ap.setShare !== 'function';
+    }
+    if (reviewBtn) {
+      reviewBtn.textContent = 'Carrier-briefing items (' + pending + ')';
+      reviewBtn.disabled = !ap || pending === 0 || typeof ap.shareItems !== 'function';
+    }
   };
   const apply = (s) => {
     if (!_open || _open.overlay !== overlay) return;
@@ -127,6 +157,7 @@ export function open(deps) {
     }
     if (alertsEl) alertsEl.textContent = _modeText(s);
     if (lastEl) lastEl.textContent = fmtEt(s && s.lastPullAt) || 'never';
+    if (shareEl) shareEl.textContent = 'Share underinflation alerts: ' + (s && s.share === true ? 'ON' : 'OFF');
     refreshButtons();
     try { if (typeof d.onChange === 'function') d.onChange(s); } catch (_) {}
   };
@@ -166,6 +197,71 @@ export function open(deps) {
       setMsg(Number.isFinite(n) ? (n === 1 ? '1 new tire issue.' : n + ' new tire issues.') : '');
     });
   });
+  if (shareBtn) shareBtn.addEventListener('click', () => {
+    if (shareBtn.disabled) return;
+    act(() => ap.setShare({ enabled: !(last && last.share === true) }));
+  });
+
+  // Carrier-briefing approval list (createElement + textContent only).
+  const renderItems = (items) => {
+    if (!listEl) return;
+    listEl.textContent = '';
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+      const empty = doc.createElement('div');
+      empty.className = 'sd-hint';
+      empty.textContent = 'No carrier-briefing items waiting.';
+      listEl.appendChild(empty);
+      return;
+    }
+    for (const it of rows) {
+      if (!it || typeof it !== 'object') continue;
+      const row = doc.createElement('div');
+      row.className = 'sd-hint aperia-share-item';
+      const head = doc.createElement('b');
+      head.textContent = [it.unit, it.severity, String(it.state || '').replace(/_/g, ' ')].filter(Boolean).join(' \u00b7 ');
+      const text = doc.createElement('div');
+      text.className = 'aperia-share-item-text';
+      text.textContent = String(it.text || '');
+      const status = doc.createElement('div');
+      status.className = 'aperia-share-item-status';
+      status.textContent = 'Status: ' + String(it.status || '');
+      const btns = doc.createElement('div');
+      btns.className = 'sd-btn-row';
+      for (const [action, label] of [['approve', 'Approve'], ['dismiss', 'Dismiss']]) {
+        const b = doc.createElement('button');
+        b.type = 'button';
+        b.className = 'sd-btn secondary';
+        b.setAttribute('data-action', action);
+        b.textContent = label;
+        b.addEventListener('click', () => {
+          if (b.disabled || typeof ap.shareItem !== 'function') return;
+          act(() => ap.shareItem({ id: it.id, action })).then(loadItems);
+        });
+        btns.appendChild(b);
+      }
+      row.appendChild(head);
+      row.appendChild(text);
+      row.appendChild(status);
+      row.appendChild(btns);
+      listEl.appendChild(row);
+    }
+  };
+  const loadItems = () => {
+    if (!ap || typeof ap.shareItems !== 'function') return Promise.resolve();
+    return Promise.resolve().then(() => ap.shareItems())
+      .then((r) => {
+        if (!_open || _open.overlay !== overlay) return;
+        if (r && r.ok === false) { setMsg(_msgFor(r.code)); return; }
+        renderItems(r && r.items);
+      })
+      .catch(() => setMsg(_msgFor('APERIA_INTERNAL')));
+  };
+  if (reviewBtn) reviewBtn.addEventListener('click', () => {
+    if (reviewBtn.disabled) return;
+    loadItems();
+  });
+
   const launch = (fn) => {
     close();
     try { Promise.resolve(fn && fn()).catch(() => {}); } catch (_) {}

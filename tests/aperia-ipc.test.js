@@ -62,10 +62,22 @@ const store = { load: vi.fn(() => ({ rows: [{ equipmentId: 'STORED1' }] })) };
 const alertsPref = { load: vi.fn(() => ({ enabled: true })), save: vi.fn(() => true) };
 let syncCache = null;
 const syncRead = { cached: vi.fn(() => syncCache) };
+const sharePref = { load: vi.fn(() => ({ enabled: false })), save: vi.fn(() => true) };
+const SHARE_ITEMS = [
+  { id: 's1a', issueId: '9001', unit: 'NP6923', operator: 'Acme Carrier', severity: 'CRITICAL', state: 'UNDERINFLATION', text: 'tire low', status: 'pending', createdAt: 1, decidedAt: null, sentAt: null },
+  { id: 's1b', issueId: '9002', unit: '122269', operator: 'Acme Carrier', severity: 'MAJOR', state: 'UNDERINFLATION_AND_LEAK', text: 'leak', status: 'approved', createdAt: 2, decidedAt: 3, sentAt: null },
+  { id: 's1c', issueId: '9005', unit: 'X1', operator: 'Acme Carrier', severity: 'MINOR', state: 'UNDERINFLATION', text: '', status: 'sent', createdAt: 4, decidedAt: 5, sentAt: 6 },
+  { id: 's1d', issueId: '9006', unit: 'X2', operator: 'Acme Carrier', severity: 'MINOR', state: 'UNDERINFLATION', text: '', status: 'dismissed', createdAt: 7, decidedAt: 8, sentAt: null },
+];
+const shareStore = {
+  list: vi.fn(() => SHARE_ITEMS.map((x) => ({ ...x }))),
+  pendingCount: vi.fn(() => 0),
+  decide: vi.fn((id, action) => (id === 's1a' ? { ok: true, item: { ...SHARE_ITEMS[0], status: action === 'approve' ? 'approved' : 'dismissed' } } : { ok: false, code: 'APERIA_SHARE_ITEM_NOT_FOUND' })),
+};
 const ctx = { lastData: { rows: [] }, sendToWindow: vi.fn(), mainWindow: null };
-require('../src/ipc/aperia').registerAperiaIPC(ctx, { client, session, watcher, exporter, dtnaStore, store, alertsPref, syncRead });
+require('../src/ipc/aperia').registerAperiaIPC(ctx, { client, session, watcher, exporter, dtnaStore, store, alertsPref, syncRead, sharePref, shareStore });
 
-const fakes = [session, watcher, client, dtnaStore, store, alertsPref, syncRead];
+const fakes = [session, watcher, client, dtnaStore, store, alertsPref, syncRead, sharePref, shareStore];
 const fakeCalls = () => fakes.reduce((n, f) => n + Object.values(f).reduce((m, fn) => m + fn.mock.calls.length, 0), 0);
 const REG_CALLS = fakeCalls();
 const call = (ch, p) => handlers[ch]({}, p);
@@ -101,10 +113,10 @@ beforeEach(async () => {
   ctx.lastData = { rows: [] };
 });
 
-const CHANNELS = ['aperia:bulk', 'aperia:export', 'aperia:fleet-tires', 'aperia:issues', 'aperia:login', 'aperia:logout', 'aperia:poll-now', 'aperia:start-alerts', 'aperia:status', 'aperia:stop-alerts', 'aperia:unit'];
+const CHANNELS = ['aperia:bulk', 'aperia:export', 'aperia:fleet-tires', 'aperia:issues', 'aperia:login', 'aperia:logout', 'aperia:poll-now', 'aperia:set-share', 'aperia:share-item', 'aperia:share-items', 'aperia:start-alerts', 'aperia:status', 'aperia:stop-alerts', 'aperia:unit'];
 
 describe('registration, preload and index.js', () => {
-  it('registers exactly the eleven aperia:* channels', () => {
+  it('registers exactly the fourteen aperia:* channels', () => {
     expect(Object.keys(handlers).sort()).toEqual(CHANNELS);
   });
 
@@ -116,12 +128,12 @@ describe('registration, preload and index.js', () => {
     expect(watcher.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('preload exposes aperia with exactly the 13 pinned keys in order, each on its channel', () => {
+  it('preload exposes aperia with exactly the 16 pinned keys in order, each on its channel', () => {
     const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
     const m = pre.match(/expose\('aperia',\s*\{([\s\S]*?)\n\}\);/);
     expect(m).toBeTruthy();
     const keys = [...m[1].matchAll(/^\s*(\w+)\s*:/gm)].map((x) => x[1]);
-    expect(keys).toEqual(['login', 'logout', 'status', 'unit', 'bulk', 'fleetTires', 'issues', 'startAlerts', 'stopAlerts', 'pollNow', 'exportBulk', 'onProgress', 'onAlert']);
+    expect(keys).toEqual(['login', 'logout', 'status', 'unit', 'bulk', 'fleetTires', 'issues', 'startAlerts', 'stopAlerts', 'pollNow', 'exportBulk', 'onProgress', 'onAlert', 'setShare', 'shareItems', 'shareItem']);
     const b = m[1];
     expect(b).toMatch(/login:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('aperia:login'\)/);
     expect(b).toMatch(/logout:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('aperia:logout'\)/);
@@ -136,6 +148,9 @@ describe('registration, preload and index.js', () => {
     expect(b).toMatch(/exportBulk:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('aperia:export',\s*p \|\| \{\}\)/);
     expect(b).toMatch(/onProgress:\s*\(cb\)\s*=>\s*on\('aperia:progress',\s*cb\)/);
     expect(b).toMatch(/onAlert:\s*\(cb\)\s*=>\s*on\('aperia:alert',\s*cb\)/);
+    expect(b).toMatch(/setShare:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('aperia:set-share',\s*p \|\| \{\}\)/);
+    expect(b).toMatch(/shareItems:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('aperia:share-items'\)/);
+    expect(b).toMatch(/shareItem:\s*\(p\)\s*=>\s*ipcRenderer\.invoke\('aperia:share-item',\s*p \|\| \{\}\)/);
     // Appended at the END of preload.js, after the zoomHub block.
     expect(pre.indexOf("expose('aperia'")).toBeGreaterThan(pre.indexOf("expose('zoomHub'"));
     expect(pre.trimEnd().endsWith('});')).toBe(true);
@@ -175,7 +190,7 @@ describe('registration, preload and index.js', () => {
 
 describe('status / login / logout', () => {
   it('status merges session.status() and watcher.status() with no client call', async () => {
-    expect(await call('aperia:status')).toEqual({ ok: true, state: 'connected', secondsLeft: 100, lastCode: null, lastPullAt: null, alerts: 'off', minutes: 5, lastPollAt: null, lastNewCount: 0 });
+    expect(await call('aperia:status')).toEqual({ ok: true, state: 'connected', secondsLeft: 100, lastCode: null, lastPullAt: null, alerts: 'off', minutes: 5, lastPollAt: null, lastNewCount: 0, share: false, sharePending: 0 });
     expect(client.lookupUnit).not.toHaveBeenCalled();
     expect(client.listIssues).not.toHaveBeenCalled();
   });
@@ -425,6 +440,17 @@ describe('invalid inputs', () => {
       ['aperia:export', { jobId: 'a1', format: 'tsv', domicile: 5 }, 'domicile'],
       ['aperia:export', { jobId: 'a1', format: 'tsv', domicile: 'x'.repeat(81) }, 'domicile'],
       ['aperia:export', 'x', 'payload'],
+      ['aperia:set-share', 'x', 'payload'],
+      ['aperia:set-share', {}, 'enabled'],
+      ['aperia:set-share', { enabled: 'true' }, 'enabled'],
+      ['aperia:set-share', { enabled: 1 }, 'enabled'],
+      ['aperia:share-item', [], 'payload'],
+      ['aperia:share-item', { action: 'approve' }, 'id'],
+      ['aperia:share-item', { id: 'x1', action: 'approve' }, 'id'],
+      ['aperia:share-item', { id: 'S1A', action: 'approve' }, 'id'],
+      ['aperia:share-item', { id: 's' + 'a'.repeat(21), action: 'approve' }, 'id'],
+      ['aperia:share-item', { id: 's1a', action: 'send' }, 'action'],
+      ['aperia:share-item', { id: 's1a' }, 'action'],
     ];
     for (const [ch, p, field] of cases) {
       expect(await call(ch, p), ch + ' ' + JSON.stringify(p).slice(0, 40)).toEqual({ ok: false, code: 'APERIA_INVALID_INPUT', field });
@@ -438,5 +464,90 @@ describe('invalid inputs', () => {
     expect(r.ok).toBe(true);
     await flush();
     expect(client.bulkLookup.mock.calls[0][0]).toHaveLength(500);
+  });
+});
+
+describe('underinflation share (set-share / share-items / share-item)', () => {
+  it('set-share saves the boolean; a failed write -> APERIA_PREF_WRITE_FAILED', async () => {
+    expect(await call('aperia:set-share', { enabled: true })).toEqual({ ok: true, share: true });
+    expect(await call('aperia:set-share', { enabled: false })).toEqual({ ok: true, share: false });
+    expect(sharePref.save.mock.calls).toEqual([[true], [false]]);
+    sharePref.save.mockReturnValueOnce(false);
+    expect(await call('aperia:set-share', { enabled: true })).toEqual({ ok: false, code: 'APERIA_PREF_WRITE_FAILED' });
+    expect(client.lookupUnit).not.toHaveBeenCalled();
+    expect(watcher.start).not.toHaveBeenCalled();
+  });
+
+  it('status reports share / sharePending from the pref and the store', async () => {
+    sharePref.load.mockReturnValueOnce({ enabled: true });
+    shareStore.pendingCount.mockReturnValueOnce(3);
+    expect(await call('aperia:status')).toMatchObject({ ok: true, state: 'connected', share: true, sharePending: 3 });
+    sharePref.load.mockImplementationOnce(() => { throw new Error('disk'); });
+    shareStore.pendingCount.mockImplementationOnce(() => { throw new Error('disk'); });
+    expect(await call('aperia:status')).toMatchObject({ ok: true, share: false, sharePending: 0 });
+  });
+
+  it('share-items lists pending / approved items only, without operator / issueId', async () => {
+    const r = await call('aperia:share-items');
+    expect(r).toEqual({
+      ok: true,
+      items: [
+        { id: 's1a', unit: 'NP6923', severity: 'CRITICAL', state: 'UNDERINFLATION', text: 'tire low', status: 'pending', createdAt: 1 },
+        { id: 's1b', unit: '122269', severity: 'MAJOR', state: 'UNDERINFLATION_AND_LEAK', text: 'leak', status: 'approved', createdAt: 2 },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain('Acme Carrier');
+    expect(JSON.stringify(r)).not.toContain('9001');
+  });
+
+  it('share-item: approve while OFF -> APERIA_SHARE_OFF with no store write; dismiss while OFF works', async () => {
+    expect(await call('aperia:share-item', { id: 's1a', action: 'approve' })).toEqual({ ok: false, code: 'APERIA_SHARE_OFF' });
+    expect(shareStore.decide).not.toHaveBeenCalled();
+    expect(await call('aperia:share-item', { id: 's1a', action: 'dismiss' })).toEqual({ ok: true, status: 'dismissed' });
+    expect(shareStore.decide.mock.calls[0].slice(0, 2)).toEqual(['s1a', 'dismiss']);
+  });
+
+  it('share-item when ON: approve -> approved; unknown id -> its code', async () => {
+    sharePref.load.mockReturnValue({ enabled: true });
+    try {
+      expect(await call('aperia:share-item', { id: 's1a', action: 'approve' })).toEqual({ ok: true, status: 'approved' });
+      expect(shareStore.decide.mock.calls[0][0]).toBe('s1a');
+      expect(shareStore.decide.mock.calls[0][1]).toBe('approve');
+      expect(Number.isFinite(shareStore.decide.mock.calls[0][2])).toBe(true);
+      expect(await call('aperia:share-item', { id: 'szz', action: 'approve' })).toEqual({ ok: false, code: 'APERIA_SHARE_ITEM_NOT_FOUND' });
+    } finally {
+      sharePref.load.mockReturnValue({ enabled: false });
+    }
+  });
+
+  it('persistence round-trip with the real share-pref / share-store on a tmp data dir', async () => {
+    const paths = require('../src/config/paths');
+    const dataDir = path.join(TMP, 'share-data');
+    fs.mkdirSync(dataDir, { recursive: true });
+    paths.setDataDir(dataDir);
+    const h2 = {};
+    require('../src/ipc/aperia').registerAperiaIPC(ctx, {
+      handle: (ch, fn) => { h2[ch] = fn; },
+      client, session, watcher, exporter, dtnaStore, store, alertsPref, syncRead,
+      electron: { app: { getPath: () => TMP } },
+    });
+    const c2 = (ch, p) => h2[ch]({}, p);
+    expect(await c2('aperia:status')).toMatchObject({ share: false, sharePending: 0 });
+    expect(await c2('aperia:set-share', { enabled: true })).toEqual({ ok: true, share: true });
+    expect(require('../src/aperia/share-pref').load()).toEqual({ enabled: true });
+    const raw = fs.readFileSync(path.join(dataDir, 'aperia_share_pref.json'), 'utf8');
+    expect(raw).toContain('"enabled":true');
+    expect(await c2('aperia:status')).toMatchObject({ share: true, sharePending: 0 });
+    // A real pending item can be approved while ON, and approval is refused after turning OFF.
+    const realStore = require('../src/aperia/share-store');
+    const it1 = realStore.addItem({ issueId: 'i1', unit: 'NP6923', operator: 'Acme', severity: 'CRITICAL', state: 'UNDERINFLATION', text: 't' });
+    const it2 = realStore.addItem({ issueId: 'i2', unit: 'NP6923', operator: 'Acme', severity: 'MAJOR', state: 'UNDERINFLATION', text: 't2' });
+    expect(await c2('aperia:status')).toMatchObject({ sharePending: 2 });
+    expect(await c2('aperia:share-item', { id: it1.id, action: 'approve' })).toEqual({ ok: true, status: 'approved' });
+    expect(await c2('aperia:set-share', { enabled: false })).toEqual({ ok: true, share: false });
+    expect(await c2('aperia:status')).toMatchObject({ share: false, sharePending: 1 });
+    expect(await c2('aperia:share-item', { id: it2.id, action: 'approve' })).toEqual({ ok: false, code: 'APERIA_SHARE_OFF' });
+    const items = (await c2('aperia:share-items')).items;
+    expect(items.map((x) => [x.id, x.status])).toEqual([[it1.id, 'approved'], [it2.id, 'pending']]);
   });
 });

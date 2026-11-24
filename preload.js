@@ -890,4 +890,7 @@ expose('aperia', {
   exportBulk:  (p) => ipcRenderer.invoke('aperia:export', p || {}),
   onProgress:  (cb) => on('aperia:progress', cb),
   onAlert:     (cb) => on('aperia:alert', cb),
+  setShare:    (p) => ipcRenderer.invoke('aperia:set-share', p || {}),
+  shareItems:  () => ipcRenderer.invoke('aperia:share-items'),
+  shareItem:   (p) => ipcRenderer.invoke('aperia:share-item', p || {}),
 });

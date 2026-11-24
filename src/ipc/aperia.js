@@ -2,8 +2,9 @@
 /**
  * ipc/aperia.js — Aperia HALO Connect IPC (user-initiated GET reads; the opt-in tire alert watcher).
  *
- * Channels (exactly 11): aperia:status, aperia:login, aperia:logout, aperia:unit, aperia:bulk,
- * aperia:fleet-tires, aperia:issues, aperia:start-alerts, aperia:stop-alerts, aperia:poll-now, aperia:export.
+ * Channels (exactly 14): aperia:status, aperia:login, aperia:logout, aperia:unit, aperia:bulk,
+ * aperia:fleet-tires, aperia:issues, aperia:start-alerts, aperia:stop-alerts, aperia:poll-now, aperia:export,
+ * aperia:set-share, aperia:share-items, aperia:share-item.
  * Events: aperia:progress (bulk / fleet jobs) and aperia:alert (sent by the watcher).
  * Every handler returns {ok:false, code[, field]} on failure and never an error message or stack.
  * Registration only registers handlers and the before-quit hook: it calls no client, session or watcher
@@ -12,6 +13,10 @@
  * issues (src/aperia/sync-read.js) or APERIA_NO_CACHE. aperia:start-alerts / aperia:stop-alerts save the
  * user's Tire Alerts choice (src/aperia/alerts-pref.js; alerts are on by default). Sign out stops the
  * watcher and aborts a running job; it leaves the saved choice as is.
+ * aperia:set-share saves the "Share underinflation alerts" choice (src/aperia/share-pref.js; OFF by
+ * default); aperia:status reports it as share plus the pending carrier-briefing item count (sharePending).
+ * aperia:share-items lists the pending / approved carrier-briefing items (src/aperia/share-store.js) and
+ * aperia:share-item approves (only while sharing is on) or dismisses one. Nothing here sends anything.
  */
 const { safeErr } = require('../aperia/redact');
 const log = require('../utils/logger')('aperia');
@@ -24,6 +29,8 @@ const ISSUE_TYPES = ['active', 'critical-no-case'];
 const DOMICILE_MAX = 80;
 const MAX_JOBS = 3;
 const BULK_ROWS_MAX = 5000;
+const SHARE_ID_RE = /^s[a-z0-9]{1,20}$/;
+const SHARE_ACTIONS = ['approve', 'dismiss'];
 
 function _bad(field) { return { ok: false, code: 'APERIA_INVALID_INPUT', field }; }
 function _payload(p) {
@@ -45,7 +52,8 @@ function _domiciles(rows) {
 
 /**
  * registerAperiaIPC(ctx, deps)
- * deps (tests): { handle, client, session, watcher, exporter, electron, dtnaStore, store, alertsPref, syncRead }
+ * deps (tests): { handle, client, session, watcher, exporter, electron, dtnaStore, store, alertsPref, syncRead,
+ *                 sharePref, shareStore }
  */
 function registerAperiaIPC(ctx, deps) {
   const d = deps || {};
@@ -59,6 +67,8 @@ function registerAperiaIPC(ctx, deps) {
   const store = () => d.store || require('../store');
   const alertsPref = () => d.alertsPref || require('../aperia/alerts-pref');
   const syncRead = () => d.syncRead || require('../aperia/sync-read');
+  const sharePref = () => d.sharePref || require('../aperia/share-pref');
+  const shareStore = () => d.shareStore || require('../aperia/share-store');
 
   const send = (ch, payload) => {
     try { if (ctx && typeof ctx.sendToWindow === 'function') ctx.sendToWindow(ch, payload); } catch (e) { log.warn('[aperia] send', safeErr(e)); }
@@ -131,7 +141,12 @@ function registerAperiaIPC(ctx, deps) {
   }
 
   // ── status / login / logout ──────────────────────────────────────────────
-  wrap('aperia:status', async () => Object.assign({}, session().status(), watcher().status()));
+  const _shareOn = () => { try { return sharePref().load().enabled === true; } catch (_) { return false; } };
+  wrap('aperia:status', async () => {
+    let sharePending = 0;
+    try { sharePending = Number(shareStore().pendingCount()) || 0; } catch (_) { sharePending = 0; }
+    return Object.assign({}, session().status(), watcher().status(), { share: _shareOn(), sharePending });
+  });
 
   wrap('aperia:login', async () => {
     const r = await session().openLoginWindow(ctx);
@@ -249,6 +264,44 @@ function registerAperiaIPC(ctx, deps) {
     const r = await watcher().pollNow(ctx);
     if (!r || !r.ok) return { ok: false, code: _code(r) };
     return { ok: true, newCount: Number(r.newCount) || 0 };
+  });
+
+  // ── underinflation share (toggle + carrier-briefing approval items) ──────
+  wrap('aperia:set-share', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    if (typeof p.enabled !== 'boolean') return _bad('enabled');
+    const ok = sharePref().save(p.enabled);
+    if (!ok) {
+      log.warn('[aperia] share', { channel: 'aperia:set-share', code: 'APERIA_PREF_WRITE_FAILED' });
+      return { ok: false, code: 'APERIA_PREF_WRITE_FAILED' };
+    }
+    log.info('[aperia] share', { channel: 'aperia:set-share', code: 'OK' });
+    return { ok: true, share: p.enabled };
+  });
+
+  wrap('aperia:share-items', async () => {
+    const all = shareStore().list();
+    const items = (Array.isArray(all) ? all : [])
+      .filter((i) => i && (i.status === 'pending' || i.status === 'approved'))
+      .map((i) => ({ id: i.id, unit: i.unit, severity: i.severity, state: i.state, text: i.text, status: i.status, createdAt: i.createdAt }));
+    return { ok: true, items };
+  });
+
+  wrap('aperia:share-item', async (payload) => {
+    const p = _payload(payload);
+    if (!p) return _bad('payload');
+    if (typeof p.id !== 'string' || !SHARE_ID_RE.test(p.id)) return _bad('id');
+    if (!SHARE_ACTIONS.includes(p.action)) return _bad('action');
+    if (p.action === 'approve' && !_shareOn()) return { ok: false, code: 'APERIA_SHARE_OFF' };
+    const r = shareStore().decide(p.id, p.action, Date.now());
+    if (r && r.ok && r.item) {
+      log.info('[aperia] share', { channel: 'aperia:share-item', code: 'OK' });
+      return { ok: true, status: r.item.status };
+    }
+    const code = _code(r);
+    log.warn('[aperia] share', { channel: 'aperia:share-item', code });
+    return { ok: false, code };
   });
 
   // ── export ───────────────────────────────────────────────────────────────
