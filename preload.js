@@ -550,6 +550,9 @@ expose('autopilot', {
   control:    (action)                  => ipcRenderer.invoke('autopilot:control', { action }),
   review:     (caseId, decision, note)  => ipcRenderer.invoke('autopilot:review', { caseId, decision, note }),
   harnessRun: (opts)                    => ipcRenderer.invoke('autopilot:harness-run', opts || {}),
+  coverage:        ()        => ipcRenderer.invoke('autopilot:coverage'),
+  units:           (filter)  => ipcRenderer.invoke('autopilot:units', filter || {}),
+  deepInvestigate: (caseId)  => ipcRenderer.invoke('autopilot:deep-investigate', { caseId }),
   onChanged:  (cb)                      => on('autopilot:changed', cb),
 });
 

@@ -7,7 +7,8 @@
  * .ap- prefix, so no shared CSS file changes. Status is polled every 15 s only while the view
  * is visible and refreshed on 'autopilot:changed'.
  *
- * Sections: Overview, Cases, Case drawer, Controls, Diagnostics. Every data value is set with
+ * Sections: Overview, Coverage (V2), Cases, Units (V2), Case drawer (V2: trace, record, proposals,
+ * Deep investigate), Controls, Diagnostics. Every data value is set with
  * textContent / setAttribute; the view never assigns innerHTML (the shell is built node by node).
  */
 import defaultBus from '../bus.js';
@@ -58,9 +59,14 @@ const CSS = `
 .ap-list { margin: 0; padding-left: 18px; font-size: 12px; }
 .ap-kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 12px; }
 .ap-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.ap-tile.ap-click { cursor: pointer; }
+.ap-tile.ap-click:hover { background: rgba(88,166,255,.14); }
+.ap-trace { display: flex; flex-direction: column; gap: 6px; }
+.ap-trace-row { border-left: 2px solid rgba(110,118,129,.35); padding: 2px 0 2px 8px; font-size: 12px; }
 `;
 
 const CASE_COLUMNS = ['Unit', 'Domicile', 'State', 'Primary reason', 'Days down', 'ETC', 'Re-check', 'Priority'];
+const UNIT_COLUMNS = ['Unit', 'Class', 'Coverage', 'Domicile', 'Operator', 'Owner', 'Case'];
 
 let _state = null;
 
@@ -86,7 +92,12 @@ export function init(mount, deps = {}) {
 
   const st = {
     status: null, cases: { items: [], total: 0 }, offset: 0,
-    filter: { state: '', reason: '', domicile: '', q: '' },
+    filter: {
+      state: '', reason: '', domicile: '', q: '',
+      carrier: '', scac: '', vendor: '', phase: '', downtimeMin: '', downtimeMax: '', priorityMin: '', group: '', aiPending: false, tier: '', sort: '',
+    },
+    coverage: null,
+    units: { items: [], total: 0, offset: 0, filter: { coverage: '', eligibility: '' } },
     drawer: null, restartPending: false, visible: false, timer: null, unsub: null, message: '',
   };
 
@@ -117,6 +128,10 @@ export function init(mount, deps = {}) {
     parts.banners = root.appendChild(el('div', 'ap-banners'));
     parts.tiles = el('div', 'ap-tiles');
     root.appendChild(section('Overview', parts.tiles));
+    const cov = section('Coverage');
+    parts.coverage = cov.appendChild(el('div', 'ap-tiles'));
+    parts.sources = cov.appendChild(el('div'));
+    root.appendChild(cov);
     const cases = section('Cases');
     parts.filters = cases.appendChild(el('div', 'ap-row'));
     const table = el('table', 'ap-table');
@@ -129,6 +144,16 @@ export function init(mount, deps = {}) {
     cases.appendChild(table);
     parts.pager = cases.appendChild(el('div', 'ap-row'));
     root.appendChild(cases);
+    const units = section('Units');
+    parts.unitFilters = units.appendChild(el('div', 'ap-row'));
+    const ut = el('table', 'ap-table');
+    const uh = el('tr');
+    for (const h of UNIT_COLUMNS) uh.appendChild(el('th', null, h));
+    const uth = el('thead'); uth.appendChild(uh); ut.appendChild(uth);
+    parts.units = ut.appendChild(el('tbody'));
+    units.appendChild(ut);
+    parts.unitPager = units.appendChild(el('div', 'ap-row'));
+    root.appendChild(units);
     const grid = el('div', 'ap-grid2');
     parts.controls = el('div');
     parts.diag = el('div');
@@ -185,6 +210,111 @@ export function init(mount, deps = {}) {
     if (authIssues.length) box.appendChild(banner('warn', 'Auth: ' + authIssues.join(', ') + '. Autopilot keeps using cached data.'));
     const nf = L.unitsNotInFleetText(s);
     if (nf) box.appendChild(banner('info', nf));
+    const rc = L.reconcileBanner(st.coverage);
+    if (rc) box.appendChild(banner(rc.tone, rc.text));
+    const sc = L.scopeBanner(st.coverage);
+    if (sc) box.appendChild(banner(sc.tone, sc.text));
+  }
+
+  // ── Coverage (V2 §10.3) ─────────────────────────────────────────────────
+  function followLink(link) {
+    if (!link) return;
+    if (link.view === 'units') {
+      st.units.filter = { coverage: link.filter.coverage || '', eligibility: link.filter.eligibility || '' };
+      st.units.offset = 0;
+      renderUnitFilters();
+      refreshUnits();
+      return;
+    }
+    for (const k of Object.keys(st.filter)) st.filter[k] = k === 'aiPending' ? false : '';
+    Object.assign(st.filter, link.filter);
+    st.offset = 0;
+    renderFilters();
+    refreshCases();
+  }
+
+  function renderCoverage() {
+    const box = part('coverage');
+    clear(box);
+    const tiles = L.coverageTiles(st.coverage);
+    if (!tiles.length) { box.appendChild(el('div', 'ap-note', 'Coverage not available.')); }
+    for (const x of tiles) {
+      const t = el('div', 'ap-tile' + (x.link ? ' ap-click' : ''));
+      t.setAttribute('data-tile', x.key);
+      t.appendChild(el('div', 'ap-tile-val', x.value));
+      t.appendChild(el('div', 'ap-tile-lbl', x.label));
+      if (x.link) t.addEventListener('click', () => followLink(x.link));
+      box.appendChild(t);
+    }
+    const src = part('sources');
+    clear(src);
+    const rows = L.sourceRows(st.coverage, st.status && st.status.auth);
+    if (!rows.length) return;
+    const t = el('table', 'ap-table');
+    const h = el('tr');
+    for (const x of ['Source (24 h)', 'OK', 'Not warm', 'Auth', 'Cache only', 'Rate limited', 'Sign-in state']) h.appendChild(el('th', null, x));
+    t.appendChild(h);
+    for (const r of rows) {
+      const tr = el('tr');
+      for (const k of ['source', 'ok', 'not_warm', 'auth', 'cache_only', 'rate_limited', 'authState']) tr.appendChild(el('td', null, r[k]));
+      t.appendChild(tr);
+    }
+    src.appendChild(t);
+  }
+
+  // ── Units (V2) ──────────────────────────────────────────────────────────
+  function renderUnitFilters() {
+    const box = part('unitFilters');
+    clear(box);
+    const sel = (key, label, options) => {
+      const s = el('select', 'ap-input');
+      s.setAttribute('aria-label', label);
+      const o0 = el('option', null, label); o0.value = ''; s.appendChild(o0);
+      for (const v of options) { const o = el('option', null, v.replace(/_/g, ' ').toLowerCase()); o.value = v; s.appendChild(o); }
+      s.value = st.units.filter[key];
+      s.addEventListener('change', () => { st.units.filter[key] = s.value; st.units.offset = 0; refreshUnits(); });
+      return s;
+    };
+    box.appendChild(sel('coverage', 'All coverage', L.UNIT_COVERAGES));
+    box.appendChild(sel('eligibility', 'All classes', L.ELIGIBILITY_CLASSES));
+  }
+
+  function renderUnits() {
+    const body = part('units');
+    clear(body);
+    const items = st.units.items || [];
+    if (!items.length) { const tr = el('tr'); const td = el('td', 'ap-note', 'No units.'); td.setAttribute('colspan', String(UNIT_COLUMNS.length)); tr.appendChild(td); body.appendChild(tr); }
+    for (const u of items) {
+      const m = L.unitRow(u);
+      const tr = el('tr');
+      tr.appendChild(el('td', null, m.unit));
+      tr.appendChild(el('td', null, m.equipmentClass || m.eligibility));
+      tr.appendChild(el('td', null, m.coverage + (m.reason ? ' — ' + m.reason : '')));
+      tr.appendChild(el('td', null, m.domicile));
+      tr.appendChild(el('td', null, m.operator));
+      tr.appendChild(el('td', null, m.owner));
+      const td = el('td');
+      if (m.caseId) td.appendChild(btn('Open case', () => openCase(m.caseId, 0)));
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+    const pager = part('unitPager');
+    clear(pager);
+    const total = st.units.total || 0;
+    const off = st.units.offset;
+    pager.appendChild(el('span', 'ap-note', total ? (off + 1) + '–' + Math.min(total, off + PAGE) + ' of ' + total : '0 units'));
+    pager.appendChild(btn('Previous', () => { st.units.offset = Math.max(0, off - PAGE); refreshUnits(); }, off === 0));
+    pager.appendChild(btn('Next', () => { st.units.offset = off + PAGE; refreshUnits(); }, off + PAGE >= total));
+  }
+
+  async function refreshUnits() {
+    if (typeof api.units !== 'function') return;
+    const f = { limit: PAGE, offset: st.units.offset };
+    for (const k of ['coverage', 'eligibility']) if (st.units.filter[k]) f[k] = st.units.filter[k];
+    const r = await call(api.units(f));
+    st.units.items = r && r.ok ? r.items || [] : [];
+    st.units.total = r && r.ok ? r.total || 0 : 0;
+    renderUnits();
   }
 
   function renderTiles() {
@@ -214,13 +344,40 @@ export function init(mount, deps = {}) {
       s.addEventListener('change', () => { st.filter[key] = s.value; st.offset = 0; refreshCases(); });
       return s;
     };
+    const fm = L.filterModel(st.coverage);
     box.appendChild(sel('state', 'All states', Object.keys(L.STATE_BADGES).map((k) => [k, L.STATE_BADGES[k].label])));
+    box.appendChild(sel('group', 'All groups', fm.groups));
     box.appendChild(sel('reason', 'All reasons', Object.keys(L.REASON_SENTENCES).map((k) => [k, k.replace(/_/g, ' ').toLowerCase()])));
-    const dom = el('input', 'ap-input'); dom.setAttribute('placeholder', 'Domicile'); dom.setAttribute('maxlength', '10'); dom.value = st.filter.domicile;
-    const q = el('input', 'ap-input'); q.setAttribute('placeholder', 'Unit starts with…'); q.setAttribute('maxlength', '40'); q.value = st.filter.q;
-    box.appendChild(dom);
-    box.appendChild(q);
-    box.appendChild(btn('Apply', () => { st.filter.domicile = dom.value.trim(); st.filter.q = q.value.trim(); st.offset = 0; refreshCases(); }));
+    box.appendChild(sel('phase', 'All phases', fm.phases.map((p) => [p, p.replace(/_/g, ' ')])));
+    box.appendChild(sel('tier', 'All tiers', fm.tiers));
+    box.appendChild(sel('sort', 'Sort: priority', fm.sorts));
+    const texts = {};
+    const input = (key, placeholder, max, type) => {
+      const i = el('input', 'ap-input');
+      if (type) i.type = type;
+      i.setAttribute('placeholder', placeholder);
+      i.setAttribute('aria-label', placeholder);
+      if (max) i.setAttribute('maxlength', String(max));
+      i.value = st.filter[key] == null ? '' : String(st.filter[key]);
+      texts[key] = i;
+      box.appendChild(i);
+    };
+    // Domicile and SCAC come from the latest detection pass (no free typing) when a pass exists.
+    if (fm.domicileOptions.length) box.appendChild(sel('domicile', 'All domiciles', fm.domicileOptions.map((d) => [d, d])));
+    else input('domicile', 'Domicile', 10);
+    if (fm.scacOptions.length) box.appendChild(sel('scac', 'All SCACs', fm.scacOptions.map((d) => [d, d])));
+    input('q', 'Unit starts with…', 40);
+    input('carrier', 'Carrier', 40);
+    input('vendor', 'Vendor', 60);
+    input('downtimeMin', 'Days down from', 0, 'number');
+    input('downtimeMax', 'Days down to', 0, 'number');
+    input('priorityMin', 'Priority at least', 0, 'number');
+    box.appendChild(check('Not yet AI-investigated', st.filter.aiPending, (v) => { st.filter.aiPending = v; st.offset = 0; refreshCases(); }));
+    box.appendChild(btn('Apply', () => {
+      for (const k of Object.keys(texts)) st.filter[k] = texts[k].value.trim();
+      st.offset = 0;
+      refreshCases();
+    }));
   }
 
   function renderCases() {
@@ -254,8 +411,7 @@ export function init(mount, deps = {}) {
   }
 
   async function refreshCases() {
-    const f = { limit: PAGE, offset: st.offset };
-    for (const k of ['state', 'reason', 'domicile', 'q']) if (st.filter[k]) f[k] = st.filter[k];
+    const f = L.casesQuery(st.filter, { limit: PAGE, offset: st.offset });
     const r = await call(api.cases(f));
     st.cases = r && r.ok ? { items: r.items || [], total: r.total || 0 } : { items: [], total: 0 };
     renderCases();
@@ -279,6 +435,11 @@ export function init(mount, deps = {}) {
     const head = el('div', 'ap-row');
     head.appendChild(el('strong', null, 'Unit ' + String(c.unit_id || '')));
     const b = L.stateBadge(c.state); head.appendChild(el('span', b.className, b.label));
+    const db = L.deepButton(c, st.status);
+    head.appendChild(btn('Deep investigate', async () => {
+      const res = await call(api.deepInvestigate(c.case_id));
+      if (res.ok) { note(''); await openCase(c.case_id, 0); refreshCases(); refreshStatus(); }
+    }, db.disabled || typeof api.deepInvestigate !== 'function', db.hint));
     head.appendChild(btn('Close', () => { st.drawer = null; renderDrawer(); }));
     d.appendChild(head);
     d.appendChild(kv([
@@ -342,6 +503,22 @@ export function init(mount, deps = {}) {
       d.appendChild(ul);
     }
 
+    renderTrace(d, r, c);
+
+    d.appendChild(el('h4', null, 'Findings record'));
+    d.appendChild(kv(r.record ? L.recordRows(r.record) : [['Record', 'No completed run yet.']]));
+
+    d.appendChild(el('h4', null, 'Timeline proposals'));
+    const props = L.proposalRows(r.proposals);
+    const pl = el('ul', 'ap-list');
+    if (!props.length) pl.appendChild(el('li', 'ap-note', 'None'));
+    for (const p of props) {
+      const li = el('li', null, (p.date ? p.date + ' — ' : '') + p.description + (p.source ? ' (' + p.source + ')' : ''));
+      li.appendChild(el('span', 'ap-approval', p.badge));
+      pl.appendChild(li);
+    }
+    d.appendChild(pl);
+
     d.appendChild(el('h4', null, 'Review'));
     const rb = L.reviewButtons(c.state);
     const noteIn = el('input', 'ap-input'); noteIn.setAttribute('placeholder', 'Note (optional)'); noteIn.setAttribute('maxlength', '500');
@@ -355,6 +532,61 @@ export function init(mount, deps = {}) {
     rr.appendChild(btn('Accept', () => doReview('accept'), !rb.accept));
     rr.appendChild(btn('Re-run', () => doReview('rerun'), !rb.rerun));
     d.appendChild(rr);
+  }
+
+  // Trace panel (V2 §10.3, AC-28): textContent only; untrusted text is set only when expanded.
+  function renderTrace(d, r, c) {
+    d.appendChild(el('h4', null, 'Investigation trace'));
+    const byId = {};
+    for (const f of Array.isArray(r.findings) ? r.findings : []) if (f && f.evidence_id) byId[f.evidence_id] = f;
+    const rows = L.traceRows(r.steps, byId, { case: c, output: c.ai_findings || null, memory: r.memory });
+    if (!rows.length) { d.appendChild(el('div', 'ap-note', 'No trace yet.')); return; }
+    const box = el('div', 'ap-trace');
+    for (const row of rows) {
+      const line = el('div', 'ap-trace-row');
+      const top = el('div', 'ap-row');
+      if (row.turn) top.appendChild(el('span', 'ap-note', 'turn ' + row.turn));
+      top.appendChild(el('strong', null, row.label));
+      if (row.status) top.appendChild(el('span', row.status.className, row.status.label));
+      if (row.marker) top.appendChild(el('span', 'ap-note', row.marker));
+      if (row.ms) top.appendChild(el('span', 'ap-note', row.ms));
+      line.appendChild(top);
+      if (row.why) line.appendChild(el('div', 'ap-note', 'Why: ' + row.why));
+      if (row.summary) line.appendChild(el('div', null, row.summary));
+      if (row.text) line.appendChild(el('div', null, row.text));
+      for (const v of row.values || []) line.appendChild(el('div', 'ap-note', v));
+      if (row.chips && row.chips.length) {
+        const chips = el('div', 'ap-row');
+        for (const ch of row.chips) {
+          const chip = el('span', 'ap-badge ap-badge--mute', ch.evidenceId);
+          chip.setAttribute('title', ch.untrusted ? ch.collapsed : (ch.value || ch.source));
+          chips.appendChild(chip);
+          if (ch.untrusted) {
+            const body = el('span', 'ap-note', ch.collapsed);
+            chips.appendChild(body);
+            chips.appendChild(btn('Expand', () => { body.textContent = ch.text; }));
+          }
+        }
+        line.appendChild(chips);
+      }
+      for (const sec of row.sections || []) {
+        if (!sec.items.length) continue;
+        const h = el('div', 'ap-row'); h.appendChild(el('strong', null, sec.title));
+        if (sec.badge) h.appendChild(el('span', 'ap-approval', sec.badge));
+        line.appendChild(h);
+        const ul = el('ul', 'ap-list');
+        for (const it of sec.items) ul.appendChild(el('li', null, it));
+        line.appendChild(ul);
+      }
+      if (row.nextReview) line.appendChild(el('div', 'ap-note', row.nextReview));
+      if (row.items) {
+        const ul = el('ul', 'ap-list');
+        for (const it of row.items) ul.appendChild(el('li', null, it));
+        line.appendChild(ul);
+      }
+      box.appendChild(line);
+    }
+    d.appendChild(box);
   }
 
   // ── Controls ────────────────────────────────────────────────────────────
@@ -408,7 +640,7 @@ export function init(mount, deps = {}) {
       box.appendChild(check(L.FEATURE_LABELS[k], feats[k], (v) => save({ features: { [k]: v } }), false, k === 'liveReads' ? L.LIVE_READS_TEXT : ''));
     }
 
-    box.appendChild(el('div', 'ap-section-title', 'Writes (locked off in V1)'));
+    box.appendChild(el('div', 'ap-section-title', 'Writes (locked off in V2)'));
     for (const k of Object.keys(L.WRITE_LABELS)) box.appendChild(check(L.WRITE_LABELS[k], false, () => {}, true, L.LOCKED_WRITE_TEXT));
     box.appendChild(el('div', 'ap-section-title', 'Protections (always on)'));
     const pl = el('ul', 'ap-list');
@@ -421,29 +653,61 @@ export function init(mount, deps = {}) {
     const units = el('textarea', 'ap-input ap-textarea'); units.setAttribute('aria-label', 'Units'); units.value = (Array.isArray(sc.units) ? sc.units : []).join('\n');
     const dr = el('div', 'ap-row'); dr.appendChild(el('span', null, 'Domicile')); dr.appendChild(dom); box.appendChild(dr);
     box.appendChild(units);
-    box.appendChild(check('All units', sc.allUnits, (v, cb) => {
-      if (v) {
-        const n = s.scope && Number.isFinite(s.scope.fleetDown) ? s.scope.fleetDown : 0;
-        const ok = win && typeof win.confirm === 'function' ? win.confirm(L.allUnitsConfirmText(n)) : false;
-        if (!ok) { cb.checked = false; return; }
-      }
-      save({ scope: { allUnits: v } });
-    }));
+    // V2: "Scope: Full fleet / Filter" writes scope.mode (replaces the V1 "All units" switch).
+    const fleet = sc.mode ? sc.mode === 'fleet' : !!sc.allUnits;
+    const mr = el('div', 'ap-row');
+    mr.appendChild(el('span', null, 'Scope: ' + (fleet ? 'Full fleet' : 'Filter')));
+    mr.appendChild(btn('Full fleet', () => {
+      const n = s.scope && Number.isFinite(s.scope.fleetDown) ? s.scope.fleetDown : 0;
+      const ok = win && typeof win.confirm === 'function' ? win.confirm(L.allUnitsConfirmText(n)) : false;
+      if (ok) save({ scope: { mode: 'fleet' } });
+    }, fleet));
+    mr.appendChild(btn('Filter', () => save({ scope: { mode: 'filter' } }), !fleet));
+    box.appendChild(mr);
     box.appendChild(btn('Save scope', () => save({ scope: { domicile: dom.value.trim().toUpperCase(), units: L.parseUnits(units.value) } })));
+    box.appendChild(el('div', 'ap-note', 'Filter lists (used in Filter mode; a unit matches when it matches every non-empty list).'));
+    const fl = sc.filter || {};
+    const lists = {};
+    for (const [k, label] of L.FILTER_LIST_KEYS) {
+      const ta = el('textarea', 'ap-input ap-textarea');
+      ta.setAttribute('aria-label', 'Filter ' + label);
+      ta.setAttribute('placeholder', label);
+      ta.value = (Array.isArray(fl[k]) ? fl[k] : []).join('\n');
+      lists[k] = ta;
+      const lr = el('div'); lr.appendChild(el('span', 'ap-note', label)); lr.appendChild(ta);
+      box.appendChild(lr);
+    }
+    box.appendChild(btn('Save filter', () => {
+      const texts = {};
+      for (const [k] of L.FILTER_LIST_KEYS) texts[k] = lists[k].value;
+      save(L.scopeFilterPatch(texts));
+    }));
 
     box.appendChild(el('div', 'ap-section-title', 'Settings'));
-    const nums = [['oosDays', 'Days down before a case opens'], ['maxCasesPerTick', 'Cases per tick'], ['intervalMs', 'Tick interval (ms)'], ['dailyCap', 'AI calls per day']];
-    const inputs = {};
-    for (const [k, label] of nums) {
+    // [patch path, label, current value]; ai.dailyCap (0-5000) replaces the legacy dailyCap field (same value, §3.2 alias).
+    const nums = [
+      [['oosDays'], 'Days down before a case opens', cfg.oosDays],
+      [['maxCasesPerTick'], 'Cases per tick', cfg.maxCasesPerTick],
+      [['intervalMs'], 'Tick interval (ms)', cfg.intervalMs],
+      [['ai', 'dailyCap'], 'AI calls per day (0–5000)', cfg.ai ? cfg.ai.dailyCap : cfg.dailyCap],
+      [['queue', 'maxConcurrent'], 'Parallel investigations (1–4)', cfg.queue ? cfg.queue.maxConcurrent : null],
+    ];
+    const inputs = [];
+    for (const [p, label, cur] of nums) {
       const r = el('div', 'ap-row');
-      const i = el('input', 'ap-input'); i.type = 'number'; i.setAttribute('aria-label', label); i.value = cfg[k] == null ? '' : String(cfg[k]);
-      inputs[k] = i;
+      const i = el('input', 'ap-input'); i.type = 'number'; i.setAttribute('aria-label', label); i.value = cur == null ? '' : String(cur);
+      inputs.push([p, i, cur]);
       r.appendChild(el('span', null, label)); r.appendChild(i);
       box.appendChild(r);
     }
     box.appendChild(btn('Save settings', () => {
       const patch = {};
-      for (const [k] of nums) { const v = parseInt(inputs[k].value, 10); if (Number.isFinite(v) && v !== cfg[k]) patch[k] = v; }
+      for (const [p, i, cur] of inputs) {
+        const v = parseInt(i.value, 10);
+        if (!Number.isFinite(v) || v === cur) continue;
+        if (p.length === 1) patch[p[0]] = v;
+        else patch[p[0]] = Object.assign(patch[p[0]] || {}, { [p[1]]: v });
+      }
       if (Object.keys(patch).length) save(patch);
     }));
     box.appendChild(el('div', 'ap-note', L.reliabilityHint(s)));
@@ -501,14 +765,24 @@ export function init(mount, deps = {}) {
     let r;
     try { r = await api.status(); } catch (_) { r = { ok: false, code: 'INTERNAL' }; }
     st.status = r || { ok: false, code: 'UNAVAILABLE' };
+    // V2: coverage is read on every status poll (no ap_* SQL on the main side while Autopilot is off).
+    let cv = null;
+    if (st.status.ok !== false && st.status.enabled && typeof api.coverage === 'function') {
+      try { cv = await api.coverage(); } catch (_) { cv = null; }
+    }
+    const hadPass = !!(st.coverage && st.coverage.pass);
+    st.coverage = cv && cv.ok ? cv : null;
     renderBanners();
     renderTiles();
+    renderCoverage();
+    if (hadPass !== !!(st.coverage && st.coverage.pass)) renderFilters();   // dropdown values come from the pass
     renderControls();
     renderDiag();
   }
   async function refresh() {
     await refreshStatus();
     await refreshCases();
+    await refreshUnits();
     if (st.drawer) await openCase(st.drawer.caseId, st.drawer.eventsOffset || 0);
   }
 
@@ -517,6 +791,7 @@ export function init(mount, deps = {}) {
     if (st.visible) return;
     st.visible = true;
     renderFilters();
+    renderUnitFilters();
     refresh();
     st.timer = setInterval(() => { if (st.visible) refreshStatus(); }, POLL_MS);
     try { st.unsub = api.onChanged(() => { if (st.visible) refresh(); }); } catch (_) { st.unsub = null; }

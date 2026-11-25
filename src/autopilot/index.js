@@ -28,6 +28,8 @@ const { createController } = require('./controller');
 const STEP_COLUMNS = Object.freeze(['step_id', 'run_id', 'seq', 'turn', 'kind', 'tool', 'args_json', 'status', 'code', 'why',
   'summary_json', 'live', 'reused_step_id', 'ai_latency_ms', 'ai_lane', 'started_at', 'ms']);
 
+const UNIT_REASONS = Object.freeze({ TYPE_UNKNOWN: 'unknown equipment type', TYPE_CONFLICT: 'equipment type conflict' });
+
 function _pct(sorted, p) {
   if (!sorted.length) return null;
   const i = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
@@ -217,7 +219,9 @@ function createAutopilot(deps) {
     if (!cfg.enabled) return _offList();
     if (!controller.ensureSchema()) return { ok: false, code: 'STORAGE_UNAVAILABLE' };
     const r = cs.listUnits(filter || {});
-    return { ok: true, total: r.total, items: r.items };
+    // FR-1.6: tracked-only units carry a plain reason.
+    const items = r.items.map((u) => Object.assign({}, u, { reason: UNIT_REASONS[u.eligibility] || null }));
+    return { ok: true, total: r.total, items };
   }
 
   /** deepInvestigate(caseId) (§8.7) -> { ok:true, state:'QUEUED' } | { ok:false, code } */

@@ -82,9 +82,12 @@ describe('autopilot-logic helpers', () => {
     expect(L.runButtons({ enabled: true, supervisorEnabled: true, runState: 'paused' }).runNowDisabled).toBe(true);
   });
 
-  it('live-reads text cites approval item 5 with the D-1 scope', () => {
+  it('live-reads text cites approval item 5 with the D-1 scope and the V2 warm-only tool reads', () => {
     expect(L.LIVE_READS_TEXT).toMatch(/approval item 5/);
-    expect(L.LIVE_READS_TEXT).toMatch(/AAP getService and Decisiv case status\/activity, only on an already-open session; DTNA and Aperia use cached data in V1/);
+    expect(L.LIVE_READS_TEXT).toMatch(/AAP getService and Decisiv case status\/activity, only on an already-open session \(warm-only\)/);
+    expect(L.LIVE_READS_TEXT).toMatch(/tools read the cache first and make at most one warm-only live read per source per run/);
+    expect(L.LIVE_READS_TEXT).toMatch(/DTNA and Aperia use cached data/);
+    expect(L.LOCKED_WRITE_TEXT).toBe('Not available in V2 (shadow mode)');
   });
 
   it('unitsNotInFleet list and text (R14)', () => {
@@ -121,11 +124,126 @@ describe('autopilot-logic helpers', () => {
   });
 });
 
+describe('V2 logic (§10.3, AC-27, AC-28, AC-37)', () => {
+  const PASS = {
+    fleet_rows: 25, duplicate_rows: 2, invalid_rows: 3, eligible: 9, excluded_trailer: 4, excluded_hostler: 4, excluded_unsupported: 1,
+    type_unknown: 1, type_conflict: 1, down_eligible: 6, case_open: 5, below_threshold: 1, out_of_filter: 0, feature_off: 0,
+    by_domicile: { ABE40: { eligible: 2 }, '(none)': { eligible: 1 }, roc5: { eligible: 1 } }, by_operator: { TUZR: {}, KNXP: {}, '(other)': {} },
+    tokensWithoutRows: [],
+  };
+  const COV = {
+    ok: true, pass: PASS, reconcileOk: true,
+    groups: { detectedHeld: 0, queued: 3, active: 1, scheduled: 1, waiting: 0, review: 1, deferredAi: 2, paused: 0, failed: 0 },
+    queue: { oldestQueuedAgeMs: 3 * 3600000 + 5 * 60000, queueCoveragePct: 60, processingRatePerHour: 1.5 },
+    ai: { callsToday: 7, cap: 48, p50Ms: 1200, p95Ms: 4000, failureRate: 0.125, notYetAi: 4, noAiConclusion: 2 },
+    sources: { aap_live: { ok: 3, not_warm: 1, auth: 0, cache_only: 2, rate_limited: 0 } },
+  };
+
+  it('coverage tile model: pass counts, groups, queue, AI and the clickable tiles', () => {
+    const tiles = L.coverageTiles(COV);
+    const by = Object.fromEntries(tiles.map((t) => [t.key, t]));
+    expect(by.eligible).toMatchObject({ label: 'Power units monitored', value: '9' });
+    expect(by.down_eligible).toMatchObject({ label: 'OOS detected', value: '6' });
+    expect(by.case_open.value).toBe('5');
+    expect(by.queued.value).toBe('3');
+    expect(by.type_unknown).toMatchObject({ value: '1', link: { view: 'units', filter: { coverage: 'type_unknown' } } });
+    expect(by.type_conflict.link).toEqual({ view: 'units', filter: { coverage: 'type_conflict' } });
+    expect(by.notYetAi).toMatchObject({ value: '4', link: { view: 'cases', filter: { aiPending: true } } });
+    expect(by.oldestQueued.value).toBe('3 h 5 min');
+    expect(by.queueCoveragePct.value).toBe('60%');
+    expect(by.processingRatePerHour.value).toBe('1.5');
+    expect(by.aiToday.value).toBe('7 / 48');
+    expect(by.aiLatency.value).toBe('1200 / 4000 ms');
+    expect(by.aiFailureRate.value).toBe('13%');
+    expect(by.noAiConclusion.value).toBe('2');
+    for (const t of tiles) expect(typeof t.value).toBe('string');
+    expect(L.coverageTiles({ ok: true, enabled: false })).toEqual([]);
+    expect(L.coverageTiles(null)).toEqual([]);
+    expect(L.sourceRows(COV, { aap_live: 'HEALTHY' })).toEqual([{ source: 'aap_live', ok: '3', not_warm: '1', auth: '0', cache_only: '2', rate_limited: '0', authState: 'HEALTHY' }]);
+  });
+
+  it('reconcile (red) and authorized-scope (amber) banners', () => {
+    expect(L.reconcileBanner(COV)).toBe(null);
+    const bad = Object.assign({}, COV, { reconcileOk: false, pass: Object.assign({}, PASS, { eligible: 8, case_open: 3 }) });
+    expect(L.reconcileBanner(bad)).toMatchObject({ tone: 'bad', rowsDiff: 1, downDiff: 2 });
+    expect(L.reconcileBanner(bad).text).toMatch(/by 1, and down power units differ from the coverage buckets by 2/);
+    expect(L.scopeBanner(COV)).toBe(null);
+    expect(L.scopeBanner(Object.assign({}, COV, { pass: Object.assign({}, PASS, { tokensWithoutRows: ['ZZZ9', 'QQQ1'] }) })))
+      .toEqual({ tone: 'warn', text: 'Authorized scope tokens with no synced units: ZZZ9, QQQ1' });
+  });
+
+  it('filter model and cases query: dropdown values from the pass groups; empty values dropped; state wins over group', () => {
+    const fm = L.filterModel(COV);
+    expect(fm.domicileOptions).toEqual(['ABE40', 'ROC5']);
+    expect(fm.scacOptions).toEqual(['KNXP', 'TUZR']);
+    expect(fm.groups.map((g) => g[0])).toEqual(['queued', 'reasoning', 'monitoring', 'waiting', 'review', 'resolved', 'paused', 'failed']);
+    expect(L.filterModel(null).domicileOptions).toEqual([]);
+    expect(L.casesQuery({ state: '', group: 'waiting', carrier: ' TUZR ', downtimeMin: '3', downtimeMax: '', priorityMin: '50', aiPending: true, tier: 'complex', sort: 'downtime' }, { limit: 50, offset: 0 }))
+      .toEqual({ group: 'waiting', carrier: 'TUZR', downtimeMin: 3, priorityMin: 50, aiPending: true, tier: 'complex', sort: 'downtime', limit: 50, offset: 0 });
+    expect(L.casesQuery({ state: 'QUEUED', group: 'queued', priorityMin: '1.5', aiPending: false })).toEqual({ state: 'QUEUED' });
+    expect(L.unitRow({ unit_id: 'UK600', eligibility: 'TYPE_UNKNOWN', coverage: 'type_unknown', reason: 'unknown equipment type', is_down: 1 }))
+      .toMatchObject({ unit: 'UK600', coverage: 'type_unknown', reason: 'unknown equipment type', down: 'down', caseId: '' });
+    expect(L.scopeFilterPatch({ domiciles: 'abe40, roc5\nABE40', carriers: 'Swift Leasing', scacs: 'tuzr', vendors: '', units: 'b13014' }))
+      .toEqual({ scope: { filter: { domiciles: ['ABE40', 'ROC5'], carriers: ['Swift Leasing'], scacs: ['TUZR'], vendors: [], units: ['B13014'] } } });
+  });
+
+  const STEPS = [
+    { step_id: 's1', run_id: 'r1', seq: 1, turn: 0, kind: 'tool', tool: 'existing_timeline', args_json: '{"unit":"322283"}', status: 'ok', code: null, why: 'preload', summary_json: JSON.stringify({ count: 1, evidenceIds: ['ev_t'], newestObservedAt: null, structured: [] }), live: 0, reused_step_id: null, ai_latency_ms: null, ai_lane: null, started_at: 1, ms: 3 },
+    { step_id: 's2', run_id: 'r1', seq: 2, turn: 1, kind: 'model', tool: null, args_json: null, status: 'ok', code: null, why: null, summary_json: JSON.stringify({ decision: 'request_tools', tools: 2 }), live: 0, reused_step_id: null, ai_latency_ms: 900, ai_lane: 'isolated', started_at: 2, ms: 905 },
+    { step_id: 's3', run_id: 'r1', seq: 3, turn: 1, kind: 'tool', tool: 'decisiv_activity', args_json: '{}', status: 'ok', code: null, why: 'check the stage ' + XSS, summary_json: JSON.stringify({ count: 2, evidenceIds: ['ev_s', 'ev_u'], newestObservedAt: Date.UTC(2026, 10, 20, 12), structured: [{ field: 'stage', value: 'x'.repeat(200) }] }), live: 1, reused_step_id: null, ai_latency_ms: null, ai_lane: null, started_at: 3, ms: 40 },
+    { step_id: 's4', run_id: 'r1', seq: 4, turn: 2, kind: 'tool', tool: 'aap_comments', args_json: '{}', status: 'reused', code: null, why: 'again', summary_json: '{"count":0}', live: 0, reused_step_id: 's0', ai_latency_ms: null, ai_lane: null, started_at: 4, ms: 0 },
+    { step_id: 's5', run_id: 'r1', seq: 5, turn: 3, kind: 'final', tool: null, args_json: null, status: 'final', code: null, why: null, summary_json: null, live: 0, reused_step_id: null, ai_latency_ms: null, ai_lane: null, started_at: 5, ms: 1 },
+  ];
+  const FIND = {
+    ev_s: { evidence_id: 'ev_s', source: 'decisiv', field: 'stage', value_text: 'ready', trust: 'structured' },
+    ev_u: { evidence_id: 'ev_u', source: 'decisiv', field: 'note', value_text: XSS, trust: 'untrusted_text' },
+  };
+
+  it('traceRows: no prompt / model-text field, collapsed untrusted text, markers, uncertain row for a conflict', () => {
+    const output = { summary: 'Down at the dealer.', confirmedFacts: [{ statement: 'fact' }], missingInfo: [], conflicts: [{ field: 'repairStatus', note: 'cache says repair, live says ready', evidenceIds: ['ev_s'] }], nextReviewInHours: 12 };
+    const rows = L.traceRows(STEPS, FIND, { case: { unit_id: '322283', state: 'MONITORING' }, output, memory: { openQuestions: [{ question: 'Is the turbo in?' }] } });
+    expect(rows.map((r) => r.kind)).toEqual(['start', 'tool', 'model', 'tool', 'tool', 'final', 'final', 'uncertain']);
+    const banned = /prompt|raw|reasoning|thought|model_text|modelText|response/i;
+    for (const r of rows) for (const k of Object.keys(r)) expect(banned.test(k), k).toBe(false);
+    expect(JSON.stringify(rows)).not.toMatch(/"prompt"/);
+    const model = rows[2];
+    expect(model).toMatchObject({ label: 'AI turn', summary: 'decision: request_tools · 2 tool requests', marker: 'lane isolated', ms: '900 ms', why: '' });
+    const dec = rows[3];
+    expect(dec).toMatchObject({ label: 'decisiv_activity', marker: 'live', turn: '1' });
+    expect(dec.why).toContain(XSS);   // a plain string; the view sets it with textContent
+    expect(dec.values[0].length).toBeLessThanOrEqual(80);
+    expect(dec.chips[0]).toMatchObject({ evidenceId: 'ev_s', untrusted: false, value: 'stage: ready' });
+    expect(dec.chips[1]).toMatchObject({ evidenceId: 'ev_u', untrusted: true, collapsed: 'decisiv · ' + XSS.length + ' chars', text: XSS });
+    expect(dec.chips[1].collapsed).not.toContain('<');
+    expect(rows[4]).toMatchObject({ marker: 'reused', status: { className: 'ap-badge ap-badge--mute' } });
+    expect(rows[1].marker).toBe('cached');
+    const fin = rows.find((r) => r.kind === 'final' && r.label === 'Conclusion');
+    expect(fin).toMatchObject({ text: 'Down at the dealer.', nextReview: 'Next review in 12 h' });
+    const unc = rows[rows.length - 1];
+    expect(unc.items).toEqual(['Open question: Is the turbo in?', 'Conflict: repairStatus — cache says repair, live says ready']);
+    expect(L.traceRows([], {}, {}).length).toBe(0);
+  });
+
+  it('deep button enablement and the V2 code messages', () => {
+    const run = { runState: 'running' };
+    for (const s of ['MONITORING', 'RECOMMENDATION_READY', 'QUEUED', 'NEEDS_REVIEW', 'WAITING_FOR_DATA', 'FAILED']) expect(L.deepButton({ state: s }, run).disabled, s).toBe(false);
+    for (const s of ['RESOLVED', 'PAUSED', 'INVESTIGATING', 'ANALYZING']) expect(L.deepButton({ state: s }, run).disabled, s).toBe(true);
+    expect(L.deepButton({ state: 'MONITORING' }, { runState: 'paused' })).toEqual({ disabled: true, hint: 'Autopilot is paused.' });
+    expect(L.deepButton({ state: 'MONITORING' }, null).disabled).toBe(true);
+    for (const code of ['NOT_RUNNING', 'CASE_BUSY', 'LOCKED_V2']) expect(L.codeMessage(code)).not.toMatch(/^Error:/);
+    expect(L.PROPOSAL_BADGE).toBe('Proposal — not published to the unit timeline');
+    expect(L.proposalRows([{ event_date: '11/18', kind: 'vendor_update', source: 'decisiv', description: XSS }])).toEqual([{ date: '11/18', kind: 'vendor_update', source: 'decisiv', description: XSS, badge: 'Proposal — not published to the unit timeline' }]);
+    const rr = Object.fromEntries(L.recordRows({ root_cause: null, confidence: 0.5, days_down: 4.6 }));
+    expect(rr).toMatchObject({ 'Root cause': '—', Confidence: '0.50', 'Days down': '4' });
+  });
+});
+
 describe('autopilot-api wrapper', () => {
   it('resolves UNAVAILABLE when window.autopilot is missing', async () => {
     const prev = globalThis.window.autopilot;
     delete globalThis.window.autopilot;
     expect(await apiMod.autopilotApi.status()).toEqual({ ok: false, code: 'UNAVAILABLE' });
+    for (const k of ['coverage', 'units', 'deepInvestigate']) expect(await apiMod.autopilotApi[k]('ap_0123456789abcdef')).toEqual({ ok: false, code: 'UNAVAILABLE' });
     expect(typeof apiMod.autopilotApi.onChanged(() => {})).toBe('function');
     globalThis.window.autopilot = { status: vi.fn(async () => ({ ok: true })) };
     expect(await apiMod.autopilotApi.status()).toEqual({ ok: true });
@@ -138,10 +256,16 @@ describe('the view in a fake DOM', () => {
     const status = { ok: true, enabled: true, runState: 'running', supervisorEnabled: true, supervisorEnvOverride: null, config: { features: { liveReads: true }, scope: { domicile: 'ABE40', units: ['B13014'], allUnits: false }, oosDays: 3, maxCasesPerTick: 1, intervalMs: 300000, dailyCap: 48 }, counts: { open: 1, byState: { RECOMMENDATION_READY: 1 }, byDomicile: { ROC5: 1 }, etaOverdue: 0, needsReview: 0, auth: 0 }, scope: { unitsNotInFleet: [], fleetDown: 3 }, ai: {}, resources: {} };
     const kase = { case_id: 'ap_0123456789abcdef', unit_id: 'B13014', domicile: 'ROC5', state: 'RECOMMENDATION_READY', primary_reason: 'DWELL_EXCEEDED', days_down: 71.2, priority: 50, reasons: [{ code: 'DWELL_EXCEEDED' }], ai_findings: { summary: XSS, confirmedFacts: [{ statement: XSS }] }, recommendation: { recommendedActions: [], actionsRequiringApproval: [] } };
     const findings = [{ evidence_id: 'ev_x', source: 'email', field: 'note', value_text: XSS, retrieved_at: 1, freshness: 'UNKNOWN', confidence: 0.5, trust: 'untrusted_text' }];
+    const steps = [{ step_id: 's1', run_id: 'r1', seq: 1, turn: 1, kind: 'tool', tool: 'outlook_evidence', status: 'ok', why: 'mail', summary_json: JSON.stringify({ count: 1, evidenceIds: ['ev_x'] }), live: 0, ms: 2 }];
+    const coverage = { ok: true, reconcileOk: false, pass: { fleet_rows: 3, eligible: 1, down_eligible: 1, case_open: 0, tokensWithoutRows: ['ZZZ9'], by_domicile: { ROC5: {} }, by_operator: {} }, groups: { queued: 1 }, queue: {}, ai: {}, sources: {} };
     return Object.assign({
       status: vi.fn(async () => status),
+      coverage: vi.fn(async () => coverage),
+      units: vi.fn(async () => ({ ok: true, total: 1, items: [{ unit_id: 'UK600', eligibility: 'TYPE_UNKNOWN', coverage: 'type_unknown', reason: 'unknown equipment type' }] })),
+      deepInvestigate: vi.fn(async () => ({ ok: false, code: 'CASE_BUSY' })),
       cases: vi.fn(async () => ({ ok: true, total: 1, items: [kase] })),
-      getCase: vi.fn(async () => ({ ok: true, case: kase, runs: [{ plan: [{ source: 'aap_cache', status: 'cache', why: XSS }] }], findings, conflicts: {}, events: [{ at: 1, kind: 'transition', to_state: 'QUEUED', reason_code: XSS }], eventsTotal: 1 })),
+      getCase: vi.fn(async () => ({ ok: true, case: kase, runs: [{ plan: [{ source: 'aap_cache', status: 'cache', why: XSS }] }], findings, conflicts: {}, events: [{ at: 1, kind: 'transition', to_state: 'QUEUED', reason_code: XSS }], eventsTotal: 1,
+        steps, proposals: [{ event_date: '11/18', kind: 'note', source: 'email', description: XSS }], record: { root_cause: null }, memory: { openQuestions: [] } })),
       setConfig: vi.fn(async () => ({ ok: true })),
       control: vi.fn(async () => ({ ok: true })),
       review: vi.fn(async () => ({ ok: true })),
@@ -181,8 +305,30 @@ describe('the view in a fake DOM', () => {
     expect(nodes.every((n) => !n.innerHTML)).toBe(true);
     expect(nodes.filter((n) => n.tagName === 'IMG').length).toBe(0);
 
-    // Locked write toggles are disabled with "Not available in V1".
-    const locked = nodes.filter((n) => n.textContent === 'Not available in V1');
+    // V2: coverage on the status poll, both banners, the units list, proposals badge, trace collapse / expand, Deep investigate.
+    expect(api.coverage).toHaveBeenCalled();
+    expect(api.units).toHaveBeenCalled();
+    const texts = nodes.map((n) => n.textContent);
+    expect(texts.some((t) => typeof t === 'string' && t.startsWith('Coverage does not reconcile'))).toBe(true);
+    expect(texts).toContain('Authorized scope tokens with no synced units: ZZZ9');
+    expect(texts).toContain('type_unknown — unknown equipment type');
+    expect(texts.filter((t) => t === 'Proposal — not published to the unit timeline').length).toBe(1);
+    const collapsed = 'email · ' + XSS.length + ' chars';
+    const body = nodes.find((n) => n.textContent === collapsed);
+    expect(body).toBeTruthy();
+    const expand = nodes.find((n) => n.tagName === 'BUTTON' && n.textContent === 'Expand');
+    expand.click();
+    expect(body.textContent).toBe(XSS);
+    const deep = nodes.find((n) => n.tagName === 'BUTTON' && n.textContent === 'Deep investigate');
+    expect(deep.disabled).toBeFalsy();
+    deep.click();
+    await flush();
+    expect(api.deepInvestigate).toHaveBeenCalledWith('ap_0123456789abcdef');
+    expect(walk(h.root).some((n) => n.textContent === 'The case is being investigated right now; try again when the run ends.')).toBe(true);
+    expect(walk(h.root).filter((n) => n.tagName === 'IMG').length).toBe(0);
+
+    // Locked write toggles are disabled with "Not available in V2 (shadow mode)".
+    const locked = nodes.filter((n) => n.textContent === 'Not available in V2 (shadow mode)');
     expect(locked.length).toBe(9);
 
     bus.emit('ui:view-change', { to: 'settings' });

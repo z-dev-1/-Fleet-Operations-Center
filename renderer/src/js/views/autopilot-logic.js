@@ -218,9 +218,10 @@ export function runButtons(status) {
   };
 }
 
-export const LIVE_READS_TEXT = 'Live reads (approval item 5): AAP getService and Decisiv case status/activity, only on an already-open session; DTNA and Aperia use cached data in V1.';
+export const LIVE_READS_TEXT = 'Live reads (approval item 5): AAP getService and Decisiv case status/activity, only on an already-open session (warm-only). Investigation tools read the cache first and make at most one warm-only live read per source per run; they never start a sign-in. DTNA and Aperia use cached data.';
 export const SHADOW_TEXT = 'Shadow mode: nothing is sent. Autopilot only reads and records recommendations.';
-export const LOCKED_WRITE_TEXT = 'Not available in V1';
+export const LOCKED_WRITE_TEXT = 'Not available in V2 (shadow mode)';
+export const PROPOSAL_BADGE = 'Proposal — not published to the unit timeline';
 export const APPROVAL_BADGE = 'Requires approval — not executed in V1';
 
 export const WRITE_LABELS = Object.freeze({
@@ -326,9 +327,11 @@ export function codeMessage(code) {
     DISABLED: 'Autopilot is off.',
     SUPERVISOR_DISABLED: 'The worker supervisor is off.',
     NOT_RUNNING: 'Autopilot is paused or stopped.',
+    CASE_BUSY: 'The case is being investigated right now; try again when the run ends.',
     BUSY: 'Autopilot is busy; try again in a moment.',
     HARNESS_ALREADY_RAN: 'The harness already ran today.',
     LOCKED_V1: 'That setting is locked in V1.',
+    LOCKED_V2: 'That setting is locked in V2 (shadow mode).',
     INVALID_INPUT: 'The value is not valid.',
     INVALID_STATE: 'That action does not apply to the case right now.',
     NOT_FOUND: 'The case was not found.',
@@ -336,4 +339,308 @@ export function codeMessage(code) {
     STORAGE_UNAVAILABLE: 'Local storage is unavailable.',
   };
   return M[code] || ('Error: ' + String(code || 'unknown'));
+}
+
+// ── V2 (§10.3) ──────────────────────────────────────────────────────────────
+
+const _num = (v) => (Number.isFinite(v) ? v : 0);
+const _arr = (v) => (Array.isArray(v) ? v : []);
+const _obj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+function _json(v) {
+  if (_obj(v) || Array.isArray(v)) return v;
+  if (typeof v !== 'string' || !v) return null;
+  try { return JSON.parse(v); } catch (_) { return null; }
+}
+
+/** formatAge(ms) -> '3 h 5 min' / '2 d 4 h' / '—'. */
+export function formatAge(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return m + ' min';
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + ' h ' + (m % 60) + ' min';
+  return Math.floor(h / 24) + ' d ' + (h % 24) + ' h';
+}
+
+/** reconcile identities of a detection pass (same formulas as src/autopilot/coverage.js). */
+export function reconcileDiffs(pass) {
+  const p = pass || {};
+  const n = (k) => Number(p[k]) || 0;
+  const rowsDiff = (n('fleet_rows') - n('duplicate_rows')) - (n('invalid_rows') + n('eligible') + n('excluded_trailer')
+    + n('excluded_hostler') + n('excluded_unsupported') + n('type_unknown') + n('type_conflict'));
+  const downDiff = n('down_eligible') - (n('case_open') + n('below_threshold') + n('out_of_filter') + n('feature_off'));
+  return { rowsDiff, downDiff };
+}
+
+/**
+ * coverageTiles(coverage) -> [{ key, label, value, group, link? }]. link is { view:'units', filter } or
+ * { view:'cases', filter } for the clickable tiles. [] while Autopilot is off or no coverage was read.
+ */
+export function coverageTiles(cov) {
+  const c = cov || {};
+  if (!c.ok || c.enabled === false) return [];
+  const p = c.pass || {};
+  const g = c.groups || {};
+  const q = c.queue || {};
+  const ai = c.ai || {};
+  const t = (key, label, value, group, link) => ({ key, label, value: String(value), group, link: link || null });
+  const pass = c.pass ? (k) => String(_num(p[k])) : () => '—';
+  const out = [
+    t('eligible', 'Power units monitored', pass('eligible'), 'fleet'),
+    t('down_eligible', 'OOS detected', pass('down_eligible'), 'fleet'),
+    t('case_open', 'Cases open', pass('case_open'), 'fleet'),
+    t('detectedHeld', 'Detected, waiting for a queue slot', _num(g.detectedHeld), 'groups', { view: 'cases', filter: { group: 'queued' } }),
+    t('queued', 'Queued', _num(g.queued), 'groups', { view: 'cases', filter: { group: 'queued' } }),
+    t('active', 'Investigating now', _num(g.active), 'groups', { view: 'cases', filter: { group: 'reasoning' } }),
+    t('scheduled', 'Scheduled re-check', _num(g.scheduled), 'groups', { view: 'cases', filter: { group: 'monitoring' } }),
+    t('waiting', 'Waiting for evidence', _num(g.waiting), 'groups', { view: 'cases', filter: { group: 'waiting' } }),
+    t('review', 'Needs review', _num(g.review), 'groups', { view: 'cases', filter: { group: 'review' } }),
+    t('deferredAi', 'AI deferred', _num(g.deferredAi), 'groups', { view: 'cases', filter: { aiPending: true } }),
+    t('paused', 'Paused', _num(g.paused), 'groups', { view: 'cases', filter: { group: 'paused' } }),
+    t('failed', 'Failed', _num(g.failed), 'groups', { view: 'cases', filter: { group: 'failed' } }),
+    t('excluded_trailer', 'Excluded: trailers', pass('excluded_trailer'), 'excluded', { view: 'units', filter: { eligibility: 'EXCLUDED_TRAILER' } }),
+    t('excluded_hostler', 'Excluded: hostlers', pass('excluded_hostler'), 'excluded', { view: 'units', filter: { eligibility: 'EXCLUDED_HOSTLER' } }),
+    t('excluded_unsupported', 'Excluded: unsupported type', pass('excluded_unsupported'), 'excluded', { view: 'units', filter: { eligibility: 'EXCLUDED_UNSUPPORTED' } }),
+    t('type_unknown', 'Unknown equipment type', pass('type_unknown'), 'excluded', { view: 'units', filter: { coverage: 'type_unknown' } }),
+    t('type_conflict', 'Equipment type conflict', pass('type_conflict'), 'excluded', { view: 'units', filter: { coverage: 'type_conflict' } }),
+    t('below_threshold', 'Below threshold', pass('below_threshold'), 'excluded', { view: 'units', filter: { coverage: 'below_threshold' } }),
+    t('out_of_filter', 'Out of filter', pass('out_of_filter'), 'excluded', { view: 'units', filter: { coverage: 'out_of_filter' } }),
+    t('oldestQueued', 'Oldest queued', formatAge(q.oldestQueuedAgeMs), 'queue'),
+    t('queueCoveragePct', 'Queue coverage', Number.isFinite(q.queueCoveragePct) ? q.queueCoveragePct + '%' : '—', 'queue'),
+    t('processingRatePerHour', 'Processed per hour', Number.isFinite(q.processingRatePerHour) ? String(q.processingRatePerHour) : '—', 'queue'),
+    t('aiToday', 'AI calls today', _num(ai.callsToday) + ' / ' + (Number.isFinite(ai.cap) ? ai.cap : '—'), 'ai'),
+    t('aiLatency', 'AI p50 / p95', Number.isFinite(ai.p50Ms) ? ai.p50Ms + ' / ' + (Number.isFinite(ai.p95Ms) ? ai.p95Ms : '—') + ' ms' : '—', 'ai'),
+    t('aiFailureRate', 'AI failure rate', Number.isFinite(ai.failureRate) ? Math.round(ai.failureRate * 100) + '%' : '—', 'ai'),
+    t('notYetAi', 'Not yet AI-investigated', _num(ai.notYetAi), 'ai', { view: 'cases', filter: { aiPending: true } }),
+    t('noAiConclusion', 'No AI-supported conclusion', _num(ai.noAiConclusion), 'ai'),
+  ];
+  return out;
+}
+
+/** sourceRows(coverage, auth) -> per-source availability rows (base-pack and tool live calls, 24 h). */
+export function sourceRows(cov, auth) {
+  const s = (cov && _obj(cov.sources)) ? cov.sources : {};
+  const a = _obj(auth) ? auth : {};
+  return Object.keys(s).sort().map((k) => {
+    const v = s[k] || {};
+    const st = a[k];
+    return {
+      source: k,
+      ok: String(_num(v.ok)), not_warm: String(_num(v.not_warm)), auth: String(_num(v.auth)),
+      cache_only: String(_num(v.cache_only)), rate_limited: String(_num(v.rate_limited)),
+      authState: st == null ? '' : (typeof st === 'object' ? (st.actionNeeded ? 'sign-in needed' : _str(st.state)) : _str(st)),
+    };
+  });
+}
+
+/** reconcileBanner(coverage) -> null | { tone:'bad', text } when the latest pass does not reconcile. */
+export function reconcileBanner(cov) {
+  if (!cov || !cov.ok || cov.reconcileOk !== false) return null;
+  const d = reconcileDiffs(cov.pass);
+  return {
+    tone: 'bad',
+    text: 'Coverage does not reconcile: fleet rows differ from the classified units by ' + d.rowsDiff
+      + ', and down power units differ from the coverage buckets by ' + d.downDiff + '.',
+    rowsDiff: d.rowsDiff, downDiff: d.downDiff,
+  };
+}
+
+/** scopeBanner(coverage) -> null | { tone:'warn', text } when authorized scope tokens match no synced unit (FR-1.10). */
+export function scopeBanner(cov) {
+  const l = cov && cov.ok && cov.pass ? _arr(cov.pass.tokensWithoutRows).map((x) => String(x)) : [];
+  return l.length ? { tone: 'warn', text: 'Authorized scope tokens with no synced units: ' + l.join(', ') } : null;
+}
+
+export const CASE_GROUPS = Object.freeze([
+  ['queued', 'Queued'], ['reasoning', 'Investigating'], ['monitoring', 'Monitoring'], ['waiting', 'Waiting for evidence'],
+  ['review', 'Needs review'], ['resolved', 'Resolved'], ['paused', 'Paused'], ['failed', 'Failed'],
+]);
+export const TIERS = Object.freeze([['simple', 'Simple'], ['standard', 'Standard'], ['complex', 'Complex']]);
+export const SORTS = Object.freeze([['priority', 'Priority'], ['downtime', 'Downtime'], ['queued', 'Time queued'], ['updated', 'Last updated']]);
+// classify.STAGES ∪ classify.CANONICAL_STATUSES (the autopilot:cases phase enum).
+export const PHASES = Object.freeze(['arrival', 'diagnosis', 'approval', 'repair', 'ready', 'none', 'available', 'down', 'in_repair',
+  'awaiting_parts', 'awaiting_estimate_approval', 'awaiting_vendor', 'ready_for_pickup', 'in_transit', 'decommissioned', 'unknown']);
+export const UNIT_COVERAGES = Object.freeze(['case_open', 'below_threshold', 'not_down', 'out_of_filter', 'feature_off', 'excluded', 'type_unknown', 'type_conflict', 'invalid']);
+export const ELIGIBILITY_CLASSES = Object.freeze(['POWER_ELIGIBLE', 'EXCLUDED_TRAILER', 'EXCLUDED_HOSTLER', 'EXCLUDED_UNSUPPORTED', 'TYPE_UNKNOWN', 'TYPE_CONFLICT', 'INVALID_ROW']);
+
+const CODE_RE = /^[A-Z0-9]{2,10}$/;
+function _groupKeys(o) {
+  return Object.keys(_obj(o) ? o : {}).map((k) => String(k).trim().toUpperCase()).filter((k) => CODE_RE.test(k)).sort();
+}
+
+/** filterModel(coverage) -> dropdown values; domicile and SCAC come from the latest pass groups (no free typing). */
+export function filterModel(cov) {
+  const p = (cov && cov.pass) || {};
+  return {
+    domicileOptions: _groupKeys(p.by_domicile),
+    scacOptions: _groupKeys(p.by_operator),
+    groups: CASE_GROUPS, tiers: TIERS, sorts: SORTS, phases: PHASES,
+  };
+}
+
+/** casesQuery(uiFilter, { limit, offset }) -> the autopilot:cases filter (empty values dropped, numbers parsed). */
+export function casesQuery(f, page) {
+  const u = f || {};
+  const out = {};
+  for (const k of ['state', 'reason', 'domicile', 'q', 'carrier', 'scac', 'vendor', 'phase', 'group', 'tier', 'sort']) {
+    const v = u[k] == null ? '' : String(u[k]).trim();
+    if (v) out[k] = v;
+  }
+  if (out.state && out.group) delete out.group;   // state wins; the IPC rejects both together
+  for (const k of ['downtimeMin', 'downtimeMax']) {
+    const v = u[k] === '' || u[k] == null ? NaN : Number(u[k]);
+    if (Number.isFinite(v)) out[k] = v;
+  }
+  const pm = u.priorityMin === '' || u.priorityMin == null ? NaN : Number(u.priorityMin);
+  if (Number.isInteger(pm)) out.priorityMin = pm;
+  if (u.aiPending === true) out.aiPending = true;
+  if (page && Number.isInteger(page.limit)) out.limit = page.limit;
+  if (page && Number.isInteger(page.offset)) out.offset = page.offset;
+  return out;
+}
+
+/** unitRow(ap_unit row) -> the units-table row model. */
+export function unitRow(u) {
+  const k = u || {};
+  return {
+    unit: _str(k.unit_id), eligibility: _str(k.eligibility), equipmentClass: _str(k.equipment_class),
+    coverage: _str(k.coverage), domicile: _str(k.domicile), operator: _str(k.operator), owner: _str(k.owner),
+    caseId: _str(k.case_id), reason: _str(k.reason), exclusionCode: _str(k.exclusion_code),
+    down: k.is_down ? 'down' : '',
+  };
+}
+
+const STEP_TONES = Object.freeze({
+  ok: 'ok', empty: 'ok', final: 'ok', reused: 'mute', skipped: 'mute', pending: 'busy', interrupted: 'busy',
+  unavailable: 'warn', auth_required: 'warn', stopped: 'warn', timeout: 'bad', invalid: 'bad', invalid_args: 'bad', denied: 'bad', error: 'bad',
+});
+const STRUCT_MAX = 80;
+const ROW_KINDS = Object.freeze({ model: 'AI turn', final: 'Final answer', stop: 'Stopped' });
+
+function _chip(id, findingsById) {
+  const f = findingsById && findingsById[id];
+  if (!f) return { evidenceId: _str(id), source: '', untrusted: false };
+  const untrusted = f.trust === 'untrusted_text';
+  const text = _str(f.value_text);
+  return untrusted
+    ? { evidenceId: _str(id), source: _str(f.source), untrusted: true, collapsed: _str(f.source) + ' · ' + text.length + ' chars', text }
+    : { evidenceId: _str(id), source: _str(f.source), untrusted: false, value: _str(f.field) + ': ' + text.slice(0, STRUCT_MAX) };
+}
+
+/**
+ * traceRows(steps, findingsById, final?) -> trace panel rows (pure, §10.3, AC-28).
+ * steps: autopilot:case `steps` (the 17 listed columns only). Rows never carry a prompt or model
+ * text field: a model step shows its decision and tool count, a tool step its why, status,
+ * counts, newest observed time, short structured values and evidence chips. Untrusted evidence
+ * text is collapsed to source + length; the view sets it with textContent only on expand.
+ * final (optional): { case, output, memory } adds 'start', 'final' and 'uncertain' rows.
+ */
+export function traceRows(steps, findingsById, final) {
+  const rows = [];
+  const fx = final || {};
+  const byId = _obj(findingsById) ? findingsById : {};
+  if (fx.case) {
+    const c = fx.case;
+    rows.push({ kind: 'start', label: 'Started with', text: 'Unit ' + _str(c.unit_id) + ' · ' + stateBadge(c.state).label + ' · ' + Object.keys(byId).length + ' evidence items' });
+  }
+  for (const s of _arr(steps)) {
+    if (!s) continue;
+    const sum = _json(s.summary_json) || {};
+    const status = _str(s.status);
+    const tone = STEP_TONES[status] || 'mute';
+    const kind = _str(s.kind);
+    const r = {
+      kind, stepId: _str(s.step_id), runId: _str(s.run_id), seq: Number.isFinite(s.seq) ? s.seq : null,
+      turn: Number.isFinite(s.turn) ? String(s.turn) : '',
+      label: kind === 'tool' ? _str(s.tool) : (ROW_KINDS[kind] || kind),
+      why: kind === 'tool' ? _str(s.why).slice(0, 200) : '',
+      status: { label: status + (s.code ? ' · ' + _str(s.code) : ''), className: 'ap-badge ap-badge--' + tone },
+      summary: '', values: [], chips: [], marker: '',
+      ms: Number.isFinite(s.ms) ? s.ms + ' ms' : '',
+    };
+    if (kind === 'model') {
+      r.summary = (sum.decision ? 'decision: ' + _str(sum.decision) : '') + (Number.isFinite(sum.tools) ? ' · ' + sum.tools + ' tool request' + (sum.tools === 1 ? '' : 's') : '');
+      r.marker = s.ai_lane ? 'lane ' + _str(s.ai_lane) : '';
+      if (Number.isFinite(s.ai_latency_ms)) r.ms = s.ai_latency_ms + ' ms';
+    } else if (kind === 'tool') {
+      const n = Number.isFinite(sum.count) ? sum.count : 0;
+      r.summary = n + ' item' + (n === 1 ? '' : 's') + (Number.isFinite(sum.newestObservedAt) ? ' · newest ' + formatTime(sum.newestObservedAt) : '');
+      r.values = _arr(sum.structured).slice(0, 8).map((x) => (_str(x && x.field) + ': ' + _str(x && x.value)).slice(0, STRUCT_MAX));
+      r.chips = _arr(sum.evidenceIds).slice(0, 40).map((id) => _chip(id, byId));
+      r.marker = s.reused_step_id || status === 'reused' ? 'reused' : (s.live ? 'live' : (sum.cacheServed ? 'cached (source unavailable)' : 'cached'));
+    }
+    rows.push(r);
+  }
+  const out = fx.output;
+  if (_obj(out)) {
+    const sec = findingsSections(out);
+    rows.push({
+      kind: 'final', label: 'Conclusion', text: _str(out.summary).slice(0, 400),
+      sections: sec.filter((x) => x.key !== 'missingInfo'),
+      nextReview: Number.isFinite(out.nextReviewInHours) ? 'Next review in ' + out.nextReviewInHours + ' h' : '',
+    });
+  }
+  const mem = _obj(fx.memory) ? fx.memory : {};
+  const uncertain = [];
+  for (const m of _arr(out && out.missingInfo)) uncertain.push('Missing: ' + _str(m && m.item));
+  for (const q of _arr(mem.openQuestions)) uncertain.push('Open question: ' + _str(q && q.question));
+  for (const c of _arr(out && out.conflicts)) uncertain.push('Conflict: ' + _str(c && (c.field || c.group)) + (c && c.note ? ' — ' + _str(c.note) : ''));
+  if (uncertain.length) rows.push({ kind: 'uncertain', label: 'Uncertain', items: uncertain });
+  return rows;
+}
+
+/** deepButton(case, status) -> { disabled, hint } (§10.3). */
+export function deepButton(c, status) {
+  const st = c && c.state;
+  if (!status || status.runState !== 'running') return { disabled: true, hint: 'Autopilot is ' + String((status && status.runState) || 'not running') + '.' };
+  if (['RESOLVED', 'PAUSED', 'INVESTIGATING', 'ANALYZING'].includes(st)) return { disabled: true, hint: 'Not available while the case is ' + stateBadge(st).label.toLowerCase() + '.' };
+  return { disabled: false, hint: '' };
+}
+
+/** recordRows(record) -> [label, value] pairs of the structured findings record (FR-14.1). */
+export function recordRows(rec) {
+  const r = _obj(rec) ? rec : {};
+  const v = (x) => (x == null || x === '' ? '—' : _str(x));
+  return [
+    ['Operator', v(r.operator)], ['Owner', v(r.owner)], ['Domicile', v(r.domicile)], ['OOS status', v(r.oos_status)],
+    ['Days down', Number.isFinite(r.days_down) ? String(Math.floor(r.days_down)) : '—'], ['Repair phase', v(r.repair_phase)],
+    ['Root cause', v(r.root_cause)], ['Blocker', v(r.blocker)], ['Responsible party', v(r.responsible_party)],
+    ['Last verified update', Number.isFinite(r.last_verified_update_at) ? formatTime(r.last_verified_update_at) + (r.last_verified_update_source ? ' (' + _str(r.last_verified_update_source) + ')' : '') : '—'],
+    ['Parts ETA', v(r.parts_eta)], ['Repair ETA', v(r.repair_eta)],
+    ['Confidence', Number.isFinite(r.confidence) ? r.confidence.toFixed(2) : '—'], ['AI status', v(r.ai_status)],
+    ['Investigated', formatTime(r.investigated_at)],
+  ];
+}
+
+/** proposalRows(proposals) -> timeline proposal rows, each with the not-published badge. */
+export function proposalRows(list) {
+  return _arr(list).map((p) => ({
+    date: _str(p && (p.event_date || (Number.isFinite(p.event_at) ? formatTime(p.event_at) : ''))),
+    kind: _str(p && p.kind), source: _str(p && p.source), description: _str(p && p.description), badge: PROPOSAL_BADGE,
+  }));
+}
+
+export const FILTER_LIST_KEYS = Object.freeze([['domiciles', 'Domiciles'], ['carriers', 'Carriers'], ['scacs', 'SCACs'], ['vendors', 'Vendors'], ['units', 'Units']]);
+
+/** parseList(text, upper) -> trimmed, deduped entries (comma, semicolon or newline separated). */
+export function parseList(text, upper) {
+  const out = [];
+  const seen = new Set();
+  for (const part of String(text == null ? '' : text).split(/[,;\n]+/)) {
+    const v = upper ? part.trim().toUpperCase() : part.trim();
+    const k = v.toLowerCase();
+    if (!v || seen.has(k)) continue;
+    seen.add(k);
+    out.push(v);
+  }
+  return out;
+}
+
+/** scopeFilterPatch({ domiciles, carriers, scacs, vendors, units } as text) -> { scope: { filter } } */
+export function scopeFilterPatch(texts) {
+  const t = texts || {};
+  return { scope: { filter: {
+    domiciles: parseList(t.domiciles, true), carriers: parseList(t.carriers, false), scacs: parseList(t.scacs, true),
+    vendors: parseList(t.vendors, false), units: parseUnits(t.units),
+  } } };
 }

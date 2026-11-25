@@ -1080,7 +1080,28 @@ function getMeta(key) {
   return r ? r.value : null;
 }
 
-/** listCases({ state, domicile, reason, q, limit, offset }) -> { total, items } */
+// §10.1 / §8.1: cases-filter groups and sort orders. Fixed SQL strings, never built from input.
+const CASE_GROUP_SQL = Object.freeze({
+  queued: "state IN ('DETECTED', 'QUEUED')",
+  reasoning: "state IN ('INVESTIGATING', 'ANALYZING')",
+  monitoring: "state IN ('MONITORING', 'RECOMMENDATION_READY')",
+  waiting: "(state IN ('WAITING_FOR_DATA', 'AUTH_REQUIRED') OR (state <> 'RESOLVED' AND awaiting_sources IS NOT NULL AND awaiting_sources <> ''))",
+  review: "state IN ('NEEDS_REVIEW', 'RECOMMENDATION_READY')",
+  resolved: "state = 'RESOLVED'",
+  paused: "state = 'PAUSED'",
+  failed: "state = 'FAILED'",
+});
+const CASE_SORT_SQL = Object.freeze({
+  priority: 'priority DESC, state_changed_at ASC, case_id ASC',
+  downtime: 'days_down DESC, case_id ASC',
+  queued: 'COALESCE(queued_since, state_changed_at) ASC, case_id ASC',
+  updated: 'updated_at DESC, case_id ASC',
+});
+
+/**
+ * listCases({ state, domicile, reason, q, limit, offset,
+ *   V2: carrier, scac, vendor, phase, downtimeMin, downtimeMax, priorityMin, group, aiPending, tier, sort }) -> { total, items }
+ */
 function listCases(filter) {
   const f = filter || {};
   const where = [];
@@ -1088,9 +1109,20 @@ function listCases(filter) {
   if (f.state) {
     const states = (Array.isArray(f.state) ? f.state : [f.state]).filter((s) => typeof s === 'string');
     if (states.length) { where.push('state IN (' + states.map(() => '?').join(', ') + ')'); args.push(...states); }
+  } else if (f.group && Object.prototype.hasOwnProperty.call(CASE_GROUP_SQL, f.group)) {
+    where.push(CASE_GROUP_SQL[f.group]);
   } else if (!f.includeResolved) {
     where.push("state <> 'RESOLVED'");
   }
+  if (f.carrier) { const c = String(f.carrier).toLowerCase(); where.push('(lower(operator) = ? OR lower(owner) = ?)'); args.push(c, c); }
+  if (f.scac) { where.push('operator = ?'); args.push(normUnit(f.scac)); }
+  if (f.vendor) { where.push('lower(vendor) = ?'); args.push(String(f.vendor).toLowerCase()); }
+  if (f.phase) { where.push("COALESCE(repair_phase, 'unknown') = ?"); args.push(String(f.phase)); }
+  if (Number.isFinite(f.downtimeMin)) { where.push('days_down >= ?'); args.push(f.downtimeMin); }
+  if (Number.isFinite(f.downtimeMax)) { where.push('days_down <= ?'); args.push(f.downtimeMax); }
+  if (Number.isFinite(f.priorityMin)) { where.push('priority >= ?'); args.push(f.priorityMin); }
+  if (f.aiPending === true) where.push('(ai_investigated_at IS NULL OR ai_pending_reason IS NOT NULL)');
+  if (f.tier) { where.push('complexity = ?'); args.push(String(f.tier)); }
   if (f.domicile) { where.push('domicile = ?'); args.push(normUnit(f.domicile)); }
   if (f.reason) { where.push('instr(reasons_json, ?) > 0'); args.push('"code":"' + String(f.reason) + '"'); }
   if (f.q) {
@@ -1101,7 +1133,8 @@ function listCases(filter) {
   const limit = Math.max(1, Math.min(200, parseInt(f.limit, 10) || 50));
   const offset = Math.max(0, parseInt(f.offset, 10) || 0);
   const total = _get('SELECT COUNT(*) AS n FROM ap_case' + w, ...args).n;
-  const items = _all('SELECT * FROM ap_case' + w + ' ORDER BY priority DESC, state_changed_at ASC, case_id ASC LIMIT ? OFFSET ?', ...args, limit, offset).map(_parseCase);
+  const order = Object.prototype.hasOwnProperty.call(CASE_SORT_SQL, f.sort) ? CASE_SORT_SQL[f.sort] : CASE_SORT_SQL.priority;
+  const items = _all('SELECT * FROM ap_case' + w + ' ORDER BY ' + order + ' LIMIT ? OFFSET ?', ...args, limit, offset).map(_parseCase);
   return { total, items };
 }
 

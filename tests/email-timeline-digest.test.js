@@ -155,9 +155,15 @@ describe('322283 email timeline digest', () => {
       ':(exclude)renderer/src/js/views/relay-actions.js', ...upgraded.map((p) => ':(exclude)' + p)];
     expect(git('diff', '--name-only', '12a01de', '--', ...paths).trim()).toBe('');
     expect(git('diff', '--name-only', '--', ...paths).trim()).toBe('');
-    const changed = (git('diff', '-U0', '12a01de', '--', ...upgraded) || '').split('\n')
+    // Fleet Autopilot V2 shows read-only timeline proposals in its dashboard ("Proposal — not published to
+    // the unit timeline"); those view lines may say "timeline" but must never reach a timeline write.
+    const AP_VIEWS = ['renderer/src/js/views/autopilot.js', 'renderer/src/js/views/autopilot-logic.js', 'renderer/src/js/views/autopilot-api.js'];
+    const changed = (git('diff', '-U0', '12a01de', '--', ...upgraded.filter((p) => !AP_VIEWS.includes(p))) || '').split('\n')
       .filter((l) => /^[+-](?![+-])/.test(l) && /timeline/i.test(l));
     expect(changed).toEqual([]);
+    const apChanged = (git('diff', '-U0', '12a01de', '--', ...AP_VIEWS) || '').split('\n')
+      .filter((l) => /^[+-](?![+-])/.test(l) && /timeline/i.test(l));
+    for (const l of apChanged) expect(l, l).not.toMatch(/applyUnitTimelineUpdate|writeTimeline|setTimeline|notesStore|\.save\(|\.update\(|ipcRenderer|invoke\(/);
     const sample = '11/10 - Christy Adriaansen - Kenworth Northeast Group (Service Advisor) confirmed, estimate $1,200.00 (ASIST case 21268757)';
     const before = redactForSharing(sample);
     build(F);

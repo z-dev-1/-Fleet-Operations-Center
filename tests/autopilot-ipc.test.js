@@ -21,7 +21,8 @@ const handlers = {};
 }
 const { registerAutopilotIPC } = require('../src/ipc/autopilot');
 
-const CHANNELS = ['autopilot:status', 'autopilot:cases', 'autopilot:case', 'autopilot:set-config', 'autopilot:control', 'autopilot:review', 'autopilot:harness-run'];
+const CHANNELS = ['autopilot:status', 'autopilot:cases', 'autopilot:case', 'autopilot:set-config', 'autopilot:control', 'autopilot:review', 'autopilot:harness-run',
+  'autopilot:coverage', 'autopilot:units', 'autopilot:deep-investigate'];
 const call = (ch, arg) => handlers[ch]({}, arg);
 const apSql = (spy) => spy.mock.calls.map((c) => String(c[0])).filter((q) => /\bap_/.test(q));
 
@@ -43,7 +44,7 @@ function seed(unit, extra) {
 beforeEach(() => { vi.restoreAllMocks(); setup(); });
 
 describe('registration', () => {
-  it('registers exactly the seven channels and boots the facade (worker registered)', () => {
+  it('registers exactly the ten channels and boots the facade (worker registered)', () => {
     expect(Object.keys(handlers).sort()).toEqual(CHANNELS.slice().sort());
     expect(env.supervisor.registerCalls).toBe(1);
     expect(env.supervisor.active()).toBe(true);
@@ -226,6 +227,170 @@ describe('autopilot:harness-run validation', () => {
   });
 });
 
+describe('V2 autopilot:cases filter keys (§10.1, AC-27)', () => {
+  const bad = [
+    [{ carrier: 'x'.repeat(41) }, 'carrier'], [{ carrier: 'a;b' }, 'carrier'], [{ carrier: 5 }, 'carrier'],
+    [{ scac: 'a' }, 'scac'], [{ scac: 'ABCDEFGHIJK' }, 'scac'], [{ scac: 'A-B' }, 'scac'],
+    [{ vendor: 'v'.repeat(61) }, 'vendor'], [{ vendor: 'a<b>' }, 'vendor'],
+    [{ phase: 'broken' }, 'phase'], [{ phase: 3 }, 'phase'],
+    [{ downtimeMin: -1 }, 'downtimeMin'], [{ downtimeMin: 3651 }, 'downtimeMin'], [{ downtimeMin: '2' }, 'downtimeMin'], [{ downtimeMax: NaN }, 'downtimeMax'],
+    [{ downtimeMin: 10, downtimeMax: 5 }, 'downtimeMax'],
+    [{ priorityMin: 101 }, 'priorityMin'], [{ priorityMin: 1.5 }, 'priorityMin'], [{ priorityMin: -1 }, 'priorityMin'],
+    [{ group: 'everything' }, 'group'], [{ state: 'QUEUED', group: 'queued' }, 'group'],
+    [{ aiPending: 'yes' }, 'aiPending'], [{ aiPending: 1 }, 'aiPending'],
+    [{ tier: 'huge' }, 'tier'], [{ sort: 'priority DESC; DROP TABLE ap_case' }, 'sort'], [{ sort: 'name' }, 'sort'],
+  ];
+  for (const [arg, field] of bad) {
+    it('rejects ' + JSON.stringify(arg) + ' -> INVALID_INPUT ' + field + ' with no SQL', async () => {
+      const prep = vi.spyOn(F.engine, 'prepare');
+      expect(await call('autopilot:cases', arg)).toEqual({ ok: false, code: 'INVALID_INPUT', field });
+      expect(apSql(prep)).toEqual([]);
+    });
+  }
+
+  it('the enum copies match classify.js, coverage.js and equipment.js', () => {
+    const { ENUMS } = require('../src/ipc/autopilot');
+    const classify = require('../src/autopilot/classify');
+    const { CLASSES } = require('../src/autopilot/equipment');
+    expect(ENUMS.CANONICAL_STATUSES).toEqual(classify.CANONICAL_STATUSES);
+    expect(ENUMS.STAGES).toEqual(classify.STAGES);
+    expect(ENUMS.ELIGIBILITY_CLASSES.slice().sort()).toEqual(Object.values(CLASSES).sort());
+    const covSrc = fs.readFileSync(path.join(ROOT, 'src', 'autopilot', 'coverage.js'), 'utf8');
+    const block = covSrc.slice(covSrc.indexOf('const COVERAGE = Object.freeze({'), covSrc.indexOf('});', covSrc.indexOf('const COVERAGE')));
+    expect([...block.matchAll(/:\s*'([a-z_]+)'/g)].map((m) => m[1]).sort()).toEqual(ENUMS.UNIT_COVERAGES.slice().sort());
+    const L = fs.readFileSync(path.join(ROOT, 'renderer', 'src', 'js', 'views', 'autopilot-logic.js'), 'utf8');
+    for (const g of ENUMS.GROUPS) expect(L).toContain("['" + g + "', ");
+  });
+
+  it('valid V2 keys filter with parameterized SQL; group, aiPending, tier and sort work', async () => {
+    const a = seed('T1', { operator: 'TUZR', owner: 'AZNG', vendor: 'Penske Truck Leasing', daysDown: 5 });
+    const b = seed('T2', { operator: 'KNXP', owner: 'KNXP', vendor: "Rush Truck Center's", daysDown: 40 });
+    const c = seed('T3', { operator: 'SWFT', owner: 'Swift Leasing', vendor: 'Other', daysDown: 12 });
+    const set = (id, sql, ...v) => F.engine.prepare('UPDATE ap_case SET ' + sql + ' WHERE case_id = ?').run(...v, id);
+    set(a, 'priority = ?, repair_phase = ?, complexity = ?, ai_investigated_at = ?, days_down = ?', 80, 'repair', 'complex', F.T0, 5);
+    set(b, 'priority = ?, repair_phase = NULL, complexity = ?, ai_investigated_at = NULL, days_down = ?, updated_at = ?', 30, 'simple', 40, F.T0 + 5);
+    set(c, "priority = ?, repair_phase = ?, complexity = ?, ai_investigated_at = ?, ai_pending_reason = 'cap', days_down = ?, state = 'MONITORING', awaiting_sources = 'decisiv'", 50, 'awaiting_parts', 'standard', F.T0, 12);
+    const units = async (f) => (await call('autopilot:cases', f)).items.map((x) => x.unit_id);
+    expect(await units({ carrier: 'tuzr' })).toEqual(['T1']);
+    expect(await units({ carrier: 'Swift Leasing' })).toEqual(['T3']);
+    expect(await units({ scac: ' knxp ' })).toEqual(['T2']);
+    expect(await units({ vendor: "rush truck center's" })).toEqual(['T2']);
+    expect(await units({ phase: 'unknown' })).toEqual(['T2']);
+    expect(await units({ phase: 'awaiting_parts' })).toEqual(['T3']);
+    expect(await units({ downtimeMin: 10 })).toEqual(['T3', 'T2']);
+    expect(await units({ downtimeMin: 10, downtimeMax: 12 })).toEqual(['T3']);
+    expect(await units({ priorityMin: 50 })).toEqual(['T1', 'T3']);
+    expect(await units({ group: 'queued' })).toEqual(['T1', 'T2']);
+    expect(await units({ group: 'monitoring' })).toEqual(['T3']);
+    expect(await units({ group: 'waiting' })).toEqual(['T3']);
+    expect(await units({ group: 'resolved' })).toEqual([]);
+    expect(await units({ aiPending: true })).toEqual(['T3', 'T2']);
+    expect(await units({ aiPending: false })).toEqual(['T1', 'T3', 'T2']);
+    expect(await units({ tier: 'complex' })).toEqual(['T1']);
+    expect(await units({ sort: 'downtime' })).toEqual(['T2', 'T3', 'T1']);
+    expect((await units({ sort: 'updated' }))[0]).toBe('T2');
+    expect((await units({ sort: 'queued' })).length).toBe(3);
+    expect(await units({ sort: 'priority' })).toEqual(['T1', 'T3', 'T2']);
+  });
+});
+
+describe('V2 channels: autopilot:coverage, autopilot:units, autopilot:deep-investigate (§10.1, AC-27)', () => {
+  const FLEET = { autopilot: { scope: { mode: 'fleet' } } };
+  function fleetEnv() {
+    const settings = F.settingsStore({ autopilot: F.v1Defaults({ scope: { mode: 'fleet' } }), domiciles: ['ABE40', 'ZZZ9'] });
+    const world = F.mkWorld({ rows: F.fleetV2() });
+    const runInvestigation = async (caseId) => ({ ok: true, caseId, outcome: 'noop' });
+    return setup({ settings, world, runInvestigation });
+  }
+
+  it('coverage input validation', async () => {
+    for (const arg of [5, 'x', [], { a: 1 }]) expect(await call('autopilot:coverage', arg), JSON.stringify(arg)).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'input' });
+    for (const arg of [undefined, null, {}]) expect((await call('autopilot:coverage', arg)).ok).toBe(true);
+  });
+
+  it('coverage returns the reconciled pass with tokensWithoutRows, groups, queue, ai and sources', async () => {
+    const env = fleetEnv();
+    await env.ctl.runOnce({ forceDetect: true });
+    const r = await call('autopilot:coverage');
+    expect(r.ok).toBe(true);
+    expect(r.reconcileOk).toBe(true);
+    const p = r.pass;
+    expect(p.fleet_rows - p.duplicate_rows).toBe(p.invalid_rows + p.eligible + p.excluded_trailer + p.excluded_hostler + p.excluded_unsupported + p.type_unknown + p.type_conflict);
+    expect(p.down_eligible).toBe(p.case_open + p.below_threshold + p.out_of_filter + p.feature_off);
+    expect(p.fleet_rows).toBe(25);
+    expect(p.tokensWithoutRows).toEqual(['ZZZ9']);
+    expect(Object.keys(p.by_domicile)).toContain('ABE40');
+    expect(r.groups).toMatchObject({ queued: expect.any(Number), active: expect.any(Number) });
+    expect(r.queue).toMatchObject({ queueCoveragePct: expect.any(Number) });
+    expect(r.ai).toMatchObject({ notYetAi: expect.any(Number), calls: expect.any(Number) });
+    expect(typeof r.sources).toBe('object');
+  });
+
+  it('units validation and the TYPE_UNKNOWN reason', async () => {
+    const bad = [
+      [{ coverage: 'all' }, 'coverage'], [{ eligibility: 'TRACTOR' }, 'eligibility'], [{ domicile: 'a' }, 'domicile'],
+      [{ scac: 'A-B' }, 'scac'], [{ q: 'X'.repeat(41) }, 'q'], [{ q: 3 }, 'q'], [{ limit: 0 }, 'limit'], [{ limit: 201 }, 'limit'],
+      [{ offset: -1 }, 'offset'], [{ offset: 100001 }, 'offset'], [{ other: 1 }, 'other'], ['x', 'filter'],
+    ];
+    for (const [arg, field] of bad) {
+      const prep = vi.spyOn(F.engine, 'prepare');
+      expect(await call('autopilot:units', arg), JSON.stringify(arg)).toEqual({ ok: false, code: 'INVALID_INPUT', field });
+      expect(apSql(prep)).toEqual([]);
+      prep.mockRestore();
+    }
+    const env = fleetEnv();
+    await env.ctl.runOnce({ forceDetect: true });
+    const unk = await call('autopilot:units', { coverage: 'type_unknown' });
+    expect(unk.ok).toBe(true);
+    expect(unk.items.map((u) => [u.unit_id, u.eligibility, u.reason])).toEqual([['UK600', 'TYPE_UNKNOWN', 'unknown equipment type']]);
+    const tc = await call('autopilot:units', { eligibility: 'TYPE_CONFLICT' });
+    for (const u of tc.items) expect(u.reason).toBe('equipment type conflict');
+    expect((await call('autopilot:units', { domicile: ' abe40 ', eligibility: 'POWER_ELIGIBLE' })).items.map((u) => u.unit_id)).toEqual(['T100']);
+    expect((await call('autopilot:units', { scac: 'swft', q: 't10' })).items.map((u) => u.unit_id)).toEqual(['T102', 'T107']);
+    const page = await call('autopilot:units', { limit: 2, offset: 1 });
+    expect(page.items.length).toBe(2);
+    expect(page.total).toBeGreaterThan(3);
+  });
+
+  it('units q with % and _ is a literal prefix', async () => {
+    const world = F.mkWorld({ rows: [F.baseRow({ equipmentId: 'X_1' }), F.baseRow({ equipmentId: 'XA1', _serviceId: 's2' }), F.baseRow({ equipmentId: 'X%9', _serviceId: 's3' })] });
+    const env = setup({ world, autopilot: FLEET.autopilot, runInvestigation: async (caseId) => ({ ok: true, caseId, outcome: 'noop' }) });
+    await env.ctl.runOnce({ forceDetect: true });
+    expect((await call('autopilot:units', { q: 'X_' })).items.map((u) => u.unit_id)).toEqual(['X_1']);
+    expect((await call('autopilot:units', { q: 'X%' })).items.map((u) => u.unit_id)).toEqual(['X%9']);
+    expect((await call('autopilot:units', { q: '%' })).total).toBe(0);
+    expect((await call('autopilot:units', { q: 'X' })).total).toBe(3);
+  });
+
+  it('deep-investigate validation, codes and the autopilot:changed push on success', async () => {
+    for (const arg of [undefined, 'ap_0123456789abcdef', { caseId: 'ap_1' }, { caseId: 'AP_0123456789ABCDEF' }]) {
+      expect(await call('autopilot:deep-investigate', arg), JSON.stringify(arg)).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'caseId' });
+    }
+    expect(await call('autopilot:deep-investigate', { caseId: 'ap_0123456789abcdef', deep: true })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'deep' });
+    const env = fleetEnv();
+    await env.ctl.runOnce({ forceDetect: true });
+    const id = F.cs.listOpen()[0].case_id;
+    expect(await call('autopilot:deep-investigate', { caseId: 'ap_0000000000000000' })).toEqual({ ok: false, code: 'NOT_FOUND' });
+    F.cs.transition(id, 'INVESTIGATING', { now: env.clock.now() });
+    expect(await call('autopilot:deep-investigate', { caseId: id })).toEqual({ ok: false, code: 'CASE_BUSY' });
+    F.cs.transition(id, 'MONITORING', { now: env.clock.now() });
+    pushes.length = 0;
+    expect(await call('autopilot:deep-investigate', { caseId: id })).toEqual({ ok: true, state: 'QUEUED' });
+    expect(pushes.filter(([ch]) => ch === 'autopilot:changed').length).toBe(1);
+    expect((await call('autopilot:control', { action: 'pause' })).ok).toBe(true);
+    pushes.length = 0;
+    expect(await call('autopilot:deep-investigate', { caseId: id })).toEqual({ ok: false, code: 'NOT_RUNNING' });
+    expect(pushes.length).toBe(0);
+    env.supervisor.enabled = false;
+    expect((await call('autopilot:control', { action: 'resume' })).ok).toBe(true);
+    expect(await call('autopilot:deep-investigate', { caseId: id })).toEqual({ ok: false, code: 'SUPERVISOR_DISABLED' });
+  });
+
+  it('LOCKED_V2 for writes.* through set-config', async () => {
+    expect(await call('autopilot:set-config', { writes: { slackReplies: true } })).toEqual({ ok: false, code: 'LOCKED_V2', field: 'writes.slackReplies' });
+  });
+});
+
 describe('supervisor disabled and master OFF: zero ap_* SQL', () => {
   it('supervisor disabled -> run-now and harness-run SUPERVISOR_DISABLED with zero ap_* SQL; status names the env override (R13)', async () => {
     const prep = vi.spyOn(F.engine, 'prepare');
@@ -256,6 +421,9 @@ describe('supervisor disabled and master OFF: zero ap_* SQL', () => {
       expect(await call('autopilot:control', { action: 'run-now' })).toEqual({ ok: false, code: 'DISABLED' });
       expect(await call('autopilot:harness-run', {})).toEqual({ ok: false, code: 'DISABLED' });
       expect(await call('autopilot:review', { caseId: 'ap_0123456789abcdef', decision: 'accept' })).toEqual({ ok: false, code: 'DISABLED' });
+      expect(await call('autopilot:coverage')).toEqual({ ok: true, enabled: false });
+      expect(await call('autopilot:units', {})).toEqual({ ok: true, enabled: false, total: 0, items: [] });
+      expect(await call('autopilot:deep-investigate', { caseId: 'ap_0123456789abcdef' })).toEqual({ ok: false, code: 'DISABLED' });
       expect(apSql(prep)).toEqual([]);
       expect(apSql(exec)).toEqual([]);
     });
@@ -265,7 +433,7 @@ describe('supervisor disabled and master OFF: zero ap_* SQL', () => {
 describe('shared-file edits (B13)', () => {
   const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8').replace(/\r\n/g, '\n');
 
-  it('preload exposes autopilot directly after the zoomMeet block with the eight pinned keys', () => {
+  it('preload exposes autopilot directly after the zoomMeet block with the eleven pinned keys', () => {
     const zm = pre.indexOf("expose('zoomMeet'");
     const zmEnd = pre.indexOf('\n});\n', zm) + 5;
     const ap = pre.indexOf("expose('autopilot'");
@@ -275,7 +443,11 @@ describe('shared-file edits (B13)', () => {
     expect(between.replace(/\/\/[^\n]*\n/g, '').trim()).toBe('');
     const block = pre.slice(ap, pre.indexOf('\n});\n', ap));
     const keys = [...block.matchAll(/^\s{2}(\w+):/gm)].map((m) => m[1]);
-    expect(keys).toEqual(['status', 'cases', 'getCase', 'setConfig', 'control', 'review', 'harnessRun', 'onChanged']);
+    expect(keys).toEqual(['status', 'cases', 'getCase', 'setConfig', 'control', 'review', 'harnessRun', 'coverage', 'units', 'deepInvestigate', 'onChanged']);
+    // V2 §10.2: the three added lines, exactly.
+    expect(block).toContain("  coverage:        ()        => ipcRenderer.invoke('autopilot:coverage'),\n");
+    expect(block).toContain("  units:           (filter)  => ipcRenderer.invoke('autopilot:units', filter || {}),\n");
+    expect(block).toContain("  deepInvestigate: (caseId)  => ipcRenderer.invoke('autopilot:deep-investigate', { caseId }),\n");
     for (const ch of CHANNELS) expect(block).toContain("'" + ch + "'");
     expect(block).toContain("on('autopilot:changed', cb)");
     // The aperia block stays last.

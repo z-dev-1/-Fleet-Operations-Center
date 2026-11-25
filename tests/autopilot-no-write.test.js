@@ -26,8 +26,10 @@ function walk(dir) {
   }
   return out.sort();
 }
+const CORE_FILE = path.join(ROOT, 'src', 'ai', 'agent-loop-core.js');
 const apFiles = walk(AP_DIR);
-const scanned = apFiles.concat(fs.existsSync(IPC_FILE) ? [IPC_FILE] : []);
+// V2 §11.6 item 1: the shared agent-loop core is scanned with the Autopilot files.
+const scanned = apFiles.concat(fs.existsSync(IPC_FILE) ? [IPC_FILE] : [], [CORE_FILE]);
 const base = (f) => path.basename(f, '.js');
 const requiresOf = (src) => [...src.matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)].map((m) => m[2]);
 
@@ -36,6 +38,8 @@ const COMMON = new Set(['crypto', '../jobs', '../telemetry', '../utils/logger', 
 function allowedFor(file, r) {
   // src/ipc/autopilot.js: the IPC wrapper, the facade, the pure constants and the logger only.
   if (file === IPC_FILE) return ['./_safe', '../autopilot', '../autopilot/constants', '../utils/logger'].includes(r);
+  // src/ai/agent-loop-core.js (V2 §11.6 item 2): the budget and the logger only.
+  if (file === CORE_FILE) return ['./budget', '../utils/logger'].includes(r);
   const f = base(file);
   if (r.startsWith('./')) return true;
   if (COMMON.has(r)) return true;
@@ -138,6 +142,47 @@ describe('§B14 static boundary', () => {
     for (const n of ['constants', 'config', 'case-store', 'detect', 'ports', 'limiter', 'plan', 'evidence']) expect(names).toContain(n);
   });
 
+  it('V2 §11.6 item 3: the V2 modules exist and are scanned; the agent-loop core is scanned', () => {
+    const names = apFiles.map(base);
+    for (const n of ['equipment', 'coverage', 'complexity', 'tool-registry', 'agent-adapter', 'memory', 'record', 'timeline', 'slices', 'queue']) {
+      expect(names, n).toContain(n);
+      expect(fs.existsSync(path.join(AP_DIR, n + '.js')), n).toBe(true);
+    }
+    expect(fs.existsSync(CORE_FILE)).toBe(true);
+    expect(scanned).toContain(CORE_FILE);
+  });
+
+  it('V2 §11.6 item 2: the agent-loop core requires only ./budget and ../utils/logger; the narrow V2 allowances', () => {
+    expect(requiresOf(read(CORE_FILE)).sort()).toEqual(['../utils/logger', './budget']);
+    expect(allowedFor(CORE_FILE, './tools')).toBe(false);
+    expect(allowedFor(CORE_FILE, '../ai/tools')).toBe(false);
+    const f = (n) => path.join(AP_DIR, n + '.js');
+    expect(allowedFor(f('agent-adapter'), '../ai/agent-loop-core')).toBe(true);
+    expect(allowedFor(f('agent-adapter'), '../ai/budget')).toBe(true);
+    expect(allowedFor(f('tool-registry'), '../ai/agent-loop-core')).toBe(false);
+    expect(allowedFor(f('agent-adapter'), '../ai/agent-loop')).toBe(false);
+    expect(allowedFor(f('agent-adapter'), '../ai/tools')).toBe(false);
+    expect(allowedFor(f('timeline'), '../orcha/timeline-text')).toBe(true);
+    expect(allowedFor(f('record'), '../orcha/timeline-text')).toBe(false);
+    expect(allowedFor(f('config'), '../config/defaults')).toBe(true);
+  });
+
+  it('V2 §11.6 item 7: VACUUM only in schema.js', () => {
+    for (const f of scanned) {
+      if (f === path.join(AP_DIR, 'schema.js')) continue;
+      expect(/VACUUM/i.test(read(f)), rel(f)).toBe(false);
+    }
+    expect(/VACUUM INTO/.test(read(path.join(AP_DIR, 'schema.js')))).toBe(true);
+  });
+
+  it('V2 §11.6 item 7: the SQL-write check sees the new ap_* tables (self-test)', () => {
+    const SQL_RE = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+    const src = read(path.join(AP_DIR, 'case-store.js'));
+    const tables = new Set([...src.matchAll(SQL_RE)].map((m) => m[1]).filter((t) => !/^(OR|SET)$/.test(t)));
+    for (const t of ['ap_step', 'ap_unit', 'ap_detect_pass', 'ap_timeline_proposal', 'ap_record']) expect(tables.has(t), t).toBe(true);
+    expect([...'INSERT INTO notes_store (x)'.matchAll(SQL_RE)].map((m) => m[1])).toEqual(['notes_store']);
+  });
+
   it('item 1: every Autopilot file except ports.js requires only allowed modules', () => {
     for (const f of scanned) {
       if (base(f) === 'ports' && path.dirname(f) === AP_DIR) continue;
@@ -211,6 +256,85 @@ describe('§B14 item 7: transitive require closure', () => {
       const bad = [...closure(f)].filter(CLOSURE_FORBIDDEN);
       expect(bad, rel(f)).toEqual([]);
     }
+  });
+});
+
+describe('V2 §11.6 item 4: agent-loop core, adapter and tool registry closures', () => {
+  it('closure(src/ai/agent-loop-core.js) is the core, the budget and the logger only', { timeout: 30000 }, () => {
+    const c = [...closure(CORE_FILE)];
+    for (const p of c) expect(['src/ai/agent-loop-core.js', 'src/ai/budget.js', 'src/utils/logger.js'], p).toContain(p);
+    expect(c).toContain('src/ai/agent-loop-core.js');
+  });
+
+  // The one src/orcha/fas file reached is the pure prompt-injection scanner that the allowed
+  // '../email-intel/untrusted' (fence / injection scan, V1 COMMON) requires; it has no require of its own.
+  const FAS_LEAF = 'src/orcha/fas/injection-guard.js';
+  it(FAS_LEAF + ' is a leaf (no require) with read-only exports', () => {
+    const src = read(path.join(ROOT, FAS_LEAF));
+    expect(requiresOf(src)).toEqual([]);
+    expect(Object.keys(require('../' + FAS_LEAF)).sort()).toEqual(['INJECTION_PATTERNS', 'detectInjection', 'neutralize', 'wrapUntrusted']);
+  });
+
+  for (const n of ['agent-adapter', 'tool-registry']) {
+    it('closure(' + n + '.js) reaches no src/ai/tools/**, src/orcha/fas/** (except the injection-guard leaf), src/ai/agent-loop.js or forbidden module', { timeout: 30000 }, () => {
+      const c = [...closure(path.join(AP_DIR, n + '.js'))];
+      const bad = c.filter((p) => p.startsWith('src/ai/tools/') || (p.startsWith('src/orcha/fas/') && p !== FAS_LEAF) || p === 'src/ai/agent-loop.js' || CLOSURE_FORBIDDEN(p));
+      expect(bad, n).toEqual([]);
+      expect(c).toContain('src/autopilot/' + n + '.js');
+      expect(c).not.toContain('src/orcha/fas/slack-search.js');
+    });
+  }
+});
+
+describe('V2 §11.6 item 5: tool registry pins', () => {
+  const TR = require('../src/autopilot/tool-registry');
+  const PINNED_TOOLS = [
+    'canonical_status', 'active_work_orders', 'wo_history', 'aap_comments', 'dtna_case', 'decisiv_activity', 'paccar_asist',
+    'estimates', 'vendor_history', 'slack_evidence', 'outlook_evidence', 'aperia_tire', 'unit_repair_history', 'existing_timeline',
+    'previous_findings', 'compare_conflicting_status', 'verify_eta_against_source',
+  ];
+  const fakeCtx = () => ({ unit: '322283', woSet: new Set(['svc-1']), blockedSources: new Set(), liveDone: new Set(), evidenceIndex: [], ports: {}, caseStore: {} });
+
+  it('TOOL_NAMES equals the pinned 17 in order; TOOL_DEFS and every def frozen; no write-like name', () => {
+    expect(TR.TOOL_NAMES).toEqual(PINNED_TOOLS);
+    expect(Object.isFrozen(TR.TOOL_NAMES)).toBe(true);
+    expect(Object.isFrozen(TR.TOOL_DEFS)).toBe(true);
+    expect(Object.keys(TR.TOOL_DEFS).sort()).toEqual(PINNED_TOOLS.slice().sort());
+    for (const n of PINNED_TOOLS) {
+      const d = TR.TOOL_DEFS[n];
+      expect(Object.isFrozen(d), n).toBe(true);
+      expect(WRITE_NAME_RE.test(n), n).toBe(false);
+      for (const k of ['run', 'execute']) {
+        if (typeof d[k] === 'function') expect(WRITE_NAME_RE.test(d[k].name), n + '.' + k + ' -> ' + d[k].name).toBe(false);
+      }
+      expect(typeof d.run, n).toBe('function');
+    }
+  });
+
+  it('createRegistry(fakeCtx).list() names equal TOOL_NAMES; the registry is frozen with read-only members', () => {
+    const reg = TR.createRegistry(fakeCtx());
+    expect(reg.list().map((x) => x.name)).toEqual(PINNED_TOOLS);
+    expect(Object.isFrozen(reg)).toBe(true);
+    expect(Object.keys(reg).sort()).toEqual(['execute', 'has', 'list']);
+    expect(reg.has('send_message')).toBe(false);
+  });
+
+  it("execute('send_message', ...) through agent-loop-core is an 'unknown tool' envelope and calls nothing", async () => {
+    const core = require('../src/ai/agent-loop-core');
+    const reg = TR.createRegistry(fakeCtx());
+    const spy = vi.fn(reg.execute);
+    const registry = { list: reg.list, has: reg.has, execute: spy };
+    let turn = 0;
+    const planner = async () => (++turn === 1
+      ? { decision: 'request_tools', tools: [{ tool: 'send_message', args: { unit: '322283', text: 'hi' } }] }
+      : { decision: 'final', result: { ok: true } });
+    const out = await core.run({ planner, registry, budget: { maxModelTurns: 3, maxToolCalls: 3 } });
+    expect(spy).not.toHaveBeenCalled();
+    const env = out.evidence.find((e) => e.tool === 'send_message');
+    expect(env).toMatchObject({ ok: false, status: 'DENIED', code: 'UNKNOWN_TOOL', error: 'unknown tool (not in catalog)' });
+    expect(out.toolLog.map((t) => [t.tool, t.ok])).toEqual([['send_message', false]]);
+    // The registry itself denies it too, without running anything.
+    expect(await reg.execute('send_message', { unit: '322283' })).toMatchObject({ ok: false, status: 'DENIED', code: 'UNKNOWN_TOOL' });
   });
 });
 
@@ -361,6 +485,17 @@ describe('ports gates (evaluated right before each live call)', () => {
     p.readStore('fleetData');
     expect(loads).toEqual(['fleetData']);
   });
+
+  it('V2 §11.6 item 6: READ_KEYS contains notesStore (read-only) and never settings', () => {
+    expect(ports.READ_KEYS).toContain('notesStore');
+    expect(ports.READ_KEYS).not.toContain('settings');
+    expect(Object.isFrozen(ports.READ_KEYS)).toBe(true);
+    const loads = [];
+    const p = ports.create({ ...NULLS, store: { load: (k, fb) => { loads.push(k); return fb; }, generation: () => 0 } });
+    p.readStore('notesStore');
+    expect(p.readStore('settings')).toBe(null);
+    expect(loads).toEqual(['notesStore']);
+  });
 });
 
 describe('§B14 item 1 exception: harness.js writes only autopilot-harness-*.json under paths.dataDir', () => {
@@ -444,6 +579,124 @@ describe('runtime: a full controller run calls no write function and leaves the 
       expect(aap.getServiceIfWarm).toHaveBeenCalled();   // the warm-only read path really ran
       for (const fn of [aap.apiPost, aap.apiPut, aap.createWorkOrder, aap.updateWork, slack.sendMessage, slack.postMessage, mailer.sendMail, mailer.send]) expect(fn).not.toHaveBeenCalled();
       expect(snap()).toEqual(before);
+    } finally {
+      for (const f of restore) f();
+    }
+  });
+
+  // V2 §12.2 (AC-31): multi-turn, both units deep (complex tier), every one of the 17 tools reached.
+  it('V2 multi-turn deep runs reach all 17 tools per unit; no write spy called; outbound stores and notesStore byte-identical', { timeout: 60000 }, async () => {
+    const F = require('./helpers/autopilot-fakes.cjs');
+    F.freshDb('nowrite-v2');
+    const store = require('../src/store');
+    const TR = require('../src/autopilot/tool-registry');
+    const thrower = (name) => vi.fn(() => { throw new Error(name + ' must not be called'); });
+    const inject = (rel, exp) => {
+      const resolved = require.resolve(rel);
+      const prev = require.cache[resolved];
+      require.cache[resolved] = { id: resolved, filename: resolved, loaded: true, exports: exp };
+      return () => { if (prev) require.cache[resolved] = prev; else delete require.cache[resolved]; };
+    };
+    const aap = {
+      isWarm: () => true,
+      getServiceIfWarm: vi.fn(async (id) => ({ workRequest: { id, assetDisplayName: '322283', lifecycleState: 'Unavailable' } })),
+      apiPost: thrower('apiPost'), apiPut: thrower('apiPut'), createWorkOrder: thrower('createWorkOrder'), updateWork: thrower('updateWork'),
+    };
+    const slack = { sendMessage: thrower('slack_send.sendMessage'), postMessage: thrower('slack_send.postMessage') };
+    const mailer = { sendMail: thrower('owa-mailer.sendMail'), send: thrower('owa-mailer.send') };
+    const restore = [
+      inject('../src/scrapers/aap_api', aap),
+      inject('../src/scrapers/slack_send', slack),
+      inject('../src/scrapers/owa-mailer', mailer),
+    ];
+    try {
+      const UNITS = ['322283', 'B13014'];
+      store.save('fleetData', { rows: [F.baseRow(), F.baseRow({ equipmentId: 'B13014', domicileSite: 'ROC5', _serviceId: 'svc-2', workRequestId: 'wr-2' })], syncedAt: new Date(F.T0 - F.H).toISOString(), source: 'aap-api' });
+      store.save('relayWritesPending', { items: [{ id: 'w1', unit: '322283', kind: 'addComment', text: 'pending' }] });
+      store.save('fasApprovalQueue', { items: [{ id: 'f1', status: 'pending' }] });
+      store.save('emailIntelSends', { sent: [{ id: 'e1', at: 1 }] });
+      store.save('slackDMReplies', { replies: [{ ts: '1.2', text: 'x' }] });
+      store.save('notesStore', { 322283: { timeline: '11/18 - Vendor: turbo on order\n11/19 - Typed note', manualEntries: ['11/19 - Typed note'] }, B13014: { timeline: '11/17 - Shop: waiting on parts' } });
+      const OUT = ['relayWritesPending', 'fasApprovalQueue', 'emailIntelSends', 'slackDMReplies', 'notesStore'];
+      const snap = () => Object.fromEntries(OUT.map((k) => [k, fs.readFileSync(store.REGISTRY[k]()).toString('base64')]));
+      const before = snap();
+
+      const NULLS2 = Object.fromEntries(Object.keys(PINNED_PICKS).map((k) => [k, null]));
+      const ports = require('../src/autopilot/ports').create(Object.assign(NULLS2, {
+        store,
+        fleetFreshness: { evaluate: () => ({ level: 'green', reasons: [], intervalMs: 600000 }), getSnapshot: () => ({ lastOkAt: F.T0 - F.H }), RED_AGE_FACTOR: 3 },
+        canonicalState: { getCanonical: () => null, isDown: (r) => /unavail/i.test(String((r && r.lifecycleState) || '')) },
+        riStore: { eventsForUnit: () => [], getAiAnalysis: () => null },
+        riTrends: { repeatOffenders: () => ({ offenders: [] }) },
+        slackSearch: { searchSlack: async () => ({ ok: true, results: [] }) },
+        dtnaStore: { findByUnit: () => [] },
+        aapApi: aap,
+        midway: { getState: () => 'HEALTHY' },
+        cluster: { mayLivePull: () => true },
+        offline: { isOffline: () => false },
+        relay: { queueStats: () => ({ active: 0, waiting: 0, max: 4, reserve: 1, byPriority: {}, flags: { priorities: false } }), getStatus: () => ({ model: 'm', backends: { claude: true } }), isolatedLaneAvailable: () => true },
+        liveReads: true,
+      }));
+      expect(ports.isolatedLaneAvailable()).toBe(true);
+
+      // Fake planner: the first (automatic) run of each case answers at once; each deep run requests the
+      // 15 non-preload tools in 5 turns of 3, then gives a final answer on turn 6. Turns are counted per run id.
+      const PRELOAD = ['existing_timeline', 'previous_findings'];
+      const REQUESTABLE = TR.TOOL_NAMES.filter((n) => !PRELOAD.includes(n));
+      expect(REQUESTABLE.length).toBe(15);
+      let phase = 1;
+      const turnsByRun = new Map();
+      const unitOfRun = (runId) => {
+        const row = F.engine.prepare('SELECT c.unit_id AS u FROM ap_run r JOIN ap_case c ON c.case_id = r.case_id WHERE r.run_id = ?').get(runId);
+        return row ? row.u : null;
+      };
+      const reason = vi.fn(async (opts) => {
+        const m = /^ap-(.+)-\d+$/.exec(String(opts && opts.requestId));
+        const runId = m ? m[1] : 'none';
+        const n = (turnsByRun.get(runId) || 0) + 1;
+        turnsByRun.set(runId, n);
+        const final = { schemaVersion: 2, decision: 'final', result: F.aiReply(opts.prompt) };
+        if (phase === 1 || n > 5) return { ok: true, data: final, raw: '', aiUsed: true, error: null };
+        const unit = unitOfRun(runId);
+        const tools = REQUESTABLE.slice((n - 1) * 3, n * 3).map((t) => ({ tool: t, args: { unit }, why: 'check ' + t }));
+        return { ok: true, data: { schemaVersion: 2, decision: 'request_tools', tools, memory: {} }, raw: '', aiUsed: true, error: null };
+      });
+
+      const env = F.mkEnv({
+        ports, reason,
+        autopilot: {
+          scope: { mode: 'fleet' }, features: { liveReads: true, multiTurn: true },
+          complexityTiers: { complex: { maxModelTurns: 8, maxToolCalls: 18, maxElapsedMs: 420000, maxEvidenceBytes: 64000 } },
+        },
+      });
+      expect(env.ap.status().config.features.multiTurn).toBe(true);
+      env.ap.boot();
+      const r = await env.supervisor.runTick();
+      expect(r.investigated.length).toBe(2);
+      const open = F.cs.listOpen();
+      expect(open.map((c) => c.unit_id).sort()).toEqual(UNITS.slice().sort());
+
+      // Review finding 16: both cases go deep after the first tick, then the second tick runs them.
+      phase = 2;
+      for (const c of open) expect(env.ap.deepInvestigate(c.case_id), c.unit_id).toEqual({ ok: true, state: 'QUEUED' });
+      await env.flush();
+
+      const all = F.engine.prepare('SELECT case_id, run_id, trigger FROM ap_run').all();
+      expect(all.filter((x) => x.trigger === 'manual').length).toBe(2);
+      for (const c of open) {
+        const kase = F.cs.getCase(c.case_id).case;
+        expect(kase.complexity, c.unit_id).toBe('complex');
+        const tools = new Set(F.engine.prepare("SELECT tool FROM ap_step WHERE case_id = ? AND kind = 'tool'").all(c.case_id).map((x) => x.tool));
+        for (const name of TR.TOOL_NAMES) expect(tools.has(name), c.unit_id + ' ' + name).toBe(true);
+        const deepRun = all.find((x) => x.case_id === c.case_id && x.trigger === 'manual');
+        expect(turnsByRun.get(deepRun.run_id), c.unit_id).toBe(6);
+      }
+      for (const fn of [aap.apiPost, aap.apiPut, aap.createWorkOrder, aap.updateWork, slack.sendMessage, slack.postMessage, mailer.sendMail, mailer.send]) expect(fn).not.toHaveBeenCalled();
+      expect(snap()).toEqual(before);
+      // liveDone: at most one AAP getServiceIfWarm per run.
+      expect(aap.getServiceIfWarm.mock.calls.length).toBeLessThanOrEqual(all.length);
+      const liveAap = F.engine.prepare("SELECT run_id, COUNT(*) AS n FROM ap_step WHERE kind = 'tool' AND live = 1 AND tool IN ('aap_comments', 'active_work_orders', 'wo_history', 'estimates') GROUP BY run_id").all();
+      for (const x of liveAap) expect(x.n, x.run_id).toBeLessThanOrEqual(1);
     } finally {
       for (const f of restore) f();
     }

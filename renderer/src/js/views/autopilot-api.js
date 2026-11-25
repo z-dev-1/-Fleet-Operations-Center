@@ -13,6 +13,9 @@ export const autopilotApi = {
   control: _ap('control'),
   review: _ap('review'),
   harnessRun: _ap('harnessRun'),
+  coverage: _ap('coverage'),
+  units: _ap('units'),
+  deepInvestigate: _ap('deepInvestigate'),
   onChanged: (cb) => (window.autopilot && typeof window.autopilot.onChanged === 'function' ? window.autopilot.onChanged(cb) : () => {}),
 };
 
