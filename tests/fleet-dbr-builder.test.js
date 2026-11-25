@@ -112,6 +112,42 @@ describe('buildFleetDbr on the fixture', () => {
     expect(r.cells.support).toBe('');
   });
 
+  it('every row has row.common = { groups, repeat }; every unit has why / barrierKinds / systems', () => {
+    for (const r of built.rows) {
+      expect(Object.keys(r.common).sort()).toEqual(['groups', 'repeat']);
+      expect(Array.isArray(r.common.groups) && Array.isArray(r.common.repeat)).toBe(true);
+      for (const u of r.units) {
+        expect(u.why && typeof u.why === 'object').toBe(true);
+        expect(Object.keys(u.why).sort()).toEqual(u.barriers.slice().sort());
+        expect(Object.keys(u.barrierKinds).sort()).toEqual(u.barriers.slice().sort());
+        expect(Array.isArray(u.systems)).toBe(true);
+        expect(Array.isArray(u.categories)).toBe(true);
+      }
+    }
+  });
+
+  it('Common Repairs: threshold 2, repeat rule, no lifecycle groups, row.common mirrors the cell', () => {
+    expect(F.COMMON_REPAIR_MIN).toBe(2);
+    expect(engine.TREND_MIN_UNITS).toBe(3); // Daily Call engine unchanged
+    const b = F.buildFleetDbr(makeFleetRows({
+      T0001: { issueSummary: 'Alternator not charging' },
+      T0002: { issueDetails: 'battery dead, parasitic draw' },
+      T0003: { lifecycleReason: 'Damaged' },
+      T0004: { lifecycleReason: 'Damaged' },
+      T0045: { issueSummary: 'Liftgate repair did not resolve the fault' },
+    }), { today: TODAY });
+    const tuzr = rowOf(b, 'ABE40|TUZR');
+    expect(tuzr.cells.commonYN).toBe('Y');
+    expect(tuzr.common).toEqual({ groups: [{ label: 'Battery/electrical', ids: ['T0001', 'T0002'] }], repeat: [] });
+    expect(tuzr.cells.commonDetails).toBe('Battery/electrical: T0001, T0002');
+    const sapb = rowOf(b, 'ABE40|SAPB');
+    expect(sapb.cells.commonYN).toBe('Y');
+    expect(sapb.common).toEqual({ groups: [], repeat: ['T0045'] });
+    expect(rowOf(b, 'ROC5|AUVTE').cells.commonYN).toBe('N');
+    expect(tuzr.units.find((u) => u.id === 'T0001').systems).toEqual(['Battery/electrical']);
+    expect(tuzr.units.find((u) => u.id === 'T0003').systems).toEqual([]);
+  });
+
   it('does not count Ordered as down but keeps it in the total', () => {
     const r = F.buildFleetDbr([
       makeUnit({ equipmentId: 'A1', lifecycleState: 'Ordered' }),

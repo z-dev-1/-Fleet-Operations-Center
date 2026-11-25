@@ -91,7 +91,8 @@ describe('ROC5|AUVTE-shaped pair (AC8)', () => {
     for (const h of Fd.HARD_CELL_IDS) expect(ov.cells[h], h).toBe(h === 'fasName' ? '' : row.cells[h]);
     for (const id of Fd.AI_CELL_IDS) expect(ov.cells[id], id).toBe(r.cells[id]);
     expect(ov.draft.state).toBe('ok');
-    // AC14 basis: the COX "Cannot Complete — Parts Ordered" unit has no 1P vendor rule hit
-    expect(row.units.find((u) => u.id === 'B90103').barriers).not.toContain('vendor1p');
+    // Golden 1P rule: any COX unit is a 1P hit; "Cannot Complete — Parts Ordered" is not read as a rejection
+    expect(row.units.find((u) => u.id === 'B90103').barriers).toContain('vendor1p');
+    expect(row.units.find((u) => u.id === 'B90103').why.vendor1p).not.toMatch(/can't complete/);
   });
 });

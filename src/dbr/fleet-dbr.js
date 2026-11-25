@@ -51,9 +51,11 @@ const EDITABLE_IDS = Object.freeze(COLUMNS.filter((c) => c.editable).map((c) => 
 const HARD_CELL_IDS = Object.freeze(['fasName', 'domicile', 'domicileUptime', 'domicileDown', 'scac', 'scacUptime', 'scacDown']);
 const AI_CELL_IDS = Object.freeze(COLUMNS.map((c) => c.id).filter((id) => !HARD_CELL_IDS.includes(id)));
 
-// Common Repairs fires when this many of the pair's down units share a category
-// (the user's recorded site-trend rule, review-engine TREND_MIN_UNITS = 3).
-const COMMON_REPAIR_MIN = engine.TREND_MIN_UNITS;
+// Common Repairs fires when this many of the pair's down units share a SYSTEM_GROUPS system
+// (golden sheets; Fleet Health only, the Daily Call engine keeps TREND_MIN_UNITS = 3).
+const COMMON_REPAIR_MIN = 2;
+// units[].why strings (drill-down only) are capped at this many chars.
+const WHY_MAX = 120;
 // Free-text heuristics read only the N latest dated repairTimeline lines.
 const RECENT_TIMELINE_LINES = 3;
 const SNIPPET_MAX = 80;
@@ -441,9 +443,19 @@ const VENDOR_REJECT_RE = /\b(reject(ed)?|declin(ed|ing)|unable to (complete|repa
 const AAP_PARTS_STATUS_RE = /\bparts?\s+(ordered|on\s+order|back[\s-]?order(ed)?)\b/i;
 const REJECT_CONTEXT_EXCLUDE_RE = new RegExp(/estimate|quote|approval|\bPO\b/.source + '|' + AAP_PARTS_STATUS_RE.source, 'i');
 const ESTIMATE_TEXT_RE = /\b(awaiting|pending|waiting (on|for))\s+(an?\s+)?(estimate|approval)\b/i;
-const PARTNER_TEXT_RE = /\b(carrier|dsp)[- ](managed|owned|handling|to (handle|repair))|insurance|adjuster|claim (filed|open|pending)\b/i;
+// Golden 1P list: any COX / Amerit / TA / … unit (no stall signal). FleetNet is not 1P.
+const VENDOR_1P_RE = /\bcox\b|amerit|\bta\b|travel\s*centers|velociti|road\s*ready|goodyear|\bmobile\b|onsite|allegiance|ascend/i;
+// The dealer is done and the unit has left (OEM exclusion with status Repair completed).
+const RELEASED_RE = /\b(?:asset\s+released|released\s+(?:to|and)|towed\s+out|picked\s+up)\b/i;
+const ESTIMATE_APPROVED_RE = /\bestimate\b[^.;\n]{0,30}\bapproved\b|\bapproved\b[^.;\n]{0,20}\bestimate\b/i;
+const DSP_VENDOR_RE = /^dsp[_ ]?entered$/i;
+const IMPOUND_TEXT_RE = /\bimpound(?:ed)?\b/i;
+const PARTNER_TEXT_RE = /\b(?:carrier|dsp)[- ](?:managed|owned|handling|to\s+(?:handle|repair))\b|\bwaiting\s+on\s+(?:the\s+)?(?:carrier|dsp)\b|\bcarrier(?:'s)?\s+(?:shop|estimate|approval)\b/i;
 const PARTS_CODE_RE = /parts|sourcing|back ?order/;
 const PARTS_TEXT_RE = /back[- ]?order|parts? (delay|on order|eta)|waiting (on|for) parts/i;
+const PARTS_WAIT_STATUSES = Object.freeze(['ordered', 'backorder', 'backordered', 'sourcing', 'on order']);
+const PARTS_ARRIVED_STATUSES = Object.freeze(['arrived', 'received', 'delivered']);
+const FACT_PARTS_WAIT_RE = /\b(?:ordered|back ?order|on order|shipped)\b/i;
 
 const _eq = (a, b) => _str(a).trim().toLowerCase() === b.toLowerCase();
 
@@ -475,86 +487,122 @@ function _partsCodes(raw) {
   return (hit.length ? hit : [_codeText(raw)]).join(', ');
 }
 
+// Parts wait (design §3.6): the unit waits on parts that have not arrived. Shared by the
+// Parts barrier and the ETC Today check. -> { wait: boolean, why: string } (why '' when no wait).
+function _partsCheck(row, today, recentText) {
+  const r = row || {};
+  const status = _str(r.savedRepairStatus).trim();
+  const ps = _norm(r.partsStatus);
+  const arrived = PARTS_ARRIVED_STATUSES.includes(ps);
+  const pw = _str(r._factPartsWhy).trim();
+  const whys = [];
+  if (/parts ordered|back ?order/i.test(status)) whys.push('status ' + status);
+  else if (_eq(status, 'Parts received')) return { wait: false, why: '' };
+  else {
+    if (PARTS_WAIT_STATUSES.includes(ps)) whys.push('parts status ' + _codeText(r.partsStatus));
+    if (PARTS_CODE_RE.test(_norm(r.delayReasonCodes))) whys.push('delay code ' + _partsCodes(r.delayReasonCodes));
+    const vdr = _str(r.vendorDelayReason).trim();
+    if (vdr && PARTS_CODE_RE.test(_norm(vdr))) whys.push('vendor delay ' + vdr);
+    if (_eq(r.lifecycleReason, 'Parts Delay') && !arrived) whys.push('lifecycle Parts Delay');
+    if (pw && FACT_PARTS_WAIT_RE.test(pw) && !arrived) whys.push(pw);
+    const text = recentText !== undefined ? _str(recentText) : _recentText(r, today);
+    const m = PARTS_TEXT_RE.exec(text);
+    if (m) whys.push("'" + _snippet(text, m.index) + "'");
+  }
+  if (!whys.length) return { wait: false, why: '' };
+  // The extracted parts summary extends an existing hit.
+  if (pw && !whys.includes(pw)) whys.push(pw);
+  return { wait: true, why: whys.join('; ') };
+}
+// true when the unit is waiting on parts that have not arrived (pure; today = 'YYYY-MM-DD').
+function partsWait(row, today) { return _partsCheck(row, today).wait; }
+// The why text for a partsWait unit, '' when partsWait is false.
+function partsWhy(row, today) { return _partsCheck(row, today).why; }
+
+// Partner kind of a unit: 'dsp' | 'impound' | 'text' with its why, or null.
+function _partnerHit(r, ctx) {
+  const vendor = _str(r.vendor).trim();
+  if (DSP_VENDOR_RE.test(vendor)) return { why: 'DSP-entered (carrier-managed)', kind: 'dsp' };
+  const lr = _str(r.lifecycleReason).trim();
+  if (/impound/i.test(lr)) return { why: 'lifecycle ' + lr, kind: 'impound' };
+  const text = _str(ctx.recentText);
+  let m = IMPOUND_TEXT_RE.exec(text);
+  if (m) return { why: "'" + _snippet(text, m.index) + "'", kind: 'impound' };
+  m = PARTNER_TEXT_RE.exec(text);
+  if (m) return { why: "'" + _snippet(text, m.index) + "'", kind: 'text' };
+  return null;
+}
+
+function _estimateApproved(r, today) {
+  if (/approved/i.test(_str(r.estimateStatus))) return true;
+  const newest = _recentTimeline(r, today)[0];
+  return !!(newest && newest.date && ESTIMATE_APPROVED_RE.test(newest.text));
+}
+
 const BARRIER_RULES = Object.freeze([
   Object.freeze({
     id: 'vendor1p', ynCol: 'vendor1pYN', detailsCol: 'vendor1pDetails',
     test(r, ctx) {
-      if (!ONSITE_VENDOR_RE.test(_str(r.vendor))) return null;
-      const rej = _vendorRejectWhy(ctx.recentText);
-      if (rej) return { why: rej };
-      if (_eq(r.savedRepairStatus, 'Waiting for vendor')) return { why: 'status Waiting for vendor' };
-      if (_norm(r.delayReasonCodes).includes('tech shortage')) return { why: 'delay code Tech shortage' };
-      return null;
+      const vendor = _str(r.vendor).trim();
+      if (!VENDOR_1P_RE.test(vendor)) return null;
+      const p = _partnerHit(r, ctx);
+      if (p && (p.kind === 'impound' || p.kind === 'dsp')) return null;
+      // No stall signal needed (golden); a stall signal only enriches the why.
+      let signal = _vendorRejectWhy(ctx.recentText);
+      if (!signal && _eq(r.savedRepairStatus, 'Waiting for vendor')) signal = 'status Waiting for vendor';
+      if (!signal && _norm(r.delayReasonCodes).includes('tech shortage')) signal = 'delay code Tech shortage';
+      return { why: '1P vendor ' + vendor + (signal ? ': ' + signal : ''), kind: signal ? 'stalled' : 'onsite' };
     },
   }),
   Object.freeze({
     id: 'oem', ynCol: 'oemYN', detailsCol: 'oemDetails',
     test(r, ctx) {
       const vendor = _str(r.vendor).trim();
-      if (!(OEM_VENDOR_RE.test(vendor) || _eq(r.lifecycleReason, 'Offsite Shop Repair'))) return null;
+      const byVendor = OEM_VENDOR_RE.test(vendor);
+      if (!(byVendor || _eq(r.lifecycleReason, 'Offsite Shop Repair'))) return null;
+      if (_eq(r.savedRepairStatus, 'Repair completed')
+        && _recentTimeline(r, ctx.today).some((l) => RELEASED_RE.test(l.text))) return null;
       const signal = _oemSignal(r, ctx);
-      if (!signal) return null;
-      // relay-extract §12.4: unanswered dealer calls only extend an existing OEM signal.
+      // Unanswered dealer calls go to the why text only; they never create an OEM hit.
       const calls = Number(r.dealerCallAttempts) > 0 ? '; ' + Number(r.dealerCallAttempts) + ' unanswered dealer calls' : '';
-      return { why: 'at OEM/dealer ' + (vendor || 'no vendor') + ': ' + signal + calls };
+      return { why: 'at OEM/dealer ' + (vendor || 'no vendor') + (signal ? ': ' + signal : '') + calls, kind: byVendor ? 'dealer' : 'offsite' };
     },
   }),
   Object.freeze({
     id: 'estimate', ynCol: 'estimateYN', detailsCol: 'estimateDetails',
     test(r, ctx) {
-      const cost = parseFloat(_str(r.estimatePendingCost).replace(/[$,\s]/g, ''));
-      if (Number.isFinite(cost) && cost > 0) return { why: 'estimate pending $' + cost };
+      const p = _partnerHit(r, ctx);
+      if (p && p.kind === 'dsp') return null;                         // the carrier's estimate is a Partner barrier
+      if (_eq(r.serviceState, 'Estimate rejected') || /reject/i.test(_str(r.estimateStatus))) return { why: 'estimate rejected', kind: 'rejected' };
       const fe = _str(r._factEstimateWhy).trim();                    // relay-extract (flag-on rows only)
-      if (fe) return { why: 'estimate ' + fe };
+      if (fe) return { why: 'estimate ' + fe, kind: /reject/i.test(fe) ? 'rejected' : 'pending' };
+      if (_estimateApproved(r, ctx.today)) return null;
+      const cost = parseFloat(_str(r.estimatePendingCost).replace(/[$,\s]/g, ''));
+      if (Number.isFinite(cost) && cost > 0) return { why: 'estimate pending $' + cost, kind: 'pending' };
       const status = _str(r.savedRepairStatus).trim();
-      if (_eq(status, 'Awaiting estimate') || _eq(status, 'Awaiting approval')) return { why: 'status ' + status };
-      if (_eq(r.serviceState, 'Estimate rejected')) return { why: 'estimate rejected' };
-      if (_eq(r.offsiteStage, 'approval')) return { why: 'offsite stage approval' };
+      if (_eq(status, 'Awaiting estimate') || _eq(status, 'Awaiting approval')) return { why: 'status ' + status, kind: 'pending' };
+      if (_eq(r.offsiteStage, 'approval')) return { why: 'offsite stage approval', kind: 'pending' };
       const esc = _str(r.escalations).trim();
-      if (/estimate/i.test(esc)) return { why: 'escalation ' + _snippet(esc, esc.search(/estimate/i)) };
+      if (/estimate/i.test(esc)) return { why: 'escalation ' + _snippet(esc, esc.search(/estimate/i)), kind: 'pending' };
       const m = ESTIMATE_TEXT_RE.exec(ctx.recentText);
-      if (m) return { why: "'" + _snippet(ctx.recentText, m.index) + "'" };
+      if (m) return { why: "'" + _snippet(ctx.recentText, m.index) + "'", kind: 'pending' };
       return null;
     },
   }),
   Object.freeze({
     id: 'partner', ynCol: 'partnerYN', detailsCol: 'partnerDetails',
-    test(r, ctx) {
-      const vendor = _str(r.vendor).trim();
-      // relay-extract §12.4: an SF (accident) case extends the partner why on _factsOn rows.
-      const sf = r._factsOn && _str(r.salesforceCase).trim() ? '; SF case ' + _str(r.salesforceCase).trim() : '';
-      if (/^dsp[_ ]?entered$/i.test(vendor)) return { why: 'DSP-entered (carrier-managed)' + sf };
-      if (/\bcei\b/i.test(vendor)) return { why: 'CEI (accident/claims managed)' + sf };
-      if (_eq(r.lifecycleReason, 'Accident')) return { why: 'Accident (carrier/insurance owned)' + sf };
-      const m = PARTNER_TEXT_RE.exec(ctx.recentText);
-      if (m) return { why: "'" + _snippet(ctx.recentText, m.index) + "'" + sf };
-      return null;
-    },
+    test(r, ctx) { return _partnerHit(r, ctx); },
   }),
   Object.freeze({
     id: 'parts', ynCol: 'partsYN', detailsCol: 'partsDetails',
     test(r, ctx) {
-      const whys = [];
-      if (PARTS_CODE_RE.test(_norm(r.delayReasonCodes))) whys.push('delay code ' + _partsCodes(r.delayReasonCodes));
-      const status = _str(r.savedRepairStatus).trim();
-      if (/parts ordered|back ?order/i.test(status)) whys.push('status ' + status);
-      if (_eq(r.lifecycleReason, 'Parts Delay')) whys.push('lifecycle Parts Delay');
-      const detail = _str(r.offsiteStageDetail);
-      if (/parts/i.test(detail)) whys.push('offsite: ' + _snippet(detail, detail.search(/parts/i)));
-      const m = PARTS_TEXT_RE.exec(ctx.recentText);
-      if (m) whys.push("'" + _snippet(ctx.recentText, m.index) + "'");
-      // relay-extract §12.4 (keys exist only with extraction on): a parts-type vendor delay enum
-      // is a parts hit; the extracted parts summary only extends an existing hit.
-      const vdr = _str(r.vendorDelayReason).trim();
-      if (vdr && PARTS_CODE_RE.test(_norm(vdr))) whys.push('vendor delay ' + vdr);
-      const pw = _str(r._factPartsWhy).trim();
-      if (pw && whys.length) whys.push(pw);
-      return whys.length ? { why: whys.join('; ') } : null;
+      const p = _partsCheck(r, ctx.today, ctx.recentText);
+      return p.wait ? { why: p.why, kind: 'wait' } : null;
     },
   }),
 ]);
 
-// One down unit -> { [ruleId]: { why } | null }
+// One down unit -> { [ruleId]: { why, kind } | null }
 function classifyBarriers(row, ctx = {}) {
   const r = row || {};
   const c = {
@@ -579,25 +627,60 @@ function _unitCategories(r) {
   return cats;
 }
 
-// Down rows of one pair -> { yn, details, common: [{ label, ids }] }
-function commonRepairs(downRows) {
+// Fleet-Health-local system groups over issueSummary + issueDetails (design §3.7). Lifecycle
+// labels (damage, accident, inspection) are never a group.
+const SYSTEM_GROUPS = Object.freeze([
+  ['Battery/electrical', /\bbatter(?:y|ies)\b|\balternator\b|\bstarter\b|\bno[- ]start\b|\bwiring\b|\bharness\b|\belectrical\b|\bvoltage\b|\bparasitic\b|\bfuse\b/i],
+  ['Engine', /\bmisfire|\bturbo|\binjector|\bcompression\b|\bvalve\s*(?:tap|cover)|\bcylinder\b|\bcrankcase\b|\b(?:engine\s+)?oil\s*(?:leak|pan|pressure|level|gasket|drop)|\bno\s+oil\b|\bgasket\b|\bccv\b|\begr\b|\bignition\s+coil|\bspark\s+plug|\bengine\s+(?:oil|noise|not\s+running)/i],
+  ['Air system / 5th wheel', /\bair\s*(?:leak|bag|spring|ride|system|tank|line|dryer|brake|suspension)|\bairbag|\b(?:5th|fifth)[\s-]*wheel/i],
+  ['Cooling', /\bcoolant\b|\bradiator\b|\bcooling\b/i],
+  ['Aftertreatment', /\bdef\b|\bdpf\b|\bscr\b|\bcatalyst\b|\bnox\b|\bo2\s+sensor/i],
+  ['Transmission', /\btransmission\b|\bclutch\b/i],
+  ['Axle/differential', /\baxle\b|\bdifferential\b|\bdriveshaft/i],
+  ['Brakes', /\bbrakes?\b|\babs\b/i],
+  ['Steering', /\bsteering\b|\balignment\b/i],
+  ['Suspension', /\bsuspension\b|\bleaf\s*spring|\bshock\s+absorber/i],
+  ['Tires/wheels', /\btires?\b|\bwheel\s+seal|\blug\s+nut/i],
+  ['Liftgate', /\bliftgate\b/i],
+  ['Fuel/CNG', /\bcng\b|\bfuel\s*(?:system|pump|line|tank|leak)/i],
+].map(Object.freeze));
+// A repeat repair makes one unit common on its own (golden YTSC 11-12).
+const REPEAT_RE = /\b(?:repeat(?:ed)?\s+(?:repair|issue|failure)|came\s+back|re-?opened|did\s+not\s+(?:resolve|fix)|didn'?t\s+(?:resolve|fix)|not\s+resolved\s+by|returned\s+for\s+the\s+same|comeback|recurr(?:ing|ent|ed))\b/i;
+
+// All SYSTEM_GROUPS labels of one unit, in table order.
+function _unitSystems(r) {
+  const text = _str(r && r.issueSummary) + ' ' + _str(r && r.issueDetails);
+  return SYSTEM_GROUPS.filter(([, re]) => re.test(text)).map(([label]) => label);
+}
+function _isRepeat(r, today) {
+  const parts = [_str(r.issueSummary), _str(r.issueDetails)];
+  for (const l of _recentTimeline(r, today)) parts.push(l.raw.trim());
+  return REPEAT_RE.test(parts.join('\n'));
+}
+
+// Down rows of one pair -> { yn, details, common: [{ label, ids }], repeat: [ids] }.
+// A group is common with >= COMMON_REPAIR_MIN units; a REPEAT_RE unit is common on its own.
+function commonRepairs(downRows, today) {
   const byLabel = new Map();
+  const repeat = [];
   for (const r of downRows || []) {
+    if (!r) continue;
     const id = _idOf(r);
-    for (const label of _unitCategories(r)) {
+    for (const label of _unitSystems(r)) {
       if (!byLabel.has(label)) byLabel.set(label, []);
       byLabel.get(label).push(id);
     }
+    if (_isRepeat(r, today)) repeat.push(id);
   }
   const common = [...byLabel.entries()]
     .filter(([, ids]) => ids.length >= COMMON_REPAIR_MIN)
     .map(([label, ids]) => ({ label, ids: ids.slice().sort() }))
     .sort((a, b) => b.ids.length - a.ids.length || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
-  return {
-    yn: common.length ? 'Y' : 'N',
-    details: common.map((c) => c.label + ' \u2014 ' + c.ids.length + ' units: ' + c.ids.join(', ')).join('\n'),
-    common,
-  };
+  repeat.sort();
+  // Temporary Details (FEAT-003 replaces them with composer text).
+  const lines = common.map((c) => c.label + ': ' + c.ids.join(', '));
+  if (repeat.length) lines.push('Repeat repair: ' + repeat.join(', '));
+  return { yn: common.length || repeat.length ? 'Y' : 'N', details: lines.join('\n'), common, repeat };
 }
 
 // ── Guards / hashing ────────────────────────────────────────────────────────
@@ -647,6 +730,22 @@ function _byDaysThenId(a, b) {
   const db = b.daysDown == null ? -1 : b.daysDown;
   if (da !== db) return db - da;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+// classifyBarriers result -> units[].why { [ruleId]: <= WHY_MAX chars, redacted } (drill-down only).
+function _unitWhy(b) {
+  const out = {};
+  for (const rule of BARRIER_RULES) {
+    const hit = b[rule.id];
+    if (!hit) continue;
+    const s = _redact(_str(hit.why).replace(/\s+/g, ' ').trim());
+    out[rule.id] = s.length > WHY_MAX ? s.slice(0, WHY_MAX - 1).trimEnd() + '\u2026' : s;
+  }
+  return out;
+}
+function _unitKinds(b) {
+  const out = {};
+  for (const rule of BARRIER_RULES) if (b[rule.id]) out[rule.id] = b[rule.id].kind || null;
+  return out;
 }
 function _detailLine(u, why) {
   const v = u.vendor || 'no vendor';
@@ -709,7 +808,8 @@ function buildFleetDbr(rows, opts = {}) {
         lifecycleReason: _str(r.lifecycleReason).trim(), vendor: _str(r.vendor).trim(),
         status: _str(r.savedRepairStatus).trim(), serviceState: _str(r.serviceState).trim(),
         etc, barriers: BARRIER_RULES.filter((x) => b[x.id]).map((x) => x.id),
-        categories: [..._unitCategories(r)], _why: b,
+        why: _unitWhy(b), barrierKinds: _unitKinds(b),
+        categories: [..._unitCategories(r)], systems: _unitSystems(r), _why: b,
       };
     }).sort(_byDaysThenId);
     for (const u of units) {
@@ -722,7 +822,7 @@ function buildFleetDbr(rows, opts = {}) {
       else if (u.etc.state === 'none') etcBuckets.none.push(u.id);
       delete u._why;
     }
-    const common = commonRepairs(p.downRows);
+    const common = commonRepairs(p.downRows, today);
     const cells = {
       fasName,
       domicile: p.domicile,
@@ -746,7 +846,8 @@ function buildFleetDbr(rows, opts = {}) {
     out.push({
       key: p.key, domicile: p.domicile, scac: p.scac,
       pair: { total: p.total, down: p.down }, domicileStats, scacStats,
-      cells, units, unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
+      cells, units, common: { groups: common.common, repeat: common.repeat },
+      unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
     });
   }
 
@@ -847,7 +948,8 @@ function _plain(v) { return v && typeof v === 'object' && !Array.isArray(v) ? v 
 
 module.exports = {
   COLUMNS, EDITABLE_IDS, AI_CELL_IDS, HARD_CELL_IDS, BARRIER_RULES, COMMON_REPAIR_MIN, RECENT_TIMELINE_LINES,
-  OEM_VENDOR_RE, ONSITE_VENDOR_RE, EMAIL_RE, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
+  OEM_VENDOR_RE, ONSITE_VENDOR_RE, VENDOR_1P_RE, RELEASED_RE, PARTNER_TEXT_RE, SYSTEM_GROUPS, REPEAT_RE, EMAIL_RE,
+  partsWait, partsWhy, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
   isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates, etcKeywordNegated,
   REPAIR_MISS_MARKER_RE, explicitRepairMiss,
   classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,

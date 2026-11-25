@@ -601,6 +601,6 @@ describe('builder parity', () => {
     const m = (await call('build')).model;
     const built = F.buildFleetDbr(fleet.rows, { today: TODAY });
     expect(m.rows.map((r) => r.key)).toEqual(built.rows.map((r) => r.key));
-    expect(rowOf(m, ROC_KEY).cells.partnerYN).toBe('Y');
+    expect(rowOf(m, ROC_KEY).cells.partnerYN).toBe('N'); // a CEI vendor is no longer a Partner hit (design §3.6, Q5)
   });
 });

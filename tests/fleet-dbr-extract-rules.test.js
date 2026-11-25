@@ -16,29 +16,34 @@ describe('AC32 barrier rule additions', () => {
     expect(why({ vendorDelayReason: 'SOURCING_PARTS' }, 'parts')).toContain('vendor delay SOURCING_PARTS');
     expect(why({ vendorDelayReason: 'WAITING_FOR_DIAGNOSIS' }, 'parts')).toBeNull();
   });
-  it('vendor: an onsite vendor with CC - Parts Ordered gets the parts why, not vendor1p', () => {
+  it('vendor: an onsite vendor with CC - Parts Ordered is both a vendor1p and a parts hit', () => {
     const r = { vendor: 'Amerit', vendorDelayReason: 'CC - Parts Ordered' };
     expect(why(r, 'parts')).toContain('vendor delay CC - Parts Ordered');
-    expect(why(r, 'vendor1p')).toBeNull();
+    expect(why(r, 'vendor1p')).toBe('1P vendor Amerit');
   });
-  it('parts: _factPartsWhy extends an existing parts hit only', () => {
+  it('parts: _factPartsWhy extends an existing parts hit; alone it hits only with a status word and parts not arrived', () => {
     expect(why({ vendorDelayReason: 'SOURCING_PARTS', _factPartsWhy: 'Part #85152780 (Order #3010287243, VOR) arrived 11/04' }, 'parts'))
       .toContain('Part #85152780');
     expect(why({ _factPartsWhy: 'Part #85152780' }, 'parts')).toBeNull();
+    expect(why({ _factPartsWhy: 'Part #85152780 ordered 11/04' }, 'parts')).toContain('Part #85152780 ordered 11/04');
+    expect(why({ _factPartsWhy: 'Part #85152780 ordered 11/04', partsStatus: 'arrived' }, 'parts')).toBeNull();
   });
   it('estimate: _factEstimateWhy gives the estimate why', () => {
     expect(why({ _factEstimateWhy: 'V2 rejected: Line item cost above expected' }, 'estimate')).toContain('V2 rejected: Line item cost above expected');
   });
-  it('OEM: unanswered dealer calls extend an OEM signal and never create one', () => {
+  it('OEM: the hit comes from the vendor; unanswered dealer calls only add to the why (units[].why.oem)', () => {
     const r = { vendor: 'Volvo (ASIST)', savedRepairStatus: 'Waiting for vendor', dealerCallAttempts: 3 };
     expect(why(r, 'oem')).toMatch(/; 3 unanswered dealer calls$/);
-    expect(why({ vendor: 'Volvo (ASIST)', dealerCallAttempts: 3 }, 'oem')).toBeNull();
+    expect(why({ vendor: 'Volvo (ASIST)', dealerCallAttempts: 3 }, 'oem')).toBe('at OEM/dealer Volvo (ASIST); 3 unanswered dealer calls');
+    expect(why({ vendor: 'Amerit', dealerCallAttempts: 3 }, 'oem')).toBeNull();
+    const u = F.buildFleetDbr([makeUnit({ equipmentId: 'V1', vendor: 'Volvo (ASIST)', dealerCallAttempts: 3 })], { today: TODAY }).rows[0].units[0];
+    expect(u.why.oem).toContain('3 unanswered dealer calls');
   });
-  it('partner: an Accident row with an SF case adds it to the partner why (rows with facts)', () => {
-    expect(why({ lifecycleReason: 'Accident', salesforceCase: '00034983', _factsOn: true }, 'partner')).toContain('SF case 00034983');
+  it('partner: an Accident row with an SF case is not a partner hit', () => {
+    expect(why({ lifecycleReason: 'Accident', salesforceCase: '00034983', _factsOn: true }, 'partner')).toBeNull();
   });
-  it('flag off: none of the keys -> rules exactly as today', () => {
-    expect(why({ lifecycleReason: 'Accident', salesforceCase: '00034983' }, 'partner')).toBe('Accident (carrier/insurance owned)');
+  it('flag off: none of the keys -> the same rules', () => {
+    expect(why({ lifecycleReason: 'Accident', salesforceCase: '00034983' }, 'partner')).toBeNull();
     expect(why({ vendor: 'Volvo (ASIST)', savedRepairStatus: 'Waiting for vendor' }, 'oem')).toBe('at OEM/dealer Volvo (ASIST): status Waiting for vendor');
     expect(why({}, 'parts')).toBeNull();
     expect(why({}, 'estimate')).toBeNull();
