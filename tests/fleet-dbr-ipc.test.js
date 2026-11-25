@@ -168,7 +168,8 @@ describe('build / get', () => {
     reset({ storeInit: { fleetDbrEdits: { version: 1, fasName: USER, day: YESTERDAY, rows: { [ROC_KEY]: { fasActions: 'old', noEtc: 'old' } } } } });
     const m = (await call('build')).model;
     for (const r of m.rows) expect(Object.values(r.source)).not.toContain('edit');
-    expect(rowOf(m, ROC_KEY).cells.fasActions).toBe('');
+    // The computed (composer) FAS Actions, not yesterday's edit.
+    expect(rowOf(m, ROC_KEY).cells.fasActions).toMatch(/^Tracking T\d{4}\//);
     expect(m.fasName).toBe(USER);
     expect(m.fasNameSource).toBe('panel');
     expect(rowOf(m, ROC_KEY).cells.fasName).toBe(USER);
@@ -307,8 +308,8 @@ describe('draft', () => {
 
   it('a third concurrent draft returns busy', async () => {
     const pending = [];
-    // The first call of each draft stays pending; the self-review call answers at once.
-    reset({ ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))) });
+    // The first call of each draft stays pending; the self-review and sheet calls answer at once.
+    reset({ ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') || p.includes('SHEET CONTRACT') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))) });
     await call('build');
     const p1 = call('draft', { key: ROC_KEY });
     const p2 = call('draft', { key: SAPB_KEY });
@@ -493,7 +494,7 @@ describe('draft v2 (FEAT-004)', () => {
     const pending = [];
     reset({
       userAlias: vi.fn(() => pendingAlias),
-      ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))),
+      ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') || p.includes('SHEET CONTRACT') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))),
     });
     await call('build');
     const p1 = call('draft', { key: ROC_KEY });
@@ -565,7 +566,7 @@ describe('draft v2 (FEAT-004)', () => {
     const info = logCalls.filter((c) => c.lvl === 'info' && c.a[0] === '[fleet-dbr] draft').pop();
     expect(info.a[1]).toMatchObject({ key: ROC_KEY, outcome: 'ok', mode: 'single', alias: false });
     expect(typeof info.a[1].demand).toBe('number');
-    expect(info.a[1].calls).toBe(2);
+    expect(info.a[1].calls).toBe(3);   // draft + review + sheet (FEAT-003)
     for (const k of ['maxOutChars', 'maxPromptChars', 'envOver', 'envMissing', 'fasTagged', 'mapRetries']) expect(typeof info.a[1][k]).toBe('number');
     expect(info.a[1].dropReasons).toBeTypeOf('object');
     expect(info.a[1].fieldOver).toBeTypeOf('object');

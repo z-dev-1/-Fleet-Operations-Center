@@ -882,10 +882,311 @@ function commonRepairs(downRows, today) {
     .map(([label, ids]) => ({ label, ids: ids.slice().sort() }))
     .sort((a, b) => b.ids.length - a.ids.length || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
   repeat.sort();
-  // Temporary Details (FEAT-003 replaces them with composer text).
+  // 'Label: ids' lines (the row's commonDetails cell comes from composeSheet).
   const lines = common.map((c) => c.label + ': ' + c.ids.join(', '));
   if (repeat.length) lines.push('Repeat repair: ' + repeat.join(', '));
   return { yn: common.length || repeat.length ? 'Y' : 'N', details: lines.join('\n'), common, repeat };
+}
+
+// ── Sheet composer (design §3.8) ────────────────────────────────────────────
+// The gate requires this module at load time, so the gate is reached only through this call-time
+// require (never at module top): stripRefs / sheetForbidden / the sheet caps.
+function _gate() { return require('./fleet-dbr-gate'); }
+
+const VENDOR_LABELS = Object.freeze([
+  [/\bcox\b/i, 'COX'], [/amerit/i, 'Amerit'], [/\bkwne\b/i, 'KWNE'], [/\bta\b|travel\s*centers/i, 'TA'],
+  [/volvo|asist/i, 'Volvo/ASIST'], [/freightliner|daimler/i, 'Freightliner'], [/kenworth|paccar/i, 'Kenworth/PACCAR'],
+  [/peterbilt/i, 'Peterbilt'], [/international|navistar/i, 'International'], [/\bmack\b/i, 'Mack'],
+  [/^dsp[_ ]?entered$/i, 'DSP'], [/fleetnet/i, 'FleetNet'], [/\bcei\b/i, 'CEI'], [/allegiance|ascend/i, 'Ascendance'],
+].map(Object.freeze));
+// Raw vendor -> the sheet's vendor label (golden spelling); unknown vendors: '_' -> space,
+// parenthetical dropped; empty -> 'no vendor'.
+function vendorLabel(v) {
+  const s = _str(v).trim();
+  if (!s) return 'no vendor';
+  for (const [re, label] of VENDOR_LABELS) if (re.test(s)) return label;
+  return s.replace(/\([^)]*\)/g, ' ').replace(/_/g, ' ').replace(/\s+/g, ' ').trim() || 'no vendor';
+}
+
+const SHORT_ISSUE_MAX = 48;
+const SHORT_ISSUE_MIN = 15;
+const ISSUE_PREFIX_RE = /^(?:(?:unit|truck|tractor)\s+(?:needs|requires|has)\s+(?:a|an|the)?\s*|reported\s+)/i;
+const ISSUE_SEPS = Object.freeze([', ', ' and ', ' due to ', ' with ']);
+const ISSUE_STOPWORDS = new Set(['and', 'or', 'the', 'a', 'an', 'of', 'to', 'with', 'on', 'for', 'due', 'at']);
+// Text up to the first sentence end ([.!?] then whitespace / end) outside parentheses.
+function _firstSentence(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && (ch === '.' || ch === '!' || ch === '?') && (i + 1 >= s.length || /\s/.test(s[i + 1]))) return s.slice(0, i);
+  }
+  return s;
+}
+// A unit's short issue (<= 48 chars) from issueSummary: first sentence, prefix strip, refs
+// stripped whole, shortened at a list joint or word boundary, first letter lowercased.
+function shortIssue(u) {
+  let s = _str(u && u.issueSummary).replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  s = _firstSentence(s);
+  const semi = s.indexOf(';');
+  if (semi >= 0) s = s.slice(0, semi);
+  s = _gate().stripRefs(s.trim().replace(ISSUE_PREFIX_RE, ''));
+  if (s.length > SHORT_ISSUE_MAX) s = s.replace(/\s*\([^()]*\)\s*$/, '').trim();
+  if (s.length > SHORT_ISSUE_MAX) {
+    let cut = -1;
+    for (const sep of ISSUE_SEPS) {
+      for (let k = s.indexOf(sep); k >= 0 && k < SHORT_ISSUE_MAX; k = s.indexOf(sep, k + 1)) {
+        if (k >= SHORT_ISSUE_MIN && k > cut) cut = k;
+      }
+    }
+    if (cut >= 0) s = s.slice(0, cut);
+    else {
+      let c = s.slice(0, SHORT_ISSUE_MAX);
+      if (s[SHORT_ISSUE_MAX] !== ' ') { const sp = c.lastIndexOf(' '); if (sp > 0) c = c.slice(0, sp); }
+      const words = c.trim().split(' ');
+      while (words.length > 1 && ISSUE_STOPWORDS.has(words[words.length - 1].toLowerCase().replace(/[,;:]+$/, ''))) words.pop();
+      s = words.join(' ');
+    }
+  }
+  s = s.replace(/[\s,;:\-\u2013\u2014]+$/, '').trim();
+  const first = s.split(' ')[0] || '';
+  const lead = first.split(/[^A-Za-z0-9]/)[0] || '';        // "APU/cab" -> "APU"
+  const keep = (lead.length > 1 && lead === lead.toUpperCase() && /[A-Z]/.test(lead)) || /\d/.test(first);
+  return s && !keep ? s[0].toLowerCase() + s.slice(1) : s;
+}
+
+const STATUS_PHRASES = Object.freeze({
+  'parts ordered': 'parts on order', 'parts backordered': 'parts on order', 'parts back ordered': 'parts on order',
+  'backordered': 'parts on order', 'waiting for vendor': 'waiting for vendor', 'under diagnosis': 'under diagnosis',
+  'vehicle arrived': 'awaiting diagnosis', 'repair in progress': 'repair in progress',
+  'repair completed': 'repair done, awaiting release', 'ready for pickup': 'ready for pickup',
+  'parts received': 'parts received, awaiting tech',
+});
+const ESTIMATE_STATUSES = Object.freeze(['awaiting estimate', 'awaiting approval', 'awaiting estimate / approval', 'awaiting estimate/approval']);
+// Status phrase of one composer unit ({ status, barriers, estApproved }).
+function _statusPhrase(u) {
+  const st = _codeText(u.status);
+  if (!st) return 'status not set';
+  const n = st.toLowerCase();
+  if (STATUS_PHRASES[n]) return STATUS_PHRASES[n];
+  if (ESTIMATE_STATUSES.includes(n)) return !u.barriers.includes('estimate') && u.estApproved ? 'estimate approved' : 'awaiting estimate';
+  return n.length <= 30 && /^[a-z ]+$/i.test(n) ? n : 'open';
+}
+function _summary(units) {
+  const counts = new Map();
+  for (const u of units) counts.set(u.phrase, (counts.get(u.phrase) || 0) + 1);
+  if (counts.size === 1) return (units.length > 1 ? 'all ' : '') + units[0].phrase;
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([p, k]) => p + ' (' + k + ')').join(', ');
+}
+// 'A', 'A and B', 'A, B and C'.
+function _list(items) {
+  if (items.length <= 1) return items[0] || '';
+  return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+}
+// At most k items, the tail replaced by '+N more'.
+function _capItems(items, k) {
+  return items.length > k ? items.slice(0, k).concat('+' + (items.length - k) + ' more') : items;
+}
+// Tier 1 'ID (Nd, issue)', 2 'ID Nd', 3 'ID'; a unit with a forbidden label never shows it.
+function _frag(u, tier) {
+  const days = u.daysDown == null ? '' : u.daysDown + 'd';
+  if (tier === 1 && !u.forceT3) {
+    const inner = [days, u.label].filter(Boolean).join(', ');
+    return inner ? u.id + ' (' + inner + ')' : u.id;
+  }
+  if (tier === 2 && !u.forceT3 && days) return u.id + ' ' + days;
+  return u.id;
+}
+// Units grouped by vendor label: count desc, max days desc, label asc (units keep builder order).
+function _vendorGroups(units) {
+  const by = new Map();
+  for (const u of units) {
+    if (!by.has(u.vendorLabel)) by.set(u.vendorLabel, []);
+    by.get(u.vendorLabel).push(u);
+  }
+  const maxDays = (us) => Math.max(...us.map((u) => (u.daysDown == null ? -1 : u.daysDown)));
+  return [...by.entries()].map(([label, us]) => ({ label, units: us }))
+    .sort((a, b) => b.units.length - a.units.length || maxDays(b.units) - maxDays(a.units) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+}
+// Last resort over the cap: cut at the last '; ' / ', ' joint and end with '.'.
+function _hardCut(s, cap) {
+  if (s.length <= cap) return s;
+  let c = s.slice(0, cap - 1);
+  const at = Math.max(c.lastIndexOf('; '), c.lastIndexOf(', '));
+  if (at > 0) c = c.slice(0, at);
+  return c.replace(/[\s,;:\-\u2013\u2014]+$/, '') + '.';
+}
+// build(tier, k) -> text; tiers T1, T2, T3, then T3 with id lists capped at k (+N more).
+function _fitTiers(build, cap, maxN) {
+  for (const tier of [1, 2, 3]) {
+    const s = build(tier, Infinity);
+    if (s.length <= cap) return s;
+  }
+  for (let k = Math.max(1, maxN - 1); k >= 1; k--) {
+    const s = build(3, k);
+    if (s.length <= cap) return s;
+  }
+  return _hardCut(build(3, 1), cap);
+}
+function _dot(s) { return s ? (/[.!?]$/.test(s) ? s : s + '.') : ''; }
+function _cap1(s) { return s ? s[0].toUpperCase() + s.slice(1) : s; }
+const _PARTNER_REASON = {
+  impound: () => 'impounded, release/tow pending',
+  text: () => 'waiting on carrier/DSP',
+  dsp: (u) => [u.lifecycleReason.toLowerCase(), 'DSP_ENTERED', 'waiting on carrier/DSP'].filter(Boolean).join(', '),
+};
+function _partnerFas(u) {
+  const kind = u.kinds.partner;
+  if (kind === 'impound') return 'impound release';
+  return 'carrier/DSP' + (kind === 'dsp' ? ' ' + (u.lifecycleReason.toLowerCase() || 'repair') : '');
+}
+function _partnerSupport(u) {
+  const kind = u.kinds.partner;
+  if (kind === 'impound') return 'impound release';
+  if (kind === 'dsp') return (u.daysDown == null ? '' : u.daysDown + 'd ') + 'carrier/DSP ' + (u.lifecycleReason.toLowerCase() || 'repair');
+  return 'carrier/DSP';
+}
+const _PARTNER_ORDER = { impound: 0, dsp: 1, text: 2 };
+
+// One Details cell (barrier id) for its units. -> build(tier, k)
+function _detailsBuilder(id, us, common) {
+  const has = (u) => u.barriers.includes(id);
+  const units = us.filter(has);
+  if (id === 'vendor1p' || id === 'oem') {
+    const groups = _vendorGroups(units);
+    return (tier, k) => _dot(groups.map((g) => {
+      const n = g.units.length;
+      const frags = _capItems(g.units.map((u) => _frag(u, tier)), k);
+      if (id === 'oem') return g.label + ' offsite: ' + (tier === 1 ? _list(frags) : frags.join(', ')) + ' \u2014 ' + _summary(g.units);
+      if (n === 1) return g.label + ': ' + frags[0] + ' \u2014 ' + g.units[0].phrase;
+      if (tier === 1) return g.label + ' has ' + n + ' units: ' + _list(frags) + ' \u2014 ' + _summary(g.units);
+      return g.label + ' has ' + n + ' units (' + frags.join(', ') + '): ' + _summary(g.units);
+    }).join('; '));
+  }
+  if (id === 'estimate') {
+    return (tier, k) => _dot(_capItems(units.map((u) => _frag(u, tier) + ' \u2014 '
+      + (u.kinds.estimate === 'rejected' ? 'estimate rejected' : 'estimate pending approval')), k).join('; '));
+  }
+  if (id === 'partner') {
+    return (tier, k) => _dot(_capItems(units.map((u) => _frag(u, tier) + ' \u2014 '
+      + (_PARTNER_REASON[u.kinds.partner] || _PARTNER_REASON.text)(u)), k).join('; '));
+  }
+  if (id === 'parts') {
+    const groups = _vendorGroups(units);
+    return (tier, k) => {
+      if (tier === 2 && k === Infinity) {
+        return 'Parts ordered: ' + groups.map((g) => g.units.map((u) => u.id).join(', ') + ' (' + g.label + ')').join(', ') + '.';
+      }
+      const frags = _capItems(units.map((u) => _frag(u, tier)), k);
+      return 'Parts ordered: ' + (tier === 1 ? _list(frags) : frags.join(', ')) + '.';
+    };
+  }
+  // common: 'Group: frags' per group, then 'Repeat repair: frags'; joined '. '.
+  const byId = new Map(us.map((u) => [u.id, u]));
+  const pick = (ids) => us.filter((u) => ids.includes(u.id) && byId.has(u.id));
+  const parts = (common.groups || []).map((g) => [g.label, pick(g.ids || [])])
+    .concat((common.repeat || []).length ? [['Repeat repair', pick(common.repeat)]] : [])
+    .filter(([, list]) => list.length);
+  return (tier, k) => _dot(parts.map(([label, list]) => {
+    const frags = _capItems(list.map((u) => _frag(u, tier)), k);
+    return label + ': ' + (tier === 1 ? _list(frags) : frags.join(', '));
+  }).join('. '));
+}
+
+// FAS Actions (plan voice, clauses 1-6 of §3.8). -> build(tier, k) (tier unused: ids only)
+function _fasBuilder(us) {
+  const clauses = [];
+  const named = new Set();
+  const add = (head, units, tail) => { clauses.push({ head, units, tail }); for (const u of units) named.add(u.id); };
+  const p1 = _vendorGroups(us.filter((u) => u.barriers.includes('vendor1p')));
+  for (const g of p1) {
+    const pw = g.units.filter((u) => u.barriers.includes('parts'));
+    if (pw.length) add('following up ' + g.label + ' on parts ETAs (', pw, ')');
+  }
+  for (const g of p1) {
+    const other = g.units.filter((u) => !u.barriers.includes('parts'));
+    if (other.length) add('following up ' + g.label + ' on ', other, ' diag/repair progress');
+  }
+  for (const g of _vendorGroups(us.filter((u) => u.barriers.includes('oem')))) add('pushing ' + g.label + ' on ', g.units, ' diagnosis/ETC');
+  const partner = us.filter((u) => u.barriers.includes('partner'));
+  if (partner.length) { clauses.push({ partner }); for (const u of partner) named.add(u.id); }
+  const est = us.filter((u) => u.barriers.includes('estimate'));
+  if (est.length) add('chasing the estimate decision on ', est, '');
+  const rest = us.filter((u) => !named.has(u.id));
+  if (rest.length) add('tracking ', rest, '');
+  return (tier, k) => _dot(_cap1(clauses.map((c) => (c.partner
+    ? 'escalating ' + _list(_capItems(c.partner.map((u) => u.id + ' (' + _partnerFas(u) + ')'), k))
+    : c.head + _capItems(c.units.map((u) => u.id), k).join('/') + c.tail)).join('; ')));
+}
+
+// Support (first rule that applies, §3.8). -> build(tier, k)
+function _supportBuilder(us) {
+  const partner = us.filter((u) => u.barriers.includes('partner'))
+    .map((u, i) => ({ u, i })).sort((a, b) => (_PARTNER_ORDER[a.u.kinds.partner] ?? 3) - (_PARTNER_ORDER[b.u.kinds.partner] ?? 3) || a.i - b.i)
+    .map((x) => x.u);
+  if (partner.length) return (tier, k) => 'Support on ' + _list(_capItems(partner.map((u) => u.id + ' (' + _partnerSupport(u) + ')'), k)) + '.';
+  const rejected = us.filter((u) => u.kinds.estimate === 'rejected');
+  if (rejected.length) return (tier, k) => 'MCS support on ' + _capItems(rejected.map((u) => u.id), k).join('/') + ' rejected estimate' + (rejected.length > 1 ? 's' : '') + '.';
+  for (const id of ['oem', 'vendor1p']) {
+    const slow = us.filter((u) => u.barriers.includes(id) && u.daysDown != null && u.daysDown >= 14);
+    if (!slow.length) continue;
+    const labels = _vendorGroups(slow).map((g) => g.label);
+    return (tier, k) => 'Vendor performance \u2014 ' + _list(labels) + ' turnaround on ' + _capItems(slow.map((u) => u.id), k).join('/') + '.';
+  }
+  return () => 'None.';
+}
+
+// Compose one cell with the self-check: a forbidden / foreign-ref hit drops the offending units to
+// T3 and recomposes; then every unit at T3; then ids only; never a failing cell.
+function _composeCell(makeBuild, us, cap, downIds) {
+  const G = _gate();
+  const bad = (s) => !!G.sheetForbidden(s, downIds);
+  const maxN = Math.max(1, us.length);
+  let s = _fitTiers(makeBuild(us), cap, maxN);
+  if (!bad(s)) return s;
+  const fixed = us.map((u) => (bad(_frag(u, 1)) ? Object.assign({}, u, { forceT3: true }) : u));
+  s = _fitTiers(makeBuild(fixed), cap, maxN);
+  if (!bad(s)) return s;
+  s = _fitTiers(makeBuild(us.map((u) => Object.assign({}, u, { forceT3: true }))), cap, maxN);
+  if (!bad(s)) return s;
+  s = _hardCut(us.map((u) => u.id).join(', ') + '.', cap);
+  return bad(s) ? '' : s;
+}
+
+// Composer units (builder order) + computed Y/N + row.common -> the 8 sheet cells (single-line).
+// cu: { id, daysDown, vendorLabel, label, status, lifecycleReason, barriers, kinds, estApproved }.
+// Details '' whenever the cell's Y/N is N (I3); a 0-down row -> '' and Support 'None.' (DR2-12).
+function composeSheet(units, yn, common) {
+  const G = _gate();
+  const out = {};
+  const ids = ['vendor1p', 'oem', 'estimate', 'partner', 'parts', 'common'];
+  const us = (Array.isArray(units) ? units : []).map((u) => Object.assign({}, u, {
+    barriers: Array.isArray(u.barriers) ? u.barriers : [], kinds: u.kinds || {}, lifecycleReason: _str(u.lifecycleReason),
+    label: _str(u.label), vendorLabel: _str(u.vendorLabel) || 'no vendor',
+  }));
+  for (const u of us) u.phrase = _statusPhrase(u);
+  const downIds = us.map((u) => u.id);
+  if (!us.length) {
+    for (const id of ids) out[id + 'Details'] = '';
+    out.fasActions = '';
+    out.support = 'None.';
+    return out;
+  }
+  const cm = common || { groups: [], repeat: [] };
+  for (const id of ids) {
+    const inCell = id === 'common'
+      ? us.filter((u) => (cm.groups || []).some((g) => (g.ids || []).includes(u.id)) || (cm.repeat || []).includes(u.id))
+      : us.filter((u) => u.barriers.includes(id));
+    out[id + 'Details'] = (yn && yn[id]) === 'Y' && inCell.length
+      ? _composeCell((list) => _detailsBuilder(id, list, cm), inCell, G.SHEET_DETAILS_MAX, downIds)
+      : '';
+  }
+  out.fasActions = _composeCell(_fasBuilder, us, G.SHEET_FAS_MAX, downIds);
+  out.support = _composeCell(_supportBuilder, us, G.SHEET_SUPPORT_MAX, downIds) || 'None.';
+  return out;
 }
 
 // ── Guards / hashing ────────────────────────────────────────────────────────
@@ -952,10 +1253,6 @@ function _unitKinds(b) {
   for (const rule of BARRIER_RULES) if (b[rule.id]) out[rule.id] = b[rule.id].kind || null;
   return out;
 }
-function _detailLine(u, why) {
-  const v = u.vendor || 'no vendor';
-  return u.id + ' (' + v + (u.daysDown == null ? '' : ', ' + u.daysDown + 'd') + '): ' + why;
-}
 // One single-line "why" per Missed ETC unit (row.missedWhy; the cell itself is the bare count).
 function _missedWhy(u) {
   const e = u.etc;
@@ -1001,28 +1298,32 @@ function buildFleetDbr(rows, opts = {}) {
     const ss = scac.get(p.scac);
     const domicileStats = _stats(ds.total, ds.down);
     const scacStats = _stats(ss.total, ss.down);
-    const details = {};
     const hits = {};
-    for (const rule of BARRIER_RULES) { details[rule.id] = []; hits[rule.id] = false; }
+    for (const rule of BARRIER_RULES) hits[rule.id] = false;
     const etcBuckets = { today: [], missed: [], none: [] };
     const units = p.downRows.map((r) => {
       const daysDown = _days(r);
       const b = classifyBarriers(r, { today, daysDown });
       const etc = parseEtc(r, today);
+      const vendor = _str(r.vendor).trim();
       return {
         id: _idOf(r), daysDown,
-        lifecycleReason: _str(r.lifecycleReason).trim(), vendor: _str(r.vendor).trim(),
+        lifecycleReason: _str(r.lifecycleReason).trim(), vendor,
         status: _str(r.savedRepairStatus).trim(), serviceState: _str(r.serviceState).trim(),
         etc, barriers: BARRIER_RULES.filter((x) => b[x.id]).map((x) => x.id),
         why: _unitWhy(b), barrierKinds: _unitKinds(b),
-        categories: [..._unitCategories(r)], systems: _unitSystems(r), _why: b, _row: r,
+        categories: [..._unitCategories(r)], systems: _unitSystems(r),
+        label: shortIssue(r), vendorLabel: vendorLabel(vendor), _why: b, _row: r,
       };
     }).sort(_byDaysThenId);
+    const composerUnits = [];
     for (const u of units) {
-      for (const rule of BARRIER_RULES) {
-        const hit = u._why[rule.id];
-        if (hit) { hits[rule.id] = true; details[rule.id].push(_detailLine(u, hit.why)); }
-      }
+      for (const rule of BARRIER_RULES) if (u._why[rule.id]) hits[rule.id] = true;
+      composerUnits.push({
+        id: u.id, daysDown: u.daysDown, vendorLabel: u.vendorLabel, label: u.label, status: u.status,
+        lifecycleReason: u.lifecycleReason, barriers: u.barriers, kinds: u.barrierKinds,
+        estApproved: _estimateApproved(u._row, today),
+      });
       // Every down unit lands in exactly one bucket (I1).
       const c = countedEtc(u._row, u.etc, today);
       u.etc = Object.assign({}, u.etc, { bucket: c.bucket, bucketReason: c.reason, undercut: c.undercut });
@@ -1036,6 +1337,10 @@ function buildFleetDbr(rows, opts = {}) {
     }));
     const etcInvariant = etcBuckets.today.length + etcBuckets.none.length + etcBuckets.missed.length === p.down;
     const common = commonRepairs(p.downRows, today);
+    const yn = { common: common.yn };
+    for (const rule of BARRIER_RULES) yn[rule.id] = hits[rule.id] ? 'Y' : 'N';
+    const rowCommon = { groups: common.common, repeat: common.repeat };
+    const sheet = composeSheet(composerUnits, yn, rowCommon);
     const cells = {
       fasName,
       domicile: p.domicile,
@@ -1045,21 +1350,21 @@ function buildFleetDbr(rows, opts = {}) {
       scacUptime: fmtPct(scacStats.uptime),
       scacDown: String(scacStats.down),
       commonYN: common.yn,
-      commonDetails: common.details,
+      commonDetails: sheet.commonDetails,
       etcToday: String(etcBuckets.today.length),
       noEtc: String(etcBuckets.none.length),
       missedEtc: String(etcBuckets.missed.length),
-      fasActions: '',
-      support: '',
+      fasActions: sheet.fasActions,
+      support: sheet.support,
     };
     for (const rule of BARRIER_RULES) {
-      cells[rule.ynCol] = hits[rule.id] ? 'Y' : 'N';
-      cells[rule.detailsCol] = details[rule.id].join('\n');
+      cells[rule.ynCol] = yn[rule.id];
+      cells[rule.detailsCol] = sheet[rule.detailsCol];
     }
     out.push({
       key: p.key, domicile: p.domicile, scac: p.scac,
       pair: { total: p.total, down: p.down }, domicileStats, scacStats,
-      cells, units, common: { groups: common.common, repeat: common.repeat },
+      cells, units, common: rowCommon,
       missedWhy, userEtcOverrides, etcInvariant,
       unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
     });
@@ -1167,4 +1472,5 @@ module.exports = {
   isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates, etcKeywordNegated,
   REPAIR_MISS_MARKER_RE, explicitRepairMiss, countedEtc, ETC_UNDERCUT_RES, DIAG_NONE_RE, APPT_DATE_RE,
   classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,
+  vendorLabel, shortIssue, composeSheet,
 };

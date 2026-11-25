@@ -62,7 +62,7 @@ describe('AC18 single mode, 39582 with facts', () => {
   });
   it('self-review prompt: checklist item 8 with Q-SELF + brainstorm, QUESTIONS block, fits; QA tolerated', async () => {
     const { r, prompts, ask } = await run();
-    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(3);   // draft + review + the Fleet Health sheet call (FEAT-003)
     const p = prompts[1];
     expect(p).toContain('REVIEW CHECKLIST');
     expect(p).toMatch(/\n8\. First add up to 5 questions of your own \(Q-SELF-1\.\.Q-SELF-5\)/);
@@ -87,6 +87,8 @@ describe('AC18 flag off: prompts equal the 1eabe04 goldens (D7 text substituted)
     const inp = GI.goldenInput(F, makeUnit);
     const prompts = [];
     const r = await AI.draftRow(Object.assign({}, inp.args, { ask: async (p) => { prompts.push(p); return J(GI.goldenAnswer(inp.ids)); }, now: () => 0 }));
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain(AI.SHEET_CONTRACT);
     const d7 = (s) => s.split(GI.D7_OLD.fasRule).join(AI.FAS_RULE).split(GI.D7_OLD.b61004).join(AI.ROW_EXAMPLE.fasActions[2].text);
     expect(GOLD.draft).toContain(GI.D7_OLD.fasRule);
     expect(prompts[0]).toBe(d7(GOLD.draft));
@@ -94,7 +96,7 @@ describe('AC18 flag off: prompts equal the 1eabe04 goldens (D7 text substituted)
     expect(prompts[1]).not.toContain('QUESTIONS:');
     expect(prompts[1]).not.toContain('Q-SELF');
     expect(r.dropReasons).toEqual(GOLD.dropReasons);
-    expect(r.calls).toBe(GOLD.calls);
+    expect(r.calls).toBe(GOLD.calls + 1);   // + the Fleet Health sheet call (FEAT-003); draft/review prompts unchanged
   });
 });
 

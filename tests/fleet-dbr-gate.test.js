@@ -842,3 +842,142 @@ describe('§3 example evidence fixture (AC46 basis)', () => {
     expect(comma).toMatchObject({ ok: true, names: [], unbound: [] });
   });
 });
+
+describe('D6 / D7 gate NITs (design §3.11, AC8)', () => {
+  const ok = env({ fas: [F('11/10', 'called TA re tech callout')] });
+  it('D6: comma, & and slash joined actions need their own quote; ", bay confirmed" is not a claim', () => {
+    for (const t of [
+      '11/10 called TA re tech callout, escalated to TA regional',
+      '11/10 called TA re tech callout, emailed dealer',
+      '11/10 called TA re tech callout & escalated to TA regional',
+      '11/10 called TA re tech callout / escalated to TA regional',
+    ]) expect(res(t, ok, ['B61001'], 'fasActions'), t).toBe('unfounded-fas-action');
+    expect(res('11/10 called TA, bay confirmed for 11/12', ok, ['B61001'], 'fasActions')).toBe('kept');
+  });
+  it('D7: the "No FAS action logged" prefix is stripped and the rest is checked, in FAS Actions and Details', () => {
+    expect(res('No FAS action logged, escalated to TA regional 11/09', undefined, ['B61001'], 'fasActions')).toBe('unfounded-fas-action');
+    expect(res('No FAS action logged, FAS escalated to TA regional 11/09', undefined, ['B61001'], 'details')).toBe('unfounded-fas-action');
+    expect(res('No FAS action logged; unit waiting on TA', undefined, ['B61001'], 'fasActions')).toBe('kept');
+    expect(res('No FAS action logged, unit waiting on TA', undefined, ['B61001'], 'fasActions')).toBe('kept');
+    expect('No FAS action logged \u2014 escalated'.replace(G.NO_FAS_PREFIX_RE, '')).toBe('escalated');
+  });
+});
+
+describe('D8 mdDates (design §3.11, AC8, DR2-14)', () => {
+  const md = (t, o) => G.mdDates(t, TODAY, o).map((d) => d.md);
+  it('spaced counts, "1st thing" and day+month without a separator', () => {
+    expect(md('replaced 2 / 4 steer tires')).toEqual([]);
+    expect(md('PM 1 / 2 done')).toEqual([]);
+    expect(md('due 1st thing tomorrow')).toEqual([]);
+    expect(md('parts ETA 21Nov')).toEqual(['11/21']);
+    expect(md('part A12MAR5 ordered')).toEqual([]);
+  });
+  it('unspaced pairs stay dates (negative guards)', () => {
+    expect(md('11/21 front tires replaced')).toEqual(['11/21']);
+    expect(md('PM 11/03 done')).toEqual(['11/3']);
+    expect(md('11/21 tires replaced')).toEqual(['11/21']);
+    expect(md('repair 11/20 complete')).toEqual(['11/20']);
+    expect(md('parts ETA 11 / 21 per dealer')).toEqual(['11/21']);
+  });
+  it('the loose (evidence) side keeps spaced pairs as dates', () => {
+    expect(md('replaced 2 / 4 steer tires', { loose: true })).toEqual(['2/4']);
+    expect(md('PM 1 / 2 done', { loose: true })).toEqual(['1/2']);
+  });
+});
+
+describe('sheetForbidden / stripRefs (design §3.8, §5, DR2-8)', () => {
+  it('forbidden patterns -> sheet-forbidden; a non-down ID token -> sheet-ref; clean text -> null', () => {
+    const ids = ['B70001', 'B70002'];
+    for (const t of [
+      'B70001 see https://portal.example.com/x', 'B70001 RO 448899 open', 'B70001 case 7712345', 'B70001 Part # 85152780',
+      'B70001 3f2a9c1e-1b2c-4d5e-8f90-123456789abc', 'B70001 tow amz-abc123def456', 'B70001 tracking 1Z999AA10123456784',
+      'B70001 order 123456789012', 'B70001 mail a.b@example.com', 'B70001 call 555-123-4567', '\u2022 B70001 waiting',
+      'B70001 ticket abc-12345678x',
+    ]) expect(G.sheetForbidden(t, ids), t).toBe('sheet-forbidden');
+    expect(G.sheetForbidden('B70001 and B79999 waiting', ids)).toBe('sheet-ref');
+    expect(G.sheetForbidden('B70001 and b70002 waiting on re-diagnosis', ids)).toBeNull();
+    expect(G.sheetForbidden('', ids)).toBeNull();
+  });
+  it('repeated calls give the same answer (no shared lastIndex)', () => {
+    const out = [];
+    for (let i = 0; i < 4; i++) out.push(G.sheetForbidden('B70001 RO 448899 and https://x.example.com', ['B70001']), G.sheetForbidden('B79999 waiting', ['B70001']));
+    expect(out).toEqual(['sheet-forbidden', 'sheet-ref', 'sheet-forbidden', 'sheet-ref', 'sheet-forbidden', 'sheet-ref', 'sheet-forbidden', 'sheet-ref']);
+    expect([G.stripRefs('RO 206910652 opened'), G.stripRefs('RO 206910652 opened')]).toEqual(['opened', 'opened']);
+  });
+  it('stripRefs removes each ref whole (label and number together)', () => {
+    expect(G.stripRefs('RO 206910652 opened for brakes')).toBe('opened for brakes');
+    expect(G.stripRefs('Work order created (RO 206910652) for engine no-start')).toBe('Work order created for engine no-start');
+    expect(G.stripRefs('Harness Part #85152780 replacement required')).toBe('Harness replacement required');
+    expect(G.stripRefs('tow amz-abc123def456 booked 3f2a9c1e-1b2c-4d5e-8f90-123456789abc')).toBe('tow booked');
+    expect(G.stripRefs('UPS 1Z999AA10123456784 run 1234567890123 unit B70009')).toBe('UPS run unit');
+    expect(G.stripRefs('call 555-123-4567 or a.b@example.com, see https://x.example.com/y')).toBe('call or see');
+    expect(G.stripRefs('re-diagnosis needed')).toBe('re-diagnosis needed');
+  });
+});
+
+describe('validateSheet (design §5) and ctx.rules[b].units (DR2-5)', () => {
+  const S = makeCtx({ units: {
+    B70001: { vendor: 'COX', savedRepairStatus: 'Parts ordered', issueSummary: 'Hood shocks broken from damage', workDuration: '21d' },
+    B70002: { vendor: 'COX', savedRepairStatus: 'Parts ordered', issueSummary: 'Air leak at the tank', workDuration: '5d' },
+    B70003: { vendor: 'Freightliner', savedRepairStatus: 'Vehicle arrived', issueSummary: 'Air brake chamber leaking', workDuration: '3d' },
+    B70004: { vendor: 'COX', savedRepairStatus: 'Waiting for vendor', issueSummary: 'Coolant leak at the radiator', workDuration: '2d' },
+    B70005: { vendor: 'DSP_ENTERED', lifecycleReason: 'Accident', issueSummary: 'Front-end damage', workDuration: '40d' },
+  }, today: TODAY, fleetIds: ['B79998'] });
+  const c = S.ctx;
+  const v = (sheet) => G.validateSheet({ sheet }, c);
+  it('ctx.rules[b].units: barrier units and the common groups + repeat, builder order', () => {
+    expect(c.rules.vendor1p.units).toEqual(['B70001', 'B70002', 'B70004']);
+    expect(c.rules.oem.units).toEqual(['B70003']);
+    expect(c.rules.partner.units).toEqual(['B70005']);
+    expect(c.rules.parts.units).toEqual(['B70001', 'B70002']);
+    expect(c.rules.estimate.units).toEqual([]);
+    expect(c.rules.common).toMatchObject({ yn: 'Y', units: ['B70002', 'B70003'] });
+    expect(S.row.common).toEqual({ groups: [{ label: 'Air system / 5th wheel', ids: ['B70002', 'B70003'] }], repeat: [] });
+  });
+  it('one passing golden-style sentence per cell; Support None -> None.', () => {
+    const sheet = {
+      vendor1pDetails: 'COX has 3 units (B70001 21d, B70002 5d, B70004 2d): parts on order (2), waiting for vendor (1).',
+      oemDetails: 'Freightliner offsite: B70003 (3d, air brake chamber leaking) \u2014 awaiting diagnosis.',
+      partnerDetails: 'B70005 (40d, accident, DSP_ENTERED) waiting on carrier/DSP.',
+      partsDetails: 'Parts ordered: B70001, B70002 (COX).',
+      commonDetails: 'Air system / 5th wheel: B70002 (air leak at the tank) and B70003 (air brake chamber).',
+      fasActions: 'Following up COX on parts ETAs (B70001/B70002); pushing Freightliner on B70003 diagnosis/ETC.',
+      support: 'none',
+    };
+    const r = v(Object.assign({ unknownKey: 'x' }, sheet));
+    expect(r.drops).toEqual({});
+    expect(r.invalid).toBe(false);
+    expect(r.sheet).toEqual(Object.assign({}, sheet, { support: 'None.' }));
+    expect(v({ support: 'Support on B70005 (40d carrier/DSP accident).' }).sheet.support).toBe('Support on B70005 (40d carrier/DSP accident).');
+    expect(G.validateSheet(JSON.stringify({ sheet: { support: 'None.' } }), c).sheet).toEqual({ support: 'None.' });
+  });
+  it('each drop code; the other cells are kept', () => {
+    const cases = [
+      [{ vendor1pDetails: 5 }, 'sheet-type'],
+      [{ vendor1pDetails: 'COX: B70001.' }, 'sheet-length'],
+      [{ fasActions: 'Following up COX on B70001. ' + 'x'.repeat(240) }, 'sheet-length'],
+      [{ support: 'Support on B70005 ' + 'y'.repeat(140) }, 'sheet-length'],
+      [{ estimateDetails: 'B70001 estimate pending approval at COX.' }, 'sheet-not-yes'],
+      [{ vendor1pDetails: 'COX has units awaiting parts, repair pace slow.' }, 'sheet-no-unit'],
+      [{ partsDetails: 'Parts ordered: B70001 (RO 448899) and B70002.' }, 'sheet-forbidden'],
+      [{ vendor1pDetails: 'COX has units B70001 and B79999 awaiting parts.' }, 'sheet-ref'],
+      [{ oemDetails: 'Freightliner offsite: B70003 and B70001 under diagnosis.' }, 'sheet-units'],
+      [{ commonDetails: 'Air system: B70002 and B70003 air leaks; B70004 coolant leak.' }, 'sheet-units'],
+      [{ vendor1pDetails: 'COX: B70001 (21d) parts ETA 11/30 per the vendor.' }, 'sheet-tokens'],
+      [{ vendor1pDetails: 'COX: B70001 waiting, Jonathan says parts are slow.' }, 'sheet-name'],
+      [{ fasActions: 'Called COX on B70001 parts; pushing Freightliner on B70003.' }, 'sheet-claim'],
+    ];
+    for (const [sheet, code] of cases) {
+      const id = Object.keys(sheet)[0];
+      const keep = id === 'support' ? { fasActions: 'Following up COX on parts ETAs (B70001/B70002).' } : { support: 'None.' };
+      const r = v(Object.assign({}, keep, sheet));
+      expect(r.drops, id + ' ' + code).toEqual({ [id]: code });
+      expect(r.sheet).toEqual(keep);
+    }
+  });
+  it('no sheet object -> invalid; empty Details are absent, not dropped', () => {
+    expect(G.validateSheet('no json', c)).toEqual({ sheet: {}, drops: {}, invalid: true });
+    expect(G.validateSheet({ cells: {} }, c).invalid).toBe(true);
+    expect(v({ estimateDetails: '', support: 'None.' })).toEqual({ sheet: { support: 'None.' }, drops: {}, invalid: false });
+  });
+});

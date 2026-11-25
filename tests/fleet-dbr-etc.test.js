@@ -103,7 +103,8 @@ describe('ETC cells', () => {
     expect(row.missedWhy).toEqual([{ unit: 'E7', date: '2026-11-05', why: "'11/09 - Dealer missed the ETC of 11/05, new date pending'", overrode: null }]);
     expect(row.userEtcOverrides).toEqual([]);
     expect(row.etcInvariant).toBe(true);
-    expect(JSON.stringify(row.cells)).not.toMatch(/E1|E4|E5|E6|E7/);
+    // The ETC cells never list unit IDs (FAS Actions now names them: composer text).
+    expect(JSON.stringify([row.cells.etcToday, row.cells.noEtc, row.cells.missedEtc])).not.toMatch(/E1|E4|E5|E6|E7/);
     // IDs stay in units[].etc for the drill-down.
     expect(row.units.find((u) => u.id === 'E1').etc.state).toBe('today');
     expect(row.units.find((u) => u.id === 'E5').etc.state).toBe('none');

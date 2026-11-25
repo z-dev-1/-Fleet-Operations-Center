@@ -62,6 +62,29 @@ describe('AC46 contract examples pass the gate', () => {
     expect(d.barriers.vendor1p.entries).toHaveLength(1);
   });
 
+  it('every SHEET_EXAMPLES cell passes validateSheet against evidence built from its own units', () => {
+    // The 11-11 golden ROC5|AUVTE units (synthetic fields worded like the golden cells).
+    const u = (vendor, savedRepairStatus, issueSummary, workDuration, extra) => Object.assign({ vendor, savedRepairStatus, issueSummary, workDuration }, extra || {});
+    const g = makeCtx({ today: '2026-11-11', units: {
+      B12267: u('COX', 'Parts ordered', 'Turbo seals leaking, CAC line', '20d'),
+      B62059: u('COX', 'Parts ordered', 'Hood shocks broken, air drain lines worn', '8d'),
+      B12263: u('COX', 'Parts ordered', 'Crankcase seal leaking oil', '6d'),
+      B12195: u('COX', 'Parts ordered', 'Corroded battery terminals, batteries and cables', '4d'),
+      B12275: u('KWNE', 'Parts ordered', 'Key snapped in ignition during PM-B, CNG filter housing and tumbler', '13d'),
+      B12258: u('KWNE', 'Parts ordered', 'CEL harness repin', '15d'),
+      B12271: u('Freightliner', 'Under diagnosis', 'Compression loss, cyl 3 misfire', '3d'),
+      B13014: u('DSP_ENTERED', 'Awaiting estimate', 'Accident, hood detached', '59d', { lifecycleReason: 'Accident' }),
+      B62064: u('FLEETNET', 'Waiting for vendor', 'Impounded, fee payment required before tow to ROC5', '15d', { lifecycleReason: 'Impounded Tow' }),
+      B20038: u('', 'Waiting for vendor', 'Tach parasitic drain', '2d'),
+    } });
+    const ex = AI.SHEET_EXAMPLES;
+    expect(Object.keys(ex)).toEqual(['vendor1pDetails', 'oemDetails', 'partnerDetails', 'partsDetails', 'commonDetails', 'fasActions', 'support']);
+    for (const b of ['vendor1p', 'oem', 'partner', 'parts', 'common']) expect(g.ctx.rules[b].yn, b).toBe('Y');
+    const r = G.validateSheet({ sheet: ex }, g.ctx);
+    expect(r.drops).toEqual({});
+    expect(r.sheet).toEqual(ex);
+  });
+
   it('the comma form passes too', () => {
     const g = G.gateEntry('11/10 called TA, bay confirmed for 11/12', { fas: [{ date: '11/10', quote: 'called TA re tech callout' }] }, ['B61001'], s.ctx, { field: 'fasActions' });
     expect(g).toMatchObject({ ok: true, names: [], unbound: [], envOver: false });

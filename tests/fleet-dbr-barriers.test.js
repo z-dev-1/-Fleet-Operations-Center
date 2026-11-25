@@ -217,12 +217,9 @@ describe('Details cells and units[].why', () => {
 
   it('Y/N from real fields; Details names exactly the matching down units, days desc, unknown last', () => {
     expect(row.cells.vendor1pYN).toBe('Y');
-    expect(row.cells.vendor1pDetails.split('\n')).toEqual([
-      'D3 (Amerit, 40d): 1P vendor Amerit',
-      'D2 (Amerit, 30d): 1P vendor Amerit: status Waiting for vendor',
-      'D1 (Amerit, 9d): 1P vendor Amerit: status Waiting for vendor',
-      'D4 (COX): 1P vendor COX: status Waiting for vendor', // R16: no "nulld"
-    ]);
+    // FEAT-003 composer text (golden style); the why strings moved to units[].why.
+    expect(row.cells.vendor1pDetails).toBe(
+      'Amerit has 3 units: D3 (40d), D2 (30d) and D1 (9d) \u2014 waiting for vendor (2), repair in progress (1); COX: D4 \u2014 waiting for vendor.');
     expect(row.cells.vendor1pDetails).not.toMatch(/nulld|D5/);
     for (const col of ['oem', 'estimate', 'partner', 'parts']) {
       expect(row.cells[col + 'YN']).toBe('N');
@@ -247,7 +244,7 @@ describe('Details cells and units[].why', () => {
     }
   });
 
-  it('every Details line on the fixture starts with a down unit ID of that pair', () => {
+  it('every Details cell on the fixture is one line naming only down unit IDs of that pair', () => {
     const rows = makeFleetRows({
       T0001: { vendor: 'Volvo', savedRepairStatus: 'Waiting for vendor' },
       T0002: { vendor: 'DSP_ENTERED', savedNotes: 'insurance claim filed' },
@@ -255,17 +252,20 @@ describe('Details cells and units[].why', () => {
       T0046: { estimatePendingCost: '500' },
     });
     const built = F.buildFleetDbr(rows, { today: TODAY });
-    let lines = 0;
+    let cellsFilled = 0;
     for (const r of built.rows) {
       const ids = new Set(r.units.map((u) => u.id));
       for (const col of ['vendor1pDetails', 'oemDetails', 'estimateDetails', 'partnerDetails', 'partsDetails']) {
-        for (const line of r.cells[col].split('\n').filter(Boolean)) {
-          lines += 1;
-          expect(ids.has(line.split(' ')[0])).toBe(true);
-        }
+        const v = r.cells[col];
+        if (!v) continue;
+        cellsFilled += 1;
+        expect(v).not.toMatch(/\n/);
+        const named = v.match(/\bT\d{4}\b/g) || [];
+        expect(named.length).toBeGreaterThan(0);
+        for (const id of named) expect(ids.has(id)).toBe(true);
       }
     }
-    expect(lines).toBe(4);
+    expect(cellsFilled).toBe(4);
     const tuzr = built.rows.find((r) => r.key === 'ABE40|TUZR');
     expect(tuzr.cells.oemYN).toBe('Y');
     expect(tuzr.cells.partnerYN).toBe('Y');
@@ -301,7 +301,7 @@ describe('Common Repairs (SYSTEM_GROUPS, >= 2 units, repeat rule)', () => {
       makeUnit({ equipmentId: 'K4', issueSummary: 'Turbo', lifecycleState: 'Active' }),
     ]);
     expect(row.cells.commonYN).toBe('Y');
-    expect(row.cells.commonDetails).toBe('Engine: K1, K2');
+    expect(row.cells.commonDetails).toBe('Engine: K1 (turbo failure) and K2.');   // composer (FEAT-003)
     expect(row.common).toEqual({ groups: [{ label: 'Engine', ids: ['K1', 'K2'] }], repeat: [] });
   });
   it("two units with 'air leak' / 'air brake' -> Y, group 'Air system / 5th wheel'", () => {

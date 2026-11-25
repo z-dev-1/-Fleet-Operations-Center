@@ -108,8 +108,9 @@ describe('buildFleetDbr on the fixture', () => {
     expect(r.cells.etcToday).toBe('0');
     expect(r.cells.missedEtc).toBe('0');
     expect(r.units.map((u) => u.id).sort()).toEqual(ids.slice().sort());
-    expect(r.cells.fasActions).toBe('');
-    expect(r.cells.support).toBe('');
+    // Composer text (FEAT-003): no barrier -> 'tracking', no support rule -> 'None.'.
+    expect(r.cells.fasActions).toBe('Tracking ' + r.units.map((u) => u.id).join('/') + '.');
+    expect(r.cells.support).toBe('None.');
   });
 
   it('I1: ETC Today + NO ETC + Missed = pair down on every row; the three cells are bare whole numbers', () => {
@@ -173,7 +174,7 @@ describe('buildFleetDbr on the fixture', () => {
     const tuzr = rowOf(b, 'ABE40|TUZR');
     expect(tuzr.cells.commonYN).toBe('Y');
     expect(tuzr.common).toEqual({ groups: [{ label: 'Battery/electrical', ids: ['T0001', 'T0002'] }], repeat: [] });
-    expect(tuzr.cells.commonDetails).toBe('Battery/electrical: T0001, T0002');
+    expect(tuzr.cells.commonDetails).toBe('Battery/electrical: T0001 (alternator not charging) and T0002.');
     const sapb = rowOf(b, 'ABE40|SAPB');
     expect(sapb.cells.commonYN).toBe('Y');
     expect(sapb.common).toEqual({ groups: [], repeat: ['T0045'] });
@@ -354,5 +355,131 @@ describe('applyOverlays', () => {
     const n = F.applyOverlays(built, {});
     expect([n.fasName, n.fasNameSource]).toEqual(['', 'none']);
     expect([n.rows[0].cells.fasName, n.rows[0].fasSource]).toEqual(['', 'none']);
+  });
+});
+
+describe('sheet composer (design §3.8, FEAT-003)', () => {
+  const G = require('../src/dbr/fleet-dbr-gate');
+  const one = (units) => F.buildFleetDbr(units.map((u) => makeUnit(u)), { today: TODAY }).rows.find((r) => r.key === 'TST1|TSCA');
+  const SHEET_IDS = ['vendor1pDetails', 'oemDetails', 'estimateDetails', 'partnerDetails', 'partsDetails', 'commonDetails', 'fasActions', 'support'];
+
+  it('vendorLabel: the golden label table, raw fallback, no vendor', () => {
+    const cases = [['COX', 'COX'], ['Amerit', 'Amerit'], ['TA Rochester', 'TA'], ['Travel Centers of America', 'TA'],
+      ['Volvo (ASIST)', 'Volvo/ASIST'], ['Freightliner (DAIMLER)', 'Freightliner'], ['Kenworth (PACCAR)', 'Kenworth/PACCAR'],
+      ['KWNE', 'KWNE'], ['Peterbilt', 'Peterbilt'], ['Navistar', 'International'], ['Mack', 'Mack'], ['DSP_ENTERED', 'DSP'],
+      ['FLEETNET', 'FleetNet'], ['CEI (CEI)', 'CEI'], ['ALLEGIANCE_AND_ASCENDANCE', 'Ascendance'],
+      ['FIRST_ADVANTAGE', 'FIRST ADVANTAGE'], ['Bruckners (Syracuse)', 'Bruckners'], ['', 'no vendor'], [null, 'no vendor']];
+    for (const [v, label] of cases) expect(F.vendorLabel(v), String(v)).toBe(label);
+  });
+
+  it('shortIssue: the frozen 11/25 issueSummary texts and the step rules', () => {
+    const si = (s) => F.shortIssue({ issueSummary: s });
+    expect(si('Hood shocks broken from damage and air tank drain lines worn through; replacement hood shocks have no parts ETA.')).toBe('hood shocks broken from damage');
+    expect(si('Engine oil level reported low and engine reported as not running correctly.')).toBe('engine oil level reported low');
+    expect(si('Liftgate assembly leaking hydraulic oil at the piston seal; air suspension dump not functioning.')).toBe('liftgate assembly leaking hydraulic oil');
+    expect(si('Unit needs oil dropped and a new gasket installed (engine/motor systems).')).toBe('oil dropped and a new gasket installed');
+    expect(si('Brake light out (see note. dealer) on trailer. Second sentence here.')).toBe('brake light out (see note. dealer) on trailer');
+    expect(si('TRUCK REQUIRES A new starter motor')).toBe('new starter motor');
+    expect(si('Reported coolant leak')).toBe('coolant leak');
+    expect(si('Work order created (RO 206910652) for engine no-start')).toBe('work order created for engine no-start');
+    expect(si('RO 206910652 opened for brakes')).toBe('opened for brakes');
+    expect(si('CNG valves leaking')).toBe('CNG valves leaking');
+    expect(si('APU/cab outlets not working')).toBe('APU/cab outlets not working');
+    expect(si('')).toBe('');
+  });
+
+  it('status phrases: table, lowercase code text fallback, open, status not set', () => {
+    const r = one([
+      { equipmentId: 'X1', vendor: 'COX', savedRepairStatus: 'Work_in_progress' },
+    ]);
+    expect(r.cells.vendor1pDetails).toBe('COX: X1 \u2014 work in progress.');
+    expect(one([{ equipmentId: 'X1', vendor: 'COX', savedRepairStatus: 'Cannot Complete \u2014 Parts Pending' }]).cells.vendor1pDetails).toBe('COX: X1 \u2014 open.');
+    expect(one([{ equipmentId: 'X1', vendor: 'COX' }]).cells.vendor1pDetails).toBe('COX: X1 \u2014 status not set.');
+    expect(one([{ equipmentId: 'X1', vendor: 'COX', savedRepairStatus: 'Vehicle arrived' }]).cells.vendor1pDetails).toBe('COX: X1 \u2014 awaiting diagnosis.');
+  });
+
+  it('group order (count desc, max days desc, label asc), unit order and the , / and joins', () => {
+    const r = one([
+      { equipmentId: 'A1', vendor: 'Amerit', savedRepairStatus: 'Repair in progress', workDuration: '30d' },
+      { equipmentId: 'C1', vendor: 'COX', savedRepairStatus: 'Repair in progress', workDuration: '5d' },
+      { equipmentId: 'C2', vendor: 'COX', savedRepairStatus: 'Repair in progress', workDuration: '9d' },
+      { equipmentId: 'C3', vendor: 'COX', savedRepairStatus: 'Repair in progress', workDuration: '1d' },
+      { equipmentId: 'T1', vendor: 'TA', savedRepairStatus: 'Under diagnosis', workDuration: '30d' },
+    ]);
+    expect(r.cells.vendor1pDetails).toBe('COX has 3 units: C2 (9d), C1 (5d) and C3 (1d) \u2014 all repair in progress; Amerit: A1 (30d) \u2014 repair in progress; TA: T1 (30d) \u2014 under diagnosis.');
+    expect(r.cells.fasActions).toBe('Following up COX on C2/C1/C3 diag/repair progress; following up Amerit on A1 diag/repair progress; following up TA on T1 diag/repair progress.');
+    expect(r.cells.support).toBe('Vendor performance \u2014 Amerit and TA turnaround on A1/T1.');
+  });
+
+  it('ROC5|AUVTE-shaped row: 1P falls to T2, FAS Actions and Support reproduce the §3.8 example', () => {
+    const spec = [
+      ['B13014', 'DSP_ENTERED', 'Awaiting estimate', 'Accident', '73d 3h', '', 'Accident front-end damage; driver-side front hood came off the box truck.'],
+      ['B62059', 'COX', 'Parts backordered', 'Damaged-Moderate', '21d 12h', 'ordered', 'Hood shocks broken from damage and air tank drain lines worn through; replacement hood shocks have no parts ETA.'],
+      ['B12195', 'COX', 'Parts ordered', 'Damaged-Moderate', '16d 9h', 'ordered', 'Engine no-start confirmed due to severe corrosion on positive battery terminals; batteries and battery cable require replacement.'],
+      ['B62064', 'FLEETNET', 'Waiting for vendor', 'Impounded Tow', '7d 21h', 'arrived', 'Unit broke down at a gas station and was impounded; it needs release and a tow back to ROC5.'],
+      ['B12263', 'Freightliner (DAIMLER)', 'Vehicle arrived', 'Damaged-Moderate', '4d 22h', '', 'Unit needs oil dropped and a new gasket installed (engine/motor systems).'],
+      ['B12343', 'COX', 'Parts ordered', 'Damaged-Moderate', '1d 7h', 'ordered', 'Engine oil level reported low and engine reported as not running correctly.'],
+      ['B62020', 'COX', 'Parts ordered', 'Damaged-Moderate', '1d 8h', 'ordered', 'Oil pressure warning light on; no oil found on dipstick.'],
+      ['B12261', 'COX', 'Waiting for vendor', 'Damaged-Moderate', '0d 0h', '', 'Check indicator on (chassis).'],
+      ['B62049', 'COX', 'Parts ordered', 'Damaged-Moderate', '0d 7h', 'ordered', 'Liftgate assembly leaking hydraulic oil at the piston seal; air suspension dump not functioning.'],
+    ];
+    const r = one(spec.map(([equipmentId, vendor, savedRepairStatus, lifecycleReason, workDuration, partsStatus, issueSummary]) =>
+      ({ equipmentId, vendor, savedRepairStatus, lifecycleReason, workDuration, partsStatus, issueSummary })));
+    // §3.8 lists B62049 before B12261; its own ordering rule (days desc, then id asc) puts B12261 first.
+    expect(r.cells.vendor1pDetails).toBe('COX has 6 units (B62059 21d, B12195 16d, B12343 1d, B62020 1d, B12261 0d, B62049 0d): parts on order (5), waiting for vendor (1).');
+    expect(r.cells.fasActions).toBe('Following up COX on parts ETAs (B62059/B12195/B12343/B62020/B62049); following up COX on B12261 diag/repair progress; pushing Freightliner on B12263 diagnosis/ETC; escalating B13014 (carrier/DSP accident) and B62064 (impound release).');
+    expect(r.cells.support).toBe('Support on B62064 (impound release) and B13014 (73d carrier/DSP accident).');
+    expect(r.cells.oemDetails).toBe('Freightliner offsite: B12263 (4d, oil dropped and a new gasket installed) \u2014 awaiting diagnosis.');
+    expect(r.cells.estimateYN).toBe('N');
+    expect(r.cells.estimateDetails).toBe('');
+    expect(r.units.find((u) => u.id === 'B62059')).toMatchObject({ label: 'hood shocks broken from damage', vendorLabel: 'COX' });
+    expect(r.units.find((u) => u.id === 'B62059').why.vendor1p).toBe('1P vendor COX');   // drill-down source unchanged
+  });
+
+  it('self-check: a unit whose label trips the forbidden check drops to T3 (id only); the others keep theirs', () => {
+    const r = one([
+      { equipmentId: 'B71001', vendor: 'Volvo', savedRepairStatus: 'Under diagnosis', workDuration: '5d', issueSummary: 'Hood \u2022 latch broken' },
+      { equipmentId: 'B71002', vendor: 'Volvo', savedRepairStatus: 'Under diagnosis', workDuration: '3d', issueSummary: 'Turbo whistle at idle' },
+    ]);
+    expect(r.units.find((u) => u.id === 'B71001').label).toBe('hood \u2022 latch broken');
+    expect(r.cells.oemDetails).toBe('Volvo/ASIST offsite: B71001 and B71002 (3d, turbo whistle at idle) \u2014 all under diagnosis.');
+    for (const id of SHEET_IDS) expect(G.sheetForbidden(r.cells[id], ['B71001', 'B71002']), id).toBeNull();
+  });
+
+  it('a 96-unit row stays within 230 / 240 / 140, single-line, no forbidden pattern', () => {
+    const vendors = ['COX', 'Amerit', 'TA', 'Volvo', 'Freightliner', 'KWNE', 'DSP_ENTERED', 'FLEETNET'];
+    const units = Array.from({ length: 96 }, (_, i) => ({
+      equipmentId: 'B8' + String(1000 + i), vendor: vendors[i % vendors.length], workDuration: (i % 40) + 'd',
+      savedRepairStatus: ['Parts ordered', 'Waiting for vendor', 'Under diagnosis', 'Awaiting estimate'][i % 4],
+      lifecycleReason: i % 8 === 7 ? 'Impounded Tow' : (i % 8 === 6 ? 'Accident' : 'Damaged'),
+      partsStatus: i % 4 === 0 ? 'ordered' : '', serviceState: i % 5 === 0 ? 'Estimate rejected' : '',
+      issueSummary: 'Turbo and air leak with a very long description of the repair needed for unit ' + i + ' and more words after it',
+    }));
+    const r = one(units);
+    expect(r.pair.down).toBe(96);
+    const caps = { fasActions: 240, support: 140 };
+    for (const id of SHEET_IDS) {
+      const v = r.cells[id];
+      expect(v.length, id).toBeLessThanOrEqual(caps[id] || 230);
+      expect(v, id).not.toMatch(/\n/);
+      expect(G.sheetForbidden(v, r.units.map((u) => u.id)), id).toBeNull();
+      if (id !== 'support' && r.cells[id.replace('Details', 'YN')] !== 'N') expect(v.length, id).toBeGreaterThan(0);
+    }
+  });
+
+  it('Details are empty whenever the computed Y/N is N; a zero-down row -> "" and Support None.', () => {
+    const built = F.buildFleetDbr(makeFleetRows(), { today: TODAY });
+    for (const r of built.rows) {
+      for (const b of ['vendor1p', 'oem', 'estimate', 'partner', 'parts', 'common']) {
+        if (r.cells[b + 'YN'] === 'N') expect(r.cells[b + 'Details'], r.key + ' ' + b).toBe('');
+      }
+    }
+    const zero = rowOf(built, 'ABE40|AZNG');
+    expect(zero.pair.down).toBe(0);
+    for (const id of SHEET_IDS.slice(0, 7)) expect(zero.cells[id]).toBe('');
+    expect(zero.cells.support).toBe('None.');
+    const c = F.composeSheet([{ id: 'Z1', barriers: ['oem'], kinds: { oem: 'dealer' }, vendorLabel: 'Volvo/ASIST', label: 'x', status: '' }], { oem: 'N' }, null);
+    expect(c.oemDetails).toBe('');
+    expect(F.composeSheet([], {}, null)).toEqual({ vendor1pDetails: '', oemDetails: '', estimateDetails: '', partnerDetails: '', partsDetails: '', commonDetails: '', fasActions: '', support: 'None.' });
   });
 });
