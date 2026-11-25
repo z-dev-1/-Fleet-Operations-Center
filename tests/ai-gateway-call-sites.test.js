@@ -218,26 +218,6 @@ describe.each(MODES)('ready_pickup_notify.notifyReadyUnits (%s)', (_name, flags)
   });
 });
 
-describe.each(MODES)('dbr_pull _dbrAskAi (%s)', (_name, flags) => {
-  it('hanging relay.ask -> rejects with the exact timeout message after 95 s', async () => {
-    T.setGatewayFlags(flags);
-    const dbr = require('../src/scrapers/dbr_pull');
-    const ask = hanging();
-    vi.spyOn(relay, 'ask').mockImplementation(ask);
-    vi.useFakeTimers();
-    const s = track(dbr._dbrAskAi('page text'));
-    await vi.advanceTimersByTimeAsync(94999);
-    expect(s.done).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(s.done).toBe(true);
-    expect(s.error).toBeInstanceOf(Error);
-    expect(s.error.message).toBe('AI parsing timed out — the AI service may be unavailable');
-    expect(ask.seen[0].source).toBe('dbr_parse');
-    if (flags.abortOnTimeout) expect(ask.seen[0].signal.aborted).toBe(true);
-    else expect(ask.seen[0].signal).toBeUndefined();
-  });
-});
-
 describe('relay.askWithTimeout sites through the real relay', () => {
   it.each(MODES)('volvo-style reject message / misc-style resolve value (%s)', async (_n, flags) => {
     T.setGatewayFlags(flags);

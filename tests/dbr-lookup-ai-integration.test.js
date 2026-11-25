@@ -10,6 +10,9 @@ import path from 'path';
 import os from 'os';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
+// These suites cover the legacy live-fleet + QuickSight answer (dbr.fleetData off). With
+// Fleet Health on (the default), Just Me answers from the DBR tab's model instead.
+process.env.FLEET_DBR_FLEET_DATA = '0';
 const tmpDir = path.join(os.tmpdir(), 'dbr-lookup-ai-' + process.pid);
 fs.mkdirSync(tmpDir, { recursive: true });
 require('../src/config/paths').setDataDir(tmpDir);
@@ -46,7 +49,7 @@ function seed(extra) {
 /** Installs the harness with a recording relay (ask + askWithTimeout) and a fake scheduler. */
 function setup(o = {}) {
   calls = { ask: [], awt: [] };
-  sched = { runDbrNow: vi.fn(async () => ({ afp: { ok: true, rowCount: 10 }, dsp: { ok: true, rowCount: 4 } })) };
+  sched = { runDbrNow: vi.fn(async () => ({ fleetHealth: { ok: true, rowCount: 10, drafts: { ok: true, drafted: 3, eligible: 4 } } })) };
   const askImpl = o.ask || (async () => reply('ok'));
   const awtImpl = o.awt || (async () => REVIEW_JSON);
   h = install({
@@ -158,7 +161,7 @@ describe('flag ON: routing', () => {
     expect(sched.runDbrNow).toHaveBeenCalledTimes(1);
     expect(calls.awt).toHaveLength(0);
     expect(res.action).toBe('multi');
-    expect(res.text).toContain('DBR pull — AFP: 10 rows · DSP: 4 rows.');
+    expect(res.text).toContain('DBR pull — Fleet Health: 10 rows, 3/4 AI drafts.');
   });
   it('"dbr for AUVTE, how many units are unavailable" → lookup, not the fast path', async () => {
     setup();

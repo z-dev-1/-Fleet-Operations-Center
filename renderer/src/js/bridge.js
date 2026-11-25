@@ -510,15 +510,6 @@ export const zoomMeet = {
   onState:       (cb) => (window.zoomMeet ? window.zoomMeet.onState(cb) : () => {}),
 };
 
-// ── QuickSight DBR DATA (Daily Call) ────────────────────────────────────────
-export const quicksight = {
-  captureAfp:  () => window.quicksight.captureAfp(),
-  captureDsp:  () => window.quicksight.captureDsp(),
-  saveParsed:  (payload) => window.quicksight.saveParsed(payload),
-  getCache:    () => window.quicksight.getCache(),
-  getCacheDsp: () => window.quicksight.getCacheDsp(),
-};
-
 // ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ────────────
 export const wbr = {
   capture:    (rows) => window.wbr.capture(rows),

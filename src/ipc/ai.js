@@ -118,6 +118,15 @@ const MAX_DAILY_NOTES_BATCH = 100;   // units    — daily-notes:run
 const MAX_SUGGEST_KEYS      = 100;   // keys on unit object for ai:suggest (raised S28: enriched units have ~71 keys)
 
 
+// 📊 DBR — Fleet Health (dbr.fleetData, default ON): the DBR answer source for Just Me / FAB.
+// Returns the read-only model getter when the flag is on, else null (legacy QuickSight path).
+function _fleetHealthFn() {
+  try {
+    if (require('../config/perf-flags').loadFleetDbr().enabled !== true) return null;
+    return () => require('./fleet-dbr').currentModel();
+  } catch (_) { return null; }
+}
+
 // Convert common Markdown to Slack's mrkdwn so replies render correctly in Slack
 // (Slack bold is *single asterisk*, not **double**). Safe on plain text.
 function _toSlackFormat(s) {
@@ -383,15 +392,19 @@ async function processOrchaAction(userMsg, opts = {}) {
     if (_dbrOn && !_uc && _dbrSrcOk) {
       const _dbr = require('../dbr/lookup');
       const _dbrContacts = store.load('contacts', []);
-      const _dbrAfp = store.load('quicksightDbr', null);
-      const _dbrDsp = store.load('quicksightDbrDsp', null);
-      const _hit = _dbr.detect(userMsg, { rows, contacts: _dbrContacts, afp: _dbrAfp, dsp: _dbrDsp });
+      // 📊 DBR — Fleet Health on (dbr.fleetData): answer from the DBR tab's model, no QuickSight.
+      const _dbrFh = _fleetHealthFn();
+      const _dbrAfp = _dbrFh ? null : store.load('quicksightDbr', null);
+      const _dbrDsp = _dbrFh ? null : store.load('quicksightDbrDsp', null);
+      const _hit = _dbrFh
+        ? _dbr.detectFleetHealth(userMsg, { rows, contacts: _dbrContacts })
+        : _dbr.detect(userMsg, { rows, contacts: _dbrContacts, afp: _dbrAfp, dsp: _dbrDsp });
       if (_hit) {
         let _r;
         try {
           _r = await _dbr.run(
             { target: _hit.rawTarget, kind: _hit.mine ? 'mine' : undefined, candidates: _hit.candidates, source: opts.source, signal: opts.signal, requestId: opts.requestId },
-            { fd, contacts: _dbrContacts, afp: _dbrAfp, dsp: _dbrDsp });
+            _dbrFh ? { fd, contacts: _dbrContacts, fleetHealth: _dbrFh } : { fd, contacts: _dbrContacts, afp: _dbrAfp, dsp: _dbrDsp });
         } catch (e) { return {ok:false,text:'Error:'+e.message,action:'chat'}; }   // only on abort; same shape as the outer catch
         chatHistory.push({role:'user', text:userMsg, ts:Date.now()});
         chatHistory.push({role:'ai', text:_r.text, ts:Date.now()});
@@ -730,21 +743,29 @@ async function processOrchaAction(userMsg, opts = {}) {
             }
           } catch (e) { results.push('Inbox triage failed: ' + e.message); }
         }
-        if (a.type==='DBR_PULL') {
-          // Pull DBR (AFP + DSP) on demand. Each source is today-PT freshness
-          // gated; a not-ready source reports "will retry" rather than failing.
+        if (a.type==='DBR_PULL' && _dbrSrcOk && !_dbrSeen && _fleetHealthFn()) {
+          // 📊 DBR — Fleet Health replaced the QuickSight pull: answer with the my-sites
+          // Fleet Health roll-up (read-only) instead of running the retired pull.
+          _dbrSeen = true;
+          try {
+            const r = await require('../dbr/lookup').run({ kind: 'mine', source: opts.source }, { fd, contacts: allContacts, fleetHealth: _fleetHealthFn() });
+            _dbrAnswer = r.text;
+          } catch (e) { results.push('Fleet Health lookup failed: ' + e.message); }
+        } else if (a.type==='DBR_PULL') {
+          // DBR DATA pull on demand: builds 📊 DBR — Fleet Health and AI-drafts rows with
+          // units down. No same-day fleet sync yet reports "will retry" rather than failing.
           try {
             const scheduler = require('../scheduler');
             const r = await scheduler.runDbrNow();
-            const describe = (x, name) => {
-              if (!x) return name + ': —';
-              if (x.ok) return name + ': ' + (x.rowCount != null ? x.rowCount + ' rows' : 'ok');
-              if (x.blocked) return name + ': not published for today yet — will keep retrying';
-              if (x.skipped) return name + ': ' + x.skipped;
-              if (x.failed || x.error) return name + ': failed';
-              return name + ': done';
-            };
-            results.push('DBR pull — ' + describe(r && r.afp, 'AFP') + ' · ' + describe(r && r.dsp, 'DSP') + '.');
+            const x = r && r.fleetHealth;
+            let s;
+            if (!x) s = '—';
+            else if (x.ok) s = (x.rowCount != null ? x.rowCount + ' rows' : 'built') + (x.drafts && x.drafts.ok ? ', ' + x.drafts.drafted + '/' + x.drafts.eligible + ' AI drafts' : '');
+            else if (x.blocked) s = "waiting for today's fleet sync — will keep retrying";
+            else if (x.skipped) s = x.skipped;
+            else if (x.failed || x.error) s = 'failed';
+            else s = 'done';
+            results.push('DBR pull — Fleet Health: ' + s + '.');
           } catch (e) { results.push('DBR pull failed: ' + e.message); }
         }
         if (a.type==='DBR_LOOKUP' && _dbrOn) {
@@ -755,7 +776,8 @@ async function processOrchaAction(userMsg, opts = {}) {
           } else if (!_dbrSeen) {
             _dbrSeen = true;
             try {
-              const r = await require('../dbr/lookup').run({ target: a.target, kind: a.kind, source: opts.source, signal: opts.signal, requestId: opts.requestId }, { fd, contacts: allContacts });
+              const _fh = _fleetHealthFn();
+              const r = await require('../dbr/lookup').run({ target: a.target, kind: a.kind, source: opts.source, signal: opts.signal, requestId: opts.requestId }, _fh ? { fd, contacts: allContacts, fleetHealth: _fh } : { fd, contacts: allContacts });
               _dbrAnswer = r.text;
             } catch (e) {
               if (opts.signal && opts.signal.aborted) throw e;

@@ -582,4 +582,53 @@ function _resetForTests(overrides) {
 function enrichFor(ids) { return _enrich('carrier-intel', Array.isArray(ids) ? ids : []); }
 function fasNamesFor(scac, domicile) { return _fasNames({ scac, domicile }); }
 function cachedAapAlias() { return _aapAlias(); }
-module.exports = { registerFleetDbrIPC, guarded, _resetForTests, CHANNELS, enrichFor, fasNamesFor, cachedAapAlias, __test__: { handlers } };
+
+// Read side for the Just Me / FAB DBR lookup: today's Fleet Health model with the same
+// overlays the DBR tab shows (your edits > AI drafts > computed). Same rule as the tab's
+// auto-build: rebuild from stored fleet data when there is no snapshot for today or fleet
+// data synced since the last build. Never drafts, never sends.
+// -> { ok:true, model, built } | { ok:false, code:'off'|'no-fleet-data' }
+function currentModel() {
+  const f = _flags();
+  if (f.enabled !== true) return OFF;
+  const today = _today();
+  const snap = _snapshot(today);
+  const fleet = _getFleet();
+  const synced = (fleet && (fleet.syncedAt || fleet.scrapedAt)) || null;
+  if (snap && (!synced || snap.fleetSyncedAt === synced)) return { ok: true, model: _model(snap, today, f), built: false };
+  const { res } = _buildLocal(f);
+  if (res.ok) return { ok: true, model: res.model, built: true };
+  if (snap) return { ok: true, model: _model(snap, today, f), built: false };
+  return res;
+}
+// DBR DATA pull (scheduler / "Pull DBR now"): always rebuild from stored fleet data.
+// -> { ok:true, model, saved } | { ok:false, code:'off'|'no-fleet-data' }
+function buildNow() {
+  const f = _flags();
+  if (f.enabled !== true) return OFF;
+  return _buildLocal(f).res;
+}
+
+// DBR DATA pull: AI-draft today's rows that have units down and no current draft (none or
+// stale), one at a time through the same draft handler the DBR tab uses. Drafts are stored
+// suggestions only; nothing is sent. -> { ok, eligible, drafted, failed, busy } | { ok:false, code }
+async function draftPending() {
+  const f = _flags();
+  if (f.enabled !== true) return OFF;
+  if (f.aiDraft !== true) return { ok: false, code: 'ai-off' };
+  const today = _today();
+  const snap = _snapshot(today);
+  if (!snap) return { ok: false, code: 'not-built' };
+  const model = _model(snap, today, f);
+  const keys = model.rows.filter((r) => r.pair && r.pair.down > 0 && (!r.draft || r.draft.state !== 'ok')).map((r) => r.key);
+  const out = { ok: true, eligible: keys.length, drafted: 0, failed: 0, busy: 0 };
+  for (const key of keys) {
+    const r = await handlers.draft(null, { key });
+    if (r && r.ok) out.drafted += 1;
+    else if (r && r.code === 'busy') out.busy += 1;
+    else out.failed += 1;
+  }
+  log.info('[fleet-dbr] draft-pending', out);
+  return out;
+}
+module.exports = { registerFleetDbrIPC, guarded, _resetForTests, CHANNELS, enrichFor, fasNamesFor, cachedAapAlias, currentModel, buildNow, draftPending, __test__: { handlers } };

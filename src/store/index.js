@@ -119,7 +119,8 @@ const REGISTRY = {
   // Shape: { [unitNumber]: { vehicleId, display, savedAt } }.
   volvoVehicleIds:      () => path.join(P.dataDir, 'volvo_vehicle_ids.json'),
   // DBR DATA (Daily Call) — cached result of the last AFP QuickSight scrape.
-  // See src/scrapers/quicksight_dbr.js + src/ipc/scrapers.js 'quicksight:scrape'.
+  // The QuickSight scraper was removed 2026-11-24; these files are no longer written. Only the
+  // legacy (dbr.fleetData off) Just Me DBR lookup still reads them.
   // Shape: { ok, domicile:[{domicile,uptimePct,unitsUnavailable}],
   //          scac:[{scac,domicile,uptimePct,unitsUnavailable}], scrapedAt, error? }.
   quicksightDbr:        () => path.join(P.dataDir, 'quicksight_dbr.json'),

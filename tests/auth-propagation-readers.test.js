@@ -61,34 +61,6 @@ describe('F3 uptake _authMessageFor', () => {
   });
 });
 
-// ── F3 QuickSight ──────────────────────────────────────────────────────────
-describe('F3 quicksight _ssoFailureResult', () => {
-  const { _ssoFailureResult } = require('../src/scrapers/quicksight_dbr').__test__;
-  const ORIG = { ok: false, error: 'Not logged in to QuickSight/Midway — open the dashboard once in a browser to establish SSO, then retry.' };
-
-  it('F3: _ssoFailureResult returns st.message for warn/down and the original text otherwise', () => {
-    expect(_ssoFailureResult(fakeAr(true, ST.warn))).toEqual({ ok: false, error: ST.warn.message });
-    expect(_ssoFailureResult(fakeAr(true, ST.down))).toEqual({ ok: false, error: ST.down.message });
-    for (const s of [ST.ok, ST.busy, ST.unknown, null]) expect(_ssoFailureResult(fakeAr(true, s))).toEqual(ORIG);
-    expect(_ssoFailureResult(fakeAr(false, ST.warn))).toEqual(ORIG);
-    expect(_ssoFailureResult({ isEnabled: () => { throw new Error('x'); } })).toEqual(ORIG);
-    expect(_ssoFailureResult()).toEqual(ORIG); // real auth-report, flag off
-  });
-
-  it('F3: quicksight SSO branch returns _ssoFailureResult()', () => {
-    const src = read('scrapers/quicksight_dbr.js');
-    expect(src).toMatch(/logger\.warn\('Stuck on SSO\/login page, not QuickSight:', curUrl\);\s*return _ssoFailureResult\(\);/);
-  });
-
-  it('F3: quicksight awaits injectCookies only under the flag check', () => {
-    const src = read('scrapers/quicksight_dbr.js');
-    expect(src.split("await require('./auth').injectCookies()").length - 1).toBe(1);
-    expect(src).toMatch(/if \(_propOn\(\)\) \{[^}]*try \{ await require\('\.\/auth'\)\.injectCookies\(\); \}/);
-    // flag-off branch keeps the original fire-and-forget statement verbatim
-    expect(src).toMatch(/\} else \{\s*try \{ require\('\.\/auth'\)\.injectCookies\(\); \} catch \(e\) \{ logger\.warn\('injectCookies skipped:', e\.message\); \}\s*\}/);
-  });
-});
-
 // ── F3 long-dwell ──────────────────────────────────────────────────────────
 describe('F3 aap_longdwell _reportSsoBounce', () => {
   const { _reportSsoBounce } = require('../src/scrapers/aap_longdwell').__test__;

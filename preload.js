@@ -553,18 +553,6 @@ expose('autopilot', {
   onChanged:  (cb)                      => on('autopilot:changed', cb),
 });
 
-// ── QuickSight DBR DATA (Daily Call) ──────────────────────────────────────────
-// captureAfp/captureDsp return raw page text (QuickSight's pivot-table DOM
-// has no stable selector shape); the renderer feeds that text to AI to
-// parse into structured rows, then calls saveParsed to persist the result.
-expose('quicksight', {
-  captureAfp:  () => ipcRenderer.invoke('quicksight:capture-afp'),
-  captureDsp:  () => ipcRenderer.invoke('quicksight:capture-dsp'),
-  saveParsed:  (payload) => ipcRenderer.invoke('quicksight:save-parsed', payload),
-  getCache:    () => ipcRenderer.invoke('quicksight:get-cache'),
-  getCacheDsp: () => ipcRenderer.invoke('quicksight:get-cache-dsp'),
-});
-
 // ── WBR weekly snapshot + Prior-Week/T6W comparison (Daily Call) ──────────────
 expose('wbr', {
   capture:    (rows) => ipcRenderer.invoke('wbr:capture', { rows }),

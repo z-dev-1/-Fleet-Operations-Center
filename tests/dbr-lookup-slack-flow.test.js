@@ -8,6 +8,8 @@ import path from 'path';
 import os from 'os';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
+// Asserts the legacy DBR lookup reply text (dbr.fleetData off); Fleet Health on answers from the DBR tab's model.
+process.env.FLEET_DBR_FLEET_DATA = '0';
 const tmpDir = path.join(os.tmpdir(), 'dbr-lookup-slack-' + process.pid);
 fs.mkdirSync(tmpDir, { recursive: true });
 require('../src/config/paths').setDataDir(tmpDir);
