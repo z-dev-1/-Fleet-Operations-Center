@@ -174,7 +174,10 @@ describe('require boundary of the FEAT-001 modules', () => {
       for (const r of reqs) {
         const ok = r.startsWith('./') || base.has(r)
           || (r === '../store/sqlite_engine' && (f === 'schema' || f === 'case-store'))
-          || (r === '../store' && f === 'config');
+          || (r === '../store' && f === 'config')
+          // V2: authorizedTokens fallback (design-review finding 9) and the §5.3 backup timing log.
+          || (r === '../config/defaults' && f === 'config')
+          || (r === '../utils/logger' && f === 'schema');
         expect(ok, f + ' requires ' + r).toBe(true);
       }
       expect(/aperia:[a-z]/.test(src), f + ' contains aperia:<letter>').toBe(false);

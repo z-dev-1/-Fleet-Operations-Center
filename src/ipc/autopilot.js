@@ -5,7 +5,7 @@
  *   autopilot:status        dashboard status (no ap_* SQL while the master switch is OFF)
  *   autopilot:cases         { state?, domicile?, reason?, q?, limit?, offset? } -> { ok, total, items }
  *   autopilot:case          { caseId, eventsOffset? } -> { ok, case, runs, findings, findingsBySource, conflicts, events, eventsTotal }
- *   autopilot:set-config    patch (plain object; writes.* -> LOCKED_V1)
+ *   autopilot:set-config    patch (plain object; writes.* -> LOCKED_V2)
  *   autopilot:control       { action: pause | resume | stop | run-now | enable-supervisor }
  *   autopilot:review        { caseId, decision: acknowledge | accept | rerun, note? }
  *   autopilot:harness-run   { runs? 20..30 (default 24) }

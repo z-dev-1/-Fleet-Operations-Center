@@ -20,7 +20,7 @@ const ALL_ON = { oosInvestigation: true, longDwellInvestigation: true, evidenceC
 
 function ctx(extra) {
   return Object.assign({
-    scope: buildScope(resolveAutopilotConfig({}, {})), oosDays: 3, features: ALL_ON, staleDays: 3, now: NOW,
+    scope: buildScope(resolveAutopilotConfig({ autopilot: { scope: { mode: 'filter' } } }, {})), oosDays: 3, features: ALL_ON, staleDays: 3, now: NOW,
     buildAtMs: BUILD, syncedAt: new Date(BUILD).toISOString(), isDown, canonical: () => null,
     longDwell: { store: {}, csvRows: {} }, cacheIndex: { dtna: new Map(), decisiv: new Map() }, riRepeat: () => [],
   }, extra || {});

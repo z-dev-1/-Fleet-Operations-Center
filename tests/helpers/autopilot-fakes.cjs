@@ -81,6 +81,7 @@ function fakeSupervisor(opts) {
 function baseRow(extra) {
   return Object.assign({
     equipmentId: '322283', domicileSite: 'ABE40', lifecycleState: 'Unavailable', lifecycleReason: 'Offsite Shop Repair',
+    assetType: 'tractor', bodyType: 'Day Cab', operator: 'TUZR', owner: 'AZNG',
     _apiSourced: true, _serviceId: 'svc-1', workRequestId: 'wr-1', workDuration: '5d 2h 0m',
     vendor: 'Penske Truck Leasing', repairEtc: '2026-11-15', repairEtcSource: 'decisiv', offsiteStage: 'repair',
   }, extra || {});
@@ -135,7 +136,7 @@ function fakePorts(w) {
     slackSearch() { w.calls.slack++; return { ok: true, results: w.slack }; },
     offsiteUrlOf() { return null; },
     dtnaCasesForUnit(u) { return w.dtna[u] || []; },
-    dtnaStatus() { return { state: 'ok' }; },
+    dtnaStatus() { return w.dtnaState || { state: 'connected' }; },
     aperiaCachedIssues() { w.calls.aperia++; return w.aperiaIssues; },
     aperiaStatus() { return w.aperia; },
     aapIsWarm() { return w.aapWarm; },
@@ -196,7 +197,7 @@ function mkEnv(opts) {
   const { createAutopilot } = require('../../src/autopilot');
   const ck = o.clock || clock();
   const world = o.world || mkWorld();
-  const settings = o.settings || settingsStore({ autopilot: Object.assign({ features: { liveReads: true } }, o.autopilot || {}) });
+  const settings = o.settings || settingsStore({ autopilot: v1Defaults(o.autopilot) });
   const supervisor = o.supervisor || fakeSupervisor({ enabled: o.supervisorEnabled !== false });
   const ports = o.ports || fakePorts(world);
   const reason = o.reason || okReason();
@@ -215,9 +216,53 @@ function mkEnv(opts) {
   };
 }
 
+/**
+ * V2 §12.3: the autopilot settings the V1 tests ran with. scope.mode 'filter' (the V1 pilot)
+ * unless the caller sets scope.mode or scope.allUnits; features.multiTurn false unless set.
+ */
+function v1Defaults(over) {
+  const ap = Object.assign({ features: { liveReads: true } }, over || {});
+  const sc = ap.scope && typeof ap.scope === 'object' ? ap.scope : {};
+  if (!('mode' in sc) && !('allUnits' in sc)) ap.scope = Object.assign({ mode: 'filter' }, sc);
+  const ft = ap.features && typeof ap.features === 'object' ? ap.features : {};
+  if (!('multiTurn' in ft)) ap.features = Object.assign({}, ft, { multiTurn: false });
+  return ap;
+}
+
 function cfgOf(over) {
   const { resolveAutopilotConfig } = require('../../src/autopilot/config');
-  return resolveAutopilotConfig({ autopilot: Object.assign({ features: { liveReads: true } }, over || {}) }, {});
+  return resolveAutopilotConfig({ autopilot: v1Defaults(over) }, {});
+}
+
+/** The V2 fixture fleet (tests/fixtures/autopilot/fleet-v2.json), a fresh deep copy per call. */
+function fleetV2() {
+  const p = path.join(__dirname, '..', 'fixtures', 'autopilot', 'fleet-v2.json');
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
+
+/**
+ * fakePlanner(script) -> reason()-compatible async fn. Each call pops the next scripted entry:
+ * a planner JSON object (returned as data), a function (called with the reason opts; its return
+ * value is the data), or { __error: code } (returns { ok:false, error: code }). An empty script
+ * returns { ok:false, error:'script-empty' }. Prompts are recorded in fn.prompts, opts in fn.calls.
+ */
+function fakePlanner(script) {
+  const queue = Array.isArray(script) ? script.slice() : [];
+  const calls = [];
+  const prompts = [];
+  const fn = async (opts) => {
+    calls.push(opts);
+    prompts.push(opts && opts.prompt);
+    if (!queue.length) return { ok: false, data: null, raw: '', aiUsed: false, error: 'script-empty' };
+    let next = queue.shift();
+    if (typeof next === 'function') next = await next(opts);
+    if (next && typeof next === 'object' && next.__error) return { ok: false, data: null, raw: '', aiUsed: true, error: next.__error };
+    return { ok: true, data: next, raw: '', aiUsed: true, error: null };
+  };
+  fn.calls = calls;
+  fn.prompts = prompts;
+  fn.remaining = () => queue.length;
+  return fn;
 }
 
 /** Create a QUEUED case for the world's first row through detection-shaped input. */
@@ -231,5 +276,5 @@ function seedCase(unit, extra) {
 
 module.exports = {
   T0, MIN, H, DAY, SR, engine, schema, cs, freshDb, settingsStore, fakeSupervisor, baseRow, mkWorld, fakePorts,
-  aiReply, okReason, clock, mkEnv, cfgOf, seedCase,
+  aiReply, okReason, clock, mkEnv, cfgOf, seedCase, fleetV2, fakePlanner, v1Defaults,
 };

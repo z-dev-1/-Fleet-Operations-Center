@@ -42,7 +42,12 @@ const REASONS = Object.freeze({
   REPAIRED_UNVERIFIED: 'REPAIRED_UNVERIFIED',
   RECURRING_DEFECT: 'RECURRING_DEFECT',
   DOWN_SINCE_UNKNOWN: 'DOWN_SINCE_UNKNOWN',
+  SAFETY_CRITICAL: 'SAFETY_CRITICAL',
 });
+
+// Exact AAP lifecycleReason enum values (aap_api_mapper LIFECYCLE_REASON) that tag a case
+// SAFETY_CRITICAL (V2 §8.3). Ordering only; never a conclusion or a state change.
+const SAFETY_LIFECYCLE_REASONS = Object.freeze(new Set(['Damaged-Severe', 'Sensor Detected Damage']));
 
 // Source ids. The Aperia source id is 'aperia_cache' so no Autopilot file ever
 // contains the pattern that tests/aperia-ipc.test.js reserves (plan R12).
@@ -60,6 +65,9 @@ const SOURCES = Object.freeze({
   FAS_CASE: 'fas_case',
   APERIA: 'aperia_cache',
   SHAREPOINT: 'sharepoint',
+  TIMELINE: 'timeline',
+  AP_MEMORY: 'autopilot_memory',
+  AP_DERIVED: 'autopilot_derived',
 });
 
 // Action classes that need no approval (§B9).
@@ -104,6 +112,24 @@ const LIMITS = Object.freeze({
   checkpointMaxBytes: 64 * 1024,
   eventDetailMaxBytes: 8 * 1024,
   findingValueMaxChars: 2000,
+  // V2 (§2.2)
+  memoryMaxBytes: 32768,       // ap_case.memory_json after memory.trim
+  recordMaxBytes: 16384,       // ap_record.record_json
+  minStartRemainingMs: 150000, // no new run starts with less tick time left
+  maxToolsPerTurn: 3,
+  recurrenceWindowMs: 90 * DAY,
+  invalidTurnStreak: 2,
+  noProgressTurns: 2,
+});
+
+// Coded errors (ApError.code / IPC { ok:false, code }) used by V2.
+const ERROR_CODES = Object.freeze({
+  LEASE_LOST: 'LEASE_LOST',
+  STEP_EXISTS: 'STEP_EXISTS',
+  MEMORY_TOO_LARGE: 'MEMORY_TOO_LARGE',
+  LOCKED_V2: 'LOCKED_V2',
+  CASE_BUSY: 'CASE_BUSY',
+  NOT_RUNNING: 'NOT_RUNNING',
 });
 
 // Retention (§B5.3).
@@ -138,6 +164,23 @@ const OPERATIONAL_CADENCE = Object.freeze({
     aiHigh: 10,
     aiLow: -5,
     monitoringUnchanged: -20,
+  }),
+  // V2 score (§8.3): band floor + modifiers, clamped to the band, so bands never overlap.
+  priorityV2: Object.freeze({
+    bands: Object.freeze({
+      safety: Object.freeze({ floor: 80, min: 80, max: 100 }),
+      operational: Object.freeze({ floorRepairedUnverified: 60, floorEtaOverdue: 57, min: 55, max: 79 }),
+      other: Object.freeze({ floor: 10, min: 10, max: 54 }),
+    }),
+    daysDownMax: 24,           // + min(24, floor(daysDown))
+    missingUpdates: 10,        // UPDATE_STALE or ANNOTATION_STALE
+    repeatFailure: 8,          // recurrence_of set or recurrence_count >= 1
+    evidenceConflict: 6,       // STATUS_CONFLICT
+    newOos: 4,                 // never investigated
+    aiHigh: 6,
+    aiLow: -4,
+    monitoringUnchanged: -20,
+    deepMin: 95,               // deep_requested_at set -> at least 95
   }),
 });
 
@@ -224,6 +267,28 @@ function localDate(now) {
   return d.getFullYear() + '-' + _pad(d.getMonth() + 1) + '-' + _pad(d.getDate());
 }
 
+/**
+ * woSetOf(row) -> { primary, secondary[], ids[] } — every WO id a fleet row carries.
+ * `primary` is the V1 primary (_serviceId || workRequestId). `ids` holds both the
+ * _serviceId and the workRequestId of the primary and of each secondary WR, so an
+ * episode roll never mistakes a build that fills only workRequestId for a new WO.
+ */
+function woSetOf(row) {
+  const r = row || {};
+  const ids = [];
+  const add = (v) => { const s = v == null ? '' : String(v).trim(); if (s && s.length <= 80 && !ids.includes(s)) ids.push(s); };
+  add(r._serviceId); add(r.workRequestId);
+  const secondary = [];
+  for (const w of Array.isArray(r._secondaryWRs) ? r._secondaryWRs : []) {
+    if (!w) continue;
+    const id = w._serviceId || w.workRequestId;
+    if (id && !secondary.includes(String(id))) secondary.push(String(id));
+    add(w._serviceId); add(w.workRequestId);
+  }
+  const p = r._serviceId || r.workRequestId;
+  return { primary: p ? String(p) : null, secondary, ids };
+}
+
 class ApError extends Error {
   constructor(code, message) {
     super(message ? code + ': ' + message : code);
@@ -233,9 +298,9 @@ class ApError extends Error {
 }
 
 module.exports = {
-  STATES, REASONS, SOURCES, ACTION_CLASSES, WRITE_ACTION_CLASSES,
+  STATES, REASONS, SAFETY_LIFECYCLE_REASONS, SOURCES, ACTION_CLASSES, WRITE_ACTION_CLASSES,
   AUTHORITATIVE_ETC_SOURCES, isAuthoritativeEtcTag, AUTH_DOWN, WATCHED_KEYS,
-  LIMITS, RETENTION, OPERATIONAL_CADENCE, CONFLICT_FIELDS,
-  normUnit, unitIndex, UNIT_KEY_OF, localDate, ApError,
+  LIMITS, RETENTION, OPERATIONAL_CADENCE, CONFLICT_FIELDS, ERROR_CODES,
+  normUnit, unitIndex, UNIT_KEY_OF, localDate, woSetOf, ApError,
   MIN, HOUR, DAY,
 };

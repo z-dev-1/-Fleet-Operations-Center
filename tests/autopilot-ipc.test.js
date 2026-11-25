@@ -168,7 +168,7 @@ describe('autopilot:set-config', () => {
     expect(r.config.oosDays).toBe(5);
     expect(env.settings.doc.autopilot).toMatchObject({ oosDays: 5, scope: { units: ['B13014', '322283'] } });
     expect((await call('autopilot:status')).config.oosDays).toBe(5);
-    expect(await call('autopilot:set-config', { writes: { woCreate: true } })).toEqual({ ok: false, code: 'LOCKED_V1', field: 'writes.woCreate' });
+    expect(await call('autopilot:set-config', { writes: { woCreate: true } })).toEqual({ ok: false, code: 'LOCKED_V2', field: 'writes.woCreate' });
     expect(await call('autopilot:set-config', { bogus: 1 })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'bogus' });
     expect(await call('autopilot:set-config', { oosDays: 6, dailyCap: -1 })).toEqual({ ok: false, code: 'INVALID_INPUT', field: 'dailyCap' });
     expect(env.settings.doc.autopilot.oosDays).toBe(5);

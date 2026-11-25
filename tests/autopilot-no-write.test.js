@@ -41,6 +41,7 @@ function allowedFor(file, r) {
   if (COMMON.has(r)) return true;
   if (r === '../store/sqlite_engine') return f === 'case-store' || f === 'schema';
   if (r === '../store') return f === 'config';
+  if (r === '../config/defaults') return f === 'config';
   if (r === '../workers/supervisor') return f === 'controller' || f === 'index';
   if (r === '../orcha/reason') return f === 'investigate';
   if (['fs', 'path', '../config/paths'].includes(r)) return f === 'harness';
