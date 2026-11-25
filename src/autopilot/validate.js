@@ -20,6 +20,7 @@
  * The output has no field that can change case state or authorize anything.
  */
 
+const untrusted = require('../email-intel/untrusted');
 const { ACTION_CLASSES, WRITE_ACTION_CLASSES } = require('./constants');
 
 const TOP_KEYS = Object.freeze([
@@ -55,6 +56,8 @@ function _str(v, n) {
 function _conf(v) { const n = Number(v); return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0; }
 function _enum(v, list) { const s = String(v == null ? '' : v).trim().toLowerCase(); return list.includes(s) ? s : 'unknown'; }
 function _arr(v) { return Array.isArray(v) ? v : []; }
+function _flags(it) { return Array.isArray(it && it.flags) ? it.flags : (typeof (it && it.flags) === 'string' ? it.flags.split(',') : []); }
+const DERIVED_TRUST = new Set(['derived_ai', 'prior_conclusion']);
 
 function validateAiOutput(data, pack) {
   const warnings = [];
@@ -110,10 +113,15 @@ function validateAiOutput(data, pack) {
     const allUntrusted = its.every((i) => i.trust === 'untrusted_text');
     const allStale = its.every((i) => i.freshness === 'STALE');
     const inConflict = its.some((i) => (memberOf[i.evidenceId] && memberOf[i.evidenceId].length) || i.conflictGroup);
-    if (allUntrusted || allStale || inConflict) {
+    // V2 (§6.5, §7.5): circular, canonical-only and timeline-only support.
+    const allDerived = its.every((i) => DERIVED_TRUST.has(i.trust));
+    const canonicalOnly = its.every((i) => _flags(i).includes('canonical_derived'));
+    const timelineOnly = its.every((i) => i.source === 'timeline');
+    if (allUntrusted || allStale || inConflict || allDerived || canonicalOnly || timelineOnly) {
       warnings.push('downgraded_fact');
-      inferences.push({ statement: f.statement, reasoning: 'Downgraded from a confirmed fact: the cited evidence is ' +
-        (inConflict ? 'in conflict' : (allUntrusted ? 'untrusted text' : 'stale')) + '.', confidence: 0.5, evidenceIds: f.evidenceIds });
+      const why = inConflict ? 'in conflict' : (timelineOnly ? 'timeline text only' : (allDerived ? 'AI-written or a prior conclusion'
+        : (canonicalOnly ? 'canonical status only' : (allUntrusted ? 'untrusted text' : 'stale'))));
+      inferences.push({ statement: f.statement, reasoning: 'Downgraded from a confirmed fact: the cited evidence is ' + why + '.', confidence: 0.5, evidenceIds: f.evidenceIds });
     } else {
       confirmedFacts.push(f);
     }
@@ -167,4 +175,95 @@ function validateAiOutput(data, pack) {
   };
 }
 
-module.exports = { validateAiOutput, TOP_KEYS };
+// ── V2 planner turn (§6.5) ──────────────────────────────────────────────────
+
+const DECISIONS = Object.freeze(['request_tools', 'final']);
+const TOOL_NAME_RE = /^[a-z_]+$/;
+const EV_ID_RE = /^ev_[a-f0-9_]{1,40}$/;
+const TURN_TOOLS_MAX = 3;
+const TURN_ARGS_KEYS_MAX = 6;
+const TURN_MEMORY_MAX = 5;
+const TURN_STR_MAX = 200;
+
+function _sanitized(v, n) { return untrusted.sanitize(_str(v, n), '').slice(0, n); }
+
+function _turnMemory(m, warnings) {
+  const src = _obj(m) ? m : {};
+  const hypotheses = [];
+  for (const h of _arr(src.hypotheses)) {
+    if (hypotheses.length >= TURN_MEMORY_MAX) { warnings.push('memory_capped'); break; }
+    if (!_obj(h)) continue;
+    const statement = _sanitized(h.statement, TURN_STR_MAX);
+    if (!statement.trim()) continue;
+    const evidenceIds = _arr(h.evidenceIds).filter((x) => typeof x === 'string' && EV_ID_RE.test(x)).slice(0, IDS_MAX);
+    hypotheses.push({ statement, confidence: _conf(h.confidence), evidenceIds });
+  }
+  const openQuestions = [];
+  for (const q of _arr(src.openQuestions)) {
+    if (openQuestions.length >= TURN_MEMORY_MAX) { warnings.push('memory_capped'); break; }
+    if (!_obj(q)) continue;
+    const question = _sanitized(q.question, TURN_STR_MAX);
+    if (!question.trim()) continue;
+    openQuestions.push({ question, likelySource: _enum(q.likelySource, LIKELY) });
+  }
+  return { hypotheses, openQuestions };
+}
+
+/**
+ * validatePlannerTurn(r, { toolNames }) -> { ok, decision, tools[], memory, result, code, warnings[] }
+ *   r is the reason() result. A V1-shaped answer (schemaVersion 1, no decision) is a final.
+ *   Unknown tool names are kept (the core reports them as data); at most 3 tools per turn.
+ */
+function validatePlannerTurn(r, opts) {
+  const o = opts || {};
+  const warnings = [];
+  const bad = (code) => ({ ok: false, decision: null, tools: [], memory: { hypotheses: [], openQuestions: [] }, result: null, code, warnings });
+  if (!r || r.ok !== true) return bad((r && r.error) || 'no_result');
+  const data = r.data;
+  if (!_obj(data)) return bad('invalid_schema');
+  if (data.decision === undefined && data.schemaVersion === 1) {
+    return { ok: true, decision: 'final', tools: [], memory: { hypotheses: [], openQuestions: [] }, result: data, code: null, warnings: ['v1_shaped_final'] };
+  }
+  if (data.schemaVersion !== 2) return bad('invalid_schema');
+  if (!DECISIONS.includes(data.decision)) return bad('invalid_decision');
+  const known = new Set(_arr(o.toolNames));
+  const tools = [];
+  for (const t of _arr(data.tools)) {
+    if (!_obj(t) || typeof t.tool !== 'string' || t.tool.length < 1 || t.tool.length > 40 || !TOOL_NAME_RE.test(t.tool)
+      || !_obj(t.args) || Object.keys(t.args).length > TURN_ARGS_KEYS_MAX) { warnings.push('tool_dropped'); continue; }
+    if (tools.length >= TURN_TOOLS_MAX) { warnings.push('tools_capped'); break; }
+    if (known.size && !known.has(t.tool)) warnings.push('unknown_tool');
+    tools.push({ tool: t.tool, args: Object.assign({}, t.args), why: _sanitized(t.why, TURN_STR_MAX) });
+  }
+  const memory = _turnMemory(data.memory, warnings);
+  if (data.decision === 'final') {
+    if (!_obj(data.result)) return bad('invalid_final');
+    return { ok: true, decision: 'final', tools: [], memory, result: data.result, code: null, warnings };
+  }
+  return { ok: true, decision: 'request_tools', tools, memory, result: null, code: null, warnings };
+}
+
+const SUPPORT_TRUST = new Set(['structured', 'untrusted_text']);
+const NO_SUPPORT_FLAGS = Object.freeze(['canonical_derived', 'derived_calc', 'manual_entry']);
+
+/**
+ * hasSourceSupport(output, pack) -> true when a confirmedFacts or inferences entry cites an item with
+ * trust structured or untrusted_text and none of the flags canonical_derived, derived_calc, manual_entry.
+ */
+function hasSourceSupport(output, pack) {
+  if (!_obj(output)) return false;
+  const byId = new Map(((pack && pack.items) || []).filter(Boolean).map((i) => [i.evidenceId, i]));
+  for (const k of ['confirmedFacts', 'inferences']) {
+    for (const x of _arr(output[k])) {
+      for (const id of _arr(x && x.evidenceIds)) {
+        const it = byId.get(id);
+        if (!it || !SUPPORT_TRUST.has(it.trust)) continue;
+        const fl = _flags(it);
+        if (!NO_SUPPORT_FLAGS.some((f) => fl.includes(f))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+module.exports = { validateAiOutput, validatePlannerTurn, hasSourceSupport, TOP_KEYS, EV_ID_RE };

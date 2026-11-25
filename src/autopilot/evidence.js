@@ -32,6 +32,7 @@ const freshness = require('./freshness');
 const { buildConflicts, conflictFieldOf, normalizeConflictValue } = require('./conflicts');
 const { toMs } = require('./updates');
 const { decisivRef, primaryWrId } = require('./plan');
+const { stableStringify } = require('./fingerprint');
 
 const PACK_MAX_BYTES = 64 * 1024;
 const EXCERPT_MAX = LIMITS.findingValueMaxChars;   // 2000
@@ -101,14 +102,52 @@ function serviceBelongs(detail, unit, woSet) {
   return !!id && woSet.has(id) && normUnit(name) === unit;
 }
 
-function createCollector(ctx) {
+// extra.trust overrides (V2 review finding 2) are limited to these values.
+const TRUST_OVERRIDES = new Set(['derived_ai', 'prior_conclusion', 'untrusted_text', 'structured']);
+// Final trust values whose string values are scanned for injection patterns.
+const SCANNED_TRUST = new Set(['untrusted_text', 'derived_ai', 'prior_conclusion']);
+
+function _knownList(k) {
+  if (!k) return [];
+  if (k instanceof Map) return [...k.values()];
+  if (Array.isArray(k)) return k;
+  if (typeof k[Symbol.iterator] === 'function') return [...k];
+  return [];
+}
+
+/**
+ * createCollector(ctx, { knownItems }?) — every evidence item is created by add().
+ *   add(source, field, value, provCtx, extra)
+ *     extra: { sourceRef, live, retrievedAt, confidence (email),
+ *              flags[] (appended), trust (derived_ai | prior_conclusion | untrusted_text | structured),
+ *              observedAt (finite ms, wins over provenance) }
+ * knownItems (V2 §6.2.3): ids already used in the run. A new item whose base id is taken gets the
+ * existing id and dup:true when an item with that base has an equal value and observedAt (a true
+ * duplicate); otherwise the next free _n suffix. Without knownItems the V1 ids are unchanged.
+ */
+function createCollector(ctx, opts) {
   const c = ctx || {};
+  const o = opts || {};
   const now = Number.isFinite(c.now) ? c.now : Date.now();
   const staleDays = freshness.clampStaleDays(c.staleDays);
   const items = [];
   const events = [];
   const flags = new Set();
   const ids = new Set();
+  const dedupe = o.knownItems != null;
+  const known = _knownList(o.knownItems).filter((it) => it && typeof it.evidenceId === 'string');
+  for (const it of known) ids.add(it.evidenceId);
+
+  function _dupOf(base, item) {
+    const val = stableStringify(item.value);
+    const pool = known.concat(items);
+    for (const ex of pool) {
+      const id = ex.evidenceId;
+      if (id !== base && !(typeof id === 'string' && id.startsWith(base + '_'))) continue;
+      if (stableStringify(ex.value) === val && (ex.observedAt == null ? null : ex.observedAt) === item.observedAt) return id;
+    }
+    return null;
+  }
 
   function add(source, field, value, provCtx, extra) {
     const ex = extra || {};
@@ -123,16 +162,19 @@ function createCollector(ctx) {
     if (_empty(v)) return null;
     if (typeof v === 'object' && v !== null) { try { v = JSON.stringify(v); } catch (_) { v = String(v); } }
     v = _cap(v);
-    const trust = trustOf(source, field, v);
+    const exFlags = Array.isArray(ex.flags) ? ex.flags.filter((f) => typeof f === 'string' && f) : [];
+    let trust = trustOf(source, field, v, exFlags);
+    if (typeof ex.trust === 'string' && TRUST_OVERRIDES.has(ex.trust)) trust = ex.trust;
     const live = ex.live === true;
     const retrievedAt = live ? (Number.isFinite(ex.retrievedAt) ? ex.retrievedAt : now) : (prov.retrievedAt != null ? prov.retrievedAt : now);
+    const observedAt = Number.isFinite(ex.observedAt) ? ex.observedAt : (prov.observedAt != null ? prov.observedAt : null);
     const item = {
       evidenceId: null,
       source,
       sourceRef: ex.sourceRef || null,
       field,
       value: v,
-      observedAt: prov.observedAt != null ? prov.observedAt : null,
+      observedAt,
       retrievedAt,
       live,
       freshness: null,
@@ -142,16 +184,25 @@ function createCollector(ctx) {
       conflictField: cf || null,
       flags: [],
     };
-    if (prov.observedFrom) item.observedFrom = prov.observedFrom;
+    if (prov.observedFrom && !Number.isFinite(ex.observedAt)) item.observedFrom = prov.observedFrom;
+    // Canonical status is derived from the other sources (§7.5, FR-10.5).
+    if (source === S.CANONICAL) item.flags.push('canonical_derived');
+    for (const f of exFlags) if (!item.flags.includes(f)) item.flags.push(f);
     if (source === S.EMAIL && Number.isFinite(Number(ex.confidence))) item.confidence = Number(ex.confidence);
     item.freshness = freshness.classify(item, now, staleDays);
     item.confidence = freshness.confidence(item);
     let base = 'ev_' + _sha([source, item.sourceRef || '', field].join('|')).slice(0, 16);
     let id = base;
-    for (let n = 2; ids.has(id); n++) id = base + '_' + n;
-    ids.add(id);
+    const dupId = dedupe && ids.has(base) ? _dupOf(base, item) : null;
+    if (dupId) {
+      id = dupId;
+      item.dup = true;
+    } else {
+      for (let n = 2; ids.has(id); n++) id = base + '_' + n;
+      ids.add(id);
+    }
     item.evidenceId = id;
-    if (trust === 'untrusted_text') {
+    if (SCANNED_TRUST.has(trust) && typeof v === 'string') {
       let hit = false;
       try { hit = untrusted.detect(String(v)).suspicious; } catch (_) { hit = false; }
       if (hit) {
@@ -459,7 +510,62 @@ async function collect(plan, ports, limiter, signal, ctx) {
   return { items, conflicts, sourceStatus, sourceCalls, flags: [...col.flags], events: col.events, woSet: [...woSet] };
 }
 
+/**
+ * collectOne(source, { row, unit, ports, limiter, signal, ctx, docs, woSet, live, knownItems })
+ *   -> Promise<{ items, sourceStatus, sourceCalls, flags, events }>
+ * V2 tool path (§6.2.3): one source through the same private builder collect() uses, then
+ * _capPack. `live` (aap_live always; decisiv when true) needs a limiter; the live call goes
+ * through limiter.run({ signal }).call(...). knownItems seeds the collector ids (dup rule).
+ */
+async function collectOne(source, opts) {
+  const o = opts || {};
+  const c = Object.assign({}, o.ctx || {});
+  if (o.row) c.row = o.row;
+  if (o.docs) c.docs = o.docs;
+  const row = c.row || {};
+  const unit = o.unit ? normUnit(o.unit) : normUnit(row.equipmentId);
+  const ports = o.ports || {};
+  const col = createCollector(c, { knownItems: o.knownItems || [] });
+  const now = col.now;
+  const doc = _docs(c, ports);
+  const sourceStatus = {};
+  const sourceCalls = [];
+  const woSet = o.woSet instanceof Set ? o.woSet : new Set(Array.isArray(o.woSet) ? o.woSet : []);
+  const run = o.limiter && typeof o.limiter.run === 'function' ? o.limiter.run({ signal: o.signal || null }) : null;
+  const safe = (fn) => {
+    try { return fn(); } catch (e) { sourceStatus[source] = 'error:' + _codeOf(e, 'READ_FAILED'); return undefined; }
+  };
+  const liveRes = async (fn) => {
+    if (!run) { sourceStatus[source] = 'cache_only:no_limiter'; return; }
+    let r;
+    try { r = await fn(); } catch (e) { r = { status: 'error:' + _codeOf(e, 'LIVE_FAILED'), calls: [] }; }
+    sourceStatus[source] = r.status;
+    for (const x of r.calls) sourceCalls.push(x);
+  };
+
+  switch (source) {
+    case S.AAP_CACHE: safe(() => { _rowItems(col, row, c); sourceStatus[source] = 'ok'; }); break;
+    case S.CANONICAL: safe(() => { sourceStatus[source] = _canonicalItems(col, row, ports, doc('canonicalState')); }); break;
+    case S.REPAIR_INTEL: safe(() => { _riItems(col, unit, ports, now); sourceStatus[source] = 'ok'; }); break;
+    case S.DTNA: safe(() => { _dtnaItems(col, unit, row, ports); sourceStatus[source] = 'ok'; }); break;
+    case S.DECISIV:
+      safe(() => { sourceStatus[source] = _decisivCacheItems(col, row, doc('decisivCaseCache')); });
+      if (o.live === true) await liveRes(() => _decisivLive(col, row, ports, run));
+      break;
+    case S.LONG_DWELL: safe(() => { _longDwellItems(col, unit, doc('longDwellStore'), doc('longDwellCsv')); sourceStatus[source] = 'ok'; }); break;
+    case S.SLACK: safe(() => { _slackItems(col, unit, ports, now); sourceStatus[source] = 'ok'; }); break;
+    case S.EMAIL: safe(() => { _emailItems(col, unit, doc('emailEvidence')); sourceStatus[source] = 'ok'; }); break;
+    case S.FAS_CASE: safe(() => { _fasItems(col, unit, doc('fasCases'), now); sourceStatus[source] = 'ok'; }); break;
+    case S.VENDOR_INTEL: safe(() => { _vendorItems(col, row, ports, now); sourceStatus[source] = 'ok'; }); break;
+    case S.APERIA: safe(() => { sourceStatus[source] = _aperiaItems(col, unit, ports); }); break;
+    case S.AAP_LIVE: await liveRes(() => _aapLive(col, unit, row, ports, run, woSet)); break;
+    default: sourceStatus[source] = 'error:UNKNOWN_SOURCE';
+  }
+  const items = _capPack(col.items, col.flags);
+  return { items, sourceStatus, sourceCalls, flags: [...col.flags], events: col.events };
+}
+
 module.exports = {
-  collect, woSetOf, dtnaBelongs, decisivBelongs, serviceBelongs, createCollector,
+  collect, collectOne, woSetOf, dtnaBelongs, decisivBelongs, serviceBelongs, createCollector,
   PACK_MAX_BYTES, EXCERPT_MAX,
 };

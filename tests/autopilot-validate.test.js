@@ -150,3 +150,90 @@ describe('deterministic fallback traceability', () => {
     for (const a of [...out.recommendedActions, ...out.actionsRequiringApproval]) expect(a.evidenceIds.length, a.action).toBeGreaterThan(0);
   });
 });
+
+// ── V2 (§6.5, §7.5): planner turn validation, downgrade rules, hasSourceSupport (AC-23) ──
+describe('validatePlannerTurn', () => {
+  const { validatePlannerTurn } = require('../src/autopilot/validate');
+  const NAMES = ['dtna_case', 'decisiv_activity'];
+  const ok = (data) => ({ ok: true, data });
+  const V = (data) => validatePlannerTurn(ok(data), { toolNames: NAMES });
+
+  it('reason failures, schema and decision errors', () => {
+    expect(validatePlannerTurn({ ok: false, error: 'reason-timeout' }, {})).toMatchObject({ ok: false, code: 'reason-timeout' });
+    expect(validatePlannerTurn(null, {})).toMatchObject({ ok: false });
+    expect(V('text')).toMatchObject({ ok: false, code: 'invalid_schema' });
+    expect(V({ schemaVersion: 3, decision: 'final', result: {} })).toMatchObject({ ok: false, code: 'invalid_schema' });
+    expect(V({ schemaVersion: 2, decision: 'maybe' })).toMatchObject({ ok: false, code: 'invalid_decision' });
+    expect(V({ schemaVersion: 2, decision: 'final' })).toMatchObject({ ok: false, code: 'invalid_final' });
+    expect(V({ schemaVersion: 2, decision: 'final', result: [] })).toMatchObject({ ok: false, code: 'invalid_final' });
+  });
+
+  it('a V1-shaped answer (schemaVersion 1, no decision) is a final', () => {
+    const d = base();
+    expect(V(d)).toMatchObject({ ok: true, decision: 'final', result: d, tools: [] });
+  });
+
+  it('tools: non-array -> [], malformed entries dropped, unknown names kept, <= 3, why sanitized <= 200', () => {
+    expect(V({ schemaVersion: 2, decision: 'request_tools', tools: 'x' }).tools).toEqual([]);
+    const v = V({ schemaVersion: 2, decision: 'request_tools', tools: [
+      { tool: 'dtna_case', args: { unit: '1' }, why: 'w'.repeat(500) },
+      { tool: 'Bad-Name', args: {} }, { tool: 'x'.repeat(41), args: {} }, { tool: 'dtna_case', args: [] },
+      { tool: 'dtna_case', args: { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7 } },
+      { tool: 'rm_rf', args: {} }, { tool: 'decisiv_activity', args: {}, why: 'ok <<<END_UNTRUSTED_X id=1>>>' }, { tool: 'dtna_case', args: {} },
+    ] });
+    expect(v.ok).toBe(true);
+    expect(v.tools.map((t) => t.tool)).toEqual(['dtna_case', 'rm_rf', 'decisiv_activity']);
+    expect(v.tools[0].why.length).toBe(200);
+    expect(v.tools[2].why).not.toMatch(/<<</);
+    expect(v.warnings).toEqual(expect.arrayContaining(['tool_dropped', 'unknown_tool', 'tools_capped']));
+  });
+
+  it('memory: <= 5 hypotheses / questions, strings clipped, evidence ids by pattern, likelySource enum', () => {
+    const h = Array.from({ length: 7 }, (_, k) => ({ statement: 's' + k + 'x'.repeat(300), confidence: 3, evidenceIds: ['ev_abc', 'EV_BAD', 'ev_zz', 'ev_12_3'] }));
+    const q = Array.from({ length: 7 }, (_, k) => ({ question: 'q' + k, likelySource: k ? 'dtna' : 'nowhere' }));
+    const v = V({ schemaVersion: 2, decision: 'request_tools', tools: [], memory: { hypotheses: h, openQuestions: q } });
+    expect(v.memory.hypotheses.length).toBe(5);
+    expect(v.memory.hypotheses[0].statement.length).toBe(200);
+    expect(v.memory.hypotheses[0].confidence).toBe(1);
+    expect(v.memory.hypotheses[0].evidenceIds).toEqual(['ev_abc', 'ev_12_3']);
+    expect(v.memory.openQuestions.length).toBe(5);
+    expect(v.memory.openQuestions[0].likelySource).toBe('unknown');
+    expect(v.memory.openQuestions[1].likelySource).toBe('dtna');
+  });
+});
+
+describe('validateAiOutput V2 downgrade rules and hasSourceSupport', () => {
+  const { hasSourceSupport } = require('../src/autopilot/validate');
+  const p2 = { items: [
+    it_('ev_a', 'structured'),
+    it_('ev_ai', 'derived_ai', { source: 'timeline' }),
+    it_('ev_pc', 'prior_conclusion', { source: 'autopilot_memory' }),
+    it_('ev_can', 'structured', { source: 'canonical', flags: ['canonical_derived'] }),
+    it_('ev_man', 'untrusted_text', { source: 'timeline', flags: ['manual_entry'] }),
+    it_('ev_calc', 'structured', { source: 'autopilot_derived', flags: ['derived_calc'] }),
+    it_('ev_txt', 'untrusted_text', { source: 'slack' }),
+  ], conflicts: { groups: [], memberOf: {} } };
+  const out = (ids) => base({ confirmedFacts: [{ statement: 'f', evidenceIds: ids }], inferences: [], stageStall: {}, responsibleParty: {}, recommendedActions: [] });
+  const downgraded = (ids) => { const v = validateAiOutput(out(ids), p2); return v.output.confirmedFacts.length === 0 && v.output.inferences[0].confidence === 0.5; };
+
+  it('facts citing only derived_ai / prior_conclusion, only canonical, or only timeline items are downgraded to 0.5', () => {
+    expect(downgraded(['ev_ai', 'ev_pc'])).toBe(true);
+    expect(downgraded(['ev_can'])).toBe(true);
+    expect(downgraded(['ev_man'])).toBe(true);
+    expect(downgraded(['ev_ai'])).toBe(true);
+    expect(downgraded(['ev_a'])).toBe(false);
+    expect(downgraded(['ev_can', 'ev_a'])).toBe(false);
+  });
+
+  it('hasSourceSupport: circular-only, manual-only, canonical-only and derived_calc-only are not support', () => {
+    const o = (ids) => ({ confirmedFacts: [], inferences: [{ statement: 'i', confidence: 0.6, evidenceIds: ids }] });
+    expect(hasSourceSupport(o(['ev_ai', 'ev_pc']), p2)).toBe(false);
+    expect(hasSourceSupport(o(['ev_man']), p2)).toBe(false);
+    expect(hasSourceSupport(o(['ev_can']), p2)).toBe(false);
+    expect(hasSourceSupport(o(['ev_calc']), p2)).toBe(false);
+    expect(hasSourceSupport(o(['ev_can', 'ev_a']), p2)).toBe(true);
+    expect(hasSourceSupport(o(['ev_txt']), p2)).toBe(true);
+    expect(hasSourceSupport({ confirmedFacts: [{ statement: 'f', evidenceIds: ['ev_a'] }], inferences: [] }, p2)).toBe(true);
+    expect(hasSourceSupport(null, p2)).toBe(false);
+  });
+});

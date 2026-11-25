@@ -54,13 +54,30 @@ function _fpObservedAt(it) {
   return String(it.observedAt);
 }
 
-function fp(pack) {
-  const items = (pack && Array.isArray(pack.items)) ? pack.items : [];
+function _fpLines(items) {
   const lines = items.filter(Boolean).map((it) => [
     it.source || '', it.sourceRef || '', it.field || '', _fpValue(it), _fpObservedAt(it),
   ].join('\u0001'));
   lines.sort();
-  return _sha1(lines.join('\u0002'));
+  return lines;
+}
+
+// V2 (§7.5): AI-written and prior-conclusion items and tool results never move evidence_fp.
+const FP_SKIP_TRUST = new Set(['derived_ai', 'prior_conclusion']);
+function _fpCounts(it) {
+  if (!it) return false;
+  if (FP_SKIP_TRUST.has(it.trust)) return false;
+  return !(Array.isArray(it.flags) && it.flags.includes('tool'));
+}
+
+function fp(pack) {
+  const items = (pack && Array.isArray(pack.items)) ? pack.items : [];
+  return _sha1(_fpLines(items.filter(_fpCounts)).join('\u0002'));
+}
+
+/** itemsFp(items) -> sha1 over the V1 fp line format of every item (tool envelope sourceFp, §6.2.5). */
+function itemsFp(items) {
+  return _sha1(_fpLines(Array.isArray(items) ? items : []).join('\u0002'));
 }
 
 /**
@@ -79,4 +96,4 @@ function cheapFp(input) {
   }));
 }
 
-module.exports = { fp, cheapFp, stableStringify, ROW_FP_FIELDS, FALLBACK_OBSERVED_FROM, TIME_DERIVED_FIELDS };
+module.exports = { fp, itemsFp, cheapFp, stableStringify, ROW_FP_FIELDS, FALLBACK_OBSERVED_FROM, TIME_DERIVED_FIELDS };

@@ -85,6 +85,11 @@ function provenanceOf(source, field, ctx) {
     case 'fas_case': return { observedAt: _first(c.entry && c.entry.updatedAt), retrievedAt: readAt, authorityTag: 'notes', observedFrom: null };
     case 'vendor_intel': return { observedAt: _first(c.scorecard && c.scorecard.computedAt), retrievedAt: readAt, authorityTag: null, observedFrom: null };
     case 'aperia_cache': return { observedAt: _first(c.issue && c.issue.dateDetected), retrievedAt: _first(c.pulledAt, c.retrievedAt), authorityTag: null, observedFrom: null };
+    // V2 derived sources: observedAt comes from the item itself (collector extra.observedAt);
+    // authorityTag is null so ai/authority never ranks them.
+    case 'timeline':
+    case 'autopilot_memory':
+    case 'autopilot_derived': return { observedAt: null, retrievedAt: readAt, authorityTag: null, observedFrom: null };
     default: return { observedAt: null, retrievedAt: readAt, authorityTag: null, observedFrom: null };
   }
 }

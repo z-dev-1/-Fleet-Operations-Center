@@ -44,6 +44,8 @@ function allowedFor(file, r) {
   if (r === '../config/defaults') return f === 'config';
   if (r === '../workers/supervisor') return f === 'controller' || f === 'index';
   if (r === '../orcha/reason') return f === 'investigate';
+  if (r === '../ai/agent-loop-core' || r === '../ai/budget') return f === 'agent-adapter';
+  if (r === '../orcha/timeline-text') return f === 'timeline';
   if (['fs', 'path', '../config/paths'].includes(r)) return f === 'harness';
   return false;
 }

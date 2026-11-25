@@ -76,9 +76,22 @@ function _structuredName(value) {
   return s === value && NAME_RE.test(s.trim());
 }
 
-function trustOf(source, field, value) {
+/**
+ * trustOf(source, field, value, flags?) — V2 (§7.5) adds the derived trust values:
+ *   timeline          -> derived_ai (untrusted_text when flags has 'manual_entry')
+ *   autopilot_memory  -> prior_conclusion
+ *   repair_intel aiAnalysis -> derived_ai
+ *   autopilot_derived -> structured (deterministic calculations)
+ * V1 callers pass three arguments and get the V1 result.
+ */
+function trustOf(source, field, value, flags) {
   const src = String(source || '');
   const f = String(field || '');
+  const fl = Array.isArray(flags) ? flags : [];
+  if (src === 'timeline') return fl.includes('manual_entry') ? 'untrusted_text' : 'derived_ai';
+  if (src === 'autopilot_memory') return 'prior_conclusion';
+  if (src === 'autopilot_derived') return 'structured';
+  if (src === 'repair_intel' && f === 'aiAnalysis') return 'derived_ai';
   if (UNTRUSTED_SOURCES.has(src)) return 'untrusted_text';
   if (UNTRUSTED_FIELDS.has(f)) return 'untrusted_text';
   const sf = UNTRUSTED_SOURCE_FIELDS[src];

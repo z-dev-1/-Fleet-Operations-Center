@@ -80,6 +80,7 @@ const PORT_NAMES = Object.freeze([
 const READ_KEYS = Object.freeze([
   'fleetData', 'canonicalState', 'longDwellStore', 'longDwellCsv', 'relayReconcileConfig',
   'dtnaCaseCache', 'decisivCaseCache', 'emailEvidence', 'fasCases', 'contacts', 'vendorHistory',
+  'notesStore',   // V2 existing_timeline (read only; no Autopilot file writes it)
 ]);
 
 const AUTOPILOT_PROFILE = Object.freeze({ type: 'internal' });

@@ -1165,14 +1165,23 @@ function getRun(runId) {
   return _parseRun(_get('SELECT * FROM ap_run WHERE run_id = ?', runId));
 }
 
-/** Findings of one run as pack items (used to resume from a checkpoint). */
-function findingsForRun(runId) {
-  return _all('SELECT * FROM ap_finding WHERE run_id = ? ORDER BY id', runId).map((f) => ({
+function _findingItem(f) {
+  return {
     evidenceId: f.evidence_id, source: f.source, sourceRef: f.source_ref, field: f.field, value: f.value_text,
     observedAt: f.observed_at, retrievedAt: f.retrieved_at, live: false, freshness: f.freshness, confidence: f.confidence,
     trust: f.trust, authorityTag: f.authority_tag, conflictGroup: f.conflict_group,
     flags: f.flags ? String(f.flags).split(',').filter(Boolean) : [],
-  }));
+  };
+}
+
+/** Findings of one run as pack items (used to resume from a checkpoint). */
+function findingsForRun(runId) {
+  return _all('SELECT * FROM ap_finding WHERE run_id = ? ORDER BY id', runId).map(_findingItem);
+}
+
+/** findingsForStep(stepId) -> the findings a tool step wrote, as pack items (V2 cross-run reuse, §6.2.5). */
+function findingsForStep(stepId) {
+  return _all('SELECT * FROM ap_finding WHERE step_id = ? ORDER BY id', stepId).map(_findingItem);
 }
 
 /** Set of 'caseId|YYYY-MM-DD' for eta_due triggers already fired since sinceMs. */
@@ -1418,7 +1427,7 @@ module.exports = {
   getMeta, listCases, getCase, counts, listOpen, pickQueued, findResumable, runsSince,
   getRun, findingsForRun, etaDueFired, aiRunStats,
   // V2 reads
-  queuedCount, listSteps, stepsForRun, findReusableStep, coverage, listUnits, getRecord, listProposals,
+  queuedCount, listSteps, stepsForRun, findReusableStep, findingsForStep, coverage, listUnits, getRecord, listProposals,
   queueStats, aiMetrics, sourceMetrics, aiBacklog,
   ISSUE_KEY,
 };
