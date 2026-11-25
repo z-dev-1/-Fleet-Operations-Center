@@ -147,11 +147,14 @@ describe('CI acceptance: 24 shadow investigations over the 12 pilot units (AC-17
     const outBefore = harness.snapshotOutbound(dir);
     expect(Object.values(outBefore).every(Boolean)).toBe(true);
     const { w, ports } = buildWorld();
-    const env = F.mkEnv({ world: w, ports, reason, autopilot: { maxCasesPerTick: 5 } });
+    // V2: scoreV2 band clamps give the pilot units equal priorities, so the start order inside a
+    // tick is no longer fixed. 3 starts per tick keep every initial run inside the 6-call per-tick
+    // live budget whatever the order (the fixture expects 'live' where the session is warm).
+    const env = F.mkEnv({ world: w, ports, reason, autopilot: { maxCasesPerTick: 3 } });
     env.ap.boot();
 
     // ── pass 1: initial runs through the supervised tick (detection + investigation) ──
-    for (let i = 0; i < 3; i++) { await env.supervisor.runTick(); env.clock.advance(MIN); }
+    for (let i = 0; i < 4; i++) { await env.supervisor.runTick(); env.clock.advance(MIN); }
     const caseOf = {};
     for (const c of F.cs.listCases({ limit: 200 }).items) caseOf[c.unit_id] = c.case_id;
     expect(Object.keys(caseOf).sort()).toEqual(FX.units.map((u) => u.unit).sort());

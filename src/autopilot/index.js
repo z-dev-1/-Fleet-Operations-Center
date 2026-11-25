@@ -11,6 +11,8 @@
  *   setConfig(patch)          validated settings.autopilot write (+ R4 register / stop handling);
  *                             runState is rejected (INVALID_INPUT), it changes only through control()
  *   listCases(filter), getCase(caseId, opts), review(caseId, decision, note)
+ *   V2: coverage(), listUnits(filter), deepInvestigate(caseId); status() adds coverage, queue,
+ *   aiBacklog and sourceMetrics; getCase() adds steps, proposals, record and memory
  *   harnessRun(opts)          lazily requires ./harness and injects runInvestigation + controller
  *                             hooks (R5); { ok:false, code:'UNAVAILABLE' } while ./harness is missing
  *
@@ -21,6 +23,10 @@ const configMod = require('./config');
 const { STATES, localDate, normUnit, HOUR } = require('./constants');
 const { buildScope, unitsNotInFleet } = require('./scope');
 const { createController } = require('./controller');
+
+// §10.1: the only ap_step columns autopilot:case returns.
+const STEP_COLUMNS = Object.freeze(['step_id', 'run_id', 'seq', 'turn', 'kind', 'tool', 'args_json', 'status', 'code', 'why',
+  'summary_json', 'live', 'reused_step_id', 'ai_latency_ms', 'ai_lane', 'started_at', 'ms']);
 
 function _pct(sorted, p) {
   if (!sorted.length) return null;
@@ -93,7 +99,14 @@ function createAutopilot(deps) {
     if (!supEnabled && !schema.isEnsured()) { out.counts = null; out.ai = { cap: cfg.dailyCap, isolatedAvailable, cost: 'not reported by AI lanes' }; return out; }
     if (!controller.ensureSchema()) { out.degraded = 'storage_unavailable'; return out; }
     const now = clock();
+    try { const ss = typeof schema.status === 'function' ? schema.status() : null; if (ss && ss.degradedCode) out.degraded = ss.degradedCode; } catch (_) {}
     out.counts = cs.counts();
+    // V2 blocks (§10.1): coverage, queue, AI backlog and per-source metrics.
+    const cap = cfg.ai && Number.isFinite(cfg.ai.dailyCap) ? cfg.ai.dailyCap : cfg.dailyCap;
+    try { const cv = cs.coverage(now); out.coverage = { pass: cv.pass, reconcileOk: cv.reconcileOk, groups: cv.groups }; } catch (_) { out.coverage = null; }
+    try { out.queue = cs.queueStats(now); } catch (_) { out.queue = null; }
+    try { out.aiBacklog = Object.assign({}, cs.aiBacklog(now, { cap }), cs.aiMetrics(now, { cap })); } catch (_) { out.aiBacklog = null; }
+    try { out.sourceMetrics = cs.sourceMetrics(now); } catch (_) { out.sourceMetrics = null; }
     out.harnessRanToday = !!cs.getMeta('harness:' + localDate(now));
     const runs = cs.aiRunStats(now - 24 * HOUR);
     const outcomes = {};
@@ -140,6 +153,14 @@ function createAutopilot(deps) {
       try { cs.appendEvent({ caseId: null, at: clock(), kind: 'config', actor: 'user', reason: 'set_config', detail: { keys: Object.keys(patch || {}) } }); } catch (_) {}
     }
     controller.onConfigChanged(prev, next);
+    // §6.7: a raised AI daily cap releases the cap-deferred cases (ai_retry_at = now; the
+    // ai_capacity trigger requeues them on the next tick).
+    const capOf = (c) => (c && c.ai && Number.isFinite(c.ai.dailyCap) ? c.ai.dailyCap : (c && Number.isFinite(c.dailyCap) ? c.dailyCap : null));
+    const capPrev = capOf(prev);
+    const capNext = capOf(next);
+    if (capPrev != null && capNext != null && capNext > capPrev && schema.isEnsured()) {
+      try { cs.releaseAiDeferred('cap', { now: clock() }); } catch (_) {}
+    }
     if (configMod.cfgFp(prev) !== configMod.cfgFp(next)) controller.scheduleRunOnce();
     return { ok: true, config: next };
   }
@@ -160,7 +181,57 @@ function createAutopilot(deps) {
     if (!controller.ensureSchema()) return { ok: false, code: 'STORAGE_UNAVAILABLE' };
     const r = cs.getCase(caseId, opts || {});
     if (!r) return { ok: false, code: 'NOT_FOUND' };
-    return Object.assign({ ok: true }, r);
+    // V2 (§10.1): the step trace (listed columns only, never prompts or model text), proposals, record, memory.
+    const steps = cs.listSteps(caseId, { limit: 200 }).map((s) => {
+      const o = {};
+      for (const k of STEP_COLUMNS) o[k] = s[k] === undefined ? null : s[k];
+      return o;
+    });
+    const rec = cs.getRecord(caseId);
+    return Object.assign({ ok: true }, r, {
+      steps,
+      proposals: cs.listProposals(caseId),
+      record: rec ? rec.record : null,
+      memory: r.case && r.case.memory !== undefined ? r.case.memory : null,
+    });
+  }
+
+  /** coverage() -> §10.1 autopilot:coverage payload; { ok:true, enabled:false } (no SQL) while the master switch is off. */
+  function coverage() {
+    const cfg = loadCfg();
+    if (!cfg.enabled) return { ok: true, enabled: false };
+    if (!controller.ensureSchema()) return { ok: false, code: 'STORAGE_UNAVAILABLE' };
+    const now = clock();
+    const cap = cfg.ai && Number.isFinite(cfg.ai.dailyCap) ? cfg.ai.dailyCap : cfg.dailyCap;
+    const cv = cs.coverage(now);
+    return {
+      ok: true, pass: cv.pass, reconcileOk: cv.reconcileOk, groups: cv.groups,
+      queue: cs.queueStats(now),
+      ai: Object.assign({}, cs.aiBacklog(now, { cap }), cs.aiMetrics(now, { cap })),
+      sources: cs.sourceMetrics(now),
+    };
+  }
+
+  function listUnits(filter) {
+    const cfg = loadCfg();
+    if (!cfg.enabled) return _offList();
+    if (!controller.ensureSchema()) return { ok: false, code: 'STORAGE_UNAVAILABLE' };
+    const r = cs.listUnits(filter || {});
+    return { ok: true, total: r.total, items: r.items };
+  }
+
+  /** deepInvestigate(caseId) (§8.7) -> { ok:true, state:'QUEUED' } | { ok:false, code } */
+  function deepInvestigate(caseId) {
+    const cfg = loadCfg();
+    if (!cfg.enabled) return { ok: false, code: 'DISABLED' };
+    if (cfg.runState !== 'running') return { ok: false, code: 'NOT_RUNNING' };
+    if (!supervisor.isEnabled()) return { ok: false, code: 'SUPERVISOR_DISABLED' };
+    if (!controller.ensureSchema()) return { ok: false, code: 'STORAGE_UNAVAILABLE' };
+    const r = cs.requestDeep(caseId, { now: clock() });
+    if (!r || !r.ok) return { ok: false, code: (r && r.code) || 'INTERNAL' };
+    controller.setPendingTrigger(caseId, 'manual');
+    controller.scheduleRunOnce();
+    return { ok: true, state: STATES.QUEUED };
   }
 
   function review(caseId, decision, note) {
@@ -194,7 +265,7 @@ function createAutopilot(deps) {
     }));
   }
 
-  return { boot, status, runOnce, control, setConfig, listCases, getCase, review, harnessRun, controller };
+  return { boot, status, runOnce, control, setConfig, listCases, getCase, review, harnessRun, coverage, listUnits, deepInvestigate, controller };
 }
 
 let _default = null;
@@ -211,4 +282,7 @@ module.exports = {
   getCase: (caseId, opts) => _inst().getCase(caseId, opts),
   review: (caseId, decision, note) => _inst().review(caseId, decision, note),
   harnessRun: (opts) => _inst().harnessRun(opts),
+  coverage: () => _inst().coverage(),
+  listUnits: (filter) => _inst().listUnits(filter),
+  deepInvestigate: (caseId) => _inst().deepInvestigate(caseId),
 };

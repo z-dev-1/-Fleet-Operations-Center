@@ -14,7 +14,9 @@
  *   - DISABLED / SUPERVISOR_DISABLED / NOT_RUNNING are answered before any ap_* SQL.
  *   - The shared mutex is held for the whole run (BUSY while a tick runs).
  *   - At most once per local day (ap_meta 'harness:<date>' -> HARNESS_ALREADY_RAN).
- *   - Runs the real open cases round-robin with trigger 'harness' and normal transitions.
+ *   - Runs the real open cases round-robin with trigger 'harness' and normal transitions,
+ *     over a stratified sample (V2 §12.4: (domicile, operator) groups, stratifiedSample()); the
+ *     report adds byDomicile / byOperator run counts and the latest coverage pass.
  *     PAUSED and NEEDS_REVIEW cases are not re-run.
  *   - The run's AbortController is the controller's in-flight one (beginExternalRun), so PAUSE,
  *     STOP, master OFF and shutdown abort the current run and stop the loop; settings are
@@ -80,6 +82,48 @@ function _sourceStatus(sourceCalls) {
 
 function _codes(reasons) { return (Array.isArray(reasons) ? reasons : []).map((r) => (r && typeof r === 'object' ? r.code : r)).filter(Boolean); }
 
+function _byPriority(a, b) {
+  return ((b.priority || 0) - (a.priority || 0)) || ((a.created_at || 0) - (b.created_at || 0)) || (a.case_id < b.case_id ? -1 : a.case_id > b.case_id ? 1 : 0);
+}
+function _groupKey(c) { return (c.domicile || '(none)') + '|' + (c.operator || '(none)'); }
+
+/**
+ * stratifiedSample(cases, runs) -> [case] (V2 §12.4): up to `runs` distinct cases, round-robin over
+ * the (domicile, operator) groups sorted by size desc (then key), at most ceil(runs / groups) per
+ * group and by priority inside a group; the remaining slots are filled by priority.
+ */
+function stratifiedSample(cases, runs) {
+  const list = Array.isArray(cases) ? cases.filter((c) => c && c.case_id) : [];
+  const n = Math.min(list.length, Math.max(0, runs | 0));
+  if (!n) return [];
+  const groups = new Map();
+  for (const c of list) {
+    const k = _groupKey(c);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(c);
+  }
+  const ordered = [...groups.entries()].sort((a, b) => (b[1].length - a[1].length) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).map((e) => e[1].sort(_byPriority));
+  const perGroup = Math.ceil(runs / ordered.length);
+  const out = [];
+  const taken = new Set();
+  for (let round = 0; round < perGroup && out.length < n; round++) {
+    for (const g of ordered) {
+      if (out.length >= n) break;
+      if (round < g.length) { out.push(g[round]); taken.add(g[round].case_id); }
+    }
+  }
+  for (const c of list.slice().sort(_byPriority)) {
+    if (out.length >= n) break;
+    if (!taken.has(c.case_id)) { out.push(c); taken.add(c.case_id); }
+  }
+  return out;
+}
+function _countBy(entries, key) {
+  const out = {};
+  for (const e of entries) { const k = e[key] || '(none)'; out[k] = (out[k] || 0) + 1; }
+  return out;
+}
+
 async function run(opts) {
   const o = opts || {};
   const cfg = o.config || {};
@@ -131,16 +175,22 @@ async function run(opts) {
     let skipped = 0;
     let stoppedBy = null;
     let k = 0;
+    // Stratified sample of distinct open cases (§12.4), re-run round-robin until `runs` runs are done.
+    const sample = stratifiedSample(cs.listOpen().filter((c) => !SKIP_STATES.has(c.state)), runs);
+    const caseMeta = new Map(sample.map((c) => [c.case_id, { domicile: c.domicile || null, operator: c.operator || null }]));
     try {
       for (let i = 0; i < runs; i++) {
         if (signal.aborted) { stoppedBy = 'aborted:' + (typeof signal.reason === 'string' ? signal.reason : 'shutdown'); break; }
         const runCfg = reload() || cfg;
         if (!runCfg.enabled) { stoppedBy = 'disabled'; break; }
         if (runCfg.runState !== 'running') { stoppedBy = 'run_state:' + runCfg.runState; break; }
-        const eligible = cs.listOpen().filter((c) => !SKIP_STATES.has(c.state));
-        if (!eligible.length) break;
-        const c = eligible[k % eligible.length];
-        k++;
+        const eligibleNow = new Map(cs.listOpen().filter((x) => !SKIP_STATES.has(x.state)).map((x) => [x.case_id, x]));
+        let c = null;
+        for (let j = 0; j < sample.length && !c; j++) {
+          const s = sample[(k + j) % sample.length];
+          if (eligibleNow.has(s.case_id)) { c = eligibleNow.get(s.case_id); k = k + j + 1; }
+        }
+        if (!c) break;
         const now = clock();
         if (c.state !== S.QUEUED && !cs.requeueCases({ caseIds: [c.case_id], trigger: 'harness', actor: 'user', now }).length) { skipped++; continue; }
         const cpu0 = process.cpuUsage();
@@ -155,9 +205,12 @@ async function run(opts) {
         }
         const cpu = process.cpuUsage(cpu0);
         const runRow = r && r.runId && typeof cs.getRun === 'function' ? cs.getRun(r.runId) : null;
+        const meta = caseMeta.get(c.case_id) || {};
         entries.push({
           caseId: c.case_id,
           unit: c.unit_id,
+          domicile: meta.domicile || null,
+          operator: meta.operator || null,
           reasons: _codes(c.reasons),
           plan: runRow && Array.isArray(runRow.plan) ? runRow.plan.map((p) => ({ source: p.source, status: p.status, why: p.why })) : null,
           sourceStatus: _sourceStatus(runRow ? runRow.source_calls : null),
@@ -203,6 +256,13 @@ async function run(opts) {
       aiCallsUsed: aiAfter - aiBefore, aiCallsToday: aiAfter, aiCap: cap,
       capReached: entries.some((e) => e.aiStatus === 'skipped_cap') || (cap != null && aiAfter >= cap),
       unitsNotInFleet: notInFleet.map(normUnit),
+      sampleSize: sample.length,
+      byDomicile: _countBy(entries, 'domicile'),
+      byOperator: _countBy(entries, 'operator'),
+      coverage: (() => {
+        if (typeof cs.coverage !== 'function') return null;
+        try { const cv = cs.coverage(t1); return { pass: cv.pass, reconcileOk: cv.reconcileOk }; } catch (_) { return null; }
+      })(),
     };
     const reportPath = path.join(paths.getDataDir(), REPORT_PREFIX + iso.replace(/[:.]/g, '-') + '.json');
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
@@ -226,4 +286,4 @@ async function run(opts) {
   });
 }
 
-module.exports = { run, snapshotOutbound, OUTBOUND_FILES, REPORT_PREFIX, RUNS };
+module.exports = { run, snapshotOutbound, stratifiedSample, OUTBOUND_FILES, REPORT_PREFIX, RUNS };

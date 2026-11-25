@@ -172,3 +172,53 @@ describe('episode roll inside the open case (AC-7, FR-6.5)', () => {
     expect(events(id, 'episode_rolled').length).toBe(0);
   });
 });
+
+describe('controller level (AC-7, §4.4 step 7)', () => {
+  const { MIN } = F;
+  const mk = (w) => F.mkEnv({ world: w || F.mkWorld({ rows: [row({ _secondaryWRs: [{ _serviceId: 'svc-2', workRequestId: 'wr-2' }] })] }), autopilot: { scope: { mode: 'fleet' } } });
+
+  it('multiple WOs of one down unit correlate to one case and one episode', async () => {
+    const env = mk();
+    await env.ctl.runOnce({ forceDetect: true });
+    const open = cs.listOpen();
+    expect(open.length).toBe(1);
+    const id = open[0].case_id;
+    const key = open[0].episode_key;
+    expect(open[0].wo_set.map((w) => w.id).sort()).toEqual(['svc-1', 'svc-2', 'wr-1', 'wr-2']);
+    env.world.rows[0]._secondaryWRs.push({ _serviceId: 'svc-3' });
+    env.clock.advance(MIN);
+    await env.ctl.runOnce({ forceDetect: true });
+    const after = cs.listOpen();
+    expect(after.length).toBe(1);
+    expect(after[0]).toMatchObject({ case_id: id, episode_key: key });
+    expect(after[0].wo_set.map((w) => w.id)).toContain('svc-3');
+  });
+
+  it('down again with a new primary WO after an unverified up sighting -> rolled, requeued and run with trigger new_episode', async () => {
+    const env = mk(F.mkWorld());
+    await env.ctl.runOnce({ forceDetect: true });
+    const id = cs.listOpen()[0].case_id;
+    const key = get(id).episode_key;
+    // Seen up in a newer scrape build: no verified resolution, the case stays open.
+    Object.assign(env.world.rows[0], { lifecycleState: 'Active', _apiSourced: false });
+    env.world.source = 'scrape';
+    env.clock.advance(5 * MIN);
+    env.world.lastOkAt = env.clock.now();
+    await env.ctl.runOnce({ forceDetect: true });
+    expect(get(id).state).not.toBe('RESOLVED');
+    expect(get(id).last_up_seen_build_at).toBe(env.clock.now());
+    // Down again with a new WO in a newer aap-api build.
+    Object.assign(env.world.rows[0], { lifecycleState: 'Unavailable', _apiSourced: true, _serviceId: 'svc-9', workRequestId: 'wr-9', workDuration: '3d 6h 0m' });
+    env.world.source = 'aap-api';
+    env.clock.advance(5 * MIN);
+    env.world.lastOkAt = env.clock.now();
+    const r = await env.ctl.runOnce({ forceDetect: true });
+    expect(cs.listOpen().length).toBe(1);
+    const c = get(id);
+    expect(c.episode_key).not.toBe(key);
+    expect(c.wo_set.map((w) => w.id)).toEqual(['svc-9', 'wr-9']);
+    expect(events(id, 'episode_rolled').length).toBe(1);
+    expect(r.investigated.map((x) => x.caseId)).toEqual([id]);
+    expect(cs.getCase(id).runs[0].trigger).toBe('new_episode');
+  });
+});

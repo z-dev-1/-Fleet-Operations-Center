@@ -20,6 +20,12 @@
  * throttled autopilot:changed push. An 8-minute budget aborts the tick before the supervisor's
  * 10-minute timeout. No raw timer drives Autopilot; the supervisor schedules every tick.
  *
+ * V2 (§4.4, §8.2, §9.2): detection classifies every row through the equipment gate, opens cases
+ * under the maxQueued admission bound (held cases stay DETECTED), tags SAFETY_CRITICAL and stores
+ * a coverage pass; every running tick adds the equipment sweep, overflow promotion and slice-based
+ * triggers; the investigate step is a worker pool (queue.maxStartsPerTick starts, at most
+ * queue.maxConcurrent at once).
+ *
  * deps: { supervisor, ports, caseStore, schema, config, settingsStore, env, runInvestigation,
  *         limiter, jobs, reason, now, rand, owner, ctx{sendToWindow, pushBubbleNotification},
  *         defer(fn), telemetry, logger }
@@ -28,15 +34,20 @@
 const crypto = require('crypto');
 const {
   STATES: S, WATCHED_KEYS, OPERATIONAL_CADENCE, normUnit, unitIndex, UNIT_KEY_OF, HOUR, MIN,
+  SAFETY_LIFECYCLE_REASONS, woSetOf, localDate,
 } = require('./constants');
 const configMod = require('./config');
-const { buildScope, inScopeExisting } = require('./scope');
+const { buildScope, inScopeExisting, vendorOf } = require('./scope');
 const { detect, openingRulesApply } = require('./detect');
 const { dueTriggers, shouldEvalCheapFp, CHEAP_FP_STATES } = require('./triggers');
 const { cheapFp } = require('./fingerprint');
-const { score } = require('./priority');
-const { decisivRef } = require('./plan');
+const { scoreV2 } = require('./priority');
+const { decisivRef, tireRelevant } = require('./plan');
 const { createLimiter } = require('./limiter');
+const { classifyEquipment, CLASSES: EQ, EXCLUDED_CLASSES } = require('./equipment');
+const coverageMod = require('./coverage');
+const slices = require('./slices');
+const { nextStart, promotionCount } = require('./queue');
 
 let logger;
 try { logger = require('../utils/logger')('autopilot'); } catch (_) { logger = { debug() {}, info() {}, warn() {}, error() {} }; }
@@ -46,6 +57,15 @@ const TICK_BUDGET_MS = 8 * MIN;
 const PUSH_THROTTLE_MS = 2000;
 const AUTH_NOTICE_SPACING_MS = 2 * HOUR;
 const DETECT_KEYS = Object.freeze(['fleetData', 'canonicalState', 'longDwellStore', 'longDwellCsv']);
+const EQUIPMENT_PAUSES = new Set(['not_power_unit', 'type_unverified']);
+const DTNA_USABLE = new Set(['connected', 'pulling']);
+
+function _aiCap(cfg) {
+  const c = cfg || {};
+  if (c.ai && Number.isFinite(c.ai.dailyCap)) return c.ai.dailyCap;
+  return Number.isFinite(c.dailyCap) ? c.dailyCap : 0;
+}
+function _hasCode(reasons, code) { return (Array.isArray(reasons) ? reasons : []).some((r) => (r && typeof r === 'object' ? r.code : r) === code); }
 
 function _staleDays(doc) {
   const n = Number(doc && doc.staleDays);
@@ -83,6 +103,7 @@ function createController(deps) {
   let _lastTick = null;
   let _degraded = null;
   const _pendingTrigger = new Map();
+  const _pendingSlices = new Map();   // caseId -> changed slice names of the trigger that requeued it
   const _authEpisode = { midway: false, aperia: false };
 
   function _loadCfg() { return configMod.loadAutopilotConfig(cfgDeps); }
@@ -279,9 +300,21 @@ function createController(deps) {
       const due = o.forceDetect || _lastDetectAt == null || genChanged || fpNow !== cs.getMeta('last_detect_cfg_fp')
         || now0 - _lastDetectAt >= OPERATIONAL_CADENCE.detectEveryMs;
       const scope = buildScope(cfg);
+      const qc = cfg.queue || {};
+      const aging = { boost: qc.agingBoostPerHour, cap: qc.agingBoostCap };
+      // Equipment class per unit (§4.1): the detection pass and the equipment sweep use it.
+      const eqByUnit = new Map();
+      for (const [u, r] of rowsByUnit) eqByUnit.set(u, classifyEquipment(r));
       if (due) {
+        const tDetect = clock();
         const csvRows = docs.longDwellCsv && typeof docs.longDwellCsv === 'object' ? (docs.longDwellCsv.rows || {}) : {};
-        const cands = detect(rows, {
+        const eligibleRows = rows.filter((r) => classifyEquipment(r).cls === EQ.POWER_ELIGIBLE);
+        const safetyOf = (row) => {
+          if (!row || !isDown(row)) return false;
+          if (SAFETY_LIFECYCLE_REASONS.has(String(row.lifecycleReason || '').trim())) return true;
+          try { const dc = ports.downCause(row); return !!(dc && dc.cause === 'accident'); } catch (_) { return false; }
+        };
+        const cands = detect(eligibleRows, {
           scope, oosDays: cfg.oosDays, features: cfg.features, staleDays, now: now0, buildAtMs, syncedAt: fleet.syncedAt, isDown,
           canonical: (r) => { try { return ports.canonical(r); } catch (_) { return null; } },
           longDwell: { store: docs.longDwellStore || {}, csvRows },
@@ -291,15 +324,57 @@ function createController(deps) {
           },
           riRepeat: (eq) => { try { return ports.riRepeat(eq); } catch (_) { return []; } },
         });
+        // Admission bound (§8.4): only new cases consume room; updates, rolls and requeues never do.
+        let room = (Number.isFinite(qc.maxQueued) ? qc.maxQueued : Infinity) - cs.queuedCount();
+        let held = 0;
         for (const c of cands) {
           if (ac.signal.aborted) break;
           const row = rowsByUnit.get(c.unitId) || {};
-          const woIds = { primary: row._serviceId || row.workRequestId || null, secondary: (Array.isArray(row._secondaryWRs) ? row._secondaryWRs : []).map((w) => w && (w._serviceId || w.workRequestId)).filter(Boolean) };
+          const safety = safetyOf(rowsByUnit.get(c.unitId));
+          const reasons = safety && !_hasCode(c.reasons, 'SAFETY_CRITICAL')
+            ? (Array.isArray(c.reasons) ? c.reasons : []).concat([{ code: 'SAFETY_CRITICAL', fields: ['lifecycleReason'] }]) : c.reasons;
+          const eq = eqByUnit.get(c.unitId);
+          const dealerCases = [];
           try {
-            const r = cs.upsertDetected(Object.assign({}, c, { woIds, priority: score({ reasons: c.reasons, daysDown: c.daysDown, neverInvestigated: true }) }), { now: now0 });
-            if (r.created) { out.detected++; changed = true; _pendingTrigger.set(r.caseId, 'new'); }
+            for (const e of ports.dtnaCasesForUnit(c.unitId) || []) {
+              const id = e && (e.caseId || e.caseNumber);
+              if (id) dealerCases.push({ id: String(id), kind: 'dtna' });
+            }
+          } catch (_) { /* no DTNA refs */ }
+          const est = decisivRef(row).estimateId;
+          if (est) dealerCases.push({ id: String(est), kind: 'decisiv' });
+          const cand = Object.assign({}, c, {
+            reasons,
+            woIds: woSetOf(row),
+            equipmentClass: eq ? eq.equipmentClass : null,
+            operator: normUnit(row.operator).slice(0, 40) || null,
+            owner: row.owner == null ? null : String(row.owner).trim() || null,
+            vendor: vendorOf(row) || null,
+            dealerCases,
+            safety,
+            priority: scoreV2({ reasons, safety, daysDown: c.daysDown, neverInvestigated: true }),
+          });
+          try {
+            const r = cs.upsertDetected(cand, { now: now0, hold: c.openedBy != null && room <= 0 });
+            if (r.created) {
+              out.detected++; changed = true; _pendingTrigger.set(r.caseId, 'new');
+              if (r.state === S.QUEUED) room--; else held++;
+            }
+            if (r.rolled) { _pendingTrigger.set(r.caseId, 'new_episode'); changed = true; }
           } catch (e) { try { log.error('detection upsert failed: ' + (e && e.code)); } catch (_) {} }
         }
+        // Coverage pass (§4.3): every fleet row accounted for, stored in one transaction.
+        try {
+          const openByUnit = new Map();
+          for (const oc of cs.listOpen()) openByUnit.set(oc.unit_id, oc.case_id);
+          const built = coverageMod.buildPass({
+            rows, scope, features: cfg.features, oosDays: cfg.oosDays, isDown,
+            detectCands: new Map(cands.map((c) => [c.unitId, c])), openCasesByUnit: openByUnit,
+            authorizedTokens: cfg.authorizedTokens, now: now0, buildAtMs, opened: out.detected, held, ms: clock() - tDetect,
+          });
+          cs.applyPass(built.pass, built.units, { now: now0 });
+          out.coverage = { reconcileOk: built.pass.reconcile_ok === 1, held };
+        } catch (e) { try { log.error('coverage pass failed: ' + ((e && e.code) || 'INTERNAL')); } catch (_) {} }
         cs.setMeta('last_detect_cfg_fp', fpNow);
         _lastDetectAt = now0;
       }
@@ -311,21 +386,36 @@ function createController(deps) {
       const toPauseFeature = [];
       const backInScope = [];
       const featureOn = [];
+      const toPauseNotPower = [];
+      const toPauseTypeUnverified = [];
+      const backEligible = [];
       for (const c of open) {
         const row = rowsByUnit.get(c.unit_id);
+        // Equipment sweep (§4.4 step 5). A unit missing from fleetData is left to missing_syncs.
+        const eq = row ? eqByUnit.get(c.unit_id) : null;
+        const eligible = !eq || eq.cls === EQ.POWER_ELIGIBLE;
         if (c.state === S.PAUSED) {
+          if (EQUIPMENT_PAUSES.has(c.pause_reason)) { if (row && eligible) backEligible.push(c.case_id); continue; }
           if (c.pause_reason === 'out_of_scope' && row && inScopeExisting(row, scope)) backInScope.push(c.case_id);
           else if (c.pause_reason === 'feature_off' && openingRulesApply(c.reasons, cfg.features)) featureOn.push(c.case_id);
           continue;
         }
         if (c.state === S.INVESTIGATING || c.state === S.ANALYZING) continue;
-        if (row && !inScopeExisting(row, scope)) toPauseScope.push(c.case_id);
+        if (!eligible) (EXCLUDED_CLASSES.includes(eq.cls) ? toPauseNotPower : toPauseTypeUnverified).push(c.case_id);
+        else if (row && !inScopeExisting(row, scope)) toPauseScope.push(c.case_id);
         else if (!openingRulesApply(c.reasons, cfg.features)) toPauseFeature.push(c.case_id);
       }
+      if (toPauseNotPower.length && cs.pauseCases(toPauseNotPower, 'not_power_unit', { now: now0 }).length) changed = true;
+      if (toPauseTypeUnverified.length && cs.pauseCases(toPauseTypeUnverified, 'type_unverified', { now: now0 }).length) changed = true;
       if (toPauseScope.length && cs.pauseCases(toPauseScope, 'out_of_scope', { now: now0 }).length) changed = true;
       if (toPauseFeature.length && cs.pauseCases(toPauseFeature, 'feature_off', { now: now0 }).length) changed = true;
+      if (backEligible.length) for (const id of cs.requeueCases({ caseIds: backEligible, trigger: 'eligible', now: now0 })) { _pendingTrigger.set(id, 'eligible'); changed = true; }
       if (backInScope.length) for (const id of cs.requeueCases({ caseIds: backInScope, trigger: 'in_scope', now: now0 })) { _pendingTrigger.set(id, 'scheduled'); changed = true; }
       if (featureOn.length) for (const id of cs.requeueCases({ caseIds: featureOn, trigger: 'feature_on', now: now0 })) { _pendingTrigger.set(id, 'feature_on'); changed = true; }
+
+      // Overflow promotion (§8.4): held DETECTED cases fill the room left under maxQueued.
+      const nPromote = promotionCount(qc.maxQueued, cs.queuedCount());
+      if (nPromote > 0 && cs.promoteDetected(nPromote, Object.assign({ now: now0 }, aging)).length) changed = true;
 
       // step 6: triggers.
       let auth = {};
@@ -333,47 +423,104 @@ function createController(deps) {
       _authNotice(auth, now0);
       const cheapOf = _cheapFpOf(docs, ports, now0);
       const cur = cs.listOpen();
-      const cheapFps = new Map();
+      // Slice fingerprints (§9.1) replace the V1 cheap fp for trigger decisions. A case with no
+      // stored baseline (a V1 case after the upgrade) gets one written and fires nothing (AC-24).
+      const sliceFps = new Map();
       if (shouldEvalCheapFp({ evaluatedOnce: _cheap.evaluatedOnce, gens, prevGens: _cheap.prevGens, lastEvalAt: _cheap.lastEvalAt, now: now0 })) {
+        let aperiaOnce;   // the Aperia cache, read at most once per pass and only for a tire-relevant unit
+        const aperiaFor = (row) => {
+          if (!tireRelevant(row)) return null;
+          if (aperiaOnce === undefined) {
+            try { aperiaOnce = ports.aperiaCachedIssues(); } catch (_) { aperiaOnce = null; }
+            if (aperiaOnce === undefined) aperiaOnce = null;
+          }
+          return aperiaOnce;
+        };
         for (const c of cur) {
           if (!CHEAP_FP_STATES.has(c.state)) continue;
-          try { cheapFps.set(c.case_id, cheapOf(c, rowsByUnit.get(c.unit_id) || null)); } catch (_) {}
+          const row = rowsByUnit.get(c.unit_id);
+          if (!row) continue;
+          let fps;
+          try { fps = slices.forCase({ row, unit: c.unit_id, docs, ports, now: now0, aperiaIssues: aperiaFor(row) }); } catch (_) { continue; }
+          if (c.slice_fps == null) {
+            try { cs.setSliceBaseline(c.case_id, fps, { now: now0 }); } catch (_) {}
+            continue;
+          }
+          sliceFps.set(c.case_id, fps);
         }
         _cheap.evaluatedOnce = true;
         _cheap.prevGens = gens;
         _cheap.lastEvalAt = now0;
       }
+      let dtnaSt;
+      const sourceUsable = (source, k) => {
+        switch (source) {
+          case 'aap_live': return auth.midway === 'HEALTHY' && auth.aapWarm === true;
+          case 'decisiv': {
+            const ref = decisivRef(rowsByUnit.get(k && k.unit_id) || {});
+            if (!ref.srUrl) return false;
+            try { return ports.decisivIsWarm(ref.srUrl) === true; } catch (_) { return false; }
+          }
+          case 'dtna': {
+            if (dtnaSt === undefined) { try { dtnaSt = ports.dtnaStatus() || {}; } catch (_) { dtnaSt = {}; } }
+            return DTNA_USABLE.has(dtnaSt.state) && dtnaSt.actionNeeded !== true;
+          }
+          case 'aperia_cache': return !(auth.aperia && auth.aperia.actionNeeded);
+          default: return false;
+        }
+      };
+      const capNow = _aiCap(cfg);
+      const aiCapLeft = Math.max(0, capNow - (parseInt(cs.getMeta('ai_calls:' + localDate(now0)) || '0', 10) || 0));
       const runs = new Map();
       for (const c of cur) runs.set(c.case_id, cs.runsSince(c.case_id, now0 - 24 * HOUR));
-      const trig = dueTriggers(cur, now0, { cheapFps, authState: auth, runs, etaFired: cs.etaDueFired(now0 - 7 * 24 * HOUR) });
+      const trig = dueTriggers(cur, now0, { sliceFps, sourceUsable, aiCapLeft, authState: auth, runs, etaFired: cs.etaDueFired(now0 - 7 * 24 * HOUR) });
       for (const t of trig) {
         const reason = t.trigger === 'eta_due' ? 'eta_due:' + t.date : t.trigger;
         if (cs.requeueCases({ caseIds: [t.caseId], trigger: reason, now: now0 }).length) {
           _pendingTrigger.set(t.caseId, t.trigger);
+          if (Array.isArray(t.changedSlices)) _pendingSlices.set(t.caseId, t.changedSlices);
           out.triggers++;
           changed = true;
         }
       }
 
-      // step 7: investigate up to maxCasesPerTick, one at a time.
-      const picked = cs.pickQueued(cfg.maxCasesPerTick, clock());
+      // step 7: the worker pool (§8.2): up to maxStartsPerTick starts, at most maxConcurrent at once,
+      // no start with less than LIMITS.minStartRemainingMs of tick time left (the case stays QUEUED).
+      const picked = cs.pickQueued(qc.maxStartsPerTick || cfg.maxCasesPerTick, clock(), aging);
+      const deadline = t0 + TICK_BUDGET_MS;
+      const running = new Set();
+      const startRun = (c) => {
+        const trigger = o.trigger || _pendingTrigger.get(c.case_id) || (c.last_checked_at == null ? 'new' : 'retry');
+        const changedSlices = _pendingSlices.get(c.case_id);
+        _pendingTrigger.delete(c.case_id);
+        _pendingSlices.delete(c.case_id);
+        const runDeps = {
+          ports, limiter, cfg, signal: ac.signal, trigger, owner, now: clock, rand, caseStore: cs, jobs,
+          reason: d.reason, fleet: { doc: fleet, ff }, docs, staleDays, cheapFpOf: cheapOf,
+        };
+        if (changedSlices) runDeps.changedSlices = changedSlices;
+        const exec = () => runInvestigation(c.case_id, runDeps);
+        const p = Promise.resolve()
+          .then(() => (telemetry && typeof telemetry.track === 'function' ? telemetry.track('autopilot.run', exec) : exec()))
+          .catch((e) => {
+            const r = { ok: false, caseId: c.case_id, code: (e && e.code) || 'INTERNAL' };
+            try { log.warn(c.unit_id + ' investigation threw: ' + r.code); } catch (_) {}
+            return r;
+          })
+          .then((r) => { out.investigated.push(r); changed = true; running.delete(p); });
+        running.add(p);
+      };
       for (const c of picked) {
         if (ac.signal.aborted) break;
-        const trigger = o.trigger || _pendingTrigger.get(c.case_id) || (c.last_checked_at == null ? 'new' : 'retry');
-        _pendingTrigger.delete(c.case_id);
-        let r;
-        try {
-          r = await runInvestigation(c.case_id, {
-            ports, limiter, cfg, signal: ac.signal, trigger, owner, now: clock, rand, caseStore: cs, jobs,
-            reason: d.reason, fleet: { doc: fleet, ff }, docs, staleDays, cheapFpOf: cheapOf,
-          });
-        } catch (e) {
-          r = { ok: false, caseId: c.case_id, code: (e && e.code) || 'INTERNAL' };
-          try { log.warn(c.unit_id + ' investigation threw: ' + r.code); } catch (_) {}
+        let act = nextStart({ running: running.size, maxConcurrent: qc.maxConcurrent, remainingMs: deadline - clock() });
+        while (act === 'wait') {
+          await Promise.race(running);
+          act = nextStart({ running: running.size, maxConcurrent: qc.maxConcurrent, remainingMs: deadline - clock() });
         }
-        out.investigated.push(r);
-        changed = true;
+        if (act === 'stop' || ac.signal.aborted) break;
+        startRun(c);
       }
+      await Promise.all(running);
 
       // step 8: prune at most every 6 h.
       try { cs.prune({ now: clock(), localHistory: cfg.features.localHistory !== false }); } catch (_) {}

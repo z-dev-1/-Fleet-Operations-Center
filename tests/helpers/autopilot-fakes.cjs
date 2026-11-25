@@ -206,7 +206,7 @@ function mkEnv(opts) {
   const pushes = [];
   const ap = createAutopilot({
     supervisor, ports, reason, settingsStore: settings, env: o.env || {}, now: ck.now, rand: () => 0.5,
-    owner: o.owner || 'owner-a', caseStore: o.caseStore || cs, telemetry: null,
+    owner: o.owner || 'owner-a', caseStore: o.caseStore || cs, telemetry: o.telemetry || null, runInvestigation: o.runInvestigation,
     defer: (fn) => deferred.push(fn),
     ctx: { pushBubbleNotification: (n) => notifications.push(n), sendToWindow: (ch, p) => pushes.push([ch, p]) },
   });

@@ -244,6 +244,41 @@ describe('master controls during a harness run (AC-14)', () => {
   });
 });
 
+describe('stratified sampling and report fields (V2 §12.4)', () => {
+  const mk = (id, domicile, operator, priority) => ({ case_id: id, domicile, operator, priority, created_at: 0 });
+
+  it('round-robin over (domicile, operator) groups by size desc, at most ceil(runs/groups) per group, then fill by priority', () => {
+    const cases = [
+      mk('a1', 'ABE40', 'TUZR', 50), mk('a2', 'ABE40', 'TUZR', 40), mk('a3', 'ABE40', 'TUZR', 30), mk('a4', 'ABE40', 'TUZR', 20), mk('a5', 'ABE40', 'TUZR', 90),
+      mk('b1', 'EWR45', 'KNXP', 10), mk('b2', 'EWR45', 'KNXP', 60),
+      mk('c1', 'PHL40', 'SWFT', 5),
+    ];
+    // runs 6, 3 groups -> 2 per group in the round-robin (a5,b2,c1,a1,b1), then the best remaining (a2).
+    expect(harness.stratifiedSample(cases, 6).map((c) => c.case_id)).toEqual(['a5', 'b2', 'c1', 'a1', 'b1', 'a2']);
+    // runs 20 with 8 cases: every case once, the largest group first.
+    const all = harness.stratifiedSample(cases, 20).map((c) => c.case_id);
+    expect(all.length).toBe(8);
+    expect(all.slice(0, 3)).toEqual(['a5', 'b2', 'c1']);
+    expect(harness.stratifiedSample([], 20)).toEqual([]);
+  });
+
+  it('the report adds byDomicile, byOperator and the latest coverage pass with reconcileOk', async () => {
+    const env = F.mkEnv({ world: world(), autopilot: { maxCasesPerTick: 5 } });
+    await env.ctl.runOnce({ forceDetect: true });
+    const r = await env.ap.harnessRun({ runs: 24 });
+    expect(r.ok).toBe(true);
+    const rep = JSON.parse(fs.readFileSync(r.reportPath, 'utf8'));
+    expect(rep.sampleSize).toBe(3);
+    expect(rep.byDomicile).toEqual({ ABE40: 16, ROC5: 8 });
+    expect(rep.byOperator).toEqual({ TUZR: 24 });
+    expect(rep.coverage.reconcileOk).toBe(true);
+    expect(rep.coverage.pass).toMatchObject({ fleet_rows: 3, case_open: 3 });
+    // The harness still writes exactly one file (one writeFileSync in harness.js).
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'autopilot', 'harness.js'), 'utf8');
+    expect((src.match(/writeFileSync\(/g) || []).length).toBe(1);
+  });
+});
+
 describe('R5 boundary', () => {
   it('harness.js requires neither ./investigate nor ./controller; index.js injects them', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'autopilot', 'harness.js'), 'utf8');
