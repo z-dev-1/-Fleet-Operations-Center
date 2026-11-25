@@ -205,3 +205,23 @@ describe('real runs (review finding 7, AC-24, AC-25)', () => {
     expect(p).toContain('Turbo backorder at the dealer.');
   });
 });
+
+describe('sliceFp: live tool pre-call fingerprint (§6.2.5)', () => {
+  const row = { equipmentId: U, fullConversation: 'Waiting on turbo', asistNotes: null, decisivCaseId: '21350186' };
+  it('comments fp follows the comments slice and ignores cosmetic fields', () => {
+    const a = slices.sliceFp('comments', row, {});
+    expect(a).toBe(slices.computeSlices({ row, docs: {} }).comments);
+    expect(slices.sliceFp('comments', Object.assign({}, row, { syncedAt: 1, workDuration: 9 }), {})).toBe(a);
+    expect(slices.sliceFp('comments', Object.assign({}, row, { fullConversation: 'Turbo arrived' }), {})).not.toBe(a);
+  });
+  it('decisiv fp hashes the cache entry slice values, not fetch times; null without an entry', () => {
+    const r = Object.assign({}, row);
+    const id = '21350186';
+    const docs = (e) => ({ decisivCaseCache: { [id]: e } });
+    const base = slices.sliceFp('decisiv', r, docs({ stage: 'Repair', notesCount: 2, fetchedAt: 1 }));
+    expect(base).toMatch(/^[0-9a-f]{40}$/);
+    expect(slices.sliceFp('decisiv', r, docs({ stage: 'Repair', notesCount: 2, fetchedAt: 2 }))).toBe(base);
+    expect(slices.sliceFp('decisiv', r, docs({ stage: 'Repair', notesCount: 3, fetchedAt: 2 }))).not.toBe(base);
+    expect(slices.sliceFp('decisiv', r, {})).toBeNull();
+  });
+});

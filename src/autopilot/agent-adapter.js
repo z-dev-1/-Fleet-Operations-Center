@@ -35,6 +35,7 @@ const fingerprint = require('./fingerprint');
 const { buildConflicts } = require('./conflicts');
 const registryMod = require('./tool-registry');
 const evidence = require('./evidence');
+const slices = require('./slices');
 const { SOURCES: S, OPERATIONAL_CADENCE, LIMITS, ApError, normUnit, localDate } = require('./constants');
 
 const { TOOL_DEFS, TOOL_NAMES } = registryMod;
@@ -249,8 +250,12 @@ async function runAgentInvestigation(input) {
     const live = !!(d && d.costClass === 'live');
     let preFp = null;
     if (live) {
-      const own = [...evidenceIndex.values()].filter((it) => it.source === d.source || (d.gateSource && it.source === d.gateSource));
-      preFp = own.length ? fingerprint.itemsFp(own) : null;
+      // §6.2.5: the pre-call slice fp, so call_key does not depend on which tools ran earlier.
+      const docOf = (k) => {
+        if (t.docs && Object.prototype.hasOwnProperty.call(t.docs, k)) return t.docs[k];
+        try { return t.ports.readStore(k); } catch (_) { return null; }
+      };
+      try { preFp = slices.sliceFp(d.source === S.DECISIV ? 'decisiv' : 'comments', t.row, docOf); } catch (_) { preFp = null; }
     }
     const args = _normArgs(req);
     const argsHash = _sha1(fingerprint.stableStringify(args));

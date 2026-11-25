@@ -156,6 +156,28 @@ function forCase(input) {
   return computeSlices({ row, unit, docs: i.docs, dtnaEntries, aperiaIssues, riSummary: { count: events.length, maxReportedAt } });
 }
 
+/**
+ * sliceFp(slice, row, docs) -> pre-call fingerprint of a live tool's source (§6.2.5), stored as
+ * ap_step.source_fp and part of call_key. 'comments' (AAP) is the comments slice of the row and
+ * docs; 'decisiv' hashes the Decisiv cache entry's slice values (no fetch times). null when the
+ * source has nothing to fingerprint.
+ */
+function sliceFp(slice, row, docs) {
+  const r = _obj(row) || {};
+  if (slice === 'decisiv') {
+    const ref = decisivRef(r);
+    const decDoc = _obj(_reader(docs)('decisivCaseCache'));
+    const dec = ref.estimateId && decDoc ? _obj(decDoc[ref.estimateId]) : null;
+    if (!dec) return null;
+    return _h({
+      notesCount: _v(dec.notesCount), newestNoteAt: _v(dec.newestNoteAt), stage: _v(dec.stage),
+      estimateStatus: _v(dec.estimateStatus), etr: _v(dec.etr !== undefined ? dec.etr : dec.repairEtc),
+    });
+  }
+  const s = computeSlices({ row: r, docs });
+  return Object.prototype.hasOwnProperty.call(s, slice) ? s[slice] : null;
+}
+
 function changedSlices(prev, next) {
   const p = _obj(prev);
   const n = _obj(next);
@@ -169,4 +191,4 @@ function triggerFor(prev, next) {
   return null;
 }
 
-module.exports = { computeSlices, forCase, changedSlices, triggerFor, SLICE_NAMES, TRIGGER_ORDER };
+module.exports = { computeSlices, forCase, sliceFp, changedSlices, triggerFor, SLICE_NAMES, TRIGGER_ORDER };
