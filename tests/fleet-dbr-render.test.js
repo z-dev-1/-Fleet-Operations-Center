@@ -73,7 +73,7 @@ describe('tableHtml', () => {
     expect(html).not.toContain('data-fdbr-action="redraft" data-key="' + zero.key + '"');
     expect(L.tableHtml(m, { aiDraft: false })).not.toContain('data-fdbr-action="redraft"');
     expect(html).toContain('FAS source: none');
-    const r = model({ rosterFas: { [down.key]: 'Roster Person' } }).rows.find((x) => x.key === down.key);
+    const r = model({ rosterExact: { [down.key]: 'Roster Person' }, rosterFas: { [down.key]: 'Roster Person' } }).rows.find((x) => x.key === down.key);
     expect(L.unitsDrillHtml(r)).toContain('FAS source: roster (roster: Roster Person)');
   });
 
@@ -150,15 +150,16 @@ describe('visibleRows / eligibleForAutoDraft', () => {
   });
 });
 
-// A v2 draft over the real builder row (FEAT-004).
+// A v3 draft over the real builder row (overlay v3: only d.sheet prose cells overlay).
 const KEY = 'ROC5|AUVTE';
 function v2Model(draftOver = {}, overlays = {}) {
   const built = F.buildFleetDbr(makeFleetRows(), { today: TODAY });
   const row = built.rows.find((r) => r.key === KEY);
   const u0 = row.units[0].id;
   const d = Object.assign({
-    version: 2, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X',
-    cells: { oemYN: 'Y', oemDetails: '\u2022 ' + u0 + ': at dealer', partsYN: 'N', partsDetails: '', fasActions: '\u2022 ' + u0 + ': <b>called</b> TA' },
+    version: 3, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X',
+    unitNotes: { oemDetails: '\u2022 ' + u0 + ': at dealer', fasActions: '\u2022 ' + u0 + ': called TA' },
+    sheet: { oemYN: 'Y', oemDetails: 'Volvo offsite: ' + u0 + '.', fasActions: 'Following up on ' + u0 + ' <b>diag</b>.' },
     sources: { oemYN: 'ai', oemDetails: 'ai', partsYN: 'ai', partsDetails: 'ai', fasActions: 'ai' },
     flags: { partsYN: 'review', fasActions: 'review' },
     disagreements: ['parts'],
@@ -189,55 +190,71 @@ describe('AI markers, drill-down and flags (FEAT-004)', () => {
     expect(hOff).not.toContain('\u26a0 check');
   });
 
-  it('AI marker on AI Y/N cells, ⚠ check on flagged cells (text, not colour only), escaped values', () => {
+  it('AI marker on AI sheet cells only; Y/N cells stay computed (Yes/No on screen, no AI marker); escaped values', () => {
     const { m, row } = v2Model();
     const h = L.tableHtml(m, { aiDraft: true });
-    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="oemYN">Y<span class="fdbr-mark">AI</span></td>');
-    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="partsYN">N<span class="fdbr-mark">AI</span><span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span></td>');
-    expect(h).not.toContain('<b>called</b>');
-    expect(h).toContain('&lt;b&gt;called&lt;/b&gt;');
-    expect(L.cellInnerHtml(row, 'fasActions')).toContain('\u26a0 check');
-    // An edited cell shows "edited" and no ⚠.
+    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="oemYN">No</td>');
+    expect(h).toContain('<td data-key="ROC5|AUVTE" data-col="partsYN">No</td>');
+    expect(row.cells.oemDetails).toBe(''); // computed N -> the draft's Details is not overlaid
+    expect(row.source.fasActions).toBe('ai');
+    expect(L.markHtml(row, 'fasActions')).toBe('<span class="fdbr-mark">AI</span>');
+    expect(h).not.toContain('<b>diag</b>');
+    expect(h).toContain('&lt;b&gt;diag&lt;/b&gt;');
+    expect(L.cellInnerHtml(row, 'oemYN')).toBe('No');
+    // An edited cell shows "edited".
     const e = v2Model({}, { edits: { [KEY]: { fasActions: 'mine' } } }).row;
     expect(L.markHtml(e, 'fasActions')).toBe('<span class="fdbr-mark">edited</span>');
     expect(L.PANEL_CSS).toContain('.fdbr-mark--warn');
   });
 
-  it('drill-down: AI ETC, ETC disagreement / override, sources, unverified names, unbound dates, AI vs rules (all escaped)', () => {
-    const { row } = v2Model();
+  it('drill-down: AI ETC, ETC disagreement / override, sources, unit notes, unverified names, unbound dates, AI vs rules (all escaped)', () => {
+    const { row, u0 } = v2Model();
     const d = L.unitsDrillHtml(row);
+    expect(d).toContain('AI note (oemDetails): at dealer');
+    expect(d).toContain('AI note (fasActions): called TA \u26a0 check'); // the draft's soft flag, drill-down only
+    expect(d).not.toContain('AI note (oemDetails): at dealer \u26a0');
+    expect(d.indexOf('AI note')).toBeGreaterThan(d.indexOf('<strong>' + u0 + '</strong>'));
     expect(d).toContain('AI ETC: none (ai)');
     expect(d).toContain('ETC: AI 11/08 vs rules 11/14');
     expect(d).toContain('ETC: AI none (rules 11/08) \u2014 &#39;ETC 11/08 cancelled &lt;i&gt;x&lt;/i&gt;&#39;');
     expect((d.match(/sources: 11\/10 \[FAS\] &#39;called TA re &lt;tech&gt;&#39;/g) || []).length).toBe(1); // de-duplicated
     expect(d).toContain('unverified name: Vanguard&lt;script&gt; (partsDetails)');
     expect(d).toContain('unbound date: eta 11/09 (partsDetails)');
-    expect(d).toContain('AI vs rules: Parts Delay AI=N rules=Y');
+    expect(d).toContain('AI vs rules: Parts Delay AI=Y rules=N'); // the cell holds the rules' N
     expect(d).not.toContain('<script>');
     expect(d).not.toContain('<tech>');
   });
 
-  it('AC37: rules Y vs AI N -> partsYN N kept, flagged, counted by flaggedCount', () => {
+  it('AC37: rules own partsYN (N kept, never flagged); draft soft flags stay on the unit notes, so flaggedCount counts only row.flags', () => {
     const { row } = v2Model();
     expect(row.cells.partsYN).toBe('N');
-    expect(row.flags.partsYN).toBe('review');
-    expect(L.flaggedCount([row])).toBe(2);
-    expect(L.flaggedCount([row], (r, id) => id === 'fasActions')).toBe(1);
-    const e = v2Model({}, { edits: { [KEY]: { fasActions: 'mine' } } }).row;
-    expect(L.flaggedCount([e])).toBe(1);
+    expect(row.source.partsYN).toBe('computed');
+    expect(row.flags).toEqual({});
+    expect(row.unitNoteFlags).toEqual({ fasActions: 'review' });
+    expect(L.flaggedCount([row])).toBe(0);
+    const flagged = { flags: { fasActions: 'review', support: 'review' }, source: {} };
+    expect(L.flaggedCount([flagged])).toBe(2);
+    expect(L.flaggedCount([flagged], (r, id) => id === 'fasActions')).toBe(1);
   });
 
-  it('AC32: evidence-stale is not auto-queued, but is with includeEvidenceStale; units / identity are', () => {
-    const ev = v2Model({ evidenceHash: 'old' }).m;
-    expect(ev.rows.find((r) => r.key === KEY).draft.staleReason).toBe('evidence');
-    expect(L.eligibleForAutoDraft(ev)).not.toContain(KEY);
-    expect(L.eligibleForAutoDraft(ev, { includeEvidenceStale: true })).toContain(KEY);
+  it('AC13 / AC32: auto queue = units/identity-stale rows; format/evidence-stale only when mine; Draft all queues them all', () => {
+    const mine = { rosterExact: { [KEY]: 'Me' }, rosterLoaded: true, fasNameOverride: 'Me' };
+    for (const [over, why] of [[{ evidenceHash: 'old' }, 'evidence'], [{ version: 2 }, 'format']]) {
+      const notMine = v2Model(over).m;
+      expect(notMine.rows.find((r) => r.key === KEY).draft.staleReason).toBe(why);
+      expect(L.eligibleForAutoDraft(notMine)).not.toContain(KEY);
+      expect(L.eligibleForAutoDraft(notMine, { includeEvidenceStale: true })).toContain(KEY);
+      const m = v2Model(over, mine).m;
+      expect(m.rows.find((r) => r.key === KEY).mine).toBe(true);
+      expect(L.eligibleForAutoDraft(m)).toContain(KEY);
+    }
     const units = v2Model({ unitsHash: 'old' }).m;
     expect(L.eligibleForAutoDraft(units)).toContain(KEY);
     const id = v2Model({ identity: { alias: false, names: 0, fasTagged: 0 } }, { fasAliasKnown: true }).m;
     expect(id.rows.find((r) => r.key === KEY).draft.staleReason).toBe('identity');
     expect(L.eligibleForAutoDraft(id)).toContain(KEY);
     expect(L.eligibleForAutoDraft(v2Model().m)).not.toContain(KEY);
+    expect(L.eligibleForAutoDraft(v2Model({}, mine).m)).not.toContain(KEY); // ok draft: never re-queued
   });
 
   it('AC40: ETA in the status line', () => {
@@ -247,16 +264,19 @@ describe('AI markers, drill-down and flags (FEAT-004)', () => {
     expect(L.statusLine(model(), { ai: { done: 20, total: 20, etaMin: 0 } })).not.toContain('min left');
   });
 
-  it('notes describe the AI cells and the whole-number ETC counts', () => {
-    expect(L.AI_NOTE).toContain('AI decides each barrier Y/N');
+  it('notes describe who owns the cells (DR2-9) and the ETC / OEM rules', () => {
+    expect(L.AI_NOTE).toBe('Y/N and counts come from rules. AI writes only Details, FAS Actions and Support, and only when its sentence passes the fact check; otherwise auto text is shown.');
     expect(L.ETC_NOTE).toContain('whole-number');
     expect(L.ETC_NOTE).toContain('drill-down');
+    expect(L.ETC_NOTE).toContain("saved 'No ETC' note");
+    expect(L.OEM_NOTE).toContain('released');
+    expect(L.OEM_NOTE).not.toContain('stalled');
   });
 });
 
 describe('statusLine', () => {
   it('counts rows/down, AI progress and rows using your name', () => {
-    const m = model({ fasNameOverride: 'Me', rosterFas: { 'ROC5|AUVTE': 'R' } });
+    const m = model({ fasNameOverride: 'Me', rosterExact: { 'ROC5|AUVTE': 'R' } });
     const s = L.statusLine(m, { ai: { done: 3, total: 7 } });
     expect(s).toContain('21 rows');
     expect(s).toContain(m.downCount + ' down');
@@ -430,7 +450,7 @@ describe('Copy fill columns', () => {
     for (const line of lines) expect(line.split('\t').length).toBe(17);
     const first = lines[0].split('\t');
     expect(first[16]).toBe('a b c d');
-    expect(first[2]).toBe('Y'); // oemYN from the AI draft
+    expect(first[2]).toBe('N'); // oemYN stays the rules' value; the draft's Y is never overlaid
     expect(first[15]).toBe(L.fillCell(row.cells.fasActions));
     expect(lines[1].split('\t')).toEqual(L.fillColumns(m).map((c) => L.fillCell(rows[1].cells[c.id])));
     expect(L.fillCell(null)).toBe('');
@@ -439,5 +459,192 @@ describe('Copy fill columns', () => {
 
   it('panelHtml has the Copy fill columns button next to the other copy actions', () => {
     expect(L.panelHtml({ status: 'ready' })).toContain('data-fdbr-action="copy-fill">\ud83d\udccb Copy fill columns</button>');
+  });
+});
+
+// ── Copy for SharePoint, freshness, markers (design §3.5, §3.12, §3.13; FEAT-004) ──
+const ME = 'Z Santiago';
+const MINE_KEYS = ['ROC5|AUVTE', 'ABE40|SAPB', 'AVP40|YTSC'];
+const rosterModel = (over = {}) => model(Object.assign({
+  rosterExact: Object.fromEntries(MINE_KEYS.map((k) => [k, ME]).concat([['HBD1|AKJJI', 'Other FAS']])),
+  rosterFas: { 'MIMY01|MIMY': 'Site Match' }, rosterLoaded: true, fasNameOverride: ME,
+}, over));
+
+describe('sheetValue / sheetTsv (golden format, I4)', () => {
+  it('sheetValue per column type; user-edited counts are copied as typed (DR2-6)', () => {
+    expect(L.sheetValue('oemYN', 'Y')).toBe('Yes');
+    expect(L.sheetValue('oemYN', 'n')).toBe('No');
+    expect(L.sheetValue('domicileUptime', '69%')).toBe('69');
+    expect(L.sheetValue('scacUptime', '83.3%')).toBe('83.3');
+    expect(L.sheetValue('missedEtc', '1\n\u2022 211022 (ETC 11/9): waiting')).toBe('1');
+    expect(L.sheetValue('missedEtc', '1\n\u2022 211022 (ETC 11/9): waiting', 'computed')).toBe('1');
+    expect(L.sheetValue('missedEtc', '1 \u2013 211022: waiting on parts', 'edit')).toBe('1 \u2013 211022: waiting on parts');
+    expect(L.sheetValue('missedEtc', '1 \u2013 211022:\nwaiting on parts', 'edit')).toBe('1 \u2013 211022: waiting on parts');
+    expect(L.sheetValue('noEtc', '7')).toBe('7');
+    expect(L.sheetValue('fasActions', 'a\tb\n c')).toBe('a b c');
+    expect(L.sheetValue('domicile', 'ROC5')).toBe('ROC5');
+    expect(L.sheetValue('fasName', null)).toBe('');
+  });
+
+  it('AC10: header = the 24 headers; Y/N in {Yes, No}; bare uptimes; single-line cells; bare Missed; FAS Name on the user rows', () => {
+    const m = rosterModel();
+    const rows = L.copyRows(m, 'mine', false, []);
+    const tsv = L.sheetTsv(m.columns, rows, null, { header: true });
+    const lines = tsv.split('\n');
+    expect(lines[0]).toBe(HEADERS.join('\t'));
+    expect(lines).toHaveLength(1 + rows.length);
+    const ids = m.columns.map((c) => c.id);
+    for (const line of lines.slice(1)) {
+      const cells = line.split('\t');
+      expect(cells).toHaveLength(24);
+      for (const [i, id] of ids.entries()) {
+        if (/YN$/.test(id)) expect(['Yes', 'No']).toContain(cells[i]);
+        if (/Uptime$/.test(id)) expect(cells[i]).toMatch(/^\d+(\.\d)?$/);
+        if (['etcToday', 'noEtc', 'missedEtc'].includes(id)) expect(cells[i]).toMatch(/^\d+$/);
+      }
+      expect(cells[0]).toBe(ME);
+      expect(line).not.toMatch(/[\r\u2022]/);
+    }
+    expect(L.sheetTsv(m.columns, rows.slice(0, 1), null, {})).toBe(lines[1]);
+    // getSource override: a live (unsaved) count edit copies as typed.
+    const live = L.sheetTsv([{ id: 'missedEtc', header: 'Missed ETC' }], rows.slice(0, 1), () => '2 \u2013 x', { getSource: () => 'edit' });
+    expect(live).toBe('2 \u2013 x');
+    expect(L.sheetTsv([{ id: 'support', header: 'S' }], [{ cells: { support: 'say "hi"' }, source: {} }], null, {})).toBe('"say ""hi"""');
+  });
+
+  it('sheetOrder: mine first, then pair down desc, SCAC down desc, domicile asc, SCAC asc', () => {
+    const r = (key, mine, down, sdown) => ({ key, mine, domicile: key.split('|')[0], scac: key.split('|')[1], pair: { down }, scacStats: { down: sdown } });
+    const rows = [r('B|X', false, 9, 9), r('A|Z', true, 1, 4), r('A|Y', true, 1, 4), r('C|Q', true, 1, 1), r('Z|Z', true, 2, 2), r('D|D', true, 1, 4)];
+    expect(L.sheetOrder(rows).map((x) => x.key)).toEqual(['Z|Z', 'A|Y', 'A|Z', 'D|D', 'C|Q', 'B|X']);
+    expect(rows[0].key).toBe('B|X'); // not mutated
+    expect(L.sheetOrder(null)).toEqual([]);
+    // The table uses the same order.
+    const m = rosterModel();
+    const keys = [...L.tableHtml(m, {}).matchAll(/<tr data-key="([^"]+)">/g)].map((x) => x[1]);
+    expect(keys).toEqual(L.sheetOrder(m.rows).map((x) => x.key));
+    expect(keys.slice(0, 3).sort()).toEqual(MINE_KEYS.slice().sort());
+  });
+
+  it('copyRows / copyScopeInfo: mine = the user pairs with units down; visible = SCAC filter + hide-zero; DR2-13 notes', () => {
+    const m = rosterModel();
+    const mine = L.copyRows(m, 'mine', false, []);
+    expect(mine.every((x) => x.mine && x.pair.down > 0)).toBe(true);
+    expect(mine.map((x) => x.key).sort()).toEqual(MINE_KEYS.slice().sort());
+    expect(L.copyRows(m, 'visible', false, []).map((x) => x.key)).toEqual(L.sheetOrder(m.rows).map((x) => x.key));
+    expect(L.copyRows(m, 'visible', true, ['TUZR']).every((x) => x.scac === 'TUZR' && x.pair.down > 0)).toBe(true);
+    expect(L.copyScopeInfo(m, false, [])).toEqual({ mineOk: true, note: '', mineCount: 3, visibleCount: 21 });
+    const noRoster = model({ fasNameOverride: ME });
+    expect(L.copyScopeInfo(noRoster).note).toBe('FAS roster not loaded \u2014 copying all visible rows');
+    expect(L.copyRows(noRoster, 'mine', true, []).length).toBe(noRoster.rows.filter((x) => x.pair.down > 0).length);
+    expect(L.copyScopeInfo(rosterModel({ fasNameOverride: '' })).note).toBe('Set your FAS name to copy only your pairs');
+    const typo = rosterModel({ fasNameOverride: 'Z Santiagoo' });
+    expect(L.copyScopeInfo(typo)).toMatchObject({ mineOk: false, note: "No roster pairs match 'Z Santiagoo' \u2014 check your FAS name" });
+    expect(L.copyRows(typo, 'mine', false, []).length).toBe(21);
+  });
+
+  it('AC15: with the roster loaded, rows without an exact pair have an empty FAS Name in every scope; "site match" is screen-only', () => {
+    const m = rosterModel();
+    const mimy = m.rows.find((x) => x.key === 'MIMY01|MIMY');
+    expect([mimy.cells.fasName, mimy.rosterHint]).toEqual(['', 'Site Match']);
+    const h = L.tableHtml(m, {});
+    expect(h).toContain('<span class="fdbr-muted">site match: Site Match</span>');
+    expect((h.match(/site match:/g) || []).length).toBe(1);
+    for (const scope of ['mine', 'visible']) {
+      const tsv = L.sheetTsv(m.columns, L.copyRows(m, scope, false, []), null, { header: true });
+      expect(tsv).not.toContain('Site Match');
+      expect(tsv).not.toContain('site match');
+    }
+    const visible = L.sheetTsv(m.columns, L.copyRows(m, 'visible', false, []), null, {}).split('\n');
+    const names = new Set(visible.map((l) => l.split('\t')[0]));
+    expect(names).toEqual(new Set([ME, 'Other FAS', '']));
+  });
+
+  it('on-screen non-editable cells use the sheet format (Yes/No, bare uptime)', () => {
+    const h = L.tableHtml(model(), {});
+    expect(h).toContain('<td>48.3</td>');
+    expect(h).not.toContain('48.3%');
+    expect(h).toContain('data-col="oemYN">No</td>');
+  });
+});
+
+describe('freshness / stale banner / status age (AC12)', () => {
+  const SYNC = Date.parse('2026-11-10T15:30:00Z');
+  it('freshness: 119 min fresh, 121 min stale, missing / invalid ts stale-unknown', () => {
+    const m = model();
+    expect(L.FRESH_MAX_MS).toBe(2 * 60 * 60 * 1000);
+    expect(L.freshness(m, SYNC + 119 * 60000)).toMatchObject({ ageMin: 119, stale: false, label: '1h 59m' });
+    expect(L.freshness(m, SYNC + 121 * 60000)).toMatchObject({ ageMin: 121, stale: true, label: '2h 1m' });
+    expect(L.freshness(m, SYNC + 45 * 60000).label).toBe('45m');
+    expect(L.freshness({ ...m, fleetSyncedAt: null }, SYNC)).toMatchObject({ stale: true, ageMin: null, label: '' });
+    expect(L.freshness({ ...m, fleetSyncedAt: 'garbage' }, SYNC).stale).toBe(true);
+  });
+  it('staleBannerHtml: role=alert, class fdbr-banner--stale, age + last sync; unknown text; empty when fresh', () => {
+    const m = model();
+    const h = L.staleBannerHtml(L.freshness(m, SYNC + 189 * 60000));
+    expect(h).toContain('class="fdbr-banner fdbr-banner--stale" role="alert"');
+    expect(h).toContain('\u26a0 Fleet data is 3h 9m old (last sync ' + L.fmtClock(m.fleetSyncedAt) + '). Sync, then \u21ba Rebuild before you copy for SharePoint.');
+    expect(L.staleBannerHtml(L.freshness({ ...m, fleetSyncedAt: null }, SYNC))).toContain('\u26a0 Fleet sync time unknown \u2014 sync before copying.');
+    expect(L.staleBannerHtml(L.freshness(m, SYNC + 119 * 60000))).toBe('');
+    expect(L.PANEL_CSS).toContain('.fdbr-banner--stale');
+    expect(L.VIEW_CSS).toContain('#view-dbr .fdbr-banner--stale');
+  });
+  it('statusLine shows the fleet data age when nowMs is given', () => {
+    const m = model();
+    expect(L.statusLine(m, { nowMs: SYNC + 189 * 60000 })).toMatch(/^Built \d\d:\d\d from fleet sync \d\d:\d\d \(3h 9m old\)/);
+    expect(L.statusLine(m)).not.toContain(' old)');
+  });
+});
+
+describe('override marker, counts marker, drill-down lines, badge (AC7, AC13)', () => {
+  const row = {
+    key: 'K|S', domicile: 'K', scac: 'S', pair: { down: 2, total: 3 }, source: {},
+    cells: { etcToday: '0', noEtc: '1', missedEtc: '1' },
+    units: [
+      { id: 'U1', daysDown: 4, etc: { state: 'missed', date: '2026-11-20', source: 'extracted', bucket: 'missed', bucketReason: 'explicit-miss',
+        overrode: { field: 'savedNotes', was: 'none', userSnippet: '11/22 - No ETC' } }, why: { parts: 'Parts ordered at COX' }, systems: ['Engine', 'Cooling'] },
+      { id: 'U2', daysDown: 1, etc: { state: 'none', missDowngraded: true, passedDate: '2026-11-18', bucket: 'none', bucketReason: 'newer-negation', undercut: 'Repair <b>blocked</b>' } },
+    ],
+    userEtcOverrides: [{ unit: 'U1', date: '2026-11-20', userSnippet: "11/22 - No ETC <x>", extractedSnippet: 'missed the ETC of 11/20' }],
+    missedWhy: [{ unit: 'U1', date: '2026-11-20', why: 'ETC 11/20 explicitly missed' }],
+  };
+  it('Missed cell: "↺ overrode the saved note" with an escaped title naming the unit (DR2-11); not on an edited cell', () => {
+    const h = L.markHtml(row, 'missedEtc');
+    expect(h).toContain('>\u21ba overrode the saved note</span>');
+    expect(h).toContain('title="U1: saved note &#39;11/22 - No ETC &lt;x&gt;&#39; \u2192 Relay/offsite: &#39;missed the ETC of 11/20&#39;"');
+    expect(h).not.toContain('<x>');
+    expect(L.markHtml({ ...row, source: { missedEtc: 'edit' } }, 'missedEtc')).toBe('<span class="fdbr-mark">edited</span>');
+    expect(L.markHtml({ ...row, userEtcOverrides: [] }, 'missedEtc')).toBe('');
+    // The copied cell stays a bare number.
+    expect(L.sheetTsv([{ id: 'missedEtc', header: 'Missed ETC' }], [row], null, {})).toBe('1');
+  });
+  it('NO ETC cell: "⚠ counts ≠ N down" when the three counts do not add up', () => {
+    expect(L.markHtml(row, 'noEtc')).toBe('');
+    const broken = { ...row, cells: { etcToday: '0', noEtc: '5', missedEtc: '1' } };
+    expect(L.markHtml(broken, 'noEtc')).toContain('\u26a0 counts \u2260 2 down');
+  });
+  it('drill-down: bucket reason, undercut, override line, passed-ETR line, barrier why, systems, missed why (escaped)', () => {
+    const d = L.unitsDrillHtml(row);
+    expect(d).toContain('Sheet: Missed ETC \u2014 explicit miss reported');
+    expect(d).toContain('Missed ETC 11/20 (extracted) \u2014 overrode the saved note &#39;11/22 - No ETC&#39;');
+    expect(d).toContain('Sheet: NO ETC \u2014 a newer line says the ETC is gone, unsure or blocked: &#39;Repair &lt;b&gt;blocked&lt;/b&gt;&#39;');
+    expect(d).toContain('ETR 11/18 passed, no miss reported');
+    expect(d).toContain('Parts Delay: Parts ordered at COX');
+    expect(d).toContain('systems: Engine, Cooling');
+    expect(d).toContain('Missed ETC: U1 (ETC 11/20): ETC 11/20 explicitly missed');
+    expect(d).not.toContain('<b>');
+  });
+  it('badge: stale -> "⚠ AI draft out of date — showing auto text"', () => {
+    expect(L.badgeHtml({ draft: { state: 'stale', staleReason: 'format' } })).toContain('\u26a0 AI draft out of date \u2014 showing auto text');
+  });
+  it('panelHtml: copy-scope select with counts; mine disabled with the note', () => {
+    const ok = L.panelHtml({ status: 'ready', copyScope: 'mine', copyInfo: { mineOk: true, note: '', mineCount: 9, visibleCount: 22 } });
+    expect(ok).toContain('data-fdbr-field="copyScope"');
+    expect(ok).toContain('<option value="mine" selected>My pairs with units down (9)</option>');
+    expect(ok).toContain('<option value="visible">All visible rows (22)</option>');
+    const off = L.panelHtml({ status: 'ready', copyScope: 'mine', copyInfo: { mineOk: false, note: 'FAS roster not loaded \u2014 copying all visible rows', mineCount: 0, visibleCount: 22 } });
+    expect(off).toContain('<option value="mine" disabled>My pairs with units down (0)</option>');
+    expect(off).toContain('<option value="visible" selected>All visible rows (22)</option>');
+    expect(off).toContain('FAS roster not loaded \u2014 copying all visible rows');
+    expect(L.panelHtml({ status: 'ready' })).not.toContain('copyScope');
   });
 });

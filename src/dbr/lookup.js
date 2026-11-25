@@ -24,6 +24,8 @@ const AI_REVIEW_MAX_UNITS = 60; // the renderer prompt's slice(0, 60)
 const AI_TIMEOUT_MS = 75000;
 const AI_TIMEOUT_MESSAGE = 'DBR AI review timed out';
 const STALE_SYNC_MS = 4 * 60 * 60 * 1000;
+// Fleet Health only (_fhBuiltLabel): past 2 h the sheet should not be submitted unsynced.
+const FH_STALE_SYNC_MS = 2 * 60 * 60 * 1000;
 const SECTION_CAPS = { trends: 700, barriers: 400, flips: 200, actions: 400, help: 300 };
 const PULL_HINT = '_Say "pull dbr" to refresh QuickSight._';
 const TZ = 'America/Los_Angeles';
@@ -329,7 +331,9 @@ function _fhBuiltLabel(model, now) {
   let s = 'Built ' + (_ptStamp(m.builtAt, true) || 'time unknown') + ' from fleet sync ' + (_ptStamp(m.fleetSyncedAt, true) || 'time unknown');
   const t = _date(m.fleetSyncedAt);
   const n = _date(now);
-  if (m.fleetSyncedAt && t && n && n - t > STALE_SYNC_MS) s += ' \u26A0 ' + Math.floor((n - t) / 3600000) + 'h old';
+  if (m.fleetSyncedAt && t && n && n - t > FH_STALE_SYNC_MS) {
+    s += ' \u26A0 fleet data ' + Math.floor((n - t) / 3600000) + 'h old \u2014 sync before submitting';
+  }
   return s;
 }
 function _fhMd(ymd) {
@@ -609,5 +613,5 @@ function detectFleetHealth(userMsg, deps = {}) {
 module.exports = {
   todayPT, qsStatus, fleetStats, formatReply, lookupDbr, detect, run,
   formatFleetHealth, formatFleetHealthMine, lookupFleetHealth, detectFleetHealth, FH_TITLE,
-  REPLY_MAX, MAX_DOWN_LIST, AI_TIMEOUT_MS, AI_TIMEOUT_MESSAGE, PULL_HINT,
+  REPLY_MAX, MAX_DOWN_LIST, AI_TIMEOUT_MS, AI_TIMEOUT_MESSAGE, PULL_HINT, FH_STALE_SYNC_MS,
 };

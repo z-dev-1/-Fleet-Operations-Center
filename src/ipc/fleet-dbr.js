@@ -10,6 +10,7 @@
  *                                                    { ok, sites, serverOpenWos, missingFromFleet (<=20 ids), missingCount } | { ok:false, code, sites }
  *   fleet-dbr:draft         ({ key })             -> { ok, key, cells, sources, flags, disagreements, etcUnits, etcDisagreements,
  *                                                      etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
+ *                                                      unitNotes, sheet, sheetDrops, sheetSkipped,
  *                                                      dropped, rounds, reviewSkipped, mode, draftedAt, saved, model?,
  *                                                      fasActions, support } | { ok:false, code }
  *   fleet-dbr:save-edit     ({ key, col, value }) -> { ok } | { ok:false, code }
@@ -20,6 +21,12 @@
  * status returns { ok:false, code:'off' } before any store access. AI sub-flag off: draft
  * returns ai-off. AI drafts are suggestions only: they are stored in the snapshot and shown
  * in the panel; nothing is sent anywhere.
+ *
+ * Snapshot `version: SNAPSHOT_VERSION` (2); an older same-day snapshot reads as absent and is
+ * rebuilt (get -> model null, currentModel / draftPending rebuild). Drafts are stored as
+ * `version: 3` { unitNotes (drill-down bullets), sheet (cells that passed validateSheet, the only
+ * cells applyOverlays may overlay), sheetDrops, sheetSkipped, ... }; older drafts are 'format'-stale.
+ * The model carries rosterExact-based FAS Name / row.mine (seams _o.fasForExact, _o.rosterSize).
  *
  * Edits are day-scoped (read side: edits.day !== today -> no per-cell edits; write side:
  * rows reset on the first write of a new day). The FAS name override persists across days.
@@ -41,6 +48,10 @@ const MAX_EDIT_ROWS = 300;
 const MAX_IN_FLIGHT = 2;
 const OFF = Object.freeze({ ok: false, code: 'off' });
 const SNAP = 'fleetDbrSnapshot';
+// Snapshot row schema: 2 = deterministic ETC buckets / barriers / composer cells (fleet-health-10).
+const SNAPSHOT_VERSION = 2;
+// Stored AI draft schema: 3 = unitNotes + validated sheet cells (the only cells a draft overlays).
+const DRAFT_VERSION = dbr.DRAFT_VERSION;
 const EDITS = 'fleetDbrEdits';
 
 let _o = {};
@@ -172,6 +183,11 @@ function _draftLog(key, res, view, calls, extra) {
   }
   const dropReasons = {};
   for (const [k, v] of Object.entries(_plain(res.dropReasons))) dropReasons[k] = num(v);
+  // Sheet drops: counts per drop code (codes are fixed 'sheet-*' identifiers, never cell text).
+  const sheetDropCounts = {};
+  for (const code of Object.values(_plain(extra.sheetDrops))) {
+    if (typeof code === 'string' && /^[a-z0-9-]{1,40}$/.test(code)) sheetDropCounts[code] = (sheetDropCounts[code] || 0) + 1;
+  }
   const er = _plain(res.etcReconciled);
   const provenanceItems = Object.values(view.provenance)
     .reduce((s, byUnit) => s + Object.values(_plain(byUnit)).reduce((t, list) => t + (Array.isArray(list) ? list.length : 0), 0), 0);
@@ -184,6 +200,7 @@ function _draftLog(key, res, view, calls, extra) {
     etcFilled: num(er.filled), etcReclassified: num(er.reclassified), etcDateUnknown: num(er.dateUnknown),
     etcDisagreements: view.etcDisagreements.length, disagreements: view.disagreements.length,
     maxPromptChars, maxOutChars, ms: extra.ms,
+    sheetCells: Object.keys(_plain(extra.sheet)).length, sheetDrops: sheetDropCounts, sheetSkipped: extra.sheetSkipped || null,
   };
 }
 function _pick(obj, ids) {
@@ -204,6 +221,21 @@ function _fasFor(scac, domicile) {
     const v = fn(scac, domicile);
     return typeof v === 'string' ? v : '';
   } catch (_) { return ''; }
+}
+// Exact SCAC+Site roster owner only (the FAS Name cell and row.mine; design §3.12).
+function _fasForExact(scac, domicile) {
+  try {
+    const fn = _o.fasForExact || require('../orcha/fas/roster-lookup').fasForExact;
+    const v = fn(scac, domicile);
+    return typeof v === 'string' ? v : '';
+  } catch (_) { return ''; }
+}
+function _rosterSize() {
+  try {
+    const fn = _o.rosterSize || require('../orcha/fas/roster-lookup').rosterSize;
+    const n = Number(fn());
+    return Number.isFinite(n) ? n : 0;
+  } catch (_) { return 0; }
 }
 
 function guarded(channel, fn) {
@@ -231,10 +263,11 @@ function _key(payload) {
 
 function _fleetRows(fleet) { return fleet && Array.isArray(fleet.rows) ? fleet.rows.filter((r) => r && typeof r === 'object') : []; }
 
-// Today's snapshot or null.
+// Today's snapshot or null. A snapshot written by an older builder (version !== SNAPSHOT_VERSION)
+// reads as absent, so its rows are rebuilt instead of shown or copied (DR2-1).
 function _snapshot(today) {
   const s = _store().load(SNAP, null);
-  return s && typeof s === 'object' && s.day === today && Array.isArray(s.rows) ? s : null;
+  return s && typeof s === 'object' && s.version === SNAPSHOT_VERSION && s.day === today && Array.isArray(s.rows) ? s : null;
 }
 
 // Raw edits doc (any day).
@@ -261,14 +294,20 @@ function _model(snap, today, flags) {
   const edits = _editsDoc();
   const rowsEdits = edits.day === today ? edits.rows : {};
   const rosterFas = {};
-  for (const r of snap.rows) rosterFas[r.key] = _fasFor(r.scac, r.domicile);
+  const rosterExact = {};
+  for (const r of snap.rows) {
+    rosterFas[r.key] = _fasFor(r.scac, r.domicile);
+    rosterExact[r.key] = _fasForExact(r.scac, r.domicile);
+  }
+  const rosterLoaded = _rosterSize() > 0;
+  if (!rosterLoaded) log.warn('[fleet-dbr] roster', { code: 'roster-unavailable' });
   const built = {
     day: snap.day, fleetCount: snap.fleetCount || 0, downCount: snap.downCount || 0,
     rows: snap.rows, conflicts: snap.conflicts || [], builtAt: snap.builtAt || null, fleetSyncedAt: snap.fleetSyncedAt || null,
   };
   return dbr.applyOverlays(built, {
     edits: rowsEdits, drafts: _plain(snap.drafts), fasNameOverride: edits.fasName,
-    emailFasName: _emailFasName(), rosterFas, today, flags: { aiDraft: !!flags.aiDraft },
+    emailFasName: _emailFasName(), rosterFas, rosterExact, rosterLoaded, today, flags: { aiDraft: !!flags.aiDraft },
     fasAliasKnown: !!_aapAlias(),
   });
 }
@@ -296,7 +335,7 @@ function _buildLocal(f) {
     for (const [k, d] of Object.entries(_plain(prev.drafts))) if (keys.has(k)) drafts[k] = d; // stale tagged by hash in applyOverlays
   }
   const snap = {
-    version: 1, day: today, builtAt: _now().toISOString(),
+    version: SNAPSHOT_VERSION, day: today, builtAt: _now().toISOString(),
     fleetSyncedAt: (fleet && (fleet.syncedAt || fleet.scrapedAt)) || null,
     fleetCount: built.fleetCount, downCount: built.downCount,
     rows: built.rows, conflicts: built.conflicts, drafts,
@@ -468,7 +507,13 @@ const handlers = {
       etcOverrides: arr(res.etcOverrides), provenance: _plain(res.provenance), unverifiedNames: arr(res.unverifiedNames),
       unboundDates: arr(res.unboundDates), coverageFilled: arr(res.coverageFilled),
     };
+    // v3: the per-unit bullets are drill-down unit notes; only validated sheet cells overlay.
+    const unitNotes = _pick(res.cells, dbr.DRAFT_SHEET_IDS);
+    const sheet = _pick(res.sheet, dbr.DRAFT_SHEET_IDS);
+    const sheetDrops = _pick(res.sheetDrops, dbr.DRAFT_SHEET_IDS);
+    const sheetSkipped = typeof res.sheetSkipped === 'string' ? res.sheetSkipped : null;
     const out = Object.assign({ ok: true, key }, view, {
+      unitNotes, sheet, sheetDrops, sheetSkipped,
       dropped: res.dropped || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null, mode: res.mode,
       draftedAt, saved: false, fasActions: view.cells.fasActions, support: view.cells.support,
     });
@@ -487,7 +532,10 @@ const handlers = {
         cells: Object.assign({}, cur.rows[i].cells, _pick(freshRow.cells, dbr.AI_CELL_IDS)),
       });
       cur.drafts = _plain(cur.drafts);
-      cur.drafts[key] = Object.assign({ version: 2 }, view, {
+      const stored = Object.assign({}, view);
+      delete stored.cells; // v3: renamed unitNotes (Details / FAS Actions / Support bullets only)
+      cur.drafts[key] = Object.assign({ version: DRAFT_VERSION }, stored, {
+        unitNotes, sheet, sheetDrops, sheetSkipped,
         dropped: res.dropped || 0, dropReasons: _plain(res.dropReasons), mode: res.mode, calls: res.calls || 0,
         mapRetries: res.mapRetries || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null,
         identity: { alias: !!fasAlias, names: fasNames.length, fasTagged },
@@ -496,7 +544,7 @@ const handlers = {
       out.saved = _save(SNAP, cur);
       out.model = _model(cur, today, f);
     }
-    log.info('[fleet-dbr] draft', _draftLog(key, res, view, calls, { fasTagged, alias: !!fasAlias, ms }));
+    log.info('[fleet-dbr] draft', _draftLog(key, res, view, calls, { fasTagged, alias: !!fasAlias, ms, sheet, sheetDrops, sheetSkipped }));
     return out;
   }),
 
@@ -610,16 +658,23 @@ function buildNow() {
 }
 
 // DBR DATA pull: AI-draft today's rows that have units down and no current draft (none or
-// stale), one at a time through the same draft handler the DBR tab uses. Drafts are stored
-// suggestions only; nothing is sent. -> { ok, eligible, drafted, failed, busy } | { ok:false, code }
+// stale), one at a time through the same draft handler the DBR tab uses. Builds first when there
+// is no current snapshot. Drafts are stored suggestions only; nothing is sent.
+// -> { ok, eligible, drafted, failed, busy } | { ok:false, code:'off'|'ai-off'|'no-fleet-data' }
 async function draftPending() {
   const f = _flags();
   if (f.enabled !== true) return OFF;
   if (f.aiDraft !== true) return { ok: false, code: 'ai-off' };
   const today = _today();
   const snap = _snapshot(today);
-  if (!snap) return { ok: false, code: 'not-built' };
-  const model = _model(snap, today, f);
+  let model;
+  if (snap) model = _model(snap, today, f);
+  else {
+    // No current snapshot (none today, or one from an older builder): build first (DR2-1).
+    const { res } = _buildLocal(f);
+    if (!res.ok) return res;
+    model = res.model;
+  }
   const keys = model.rows.filter((r) => r.pair && r.pair.down > 0 && (!r.draft || r.draft.state !== 'ok')).map((r) => r.key);
   const out = { ok: true, eligible: keys.length, drafted: 0, failed: 0, busy: 0 };
   for (const key of keys) {

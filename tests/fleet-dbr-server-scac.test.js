@@ -37,7 +37,7 @@ function reset({ on = false, searchImpl } = {}) {
   search = vi.fn(searchImpl || (async () => []));
   ipc._resetForTests({
     store, loadFlags: () => ({ enabled: true, aiDraft: false }), now: () => NOW, getFleet: () => fleet,
-    fasFor: () => '', userAlias: () => '', loadServerFlags: () => ({ serverScac: serverOn }), search,
+    fasFor: () => '', fasForExact: () => '', rosterSize: () => 0, userAlias: () => '', loadServerFlags: () => ({ serverScac: serverOn }), search,
   });
 }
 beforeEach(() => { reset(); logCalls.length = 0; });
