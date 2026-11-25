@@ -154,7 +154,9 @@ describe('AI outcome mapping and ai_fp / ai_retry_at', () => {
     const r = await inv(caseId, { cfgOver: { dailyCap: 0 } });
     expect(r.aiStatus).toBe('skipped_cap');
     expect(s.reason.calls.length).toBe(0);
-    expect(caseOf(caseId).ai_retry_at).toBe(s.ck.now() + H);
+    // V2 review finding 5: a cap deferral waits for the next local day (+ rand()·30 min), not one hour.
+    expect(caseOf(caseId).ai_retry_at).toBe(new Date(2026, 10, 21).getTime() + 15 * MIN);
+    expect(caseOf(caseId).ai_pending_reason).toBe('cap');
     setup();
     const b = F.seedCase();
     const r2 = await inv(b.caseId, { cfgOver: { features: { aiInvestigation: false } } });

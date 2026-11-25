@@ -5,6 +5,9 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const timeline = require('../src/autopilot/timeline');
 const evidence = require('../src/autopilot/evidence');
+const F = require('./helpers/autopilot-fakes.cjs');
+const { runInvestigation } = require('../src/autopilot/investigate');
+const { createLimiter } = require('../src/autopilot/limiter');
 
 const NOW = Date.parse('2026-11-20T15:00:00Z');
 const DOC = {
@@ -111,5 +114,40 @@ describe('buildProposals', () => {
     const ix = timeline.publishedIndex(DOC, '322283');
     expect(ix.published['11/15']).toEqual(['vendor: unit arrived']);
     expect(ix.hiddenSigs).toEqual(['hidden line text']);
+  });
+});
+
+describe('full multi-turn run (AC-22)', () => {
+  const U = '322283';
+  const turn = (tools) => ({ schemaVersion: 2, decision: 'request_tools', tools, memory: {} });
+  const finalFrom = (o) => ({ schemaVersion: 2, decision: 'final', result: F.aiReply(o.prompt) });
+
+  it('notesStore is byte-identical after a multi-turn run; a second run on the same evidence adds no duplicate proposals', async () => {
+    F.freshDb('tlrun');
+    F.schema.ensureSchema();
+    const ck = F.clock();
+    const w = F.mkWorld({
+      rows: [F.baseRow({ asistSrUrl: F.SR, decisivCaseId: '21350186' })], isolated: true,
+      dtna: { [U]: [{ caseId: 'C1', unitId: U, offsiteStage: 'repair', stageSince: '2026-11-18T00:00:00Z', repairEtc: '2026-11-25' }] },
+      decisivStatus: () => ({ ok: true, value: { stage: 'repair', status: 'open' } }),
+    });
+    w.docs.notesStore = JSON.parse(JSON.stringify(DOC));
+    const before = JSON.stringify(w.docs.notesStore);
+    const cfg = F.cfgOf({ features: { liveReads: true, multiTurn: true } });
+    const reason = F.fakePlanner([turn([{ tool: 'dtna_case', args: { unit: U } }, { tool: 'existing_timeline', args: { unit: U } }]), finalFrom,
+      turn([{ tool: 'dtna_case', args: { unit: U } }]), finalFrom]);
+    const deps = () => ({ ports: F.fakePorts(w), cfg, now: ck.now, rand: () => 0.5, owner: 'own', reason, limiter: createLimiter({ now: ck.now, random: () => 0 }), trigger: 'new' });
+    const { caseId } = F.seedCase(U);
+    expect((await runInvestigation(caseId, deps())).aiStatus).toBe('ok');
+    expect(JSON.stringify(w.docs.notesStore)).toBe(before);
+    const first = F.cs.listProposals(caseId);
+    expect(first.length).toBeGreaterThan(0);
+    ck.advance(F.H);
+    expect(F.cs.requestDeep(caseId, { now: ck.now() }).ok).toBe(true);
+    expect((await runInvestigation(caseId, Object.assign(deps(), { trigger: 'manual' }))).aiStatus).toBe('ok');
+    expect(JSON.stringify(w.docs.notesStore)).toBe(before);
+    const second = F.cs.listProposals(caseId);
+    expect(second.map((p) => p.fingerprint)).toEqual(first.map((p) => p.fingerprint));
+    expect(reason.remaining()).toBe(0);
   });
 });

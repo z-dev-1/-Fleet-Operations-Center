@@ -91,6 +91,44 @@ describe('priority', () => {
   });
 });
 
+describe('priority.scoreV2 bands (AC-16, V2 §8.3)', () => {
+  const { scoreV2 } = require('../src/autopilot/priority');
+  const MAX_MODS = { daysDown: 400, neverInvestigated: true, recurrenceCount: 2, aiUrgency: 'high' };
+  const MIN_MODS = { aiUrgency: 'low', state: 'MONITORING', unchanged: true };
+
+  it('band floors and exact modifier sums', () => {
+    expect(scoreV2({ reasons: ['OOS'] })).toBe(10);
+    expect(scoreV2({ reasons: ['SAFETY_CRITICAL'] })).toBe(80);
+    expect(scoreV2({ reasons: ['OOS'], safety: 1 })).toBe(80);
+    expect(scoreV2({ reasons: ['REPAIRED_UNVERIFIED'] })).toBe(60);
+    expect(scoreV2({ reasons: ['ETA_OVERDUE_VERIFIED'] })).toBe(57);
+    expect(scoreV2({ reasons: ['REPAIRED_UNVERIFIED', 'ETA_OVERDUE_VERIFIED'] })).toBe(60);
+    // other band: 10 + 5 (days) + 10 (stale) + 8 (repeat) + 6 (conflict) + 4 (new) + 6 (AI high) = 49
+    expect(scoreV2({ reasons: ['OOS', 'UPDATE_STALE', 'STATUS_CONFLICT'], daysDown: 5.9, recurrenceOf: 'c0', neverInvestigated: true, aiUrgency: 'high' })).toBe(49);
+    expect(scoreV2({ reasons: ['OOS'], aiUrgency: 'high', aiInvestigation: false })).toBe(10);
+  });
+
+  it('bands never overlap: safety 80..100 > operational 55..79 > other 10..54', () => {
+    const top = (codes) => scoreV2(Object.assign({ reasons: codes.concat(['UPDATE_STALE', 'STATUS_CONFLICT']) }, MAX_MODS));
+    const low = (codes) => scoreV2(Object.assign({ reasons: codes }, MIN_MODS));
+    expect(top(['OOS'])).toBe(54);
+    expect(low(['OOS'])).toBe(10);
+    expect(top(['ETA_OVERDUE_VERIFIED'])).toBe(79);
+    expect(low(['ETA_OVERDUE_VERIFIED'])).toBe(55);
+    expect(top(['REPAIRED_UNVERIFIED'])).toBe(79);
+    expect(low(['REPAIRED_UNVERIFIED'])).toBe(55);
+    expect(top(['SAFETY_CRITICAL'])).toBe(100);
+    expect(low(['SAFETY_CRITICAL'])).toBe(80);
+  });
+
+  it('deep -> at least 95; no trigger boost', () => {
+    expect(scoreV2({ reasons: ['OOS'], deep: true })).toBe(95);
+    expect(scoreV2(Object.assign({ reasons: ['SAFETY_CRITICAL', 'UPDATE_STALE'], deep: true }, MAX_MODS))).toBe(100);
+    expect(scoreV2({ reasons: ['OOS'], trigger: 'evidence_changed' })).toBe(scoreV2({ reasons: ['OOS'] }));
+    expect(scoreV2({})).toBe(10);
+  });
+});
+
 describe('triggers', () => {
   const base = (o) => Object.assign({ case_id: 'c1', state: 'MONITORING', cheap_fp: 'fp0', next_review_at: NOW + H, next_attempt_at: null, eta_json: null }, o);
   const run = (trigger, at) => ({ trigger, started_at: at });

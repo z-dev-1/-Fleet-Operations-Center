@@ -62,7 +62,7 @@ const CASE_JSON = ['reasons_json', 'wo_ids_json', 'eta_json', 'blockers_json', '
   'wo_set_json', 'dealer_cases_json', 'memory_json', 'slice_fps_json'];
 const RUN_JSON = ['checkpoint_json', 'source_calls_json', 'plan_json'];
 const RESUME_OUTCOMES = ['abandoned', 'aborted', 'deferred'];
-const RESUME_STEPS = new Set(['evidence_done', 'ai_pending', 'analysis_done']);
+const RESUME_STEPS = new Set(['evidence_done', 'ai_pending', 'loop', 'analysis_done']);
 const OPEN_ACTIVE = new Set([S.INVESTIGATING, S.ANALYZING]);
 
 let _seq = 0;
@@ -662,6 +662,15 @@ function openRun(opts) {
   const runId = _newId('run_', [o.caseId, now]);
   _tx(() => _writeRunInTx({ runId, caseId: o.caseId, startedAt: now, trigger: o.trigger || 'scheduled', resumedFrom: o.resumedFrom, jobId: o.jobId, plan: o.plan }));
   return runId;
+}
+
+/**
+ * closeRun(runId, run{outcome, aiStatus, ...}, { now }) -> rows updated. Closes only the ap_run row; no
+ * case column changes (V2 §7.1 step 1: a run that lost its lease closes its own run as 'lease_lost').
+ */
+function closeRun(runId, run, meta) {
+  const now = _now(meta);
+  return _tx(() => _closeRunInTx(runId, run, now));
 }
 
 /**
@@ -1418,7 +1427,7 @@ function aiBacklog(now, opts) {
 module.exports = {
   // writes (one transaction each)
   upsertDetected, transition, persistRun, reserveAiCallAndMarkPending, sweepResolution,
-  pauseCases, requeueCases, lease, openRun, writeCheckpoint, writeFindings, copyRunForResume,
+  pauseCases, requeueCases, lease, openRun, closeRun, writeCheckpoint, writeFindings, copyRunForResume,
   recoverAbandoned, prune, review, bumpCounter, setMeta, appendEvent,
   // V2 writes
   applyPass, promoteDetected, leaseRun, renewLease, beginStep, reserveAiTurn, completeStep, writeMemory,
