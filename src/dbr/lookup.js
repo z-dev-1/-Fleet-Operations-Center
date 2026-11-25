@@ -332,13 +332,27 @@ function _fhBuiltLabel(model, now) {
   if (m.fleetSyncedAt && t && n && n - t > STALE_SYNC_MS) s += ' \u26A0 ' + Math.floor((n - t) / 3600000) + 'h old';
   return s;
 }
-// Missed ETC cell: first line is the count, then one "why" line per unit (an edited cell may be free text).
+function _fhMd(ymd) {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  return m ? (+m[1]) + '/' + (+m[2]) : '';
+}
+// Missed ETC: the count comes from the (bare) cell; the "why" lines come from the cell when it
+// has them (legacy / edited), else from row.missedWhy. note = the override marker text when an
+// extracted miss overrode a saved "No ETC" note (computed cell only).
 function _fhMissed(row) {
   const raw = _fhCell(row, 'missedEtc');
   const lines = raw.split('\n');
   const first = (lines[0] || '').trim();
-  if (/^\d+$/.test(first)) return { count: first, why: lines.slice(1).join('\n') };
-  return { count: raw ? raw.split('\n')[0] : '0', why: lines.slice(1).join('\n') };
+  const count = /^\d+$/.test(first) ? first : (raw ? lines[0] : '0');
+  let why = lines.slice(1).join('\n');
+  const edited = !!(row && row.source && row.source.missedEtc === 'edit');
+  const mw = row && Array.isArray(row.missedWhy) ? row.missedWhy : [];
+  if (!why.trim() && !edited && mw.length) {
+    why = mw.map((w) => '\u2022 ' + String(w.unit || '?') + ' (ETC ' + _fhMd(w.date) + '): ' + String(w.why || '')).join('\n');
+  }
+  const ov = row && Array.isArray(row.userEtcOverrides) ? row.userEtcOverrides : [];
+  const note = !edited && ov.length ? ' (' + ov.map((o) => String(o.unit || '?')).join(', ') + ' overrode the saved "No ETC" note)' : '';
+  return { count, why, note };
 }
 function _fhUnits(row, limit) {
   const units = Array.isArray(row.units) ? row.units : [];
@@ -367,7 +381,7 @@ function _fhRowBlock(row, kind, o) {
     out.push(..._fhSub(text, o.detailLines, o.cap));
   }
   const missed = _fhMissed(row);
-  out.push('  ETC Today: ' + _d(_fhCell(row, 'etcToday') || '0') + ' · NO ETC: ' + _d(_fhCell(row, 'noEtc') || '0') + ' · Missed ETC: ' + _d(missed.count));
+  out.push('  ETC Today: ' + _d(_fhCell(row, 'etcToday') || '0') + ' · NO ETC: ' + _d(_fhCell(row, 'noEtc') || '0') + ' · Missed ETC: ' + _d(missed.count) + _d(missed.note));
   if (missed.why && o.detailLines) out.push(..._fhSub(missed.why, o.detailLines, o.cap));
   for (const [id, label] of [['fasActions', 'FAS Actions'], ['support', 'Where do you need support']]) {
     const text = _fhCell(row, id);

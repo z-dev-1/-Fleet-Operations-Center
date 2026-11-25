@@ -107,10 +107,13 @@ describe('Path B: counted Missed needs an explicit repair-completion marker', ()
     expect(F.parseEtc({ _factsOn: true, repairTimeline: '11/09 - Dealer missed the ETC of 11/07, new date pending' }, TODAY))
       .toMatchObject({ state: 'missed', date: '2026-11-07' });
   });
-  it('flag off (no _factsOn): byte-identical to today, arithmetic missed kept', () => {
-    expect(F.parseEtc({ savedNotes: 'ETC 11/07' }, TODAY)).toEqual({ state: 'missed', date: '2026-11-07', source: 'savedNotes', snippet: 'ETC 11/07' });
+  // The flag-off "arithmetic missed kept" invariant is intentionally retired for Fleet Health ETC (D16).
+  it('flag off (no _factsOn): D16 a past date without a marker -> none + missDowngraded (arithmetic missed retired)', () => {
+    expect(F.parseEtc({ savedNotes: 'ETC 11/07' }, TODAY)).toEqual({ state: 'none', date: null, source: 'savedNotes', snippet: 'ETC 11/07', statedDay: null, missDowngraded: true });
     expect(F.parseEtc({ repairTimeline: '11/05 - Dealer: ETC 11/07', _factEtc: fe({ state: 'today', date: TODAY, source: 'x' }) }, TODAY))
-      .toMatchObject({ state: 'missed', source: 'repairTimeline' });
+      .toMatchObject({ state: 'none', missDowngraded: true, source: 'repairTimeline' });
+    expect(F.parseEtc({ repairTimeline: '11/09 - Dealer missed the ETC of 11/07, new date pending' }, TODAY))
+      .toMatchObject({ state: 'missed', date: '2026-11-07', source: 'repairTimeline' });
   });
 });
 
@@ -123,19 +126,21 @@ describe('buildFleetDbr counts follow the rule', () => {
     unit('P4', { _factsOn: true, _factEtc: fe({}) }),
     unit('P5', { _factsOn: true, _factEtc: fe({ state: 'future', date: '2026-11-20', source: 'decisiv', statedAt: '2026-11-10T15:28:00Z' }) }),
   ];
-  it('etcToday / noEtc / missedEtc; the missed why cites explicitMissDate', () => {
-    const c = F.buildFleetDbr(rows, { today: TODAY }).rows[0].cells;
+  it('etcToday / noEtc / missedEtc (future counts in NO ETC); missedEtc is the bare count and row.missedWhy cites explicitMissDate', () => {
+    const row = F.buildFleetDbr(rows, { today: TODAY }).rows[0];
+    const c = row.cells;
     expect(c.etcToday).toBe('1');
-    expect(c.noEtc).toBe('2');
-    const lines = c.missedEtc.split('\n');
-    expect(lines[0]).toBe('1');
-    expect(lines[1]).toMatch(/^\u2022 P2 \(ETC 11\/7\): ETC 11\/7 explicitly missed/);
+    expect(c.noEtc).toBe('3');
+    expect(c.missedEtc).toBe('1');
+    expect(row.missedWhy).toHaveLength(1);
+    expect(row.missedWhy[0]).toMatchObject({ unit: 'P2', date: '2026-11-07' });
+    expect(row.missedWhy[0].why).toMatch(/^ETC 11\/7 explicitly missed/);
   });
-  it('flag off: the same text rows count arithmetic misses exactly as today', () => {
+  it('flag off: D16 an unmarked past text ETC is NO ETC (arithmetic missed retired for Fleet Health ETC)', () => {
     const off = [unit('P1', { repairTimeline: '11/05 - Dealer: ETC 11/07' }), unit('P4', {})];
     const c = F.buildFleetDbr(off, { today: TODAY }).rows[0].cells;
-    expect(c.missedEtc.split('\n')[0]).toBe('1');
-    expect(c.noEtc).toBe('1');
+    expect(c.missedEtc).toBe('0');
+    expect(c.noEtc).toBe('2');
   });
   it('evidenceHash includes _factsSig only when present', () => {
     const a = unit('H1', {});

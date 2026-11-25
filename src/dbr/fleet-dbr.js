@@ -88,7 +88,15 @@ function _codeText(s) { return _str(s).replace(/\s*_\s*/g, ' ').replace(/\s+/g, 
 
 const EMAIL_RE = /\S+@\S+\.\S+/g;
 const PHONE_RE = /\+?\d[\d\s().-]{8,}\d/g;
-function _redact(s) { return s.replace(EMAIL_RE, '[redacted]').replace(PHONE_RE, '[redacted]'); }
+// ISO dates / times ("2026-11-26T04:31Z") are protected from PHONE_RE and restored (D18).
+const ISO_DATE_TIME_RE = /\b\d{4}-\d{2}-\d{2}(?:T[\d:.]+Z?)?\b/g;
+function _redact(s) {
+  const kept = [];
+  const t = s.replace(EMAIL_RE, '[redacted]')
+    .replace(ISO_DATE_TIME_RE, (m) => { kept.push(m); return '\u0000' + (kept.length - 1) + '\u0000'; })
+    .replace(PHONE_RE, '[redacted]');
+  return t.replace(/\u0000(\d+)\u0000/g, (m, i) => kept[+i]);
+}
 
 // Up to 80 chars around a match, single-lined, emails / phone-like runs redacted.
 function _snippet(text, index) {
@@ -190,8 +198,8 @@ const _ETC_PHRASE = '\\b(?:est(?:\\.|imated)?\\s+(?:time\\s+of\\s+)?completion|e
 const ETC_PHRASE_POS_RE = new RegExp(_ETC_PHRASE + _DATE_TAIL, 'gi');
 const ETC_TOKEN_RE = /\b(?:ETC|ETR)\b/g;
 const ETC_PHRASE_RE = new RegExp(_ETC_PHRASE, 'gi');
-const NEG_BEFORE_RE = /\b(?:no|without|pending|tbd|unknown|n\/a)\s+(?:an?\s+)?$/i;
-const NEG_AFTER_RE = /^\s*[:-]?\s*(?:tbd|pending|unknown|n\/a|none|not (?:yet )?(?:provided|given|available))\b/i;
+const NEG_BEFORE_RE = /\b(?:no|without|pending|tbd|unknown|n\/a)\s+(?:an?\s+)?(?:(?:new|revised|updated|firm|repair|confirmed)\s+){0,3}$/i;
+const NEG_AFTER_RE = /^\s*[:-]?\s*(?:(?:is|was|remains|still|currently)\s+)?(?:tbd|pending|unknown|n\/a|none|not\s+(?:yet\s+)?(?:provided|given|available|known|set|stated|confirmed|reconfirmed)|not\s+known\s+yet)\b/i;
 // Expectation phrasing ("dealer says ready 11/12", "should be ready by 11/12", "promised ready
 // 11/12") is an ETC. Past-tense events ("diagnosis completed 11/05", "PM done 11/03") never are,
 // and neither is a parts / tow / delivery date ("parts delivered and ready 11/12").
@@ -347,6 +355,55 @@ function _winnerHasMarker(win, today) {
   const [ls, le] = lineOf(win.m.start);
   return explicitRepairMiss(t, today).some((x) => (x.date ? x.date === win.m.date : x.start >= ls && x.start <= le));
 }
+// Newest dated explicit-miss marker on the line holding the winning mention (legacy rows).
+function _winnerMarkerDate(win, today) {
+  if (!win) return null;
+  const t = _str(win.text);
+  const ls = t.lastIndexOf('\n', win.m.start - 1) + 1;
+  const le = t.indexOf('\n', win.m.start) === -1 ? t.length : t.indexOf('\n', win.m.start);
+  const ds = explicitRepairMiss(t.slice(ls, le), today).map((x) => x.date).filter(Boolean).sort();
+  return ds.length ? ds[ds.length - 1] : null;
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+function _ymdBefore(d, today) { return typeof d === 'string' && YMD_RE.test(d) && d < _str(today); }
+// User-note fields whose "No ETC" an extracted miss can override (visible marker, §3.5).
+const USER_NOTE_FIELDS = Object.freeze(['savedNotes', 'canonicalNextStep', 'canonicalSituation']);
+function _structMiss(fe, today) {
+  const sm = fe && fe.structuredMiss;
+  return sm && typeof sm === 'object' && _ymdBefore(sm.date, today) ? sm : null;
+}
+function _passedHead(fe, today) {
+  const ph = fe && fe.passedHead;
+  return ph && typeof ph === 'object' && _ymdBefore(ph.date, today) ? ph : null;
+}
+// The explicit miss an ETC-Today result carries (design §3.3; read by countedEtc rule 4).
+function _todayMissDate(fe, today) {
+  const sm = _structMiss(fe, today);
+  return (fe && fe.explicitMissDate) || (sm && sm.date) || null;
+}
+// Extracted ETC re-classified at build time (D3): the stored state is not trusted for dated
+// states. An explicit miss (explicitMissDate / structuredMiss, DR2-2, §3.4) stays missed; a
+// current 'today' head keeps precedence over it. A passed date with no miss -> none.
+function _feEffective(fe, today) {
+  if (fe.state === 'missed' && fe.date) return { state: 'missed', date: fe.date, explicitMissDate: fe.explicitMissDate || fe.date, snippet: fe.snippet };
+  const live = fe.negated || !fe.date ? 'none' : _classifyEtc(fe.date, today);
+  if (live === 'today') return { state: 'today', date: fe.date, explicitMissDate: _todayMissDate(fe, today), snippet: fe.snippet };
+  const sm = _structMiss(fe, today);
+  if (sm) return { state: 'missed', date: sm.date, explicitMissDate: sm.date, snippet: sm.snippet || fe.snippet };
+  if (live === 'missed') {
+    if (_ymdBefore(fe.explicitMissDate, today)) return { state: 'missed', date: fe.explicitMissDate, explicitMissDate: fe.explicitMissDate, snippet: fe.snippet };
+    return { state: 'none', date: null, missDowngraded: true, passedDate: fe.date, snippet: fe.snippet };
+  }
+  return { state: live, date: live === 'none' ? null : fe.date, snippet: fe.snippet };
+}
+// A none result with a passed, unmarked extracted ETC: 'ETR M/D passed, no miss reported'.
+function _markPassed(out, fe, today) {
+  const ph = _passedHead(fe, today);
+  if (out.state !== 'none' || out.missDowngraded || !ph) return out;
+  return Object.assign({}, out, { missDowngraded: true, passedDate: ph.date });
+}
+
 // relay-extract §14.6 freshness takeover by _factEtc + Path B (only for rows with _factsOn).
 // Counted conservatively by design; met/revision nuance lives in the Details prose, not the counts.
 function _withFactEtc(res, win, field, r, today) {
@@ -363,35 +420,52 @@ function _withFactEtc(res, win, field, r, today) {
       take = !!stated && !!win.date && stated >= win.date;
     }
   }
+  const statedDay = fe && typeof fe === 'object' ? (_localDay(fe.statedAt) || null) : null;
   if (take) {
-    const snippet = fe.snippet ? _snippet(fe.snippet, 0) : '';
     // Precedence today > missed > future > none: a newer negation never hides an explicit miss.
-    if (fe.state === 'missed' && fe.date) return { state: 'missed', date: fe.date, source: 'extracted', snippet, explicitMissDate: fe.explicitMissDate || fe.date };
-    if (fe.negated || !fe.date) return { state: 'none', date: null, source: 'extracted', snippet };
-    const state = ['today', 'missed', 'future', 'none'].includes(fe.state) ? fe.state : _classifyEtc(fe.date, today);
-    const out = { state, date: state === 'none' ? null : fe.date, source: 'extracted', snippet };
-    if (state === 'missed') out.explicitMissDate = fe.explicitMissDate || fe.date;
-    return out;
+    const eff = _feEffective(fe, today);
+    const out = { state: eff.state, date: eff.date, source: 'extracted', snippet: eff.snippet ? _snippet(eff.snippet, 0) : '', statedDay };
+    if (eff.explicitMissDate !== undefined) out.explicitMissDate = eff.explicitMissDate;
+    if (eff.missDowngraded) Object.assign(out, { missDowngraded: true, passedDate: eff.passedDate });
+    return _markPassed(out, fe, today);
   }
+  const eff = fe && typeof fe === 'object' ? _feEffective(fe, today) : null;
+  const userField = USER_NOTE_FIELDS.includes(res.source);
+  const ph = _passedHead(fe, today);
   let out = res;
-  if (res.state === 'missed' && !(fe && fe.state === 'missed') && !(win && _winnerHasMarker(win, today))) {
+  if (res.state === 'missed' && !(eff && eff.state === 'missed') && !(win && _winnerHasMarker(win, today))) {
     out = Object.assign({}, res, { state: 'none', date: null, missDowngraded: true });
-  } else if (res.state !== 'missed' && fe && fe.state === 'missed' && fe.date) {
+  } else if (res.state !== 'missed' && eff && eff.state === 'missed') {
     // An explicit repair-completion miss outranks a legacy future/none (precedence today > missed).
     // Deliberate Path-B deviation from design §14.6/AC35: this also applies when the legacy winner
-    // is user-authored savedNotes / canonical* (including a user "No ETC").
+    // is user-authored savedNotes / canonical* (including a user "No ETC"); then it is marked.
     if (res.state !== 'today') {
-      out = { state: 'missed', date: fe.date, source: 'extracted', snippet: fe.snippet ? _snippet(fe.snippet, 0) : '', explicitMissDate: fe.explicitMissDate || fe.date };
+      out = { state: 'missed', date: eff.date, source: 'extracted', snippet: eff.snippet ? _snippet(eff.snippet, 0) : '', explicitMissDate: eff.explicitMissDate, statedDay };
+      if (userField) out.overrode = { field: res.source, was: res.state, userSnippet: res.snippet };
+    } else {
+      out = Object.assign({}, res, { explicitMissDate: eff.explicitMissDate });
     }
+  } else if (userField && win && win.m.negated && ph) {
+    // User Q9 rule (design §14): a saved "No ETC" + an extracted ETC whose date already passed
+    // flips to Missed ETC, with the visible override marker.
+    out = {
+      state: 'missed', date: ph.date, source: 'extracted', snippet: fe.snippet ? _snippet(fe.snippet, 0) : '',
+      explicitMissDate: null, viaPassedHead: true, statedDay: _localDay(ph.statedAt) || null,
+      overrode: { field: res.source, was: 'none', userSnippet: res.snippet },
+    };
   }
+  if (out.state === 'today' && out.explicitMissDate === undefined) out = Object.assign({}, out, { explicitMissDate: _todayMissDate(fe, today) });
+  out = _markPassed(out, fe, today);
   if (_hasFactEtc(fe) && fe.date && res.date && fe.date !== res.date && out.source === res.source) {
     out = Object.assign({}, out, { factConflict: { date: fe.date, source: fe.source || null } });
   }
   return out;
 }
 
-// -> { state: 'today'|'missed'|'future'|'none', date: 'YYYY-MM-DD'|null, source, snippet }
-// Rows with _factsOn (relay-extract) also go through _withFactEtc; others are unchanged.
+// -> { state: 'today'|'missed'|'future'|'none', date: 'YYYY-MM-DD'|null, source, snippet, statedDay,
+//      explicitMissDate? (every 'today' result), missDowngraded?, passedDate?, overrode?, viaPassedHead? }
+// Rows with _factsOn (relay-extract) also go through _withFactEtc. Legacy rows keep a passed
+// date as missed only with an explicit marker (D16).
 function parseEtc(row, today) {
   const r = row || {};
   for (const field of ETC_SOURCES) {
@@ -417,13 +491,35 @@ function parseEtc(row, today) {
     }
     if (!win) continue;
     const snippet = _snippet(win.text, win.m.start);
+    const statedDay = _winnerStatedDay(win, field, today);
     const res = win.m.negated
-      ? { state: 'none', date: null, source: field, snippet }
-      : { state: _classifyEtc(win.m.date, today), date: win.m.date, source: field, snippet };
-    return r._factsOn ? _withSlip(_withFactEtc(res, win, field, r, today), r) : res;
+      ? { state: 'none', date: null, source: field, snippet, statedDay }
+      : { state: _classifyEtc(win.m.date, today), date: win.m.date, source: field, snippet, statedDay };
+    if (r._factsOn) return _withSlip(_withFactEtc(res, win, field, r, today), r);
+    // D16: legacy rows keep a passed date as missed only with an explicit marker.
+    if (res.state === 'missed' && !_winnerHasMarker(win, today)) return Object.assign({}, res, { state: 'none', date: null, missDowngraded: true });
+    if (res.state === 'today') res.explicitMissDate = _winnerMarkerDate(win, today);
+    return res;
   }
-  const none = { state: 'none', date: null, source: null, snippet: '' };
+  const none = { state: 'none', date: null, source: null, snippet: '', statedDay: null };
   return r._factsOn ? _withSlip(_withFactEtc(none, null, null, r, today), r) : none;
+}
+// The day the winning mention was stated: timeline line date, the 'M/D - ' prefix of the
+// savedNotes line, the offsite entry day; null for undated text (canonical*).
+function _winnerStatedDay(win, field, today) {
+  if (field === 'repairTimeline') return win.date || null;
+  if (field === 'savedNotes') {
+    const t = _str(win.text);
+    const ls = t.lastIndexOf('\n', win.m.start - 1) + 1;
+    const le = t.indexOf('\n', win.m.start) === -1 ? t.length : t.indexOf('\n', win.m.start);
+    const m = TIMELINE_LINE_RE.exec(t.slice(ls, le));
+    return m ? inferDate(m[1], m[2], m[3], today) : null;
+  }
+  if (field === 'asistNotes') {
+    const e = offsiteEntries(win.text).find((x) => win.m.start >= x.start && win.m.start < x.end);
+    return e && e.atMs != null ? (_localDay(e.atMs) || null) : null;
+  }
+  return null;
 }
 // Relay history ETC revisions (wo-facts _factEtc.slip) ride along on the parsed ETC; rows
 // without them return the same object as before.
@@ -431,6 +527,115 @@ function _withSlip(out, r) {
   const s = r._factEtc && r._factEtc.slip;
   if (!s || typeof s !== 'object') return out;
   return Object.assign({}, out, { slip: { count: Number(s.count) || 0, seq: Array.isArray(s.seq) ? s.seq.slice() : [] } });
+}
+
+// ── ETC buckets (design §3.2) ───────────────────────────────────────────────
+// (a) A newer line says the ETC is gone, unsure or blocked. ETC / ETR stay case-sensitive.
+const ETC_UNDERCUT_RES = Object.freeze([
+  /\b[Nn]o\s+(?:(?:new|revised|repair|firm|updated|confirmed)\s+){0,3}(?:ETC|ETR)\b/,
+  /\b(?:ETC|ETR)\b(?:\s+(?:is|remains|still|has|been|was|currently|yet)){0,3}\s+(?:not\s+(?:yet\s+)?(?:set|stated|known|confirmed|reconfirmed|provided|given|available)|unknown|TBD|tbd|pending)\b/,
+  /\b(?:ETC|ETR)\b[^.;\n]{0,30}?\b(?:at\s+risk|has\s+passed|passed|missed|slipp(?:ed|ing))\b/,
+  /\b(?:repairs?|completion)\s+(?:remains?\s+|is\s+)?(?:blocked|on\s+hold)\b/i,
+]);
+// Pattern 3 (index 2) is checked per match: a date between the token and the keyword must be
+// the counted ETC date (DR2-3), so "ETR 11/24 missed, new ETR 11/25" does not undercut 11/25.
+const _UNDERCUT_P3_G = new RegExp(ETC_UNDERCUT_RES[2].source, 'g');
+const _MD_OR_ISO_G = /\b(\d{4})-(\d{2})-(\d{2})(?!\d)|\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/g;
+const DIAG_NONE_RE = /\bno\s+(?:diagnosis|repair\s+update)\b[^.;\n]{0,30}\b(?:logged|yet|received)\b/i;
+const APPT_DATE_RE = /\b(?:appointment|appt|scheduled|tech(?:nician)?\s+(?:expected|arriv\w*|on[- ]?site|visit|callout|dispatch\w*))\b[^.;\n]{0,25}?(\d{1,2}\/\d{1,2})/i;
+const NOT_STARTED_STATUSES = Object.freeze(['waiting for vendor', 'under diagnosis', 'vehicle arrived']);
+const STALE_ETR_DAYS = 7;
+const ROLLING_ETR_SLIPS = 5;
+
+function _datesIn(s, today) {
+  const out = [];
+  _MD_OR_ISO_G.lastIndex = 0;
+  let m;
+  while ((m = _MD_OR_ISO_G.exec(s))) {
+    const d = m[1] ? m[1] + '-' + m[2] + '-' + m[3] : inferDate(m[4], m[5], m[6], today);
+    if (d) out.push(d);
+  }
+  return out;
+}
+function _undercutHit(line, etcDate, today) {
+  for (let i = 0; i < ETC_UNDERCUT_RES.length; i++) {
+    if (i !== 2) { if (ETC_UNDERCUT_RES[i].test(line)) return true; continue; }
+    _UNDERCUT_P3_G.lastIndex = 0;
+    let m;
+    while ((m = _UNDERCUT_P3_G.exec(line))) {
+      if (_datesIn(m[0], today).every((d) => d === etcDate)) return true;
+    }
+  }
+  return false;
+}
+// Lines of the counted text source that hold a positive mention of the ETC date (the winning line).
+function _winningLines(r, etc, today) {
+  if (!etc.source || etc.source === 'extracted' || !ETC_SOURCES.includes(etc.source)) return [];
+  const lines = etc.source === 'repairTimeline'
+    ? parseTimelineLines(r.repairTimeline, today).filter((l) => !etc.statedDay || l.date === etc.statedDay).map((l) => l.raw)
+    : _str(r[etc.source]).split(/\r?\n/);
+  return lines.filter((l) => l.trim() && _etcMentions(l, today).some((x) => !x.negated && x.date === etc.date));
+}
+// Lines read by checks (a) / (c): dated timeline + savedNotes lines and offsite entries on or
+// after the stated day (== today when it is unknown), the undated canonical next step /
+// situation (current) and the winning line itself.
+function _currentLines(r, etc, today) {
+  const from = etc.statedDay || null;
+  const ok = (d) => !!d && (from ? d >= from : d === today);
+  const out = [];
+  for (const f of ['repairTimeline', 'savedNotes']) {
+    for (const l of parseTimelineLines(r[f], today)) if (ok(l.date)) out.push(l.raw);
+  }
+  const an = _str(r.asistNotes);
+  for (const e of offsiteEntries(an)) {
+    if (e.atMs != null && ok(_localDay(e.atMs))) out.push(an.slice(e.start, e.end));
+  }
+  for (const f of ['canonicalNextStep', 'canonicalSituation']) {
+    for (const l of _str(r[f]).split(/\r?\n/)) if (l.trim()) out.push(l);
+  }
+  for (const l of _winningLines(r, etc, today)) out.push(l);
+  return [...new Set(out.map((l) => l.trim()))];
+}
+function _undercutText(line) {
+  const s = _redact(_str(line).replace(/\s+/g, ' ').trim());
+  return s.length > SNIPPET_MAX ? s.slice(0, SNIPPET_MAX - 1).trimEnd() + '\u2026' : s;
+}
+// The first failing ETC-Today check (a)..(f) -> { reason, undercut } | null.
+function _etcTodayFails(r, etc, today) {
+  const lines = _currentLines(r, etc, today);
+  const neg = lines.find((l) => _undercutHit(l, etc.date, today));
+  if (neg) return { reason: 'newer-negation', undercut: _undercutText(neg) };
+  const pe = _str(r.partsEta).trim();
+  if (partsWait(r, today) && !(YMD_RE.test(pe) && pe === today)) return { reason: 'parts-wait', undercut: null };
+  if (NOT_STARTED_STATUSES.includes(_norm(r.savedRepairStatus))
+    || _norm(r.vendorDelayReason) === 'waiting for diagnosis'
+    || _norm(r.delayReasonCodes).includes('waiting for diagnosis')) return { reason: 'not-started', undercut: null };
+  const diag = lines.find((l) => DIAG_NONE_RE.test(l));
+  if (diag) return { reason: 'not-started', undercut: _undercutText(diag) };
+  for (const l of _winningLines(r, etc, today)) {
+    const m = APPT_DATE_RE.exec(l);
+    if (!m) continue;
+    const dm = /^(\d{1,2})\/(\d{1,2})$/.exec(m[1]);
+    if (dm && inferDate(dm[1], dm[2], null, today) === etc.date) return { reason: 'appointment', undercut: _undercutText(l) };
+  }
+  if (etc.slip && Number(etc.slip.count) >= ROLLING_ETR_SLIPS) return { reason: 'rolling-etr', undercut: null };
+  const sd = _toUtc(etc.statedDay);
+  if (Number.isFinite(sd) && (_toUtc(today) - sd) / DAY_MS > STALE_ETR_DAYS) return { reason: 'stale-etr', undercut: null };
+  return null;
+}
+
+// Sheet bucket of one down unit (pure): -> { bucket: 'today'|'none'|'missed', reason, undercut }.
+// ETC Today needs evidence the repair finishes today; an unsupported ETC Today goes to Missed
+// only when an explicit miss was reported in the same episode (etc.explicitMissDate).
+function countedEtc(row, etc, today) {
+  const r = row || {};
+  const e = etc && typeof etc === 'object' ? etc : {};
+  if (e.state === 'missed') return { bucket: 'missed', reason: e.viaPassedHead ? 'no-etc-note-passed-etr' : 'explicit-miss', undercut: null };
+  if (e.state === 'future') return { bucket: 'none', reason: 'future', undercut: null };
+  if (e.state !== 'today') return { bucket: 'none', reason: 'no-etc', undercut: null };
+  const fail = _etcTodayFails(r, e, today);
+  if (!fail) return { bucket: 'today', reason: 'etc-today', undercut: null };
+  return { bucket: e.explicitMissDate ? 'missed' : 'none', reason: fail.reason, undercut: fail.undercut };
 }
 
 // ── Barrier rules (one table; tune here) ────────────────────────────────────
@@ -751,13 +956,14 @@ function _detailLine(u, why) {
   const v = u.vendor || 'no vendor';
   return u.id + ' (' + v + (u.daysDown == null ? '' : ', ' + u.daysDown + 'd') + '): ' + why;
 }
-// Missed ETC: the count, then one "why" line per missed unit (IDs of every bucket stay in
-// units[].etc for the drill-down).
-function _missedCell(missed) {
-  return [String(missed.length)].concat(missed.map((u) => '\u2022 ' + u.id + ' (ETC ' + _md(u.etc.date) + '): '
-    + (u.etc.explicitMissDate ? 'ETC ' + _md(u.etc.explicitMissDate) + ' explicitly missed' + (u.etc.snippet ? ": '" + u.etc.snippet + "'" : '')
-      : (u.etc.snippet ? "'" + u.etc.snippet + "'" : '(no verified reason)'))
-    + _slipSuffix(u.etc.slip))).join('\n');
+// One single-line "why" per Missed ETC unit (row.missedWhy; the cell itself is the bare count).
+function _missedWhy(u) {
+  const e = u.etc;
+  let why;
+  if (e.explicitMissDate) why = 'ETC ' + _md(e.explicitMissDate) + ' explicitly missed' + (e.snippet ? ": '" + e.snippet + "'" : '');
+  else if (e.viaPassedHead) why = 'ETR ' + _md(e.date) + ' passed and the saved note says No ETC';
+  else why = e.snippet ? "'" + e.snippet + "'" : '(no verified reason)';
+  return { unit: u.id, date: e.date || null, why: (why + _slipSuffix(e.slip)).replace(/\s*\n\s*/g, ' '), overrode: e.overrode || null };
 }
 // '; ETC moved N× (M/D→M/D→…)' from Relay history (last 6 dates); '' without slips.
 function _slipSuffix(slip) {
@@ -809,7 +1015,7 @@ function buildFleetDbr(rows, opts = {}) {
         status: _str(r.savedRepairStatus).trim(), serviceState: _str(r.serviceState).trim(),
         etc, barriers: BARRIER_RULES.filter((x) => b[x.id]).map((x) => x.id),
         why: _unitWhy(b), barrierKinds: _unitKinds(b),
-        categories: [..._unitCategories(r)], systems: _unitSystems(r), _why: b,
+        categories: [..._unitCategories(r)], systems: _unitSystems(r), _why: b, _row: r,
       };
     }).sort(_byDaysThenId);
     for (const u of units) {
@@ -817,11 +1023,18 @@ function buildFleetDbr(rows, opts = {}) {
         const hit = u._why[rule.id];
         if (hit) { hits[rule.id] = true; details[rule.id].push(_detailLine(u, hit.why)); }
       }
-      if (u.etc.state === 'today') etcBuckets.today.push(u.id);
-      else if (u.etc.state === 'missed') etcBuckets.missed.push(u);
-      else if (u.etc.state === 'none') etcBuckets.none.push(u.id);
+      // Every down unit lands in exactly one bucket (I1).
+      const c = countedEtc(u._row, u.etc, today);
+      u.etc = Object.assign({}, u.etc, { bucket: c.bucket, bucketReason: c.reason, undercut: c.undercut });
+      etcBuckets[c.bucket].push(u);
       delete u._why;
+      delete u._row;
     }
+    const missedWhy = etcBuckets.missed.map(_missedWhy);
+    const userEtcOverrides = etcBuckets.missed.filter((u) => u.etc.overrode).map((u) => ({
+      unit: u.id, date: u.etc.date || null, userSnippet: u.etc.overrode.userSnippet || '', extractedSnippet: u.etc.snippet || '',
+    }));
+    const etcInvariant = etcBuckets.today.length + etcBuckets.none.length + etcBuckets.missed.length === p.down;
     const common = commonRepairs(p.downRows, today);
     const cells = {
       fasName,
@@ -835,7 +1048,7 @@ function buildFleetDbr(rows, opts = {}) {
       commonDetails: common.details,
       etcToday: String(etcBuckets.today.length),
       noEtc: String(etcBuckets.none.length),
-      missedEtc: _missedCell(etcBuckets.missed),
+      missedEtc: String(etcBuckets.missed.length),
       fasActions: '',
       support: '',
     };
@@ -847,6 +1060,7 @@ function buildFleetDbr(rows, opts = {}) {
       key: p.key, domicile: p.domicile, scac: p.scac,
       pair: { total: p.total, down: p.down }, domicileStats, scacStats,
       cells, units, common: { groups: common.common, repeat: common.repeat },
+      missedWhy, userEtcOverrides, etcInvariant,
       unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
     });
   }
@@ -951,6 +1165,6 @@ module.exports = {
   OEM_VENDOR_RE, ONSITE_VENDOR_RE, VENDOR_1P_RE, RELEASED_RE, PARTNER_TEXT_RE, SYSTEM_GROUPS, REPEAT_RE, EMAIL_RE,
   partsWait, partsWhy, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE, AAP_PARTS_STATUS_RE,
   isDown, uptimePct, fmtPct, groupKey, normCode, parseTimelineLines, inferDate, parseEtc, etcMentionDates, etcKeywordNegated,
-  REPAIR_MISS_MARKER_RE, explicitRepairMiss,
+  REPAIR_MISS_MARKER_RE, explicitRepairMiss, countedEtc, ETC_UNDERCUT_RES, DIAG_NONE_RE, APPT_DATE_RE,
   classifyBarriers, commonRepairs, statusConflicts, buildFleetDbr, applyOverlays, unitsHash, evidenceHash,
 };

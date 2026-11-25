@@ -181,3 +181,43 @@ describe('AC40 two repair source heads', () => {
     expect(etc.counted.state).not.toBe('missed');
   });
 });
+
+describe('FEAT-002 additive fields: structuredMiss and passedHead (counted unchanged)', () => {
+  const T = '2026-11-25';
+  const structured = { id: 's1', kind: 'etcMention', at: '2026-11-18T15:00:00Z', source: 'relay', via: 'structured', value: '2026-11-20', etcKind: 'repairCompletion', snippet: 'expectedCompletionDateTime: 2026-11-20' };
+  const marker = { id: 'm1', kind: 'etcMention', at: '2026-11-21T15:00:00Z', source: 'relay', via: 'text', value: '2026-11-20', marker: 'miss', chain: 'repairCompletion', repair: true, snippet: 'missed the ETC of 11/20' };
+  const NONE = { state: 'none', date: null, explicitMissDate: null, reason: null };
+
+  it('structured-only revision: an unattached dated repair marker matching a structured entry -> structuredMiss; counted unchanged', () => {
+    const etc = F.etcModel([structured, marker], { today: T });
+    expect(etc.counted).toEqual(NONE);
+    expect(etc._countedEntry).toBeNull();
+    expect(etc.explicitMisses).toEqual([]);
+    expect(etc.structuredExplicitMiss).toEqual({ date: '2026-11-20', at: '2026-11-21T15:00:00Z', snippet: 'missed the ETC of 11/20' });
+  });
+  it('structuredMiss stays null without a matching structured entry, for non-repair markers and when the marker attaches to a text entry', () => {
+    expect(F.etcModel([marker], { today: T }).structuredExplicitMiss).toBeNull();
+    expect(F.etcModel([structured, Object.assign({}, marker, { repair: false })], { today: T }).structuredExplicitMiss).toBeNull();
+    expect(F.etcModel([structured, Object.assign({}, marker, { chain: 'parts' })], { today: T }).structuredExplicitMiss).toBeNull();
+    const text = { id: 't1', kind: 'etcMention', at: '2026-11-17T15:00:00Z', source: 'relay', via: 'text', value: '2026-11-20', etcKind: 'repairCompletion', snippet: 'ETC 11/20' };
+    const attached = F.etcModel([structured, text, marker], { today: T });
+    expect(attached.structuredExplicitMiss).toBeNull();
+    expect(attached.counted).toMatchObject({ state: 'missed', explicitMissDate: '2026-11-20' });
+  });
+  it('passedHead for a passed, unmarked head; null for today / future / explicit miss / no head', () => {
+    const rf = relayOf([c('2026-11-05T15:00:00Z', 'fasuser1', 'ETC 11/07')]);
+    const etc = fsOf({ relayFacts: rf }).etc;
+    expect(etc.counted).toEqual(NONE);
+    expect(etc.passedHead).toMatchObject({ date: '2026-11-07' });
+    expect(Date.parse(etc.passedHead.statedAt)).toBe(Date.parse('2026-11-05T15:00:00Z'));
+    const row = { equipmentId: 'P1', relayFacts: rf };
+    F.refreshRowFacts(row, ON, '2026-11-11');
+    expect(row._factEtc).toMatchObject({ state: 'none', date: null, source: null, statedAt: null, negated: false, structuredMiss: null });
+    expect(row._factEtc.passedHead).toMatchObject({ date: '2026-11-07' });
+    expect(DBR.parseEtc(row, '2026-11-11')).toMatchObject({ state: 'none', missDowngraded: true, passedDate: '2026-11-07' });
+    expect(fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC 11/11')]) }).etc.passedHead).toBeNull();
+    expect(fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC 11/20')]) }).etc.passedHead).toBeNull();
+    expect(fsOf({ relayFacts: relayOf([c('2026-11-05T15:00:00Z', 'fasuser1', 'ETC 11/07'), c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC revised from 11/07 to 11/14')]) }).etc.passedHead).toBeNull();
+    expect(fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'Unit at dealer, diag in progress.')]) }).etc.passedHead).toBeNull();
+  });
+});

@@ -112,6 +112,40 @@ describe('buildFleetDbr on the fixture', () => {
     expect(r.cells.support).toBe('');
   });
 
+  it('I1: ETC Today + NO ETC + Missed = pair down on every row; the three cells are bare whole numbers', () => {
+    const b = F.buildFleetDbr(makeFleetRows({
+      T0001: { canonicalNextStep: 'ETC 11/10' },
+      T0002: { repairTimeline: '11/09 - Dealer missed the ETC of 11/05, new date pending' },
+      T0003: { savedNotes: 'ETC 11/05' },
+      T0004: { savedNotes: 'ETC 11/20' },
+    }), { today: TODAY });
+    for (const r of b.rows) {
+      for (const id of ['etcToday', 'noEtc', 'missedEtc']) expect(r.cells[id], r.key + ' ' + id).toMatch(/^\d+$/);
+      expect(+r.cells.etcToday + +r.cells.noEtc + +r.cells.missedEtc, r.key).toBe(r.pair.down);
+      expect(r.etcInvariant).toBe(true);
+      expect(r.missedWhy).toHaveLength(+r.cells.missedEtc);
+      for (const u of r.units) expect(['today', 'none', 'missed']).toContain(u.etc.bucket);
+    }
+    const tuzr = rowOf(b, 'ABE40|TUZR');
+    expect([tuzr.cells.etcToday, tuzr.cells.noEtc, tuzr.cells.missedEtc]).toEqual(['1', '3', '1']);
+    expect(tuzr.missedWhy).toEqual([{ unit: 'T0002', date: '2026-11-05', why: "'11/09 - Dealer missed the ETC of 11/05, new date pending'", overrode: null }]);
+    expect(tuzr.userEtcOverrides).toEqual([]);
+    expect(tuzr.units.find((u) => u.id === 'T0004').etc).toMatchObject({ state: 'future', bucket: 'none', bucketReason: 'future', undercut: null });
+    expect(tuzr.units.find((u) => u.id === 'T0001').etc).toMatchObject({ bucket: 'today', bucketReason: 'etc-today' });
+  });
+
+  it('userEtcOverrides lists Missed units whose extracted miss overrode a saved note', () => {
+    const r = F.buildFleetDbr([
+      makeUnit({ equipmentId: 'O1', _factsOn: true, savedNotes: '11/08 - No ETC',
+        _factEtc: { state: 'missed', date: '2026-11-05', explicitMissDate: '2026-11-05', source: 'relay', statedAt: null, snippet: 'missed the ETC of 11/05', negated: false } }),
+      makeUnit({ equipmentId: 'O2', savedNotes: 'No ETC' }),
+    ], { today: TODAY }).rows[0];
+    expect([r.cells.etcToday, r.cells.noEtc, r.cells.missedEtc]).toEqual(['0', '1', '1']);
+    expect(r.userEtcOverrides).toEqual([{ unit: 'O1', date: '2026-11-05', userSnippet: '11/08 - No ETC', extractedSnippet: 'missed the ETC of 11/05' }]);
+    expect(r.missedWhy[0]).toMatchObject({ unit: 'O1', overrode: { field: 'savedNotes', was: 'none' } });
+    expect(r.missedWhy[0].why).not.toMatch(/\n/);
+  });
+
   it('every row has row.common = { groups, repeat }; every unit has why / barrierKinds / systems', () => {
     for (const r of built.rows) {
       expect(Object.keys(r.common).sort()).toEqual(['groups', 'repeat']);

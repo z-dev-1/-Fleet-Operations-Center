@@ -604,30 +604,32 @@ describe('ETC reconciliation (AC6, AC21, AC55, R-N5)', () => {
     expect(r.flags.etcToday).toBeUndefined();
     expect(r.flags.noEtc).toBeUndefined();
   });
-  it('AC21 / AC55 cancelled ETC: accepted with a gated why, recorded in etcOverrides, no flag', () => {
+  // FEAT-002 D16: B61005's passed 11/08 ETC has no miss marker, so code parseEtc is NO ETC
+  // (was arithmetic Missed); the AI "cancelled" none now agrees with code.
+  it('AC21 / AC55 cancelled ETC: accepted with a gated why; code is NO ETC (D16), so no override, no flag', () => {
     const r = run([{ unit: 'B61005', state: 'none', date: '', why: 'ETC 11/08 cancelled, waiting on parts' }]);
     expect(r.etcUnits.find((u) => u.unit === 'B61005')).toMatchObject({ state: 'none', origin: 'ai', why: 'ETC 11/08 cancelled, waiting on parts' });
-    expect(r.etcOverrides).toEqual([{ unit: 'B61005', code: '11/08' }]);
+    expect(r.etcOverrides).toEqual([]);
     expect(r.etcDisagreements).toEqual([]);
     expect(r.cells.missedEtc).not.toContain('B61005');
     expect(r.flags.noEtc).toBeUndefined();
     expect(r.flags.missedEtc).toBeUndefined();
   });
-  it('AC21 cancelled siblings: code parseEtc wins (Missed with the builder snippet, no override)', () => {
+  it('AC21 cancelled siblings: AI none agrees with code NO ETC (D16), no override, Missed 0', () => {
     for (const why of ['', 'ETC 11/08 cancelled; FAS escalated to dealer 11/10', 'ETC 11/08 cancelled 11/09']) {
       const r = run([{ unit: 'B61005', state: 'none', date: '', why }]);
-      expect(r.etcUnits.find((u) => u.unit === 'B61005')).toMatchObject({ state: 'missed', origin: 'code' });
+      expect(r.etcUnits.find((u) => u.unit === 'B61005')).toMatchObject({ state: 'none' });
       expect(r.etcOverrides).toEqual([]);
-      expect(r.cells.missedEtc).toMatch(/\u2022 B61005 \(ETC 11\/8\): '.+'/);
+      expect(r.cells.missedEtc).toBe('0');
     }
     const d = G.validateRowDraft(answer({ barriers: N6(), etc: [{ unit: 'B61005', state: 'none', why: 'ETC 11/08 cancelled; FAS escalated to dealer 11/10' }] }), ctx);
     expect(d.meta.dropReasons['unfounded-fas-action']).toBe(1);
   });
-  it('AC21 code-origin missed unit renders the builder snippet; an AI why for another date is not used', () => {
+  it('AC21 an AI miss for a date with no evidence falls back to code parseEtc (NO ETC under D16); the AI why is not used', () => {
     const r = run([{ unit: 'B61005', state: 'missed', date: '11/02', why: 'Dealer update 11/10: waiting on parts' }]);
-    const line = r.cells.missedEtc.split('\n').find((l) => l.includes('B61005'));
-    expect(line).toMatch(/^\u2022 B61005 \(ETC 11\/8\): '.*ETC 11\/08.*'$/);
-    expect(line).not.toContain('waiting on parts');
+    expect(r.etcUnits.find((u) => u.unit === 'B61005')).toMatchObject({ state: 'none', origin: 'code' });
+    expect(r.cells.missedEtc).toBe('0');
+    expect(JSON.stringify(r.etcUnits)).not.toContain('waiting on parts');
   });
   it('etc not an array: the whole ETC block is computed and flagged', () => {
     const r = G.renderCells(G.validateRowDraft(answer({ barriers: N6(), etc: 'none' }), ctx), ctx);
