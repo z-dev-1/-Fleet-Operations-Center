@@ -22,7 +22,7 @@ beforeAll(() => {
   engine = require('../src/store/sqlite_engine');
   schema = require('../src/autopilot/schema');
 });
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 function freshDir(label) {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-sv2-' + label + '-'));
@@ -150,7 +150,7 @@ describe('schema v2 migration (AC-33)', () => {
     expect(fs.readFileSync(path.join(dir, leftover), 'utf8')).toBe('partial');
   });
 
-  it('a backup failure -> degraded migration_backup_failed, no DDL, no meta key; a later retry succeeds', () => {
+  it('a backup failure -> degraded migration_backup_failed, no DDL, no meta key; retried only after the backoff, then succeeds', () => {
     freshDir('fail');
     seedV1();
     const real = engine.exec;
@@ -171,7 +171,18 @@ describe('schema v2 migration (AC-33)', () => {
     expect(meta('schema_version')).toBe('1');
     expect(schema.isEnsured()).toBe(false);
     vi.restoreAllMocks();
+    // Backoff: the next calls (ticks, status polls) inside 15 min do not run VACUUM INTO again.
+    const t = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(t + 60 * 1000);
+    const nBak = backups().length;
+    expect(schema.ensureSchema()).toBe(false);
+    expect(schema.ensureSchema()).toBe(false);
+    expect(backups().length).toBe(nBak);
+    expect(schema.status()).toMatchObject({ degradedCode: 'migration_backup_failed' });
+    vi.setSystemTime(t + 15 * 60 * 1000 + 1);
     expect(schema.ensureSchema()).toBe(true);
+    vi.useRealTimers();
     expect(schema.status()).toMatchObject({ version: 2, degradedCode: null });
     expect(meta('premigration_backup_v2')).toMatch(/\.ap-v2-premigration-\d+\.bak$/);
   });

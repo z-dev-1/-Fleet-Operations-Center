@@ -8,7 +8,8 @@
  *
  * V2: SCHEMA_VERSION 2. Upgrading an existing v1 database first writes a one-time
  * backup with VACUUM INTO '<db>.ap-v2-premigration-<ms>.bak'. A backup failure
- * leaves the schema untouched and status().degradedCode = 'migration_backup_failed'.
+ * leaves the schema untouched and status().degradedCode = 'migration_backup_failed';
+ * the backup is retried at most once per BACKUP_RETRY_MS (15 min) per database path.
  *
  * Nothing here runs at require time. The controller calls ensureSchema() once
  * per process, only while the master switch is on.
@@ -22,6 +23,7 @@ try { logger = require('../utils/logger')('autopilot'); } catch (_) { logger = {
 const SCHEMA_VERSION = 2;
 const BACKUP_META_KEY = 'premigration_backup_v2';
 const BACKUP_INFIX = '.ap-v2-premigration-';
+const BACKUP_RETRY_MS = 15 * 60 * 1000;
 
 const DDL_V1 = `
 CREATE TABLE IF NOT EXISTS ap_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -212,6 +214,7 @@ const BACKFILL = [
 let _ensuredPath = null;
 let _degradedCode = null;
 let _lastBackup = null;   // { ms, ok } of the last VACUUM INTO attempt in this process
+let _backupFailed = null; // { path, at } of the last failed backup (retry backoff)
 
 function _tableExists(name) {
   return !!engine.prepare("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
@@ -258,9 +261,15 @@ function ensureSchema() {
   const p = engine._currentDbPath();
   if (_ensuredPath === p && engine.getDb()) return true;
   if (!engine.isAvailable()) return false;
-  if (_needsBackup() && !_backup()) {
-    _degradedCode = 'migration_backup_failed';
-    return false;
+  if (_needsBackup()) {
+    // A failed backup is not retried on every call (ticks and status polls): wait BACKUP_RETRY_MS.
+    if (_backupFailed && _backupFailed.path === p && Date.now() - _backupFailed.at < BACKUP_RETRY_MS) return false;
+    if (!_backup()) {
+      _backupFailed = { path: p, at: Date.now() };
+      _degradedCode = 'migration_backup_failed';
+      return false;
+    }
+    _backupFailed = null;
   }
   if (!engine.exec(DDL)) return false;
   _migrate();
@@ -290,7 +299,7 @@ function status() {
 }
 
 function isEnsured() { return _ensuredPath != null && _ensuredPath === engine._currentDbPath(); }
-function _resetForTests() { _ensuredPath = null; _degradedCode = null; _lastBackup = null; }
+function _resetForTests() { _ensuredPath = null; _degradedCode = null; _lastBackup = null; _backupFailed = null; }
 
 module.exports = {
   ensureSchema, isEnsured, status, SCHEMA_VERSION, DDL, DDL_V1, DDL_V2, INDEXES, INDEXES_V1, INDEXES_V2,

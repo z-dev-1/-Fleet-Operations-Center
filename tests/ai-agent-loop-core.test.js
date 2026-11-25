@@ -172,4 +172,12 @@ describe('agent-loop-core', () => {
     expect(strip(a)).toEqual(strip(b));
     expect(a.toolLog[0]).toMatchObject({ tool: 'rm_rf_fleet', ok: false });
   });
+
+  it("parity: through the wrapper a 'stop' decision is still treated as final (pre-split contract)", async () => {
+    const loop = require('../src/ai/agent-loop');
+    const res = await loop.run({ planner: async () => ({ decision: 'stop', code: 'ai_cap', result: { x: 1 } }), profile: { type: 'internal' } });
+    expect(res).toMatchObject({ ok: true, stopped: null, result: { x: 1 } });
+    const res2 = await loop.run({ planner: async () => ({ decision: 'stop' }), profile: { type: 'internal' } });
+    expect(res2).toMatchObject({ ok: true, stopped: null, result: null });
+  });
 });

@@ -26,6 +26,11 @@
  * triggers; the investigate step is a worker pool (queue.maxStartsPerTick starts, at most
  * queue.maxConcurrent at once).
  *
+ * KNOWN LIMITATION: steps 4-6 (resolution sweep, detection pass, equipment sweep, slice triggers)
+ * run synchronously on the main process. The opt-in load bench (tests/autopilot-load.bench.test.js) measured
+ * an event-loop block of about 0.2 s at 263 rows, 0.56 s at 1,000, 3.8 s at 5,000 and 10 s on the
+ * first 5,000-row tick. Chunk the pass or yield between rows before the fleet grows past ~1,000 units.
+ *
  * deps: { supervisor, ports, caseStore, schema, config, settingsStore, env, runInvestigation,
  *         limiter, jobs, reason, now, rand, owner, ctx{sendToWindow, pushBubbleNotification},
  *         defer(fn), telemetry, logger }

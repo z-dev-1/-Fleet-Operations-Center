@@ -244,7 +244,7 @@ function validatePlannerTurn(r, opts) {
 }
 
 const SUPPORT_TRUST = new Set(['structured', 'untrusted_text']);
-const NO_SUPPORT_FLAGS = Object.freeze(['canonical_derived', 'derived_calc', 'manual_entry']);
+const NO_SUPPORT_FLAGS = Object.freeze(['canonical_derived', 'derived_calc', 'manual_entry', 'injection_suspected']);
 
 /**
  * hasSourceSupport(output, pack) -> true when a confirmedFacts or inferences entry cites an item with

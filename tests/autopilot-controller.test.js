@@ -400,6 +400,17 @@ describe('master OFF and supervisor disabled (AC-18, AC-19)', () => {
     expect(st.supervisorEnvOverride).toBe(null);
     expect(st.lastTick.outcome).toBe('ok');
   });
+
+  it('status surfaces the schema degraded code (migration_backup_failed) when ensureSchema fails', () => {
+    const schemaMod = require('../src/autopilot/schema');
+    const env = F.mkEnv();
+    vi.spyOn(schemaMod, 'isEnsured').mockReturnValue(false);
+    vi.spyOn(schemaMod, 'ensureSchema').mockReturnValue(false);
+    const ss = vi.spyOn(schemaMod, 'status').mockReturnValue({ version: 1, degradedCode: 'migration_backup_failed', backup: { ms: 1, ok: false } });
+    expect(env.ap.status().degraded).toBe('migration_backup_failed');
+    ss.mockReturnValue({ version: null, degradedCode: null, backup: null });
+    expect(env.ap.status().degraded).toBe('storage_unavailable');
+  });
 });
 
 describe('AC-21: full controller run over the real ports object', () => {

@@ -99,9 +99,10 @@ function createAutopilot(deps) {
 
     // ap_* SQL only when the supervisor is enabled (Autopilot can run) or the schema is already ensured.
     if (!supEnabled && !schema.isEnsured()) { out.counts = null; out.ai = { cap: cfg.dailyCap, isolatedAvailable, cost: 'not reported by AI lanes' }; return out; }
-    if (!controller.ensureSchema()) { out.degraded = 'storage_unavailable'; return out; }
-    const now = clock();
+    const schemaOk = controller.ensureSchema();
     try { const ss = typeof schema.status === 'function' ? schema.status() : null; if (ss && ss.degradedCode) out.degraded = ss.degradedCode; } catch (_) {}
+    if (!schemaOk) { if (!out.degraded) out.degraded = 'storage_unavailable'; return out; }
+    const now = clock();
     out.counts = cs.counts();
     // V2 blocks (§10.1): coverage, queue, AI backlog and per-source metrics.
     const cap = cfg.ai && Number.isFinite(cfg.ai.dailyCap) ? cfg.ai.dailyCap : cfg.dailyCap;

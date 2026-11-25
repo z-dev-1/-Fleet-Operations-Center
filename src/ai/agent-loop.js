@@ -47,7 +47,14 @@ async function run(input) {
   const budget = input.budget instanceof Budget ? input.budget : new Budget(input.budget || {});
   if (typeof input.planner !== 'function') return { ok: false, error: 'planner function required', evidence: [], budget: budget.summary(), toolLog: [] };
   if (!input.profile) return { ok: false, error: 'resolved sender profile required', evidence: [], budget: budget.summary(), toolLog: [] };
-  return core.run(Object.assign({}, input, { budget, registry: tools, ctx: { profile: input.profile, mode: input.mode } }));
+  // Pre-split contract: an unexpected decision (including 'stop') is treated as final. The
+  // core's 'stop' branch is for core callers only, so map it back to 'final' here.
+  const userPlanner = input.planner;
+  const planner = async (state) => {
+    const plan = await userPlanner(state);
+    return plan && plan.decision === 'stop' ? { decision: 'final', result: plan.result } : plan;
+  };
+  return core.run(Object.assign({}, input, { planner, budget, registry: tools, ctx: { profile: input.profile, mode: input.mode } }));
 }
 
 module.exports = { run };

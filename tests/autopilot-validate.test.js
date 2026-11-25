@@ -212,6 +212,7 @@ describe('validateAiOutput V2 downgrade rules and hasSourceSupport', () => {
     it_('ev_man', 'untrusted_text', { source: 'timeline', flags: ['manual_entry'] }),
     it_('ev_calc', 'structured', { source: 'autopilot_derived', flags: ['derived_calc'] }),
     it_('ev_txt', 'untrusted_text', { source: 'slack' }),
+    it_('ev_inj', 'untrusted_text', { source: 'slack', flags: ['injection_suspected'] }),
   ], conflicts: { groups: [], memberOf: {} } };
   const out = (ids) => base({ confirmedFacts: [{ statement: 'f', evidenceIds: ids }], inferences: [], stageStall: {}, responsibleParty: {}, recommendedActions: [] });
   const downgraded = (ids) => { const v = validateAiOutput(out(ids), p2); return v.output.confirmedFacts.length === 0 && v.output.inferences[0].confidence === 0.5; };
@@ -225,7 +226,7 @@ describe('validateAiOutput V2 downgrade rules and hasSourceSupport', () => {
     expect(downgraded(['ev_can', 'ev_a'])).toBe(false);
   });
 
-  it('hasSourceSupport: circular-only, manual-only, canonical-only and derived_calc-only are not support', () => {
+  it('hasSourceSupport: circular-only, manual-only, canonical-only, derived_calc-only and injection_suspected-only are not support', () => {
     const o = (ids) => ({ confirmedFacts: [], inferences: [{ statement: 'i', confidence: 0.6, evidenceIds: ids }] });
     expect(hasSourceSupport(o(['ev_ai', 'ev_pc']), p2)).toBe(false);
     expect(hasSourceSupport(o(['ev_man']), p2)).toBe(false);
@@ -233,6 +234,8 @@ describe('validateAiOutput V2 downgrade rules and hasSourceSupport', () => {
     expect(hasSourceSupport(o(['ev_calc']), p2)).toBe(false);
     expect(hasSourceSupport(o(['ev_can', 'ev_a']), p2)).toBe(true);
     expect(hasSourceSupport(o(['ev_txt']), p2)).toBe(true);
+    expect(hasSourceSupport(o(['ev_inj']), p2)).toBe(false);
+    expect(hasSourceSupport(o(['ev_inj', 'ev_txt']), p2)).toBe(true);
     expect(hasSourceSupport({ confirmedFacts: [{ statement: 'f', evidenceIds: ['ev_a'] }], inferences: [] }, p2)).toBe(true);
     expect(hasSourceSupport(null, p2)).toBe(false);
   });
