@@ -69,7 +69,8 @@ function _awaiting(c) {
  * V2 ctx additions (§9.2): sliceFps (Map|object caseId -> current slices; when given, slice
  * triggers replace the V1 cheap-fp evidence_changed), sourceUsable(source, case) and aiCapLeft.
  * Order per case, first match wins: slice-named trigger, eta_due, scheduled, auth_restored,
- * source_restored, ai_capacity, retry_due. A slice trigger also returns changedSlices.
+ * source_restored, ai_capacity (also NEEDS_REVIEW with ai_pending_reason 'cap'), retry_due.
+ * A slice trigger also returns changedSlices.
  */
 function dueTriggers(cases, now, ctx) {
   const c = ctx || {};
@@ -110,7 +111,10 @@ function dueTriggers(cases, now, ctx) {
       const list = _awaiting(k);
       if (list.length && list.some((s) => { try { return usable(s, k) === true; } catch (_) { return false; } })) trig = 'source_restored';
     }
-    if (!trig && REVIEW_STATES.has(st) && k.ai_pending_reason != null && Number.isFinite(k.ai_retry_at) && k.ai_retry_at <= now
+    // ai_capacity also covers a NEEDS_REVIEW case deferred by the daily cap (user decision): it gets its
+    // AI run while it still waits for review (investigate returns it to NEEDS_REVIEW).
+    const capReview = st === S.NEEDS_REVIEW && k.ai_pending_reason === 'cap';
+    if (!trig && (REVIEW_STATES.has(st) || capReview) && k.ai_pending_reason != null && Number.isFinite(k.ai_retry_at) && k.ai_retry_at <= now
       && Number.isFinite(capLeft) && capLeft > 0) trig = 'ai_capacity';
     if (!trig && RETRY_STATES.has(st) && Number.isFinite(k.next_attempt_at) && k.next_attempt_at <= now) trig = 'retry_due';
     if (!trig) continue;

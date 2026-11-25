@@ -807,6 +807,25 @@ function prune(opts) {
   });
 }
 
+const IN_RUN_STATES = new Set([S.QUEUED, S.INVESTIGATING, S.ANALYZING]);
+/**
+ * heldReviewCode(caseId) -> NEEDS_REVIEW reason code | null. Read, no transaction.
+ * Non-null when the case's last entry into QUEUED from a resting state was an ai_capacity requeue
+ * out of NEEDS_REVIEW (user decision: cap-deferred review cases get their AI run while they keep
+ * waiting for review). Requeues by an aborted run (INVESTIGATING/ANALYZING -> QUEUED) are skipped,
+ * so a resumed run keeps the hold. The code is that of the latest transition into NEEDS_REVIEW.
+ */
+function heldReviewCode(caseId) {
+  const evs = _all("SELECT from_state, to_state, reason_code FROM ap_event WHERE case_id = ? AND kind = 'transition' ORDER BY id DESC LIMIT 50", caseId);
+  for (const e of evs) {
+    if (e.to_state !== S.QUEUED || IN_RUN_STATES.has(e.from_state)) continue;
+    if (e.from_state !== S.NEEDS_REVIEW || e.reason_code !== 'ai_capacity') return null;
+    const r = evs.find((x) => x.to_state === S.NEEDS_REVIEW);
+    return (r && r.reason_code) || 'ai_capacity';
+  }
+  return null;
+}
+
 /**
  * review(caseId, action, { note, now }) -> { ok:true, state } | { ok:false, code }
  *   acknowledge: RECOMMENDATION_READY -> MONITORING
@@ -1469,6 +1488,7 @@ module.exports = {
   getMeta, listCases, getCase, counts, listOpen, pickQueued, findResumable, runsSince,
   getRun, findingsForRun, etaDueFired, aiRunStats,
   // V2 reads
+  heldReviewCode,
   queuedCount, listSteps, stepsForRun, findReusableStep, findingsForStep, coverage, listUnits, getRecord, listProposals,
   queueStats, aiMetrics, sourceMetrics, aiBacklog,
   ISSUE_KEY,

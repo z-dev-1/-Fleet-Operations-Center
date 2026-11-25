@@ -39,6 +39,15 @@ describe('queue.js (pure)', () => {
     expect(queue.promotionCount(100, 40)).toBe(60);
     expect(queue.promotionCount(100, 140)).toBe(0);
   });
+
+  it('runBudgetMs: deep -> complex, last complexity, unknown -> complex; configured tiers win', () => {
+    expect(queue.runBudgetMs({ complexity: 'simple' })).toBe(120000);
+    expect(queue.runBudgetMs({ complexity: 'standard' })).toBe(240000);
+    expect(queue.runBudgetMs({ complexity: 'complex' })).toBe(420000);
+    expect(queue.runBudgetMs({ complexity: null })).toBe(420000);
+    expect(queue.runBudgetMs({ complexity: 'simple', deep_requested_at: 1 })).toBe(420000);
+    expect(queue.runBudgetMs({ complexity: 'simple' }, { simple: { maxElapsedMs: 90000 } })).toBe(90000);
+  });
 });
 
 describe('priority and aging (AC-16)', () => {
@@ -124,9 +133,29 @@ describe('worker pool (AC-17)', () => {
     });
     for (let i = 0; i < 3; i++) seedQ('M' + i, 30, T0 - MIN);
     const out = await env.ctl.runOnce();
-    expect(n).toBe(1);                 // 8 min budget - 6 min = 2 min < 150 s
+    expect(n).toBe(1);                 // 8 min budget - 6 min = 2 min < 420 s (unknown tier -> complex)
     expect(out.investigated.length).toBe(1);
     expect(stateCount('QUEUED')).toBe(2);
+  });
+
+  it('a case starts only when the remaining tick time covers its tier budget; a smaller tier may still start', async () => {
+    const started = [];
+    const env = F.mkEnv({
+      world: F.mkWorld({ rows: [] }), autopilot: { queue: { maxStartsPerTick: 4, maxConcurrent: 1 } },
+      runInvestigation: async (caseId) => { started.push(caseId); env.clock.advance(210 * 1000); toMonitoring(caseId, env.clock.now()); return { ok: true, caseId }; },
+    });
+    const first = seedQ('U0', 60, T0 - MIN);
+    const cx = seedQ('CX', 50, T0 - MIN);
+    const st = seedQ('ST', 40, T0 - MIN);
+    const si = seedQ('SI', 30, T0 - MIN);
+    cs.persistRun(cx, null, { complexity: 'complex' }, null, { now: T0 });
+    cs.persistRun(st, null, { complexity: 'standard' }, null, { now: T0 });
+    cs.persistRun(si, null, { complexity: 'simple' }, null, { now: T0 });
+    await env.ctl.runOnce();
+    // 480 s: U0 (unknown -> 420 s) starts; 270 s left: CX (420 s) waits, ST (240 s) starts; 60 s left: SI (120 s) waits.
+    expect(started).toEqual([first, st]);
+    expect(cs.getCase(cx).case.state).toBe('QUEUED');
+    expect(cs.getCase(si).case.state).toBe('QUEUED');
   });
 });
 

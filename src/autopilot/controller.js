@@ -52,7 +52,7 @@ const { createLimiter } = require('./limiter');
 const { classifyEquipment, CLASSES: EQ, EXCLUDED_CLASSES } = require('./equipment');
 const coverageMod = require('./coverage');
 const slices = require('./slices');
-const { nextStart, promotionCount } = require('./queue');
+const { nextStart, promotionCount, runBudgetMs } = require('./queue');
 
 let logger;
 try { logger = require('../utils/logger')('autopilot'); } catch (_) { logger = { debug() {}, info() {}, warn() {}, error() {} }; }
@@ -490,7 +490,7 @@ function createController(deps) {
       }
 
       // step 7: the worker pool (§8.2): up to maxStartsPerTick starts, at most maxConcurrent at once,
-      // no start with less than LIMITS.minStartRemainingMs of tick time left (the case stays QUEUED).
+      // no start unless the remaining tick time covers the case's tier budget (the case stays QUEUED).
       const picked = cs.pickQueued(qc.maxStartsPerTick || cfg.maxCasesPerTick, clock(), aging);
       const deadline = t0 + TICK_BUDGET_MS;
       const running = new Set();
@@ -515,14 +515,23 @@ function createController(deps) {
           .then((r) => { out.investigated.push(r); changed = true; running.delete(p); });
         running.add(p);
       };
+      // A case starts only when the remaining tick time covers its tier's maxElapsedMs (user decision,
+      // replaces the fixed LIMITS.minStartRemainingMs): a run that cannot finish would waste an AI call.
+      // A case that does not fit stays QUEUED for the next tick; a smaller-tier case may still start.
+      const tiers = cfg.complexityTiers || {};
+      const minNeed = Math.min(runBudgetMs({ complexity: 'simple' }, tiers), runBudgetMs({ complexity: 'standard' }, tiers), runBudgetMs({ complexity: 'complex' }, tiers));
       for (const c of picked) {
         if (ac.signal.aborted) break;
-        let act = nextStart({ running: running.size, maxConcurrent: qc.maxConcurrent, remainingMs: deadline - clock() });
+        if (deadline - clock() < minNeed) break;
+        const need = runBudgetMs(c, tiers);
+        const ask = () => nextStart({ running: running.size, maxConcurrent: qc.maxConcurrent, remainingMs: deadline - clock(), minStartRemainingMs: need });
+        let act = ask();
         while (act === 'wait') {
           await Promise.race(running);
-          act = nextStart({ running: running.size, maxConcurrent: qc.maxConcurrent, remainingMs: deadline - clock() });
+          act = ask();
         }
-        if (act === 'stop' || ac.signal.aborted) break;
+        if (ac.signal.aborted) break;
+        if (act === 'stop') continue;
         startRun(c);
       }
       await Promise.all(running);

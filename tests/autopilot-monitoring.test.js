@@ -144,6 +144,13 @@ describe('controller slice evaluation', () => {
     await env.ctl.runOnce();
     expect(env.calls.map((c) => [c.caseId, c.trigger])).toEqual([[id, 'ai_capacity']]);
   });
+
+  it('ai_capacity also fires for a NEEDS_REVIEW case deferred by the cap, not for other NEEDS_REVIEW cases', () => {
+    const k = (reason) => ({ case_id: 'c1', state: 'NEEDS_REVIEW', ai_pending_reason: reason, ai_retry_at: T0 - 1 });
+    expect(dueTriggers([k('cap')], T0, { aiCapLeft: 1 })).toEqual([{ caseId: 'c1', trigger: 'ai_capacity' }]);
+    expect(dueTriggers([k('cap')], T0, { aiCapLeft: 0 })).toEqual([]);
+    expect(dueTriggers([k('unavailable')], T0, { aiCapLeft: 1 })).toEqual([]);
+  });
 });
 
 describe('real runs (review finding 7, AC-24, AC-25)', () => {

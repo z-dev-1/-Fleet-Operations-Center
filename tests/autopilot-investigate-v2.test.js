@@ -142,6 +142,24 @@ describe('AI budget: cap mid-loop and deferral timing', () => {
     expect(caseOf(caseId)).toMatchObject({ ai_pending_reason: null });
   });
 
+  it('a cap-deferred NEEDS_REVIEW case requeued by ai_capacity gets its AI run and returns to NEEDS_REVIEW with its code', async () => {
+    const { caseId } = F.seedCase();
+    const r1 = await inv(caseId, { reason: F.fakePlanner([finalFrom]), cfgOver: { dailyCap: 0, ai: { dailyCap: 0 } } });
+    expect(r1.aiStatus).toBe('skipped_cap');
+    if (caseOf(caseId).state !== 'NEEDS_REVIEW') F.cs.transition(caseId, 'NEEDS_REVIEW', { reason: 'unit_missing', now: s.ck.now() });
+    const code = events(caseId, 'transition').filter((e) => e.to_state === 'NEEDS_REVIEW').pop().reason_code;
+    s.ck.t = NEXT_MIDNIGHT + H;
+    F.cs.requeueCases({ caseIds: [caseId], trigger: 'ai_capacity', now: s.ck.now() });
+    expect(F.cs.heldReviewCode(caseId)).toBe(code);
+    const r2 = await inv(caseId, { reason: F.fakePlanner([finalFrom]), cfgOver: { ai: { dailyCap: 1 } }, trigger: 'ai_capacity' });
+    expect(r2.aiStatus).toBe('ok');
+    expect(caseOf(caseId)).toMatchObject({ state: 'NEEDS_REVIEW', ai_pending_reason: null, ai_investigated_at: s.ck.now() });
+    expect(events(caseId, 'transition').pop()).toMatchObject({ to_state: 'NEEDS_REVIEW', reason_code: code });
+    // A manual rerun out of NEEDS_REVIEW is not held.
+    F.cs.requeueCases({ caseIds: [caseId], trigger: 'manual', now: s.ck.now() });
+    expect(F.cs.heldReviewCode(caseId)).toBe(null);
+  });
+
   it('finding 5: a cap-deferred case gets ai_retry_at >= next local midnight with multiTurn on and off', async () => {
     for (const multiTurn of [true, false]) {
       setup();

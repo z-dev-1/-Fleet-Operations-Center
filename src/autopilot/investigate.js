@@ -201,6 +201,8 @@ async function runInvestigation(caseId, deps) {
   if (!got) return { ok: false, code: 'NOT_FOUND', caseId };
   let rec = got.case;
   if (rec.state !== S.QUEUED) return { ok: false, code: 'INVALID_STATE', caseId, state: rec.state };
+  // A cap-deferred NEEDS_REVIEW case requeued by ai_capacity returns to NEEDS_REVIEW (it still waits for a human).
+  const heldReview = (() => { try { return typeof cs.heldReviewCode === 'function' ? cs.heldReviewCode(caseId) : null; } catch (_) { return null; } })();
 
   // ── step 1: lease, open ─────────────────────────────────────────────────
   // One lease owner per run (V2 §7.1, FR-12.1): every in-run case / step write checks it in its own
@@ -381,8 +383,9 @@ async function runInvestigation(caseId, deps) {
       // An authority tie or the AI-rejected streak still holds: stay in NEEDS_REVIEW (leaving it needs
       // a human accept). A review the user already accepted with the same code is not re-requested.
       const tie = needsReview(pack.conflicts && pack.conflicts.groups);
-      const reviewCode = tie ? 'authority_tie' : ((rec.ai_reject_streak || 0) >= LIMITS.aiRejectStreak ? 'ai_rejected' : null);
-      const keepReview = reviewCode != null && !(rec.review_status === 'accepted' && rec.review_accepted_code === reviewCode);
+      let reviewCode = tie ? 'authority_tie' : ((rec.ai_reject_streak || 0) >= LIMITS.aiRejectStreak ? 'ai_rejected' : null);
+      let keepReview = reviewCode != null && !(rec.review_status === 'accepted' && rec.review_accepted_code === reviewCode);
+      if (!keepReview && heldReview) { keepReview = true; reviewCode = heldReview; }
       const to = keepReview ? S.NEEDS_REVIEW : (rec.review_status === 'pending' ? S.RECOMMENDATION_READY : S.MONITORING);
       const f = Object.assign({}, RELEASE, {
         last_checked_at: t, next_review_at: nra, attempts: 0, next_attempt_at: null, last_error_code: null,
@@ -610,7 +613,7 @@ async function runInvestigation(caseId, deps) {
 
     const approvals = recommendation.actionsRequiringApproval.length > 0;
     let to;
-    if (analysis.needsReviewConflict || streak >= LIMITS.aiRejectStreak) to = S.NEEDS_REVIEW;
+    if (analysis.needsReviewConflict || streak >= LIMITS.aiRejectStreak || heldReview) to = S.NEEDS_REVIEW;
     else if (approvals && (hashChanged || rec.review_status === 'pending')) to = S.RECOMMENDATION_READY;
     else to = S.MONITORING;
     if (approvals && hashChanged) f.review_status = 'pending';
@@ -633,7 +636,9 @@ async function runInvestigation(caseId, deps) {
       conflicts: mergedConflicts, sourceStatus: pack.sourceStatus, aiStatus: ctx.aiStatus, now: t,
     });
 
-    const reasonCode = to === S.NEEDS_REVIEW ? (analysis.needsReviewConflict ? 'authority_tie' : 'ai_rejected') : 'recommendation';
+    const reasonCode = to === S.NEEDS_REVIEW
+      ? (analysis.needsReviewConflict ? 'authority_tie' : (streak >= LIMITS.aiRejectStreak ? 'ai_rejected' : heldReview))
+      : 'recommendation';
     cs.persistRun(caseId, runId, f, to, {
       reason: reasonCode,
       run: runMeta('recommendation'),
