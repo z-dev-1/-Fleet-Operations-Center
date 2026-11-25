@@ -138,11 +138,15 @@ function unitEvidence(row, today) {
   for (const f of EVIDENCE_FIELDS) if (row[f] !== undefined && row[f] !== '' && row[f] !== null) ev[f] = red(clone(row[f]));
   const daysDown = engine.parseDaysOpen(row);
   const b = dbr.classifyBarriers(row, { today, daysDown });
+  const pe = dbr.parseEtc(row, today);
+  const counted = dbr.countedEtc(row, pe, today);
   return {
     id: String(row.equipmentId || ''),
     daysDown,
     evidence: ev,
-    parseEtc: red(dbr.parseEtc(row, today)),
+    // The sheet bucket the builder puts this unit in (design §3.2).
+    etc: { state: pe.state, date: pe.date, bucket: counted.bucket, bucketReason: counted.reason, undercut: red(counted.undercut) },
+    parseEtc: red(pe),
     etcLegacyNoFacts: red(dbr.parseEtc(Object.assign({}, row, { _factsOn: false }), today)),
     etcBySource: etcBySource(row, today),
     recomputedAtBuild: recomputedFactEtc(row, today),
@@ -161,7 +165,7 @@ function rowView(model, r) {
     key: r.key, domicile: r.domicile, scac: r.scac, pair: r.pair,
     domicileStats: r.domicileStats, scacStats: r.scacStats,
     cells: red(cellsByHeader(model, r)), source: r.source, flags: r.flags, draft: r.draft,
-    base: red(r.base), fasSource: r.fasSource, rosterFas: r.rosterFas ? '(roster)' : '',
+    base: red(r.base), fasSource: r.fasSource, rosterFas: r.rosterFas ? '(roster)' : '', mine: !!r.mine,
     units: red(r.units), etcUnits: red(r.etcUnits), etcOverrides: r.etcOverrides, etcDisagreements: r.etcDisagreements,
     disagreements: r.disagreements, unverifiedNames: red(r.unverifiedNames), unboundDates: r.unboundDates,
   };
@@ -193,17 +197,21 @@ function rowView(model, r) {
   const model = built.model;
 
   const userName = FAS_ARG || model.fasName || '';
-  const visible = L.visibleRows(model, HIDE_ZERO, SCACS);
-  const tsv = {
+  // "Copy for SharePoint" exactly as the panel does it: scope 'mine' (the user's exact roster pairs
+  // with units down; falls back to the visible rows when the scope is unavailable) through the
+  // golden-format sheetTsv. tsvVisible keeps the visible-rows scope for comparison.
+  const sheetBlock = (rowsToCopy, extra) => Object.assign({
     filters: { hideZero: HIDE_ZERO, scacs: SCACS },
-    copyRowKeys: visible.map((r) => r.key),
-    copyRows: L.rowsToTsv(model.columns, visible, undefined, { header: false }),
-    copyWithHeader: L.rowsToTsv(model.columns, visible, undefined, { header: true }),
-    copyFill: L.fillColumnsTsv(model, visible),
-  };
-  // The user's pairs = roster matches for the user's name. Rows with no roster match also show
-  // the user's name (fasSource 'you'); they are listed separately and are not "the user's pairs".
-  const isUser = (r) => !!userName && r.fasSource === 'roster' && r.rosterFas === userName;
+    copyRowKeys: rowsToCopy.map((r) => r.key),
+    copyRows: L.sheetTsv(model.columns, rowsToCopy, undefined, { header: false }),
+    copyWithHeader: L.sheetTsv(model.columns, rowsToCopy, undefined, { header: true }),
+    copyFill: L.sheetTsv(L.fillColumns(model), rowsToCopy, undefined, { header: false }),
+  }, extra);
+  const scopeInfo = L.copyScopeInfo(model, HIDE_ZERO, SCACS);
+  const tsv = sheetBlock(L.copyRows(model, 'mine', HIDE_ZERO, SCACS), { scope: 'mine', scopeOk: scopeInfo.mineOk, scopeNote: scopeInfo.note });
+  const tsvVisible = sheetBlock(L.copyRows(model, 'visible', HIDE_ZERO, SCACS), { scope: 'visible' });
+  // The user's pairs = the model's exact-roster rows for the user's name (row.mine, §3.12).
+  const isUser = (r) => !!r.mine;
   const userPairs = model.rows.filter(isUser);
   const userDownPairs = userPairs.filter((r) => r.pair.down > 0);
   const youRows = model.rows.filter((r) => r.fasSource === 'you');
@@ -258,6 +266,7 @@ function rowView(model, r) {
       })),
     },
     tsv: red(tsv),
+    tsvVisible: red(tsvVisible),
     pairs,
   };
   fs.mkdirSync(path.dirname(path.resolve(OUT)), { recursive: true });
@@ -265,6 +274,6 @@ function rowView(model, r) {
   console.log('today', TODAY, '| fleet rows', rows.length, '| synced', syncedAt, '(' + out.meta.fleetAgeMin + ' min old)');
   console.log('user', userName ? '(set)' : '(none)', '| user pairs', userPairs.length, '| with units down', userDownPairs.map((r) => r.key + ' ' + r.pair.down + '/' + r.pair.total + ' ETC today ' + r.cells.etcToday + ' NO ETC ' + r.cells.noEtc + ' missed ' + String(r.cells.missedEtc).split('\n')[0] + ' [' + r.draft.state + ']').join('; '));
   console.log('rows with no roster match showing the user name:', youRows.length);
-  console.log('copy rows (default filters):', tsv.copyRowKeys.length, '| blocked saves (memory only):', blockedSaves.join(',') || 'none');
+  console.log('copy rows (scope mine' + (tsv.scopeOk ? '' : ', unavailable: ' + tsv.scopeNote) + '):', tsv.copyRowKeys.length, '| visible rows:', tsvVisible.copyRowKeys.length, '| blocked saves (memory only):', blockedSaves.join(',') || 'none');
   console.log('wrote', path.resolve(OUT));
 })().catch((e) => { console.error('harness failed:', e && e.stack ? e.stack : e); process.exit(1); });
