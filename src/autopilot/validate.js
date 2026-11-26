@@ -60,13 +60,18 @@ function _flags(it) { return Array.isArray(it && it.flags) ? it.flags : (typeof 
 const DERIVED_TRUST = new Set(['derived_ai', 'prior_conclusion']);
 const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
 const US_DATE_RE = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g;
+// Value side: the leading date of a datetime ('2026-11-24T19:55:48Z') counts too.
+const VALUE_DATE_RE = /\b\d{4}-\d{2}-\d{2}(?!\d)/g;
+const DATETIME_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g;
 
-// ISO dates a cited item carries: in its value (ISO or M/D/YYYY) and its observation day.
+// ISO dates a cited item carries: in its value (ISO, datetime or M/D/YYYY) and its observation day.
 function _itemDates(it) {
   const out = new Set();
   const v = it && it.value;
   const s = v != null && typeof v === 'object' ? JSON.stringify(v) : String(v == null ? '' : v);
-  for (const m of s.match(ISO_DATE_RE) || []) out.add(m);
+  for (const m of s.match(VALUE_DATE_RE) || []) out.add(m);
+  // A UTC datetime can fall on the previous/next local day; either day is consistent.
+  for (const m of s.match(DATETIME_RE) || []) { const t = Date.parse(m); if (Number.isFinite(t)) out.add(localDate(t)); }
   for (const m of s.matchAll(US_DATE_RE)) out.add(m[3] + '-' + m[1].padStart(2, '0') + '-' + m[2].padStart(2, '0'));
   if (it && Number.isFinite(it.observedAt)) out.add(localDate(it.observedAt));
   return out;
