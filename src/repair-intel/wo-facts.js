@@ -235,6 +235,8 @@ function _runChains(stream, today, reasonOf, onStep) {
   const chains = { parts: [], repairCompletion: [], techOnsite: [] };
   const metAt = { parts: null, repairCompletion: null, techOnsite: null };
   const negations = [];
+  // Dated repair-completion miss markers that found no entry with the cited date (design §3.4).
+  const unattachedMisses = [];
   for (const ev of stream) {
     const ch = chains[ev.chain];
     if (!ch) continue;
@@ -251,6 +253,7 @@ function _runChains(stream, today, reasonOf, onStep) {
       let e = null;
       if (ev.date) e = ch.find((x) => x.date === ev.date && same(x)) || ch.find((x) => x.date === ev.date) || null;
       else e = prev;
+      if (!e && ev.date && ev.repair && isRep) unattachedMisses.push({ date: ev.date, at: ev.at || null, snippet: ev.snippet || null });
       if (e && d > e.date) {
         if (e.status === 'open' || e.status === 'superseded') { e.status = 'missed'; e.missedAt = d; }
         if (ev.repair && isRep) { e.explicitMiss = true; e.explicitAt = ev.at; e.explicitSnippet = ev.snippet || null; }
@@ -296,7 +299,7 @@ function _runChains(stream, today, reasonOf, onStep) {
     }
     if (onStep) onStep(ev, chains);
   }
-  return { chains, metAt, negations };
+  return { chains, metAt, negations, unattachedMisses };
 }
 
 function _stated(e) { return e.lastConfirmedAt || e.statedAt; }
@@ -419,6 +422,15 @@ function etcModel(facts, opts = {}) {
     reason: newestMiss ? (newestMiss.reason || null) : null,
   };
   const countedEntry = state === 'missed' ? newestMiss : (state === 'today' || state === 'future' ? repHead : null);
+  // Additive (Fleet Health, design §3.4 / DR2-4); `counted` above is not affected.
+  // Structured-only revision: a text marker cites a date stated only in the structured chain.
+  const sDates = new Set(S.chains.repairCompletion.map((e) => e.date));
+  const structuredExplicitMiss = T.unattachedMisses
+    .filter((x) => x.date < today && sDates.has(x.date))
+    .sort((a, b) => (_ms(b.at) || 0) - (_ms(a.at) || 0))[0] || null;
+  // A head whose date passed with no explicit miss (counted none).
+  const passedHead = repHead && repHead.date < today && state === 'none'
+    ? { date: repHead.date, statedAt: _stated(repHead) || null, source: repHead.tag || null } : null;
 
   const view = (k) => chains.parts.filter((e) => e.kind === k);
   return {
@@ -445,6 +457,8 @@ function etcModel(facts, opts = {}) {
       ? { source: countedEntry.tag, statedAt: countedEntry.explicitAt || _stated(countedEntry), snippet: countedEntry.explicitSnippet || countedEntry.snippet }
       : { source: countedEntry.tag, statedAt: _stated(countedEntry), snippet: countedEntry.snippet }),
     conflicts,
+    structuredExplicitMiss,
+    passedHead,
   };
 }
 
@@ -997,6 +1011,12 @@ function _factEtc(fs) {
     snippet: ent ? ent.snippet || '' : '',
     negated, reason: c.reason || null,
   };
+  // Additive Fleet Health fields (design §3.4, DR2-4); the keys above are unchanged. Set only
+  // when present, so rows without them keep the same _factEtc (and autopilot fingerprint).
+  if (etc.structuredExplicitMiss) {
+    out.structuredMiss = { date: etc.structuredExplicitMiss.date, at: etc.structuredExplicitMiss.at || null, snippet: etc.structuredExplicitMiss.snippet || null };
+  }
+  if (etc.passedHead) out.passedHead = Object.assign({}, etc.passedHead);
   // Relay history ETC revisions (only when the WR's history has any ETC field).
   const h = fs.history;
   if (h && h.etc.available) {

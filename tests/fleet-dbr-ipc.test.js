@@ -60,7 +60,7 @@ const answer = (fasActions) => JSON.stringify({
 const OK_ANSWER = answer([{ unit: ROC[0], text: 'No FAS action logged; AI_SECRET call carrier; next: call carrier' }]);
 const ROC0_LINE = '• ' + ROC[0] + ': No FAS action logged; AI_SECRET call carrier; next: call carrier';
 
-let store, flags, fleet, ask, fasFor, userAlias, clock;
+let store, flags, fleet, ask, fasFor, fasForExact, rosterSize, userAlias, clock;
 function freshFleet() {
   return { rows: makeFleetRows({ [ROC[0]]: { savedNotes: SECRET + ' tow order 00176990', vendor: 'CEI' } }), syncedAt: '2026-11-10T10:00:00Z' };
 }
@@ -70,12 +70,16 @@ function reset(over = {}) {
   fleet = over.fleet || freshFleet();
   ask = over.ask || vi.fn(async () => OK_ANSWER);
   fasFor = vi.fn((scac, dom) => (scac === 'TUZR' && dom === 'ABE40' ? ROSTER : ''));
+  // Exact-pair roster lookup (FAS Name cell); rosterSize 0 = no roster loaded (old FAS Name behavior).
+  fasForExact = vi.fn((scac, dom) => (scac === 'TUZR' && dom === 'ABE40' ? ROSTER : ''));
+  rosterSize = vi.fn(() => over.rosterSize || 0);
   userAlias = over.userAlias || vi.fn(() => '');
   clock = { t: 1000000 };
   logCalls.length = 0;
   relayCalls.length = 0;
   const o = {
     store, loadFlags: () => flags, now: () => NOW, getFleet: () => fleet, fasFor,
+    fasForExact: (...a) => fasForExact(...a), rosterSize: () => rosterSize(),
     userAlias: (...a) => userAlias(...a),
     aliasNow: over.aliasNow || (() => clock.t),
     aliasSleep: over.aliasSleep || (() => new Promise((r) => setTimeout(r, 1))),
@@ -126,7 +130,7 @@ describe('build / get', () => {
     expect(r.model.fleetSyncedAt).toBe('2026-11-10T10:00:00Z');
     expect(r.model.flags).toEqual({ aiDraft: true });
     const snap = store.data.fleetDbrSnapshot;
-    expect(snap.version).toBe(1);
+    expect(snap.version).toBe(2); // SNAPSHOT_VERSION (DR2-1)
     expect(snap.day).toBe(TODAY);
     expect(snap.rows).toHaveLength(21);
     expect(snap.drafts).toEqual({});
@@ -150,15 +154,16 @@ describe('build / get', () => {
   it('keeps today\'s drafts across a rebuild and tags them stale when the pair\'s units changed', async () => {
     const b = await call('build');
     const hash = rowOf(b.model, ROC_KEY).unitsHash;
-    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: { fasActions: '• kept', support: 'None', draftedAt: 'x', unitsHash: hash, dropped: 0 } };
+    const ev = rowOf(b.model, ROC_KEY).evidenceHash;
+    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: { version: 3, sheet: { fasActions: 'Kept sentence.', support: 'None.' }, draftedAt: 'x', unitsHash: hash, evidenceHash: ev, dropped: 0 } };
     let m = (await call('build')).model;
     expect(rowOf(m, ROC_KEY).draft.state).toBe('ok');
-    expect(rowOf(m, ROC_KEY).cells.fasActions).toBe('• kept');
+    expect(rowOf(m, ROC_KEY).cells.fasActions).toBe('Kept sentence.');
     expect(rowOf(m, ROC_KEY).source.fasActions).toBe('ai');
     fleet.rows.find((x) => x.equipmentId === ROC[1]).vendor = 'Amerit';
     m = (await call('build')).model;
     expect(rowOf(m, ROC_KEY).draft.state).toBe('stale');
-    expect(rowOf(m, ROC_KEY).cells.fasActions).toBe('• kept');
+    expect(rowOf(m, ROC_KEY).cells.fasActions).not.toBe('Kept sentence.'); // a stale draft is never overlaid
     store.data.fleetDbrSnapshot.day = YESTERDAY;
     m = (await call('build')).model;
     expect(rowOf(m, ROC_KEY).draft.state).toBe('none');
@@ -168,7 +173,8 @@ describe('build / get', () => {
     reset({ storeInit: { fleetDbrEdits: { version: 1, fasName: USER, day: YESTERDAY, rows: { [ROC_KEY]: { fasActions: 'old', noEtc: 'old' } } } } });
     const m = (await call('build')).model;
     for (const r of m.rows) expect(Object.values(r.source)).not.toContain('edit');
-    expect(rowOf(m, ROC_KEY).cells.fasActions).toBe('');
+    // The computed (composer) FAS Actions, not yesterday's edit.
+    expect(rowOf(m, ROC_KEY).cells.fasActions).toMatch(/^Tracking T\d{4}\//);
     expect(m.fasName).toBe(USER);
     expect(m.fasNameSource).toBe('panel');
     expect(rowOf(m, ROC_KEY).cells.fasName).toBe(USER);
@@ -185,6 +191,7 @@ describe('build / get', () => {
     expect(rowOf(m, ROC_KEY).cells.fasName).toBe('Mail Name');
     reset();
     fasFor.mockImplementation(() => { throw new Error('roster broken'); });
+    fasForExact.mockImplementation(() => { throw new Error('roster broken'); });
     m = (await call('build')).model;
     expect(m.fasNameSource).toBe('none');
     expect(rowOf(m, TUZR_KEY).cells.fasName).toBe('');
@@ -286,13 +293,18 @@ describe('draft', () => {
     expect(r.saved).toBe(true);
     expect(typeof r.draftedAt).toBe('string');
     const stored = store.data.fleetDbrSnapshot.drafts[ROC_KEY];
-    expect(stored).toMatchObject({ version: 2, unitsHash: hash, dropped: 0, mode: 'single', identity: { alias: false, names: 0 } });
-    expect(stored.cells.fasActions).toBe(r.fasActions);
-    expect(stored.cells.support).toBe('None');
-    expect(Object.keys(stored.cells).sort()).toEqual(F.AI_CELL_IDS.slice().sort());
+    expect(stored).toMatchObject({ version: 3, unitsHash: hash, dropped: 0, mode: 'single', identity: { alias: false, names: 0 } });
+    expect(stored).not.toHaveProperty('cells');
+    expect(stored.unitNotes.fasActions).toBe(r.fasActions);
+    expect(stored.unitNotes.support).toBe('None');
+    for (const id of Object.keys(stored.unitNotes)) expect(F.DRAFT_SHEET_IDS).toContain(id);
+    // The fake AI answers the sheet call with the draft JSON (no `sheet` object) -> skipped, no cells.
+    expect(stored.sheet).toEqual({});
+    expect(stored.sheetSkipped).toBe('ai-invalid');
     expect(stored.evidenceHash).toBe(rowOf(b.model, ROC_KEY).evidenceHash);
-    expect(rowOf(r.model, ROC_KEY).source.fasActions).toBe('ai');
-    expect(rowOf(r.model, ROC_KEY).source.oemYN).toBe('ai');
+    // No validated sheet cell -> composer text; Y/N never from the AI.
+    expect(rowOf(r.model, ROC_KEY).source.fasActions).toBe('computed');
+    expect(rowOf(r.model, ROC_KEY).source.oemYN).toBe('computed');
     expect(rowOf(r.model, ROC_KEY).draft.state).toBe('ok');
     expect(ask.mock.calls[0][0]).toContain('VERIFIED COUNTS');
     expect(ask.mock.calls[0][0]).toContain('tow order 00176990');
@@ -307,8 +319,8 @@ describe('draft', () => {
 
   it('a third concurrent draft returns busy', async () => {
     const pending = [];
-    // The first call of each draft stays pending; the self-review call answers at once.
-    reset({ ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))) });
+    // The first call of each draft stays pending; the self-review and sheet calls answer at once.
+    reset({ ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') || p.includes('SHEET CONTRACT') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))) });
     await call('build');
     const p1 = call('draft', { key: ROC_KEY });
     const p2 = call('draft', { key: SAPB_KEY });
@@ -345,6 +357,15 @@ function v2Draft(row, over = {}) {
     draftedAt: 'x', unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, identity: { alias: true, names: 0, fasTagged: 0 },
   }, over);
 }
+const SHEET_FAS = 'Following up on ' + ROC[0] + '/' + ROC[1] + ' diag/repair progress.';
+function v3Draft(row, over = {}) {
+  return Object.assign({
+    version: 3, unitNotes: { oemDetails: '• AI OEM', fasActions: '• AI FAS', support: 'None' },
+    sheet: { oemYN: 'Y', oemDetails: 'Volvo offsite: ' + ROC[0] + '.', fasActions: SHEET_FAS, support: 'None.', domicileDown: '999', etcToday: '9' },
+    sheetDrops: {}, sheetSkipped: null, flags: { oemDetails: 'review' },
+    draftedAt: 'x', unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, identity: { alias: true, names: 0, fasTagged: 0 },
+  }, over);
+}
 
 describe('draft v2 (FEAT-004)', () => {
   it('AC7: hard cells are never changed through IPC, even when the AI JSON carries hard keys', async () => {
@@ -356,18 +377,19 @@ describe('draft v2 (FEAT-004)', () => {
     expect(pickCells(rowOf(r.model, ROC_KEY), HARD)).toEqual(before);
     for (const id of F.HARD_CELL_IDS) expect(r.cells).not.toHaveProperty(id);
     const snap = store.data.fleetDbrSnapshot;
-    for (const id of F.HARD_CELL_IDS) expect(snap.drafts[ROC_KEY].cells).not.toHaveProperty(id);
+    for (const id of F.HARD_CELL_IDS) expect(snap.drafts[ROC_KEY].unitNotes).not.toHaveProperty(id);
+    for (const id of F.HARD_CELL_IDS) expect(snap.drafts[ROC_KEY].sheet).not.toHaveProperty(id);
     // A tampered stored draft with hard keys is ignored by the overlay whitelist.
-    snap.drafts[ROC_KEY].cells.domicileDown = '999';
-    snap.drafts[ROC_KEY].cells.scacUptime = '1%';
+    snap.drafts[ROC_KEY].sheet.domicileDown = '999';
+    snap.drafts[ROC_KEY].sheet.scacUptime = '1%';
     const g = await call('get');
     expect(pickCells(rowOf(g.model, ROC_KEY), HARD)).toEqual(before);
   });
 
-  it('AC12: flag OFF -> draft ai-off; get with a stored v2 draft shows computed cells, no AI source, state none', async () => {
+  it('AC12: flag OFF -> draft ai-off; get with a stored v3 draft shows computed cells, no AI source, state none', async () => {
     const b = await call('build');
     const row = rowOf(b.model, ROC_KEY);
-    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: v2Draft(row) };
+    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: v3Draft(row) };
     flags = { enabled: true, aiDraft: false };
     expect(await call('draft', { key: ROC_KEY })).toEqual({ ok: false, code: 'ai-off' });
     let m = (await call('get')).model;
@@ -378,30 +400,42 @@ describe('draft v2 (FEAT-004)', () => {
     expect(r.flags).toEqual({});
     expect(m.columns).toHaveLength(24);
     expect(m.aiCellIds).toEqual(F.AI_CELL_IDS);
-    // Flag back on: the stored draft shows again (kept on disk).
+    // Flag back on: the stored draft's sheet cells show again (kept on disk); Y/N, counts and
+    // hard cells stay computed, a Details cell of a computed N stays blank.
     flags = { enabled: true, aiDraft: true };
     m = (await call('get')).model;
     r = rowOf(m, ROC_KEY);
-    expect(r.cells.oemYN).toBe('Y');
-    expect(r.source.oemYN).toBe('ai');
+    expect(r.cells.fasActions).toBe(SHEET_FAS);
+    expect(r.source.fasActions).toBe('ai');
+    expect(r.cells.oemYN).toBe(row.cells.oemYN);
+    expect(r.source.oemYN).toBe('computed');
+    expect(r.cells.oemDetails).toBe('');
+    expect(r.cells.etcToday).toBe(row.cells.etcToday);
     expect(r.cells.domicileDown).toBe(row.cells.domicileDown);
-    expect(r.flags).toEqual({ oemDetails: 'review' });
+    expect(r.flags).toEqual({});
+    expect(r.unitNoteFlags).toEqual({ oemDetails: 'review' });
+    expect(r.unitNotes.fasActions).toBe('• AI FAS');
     expect(r.draft.state).toBe('ok');
   });
 
-  it('v1 drafts still overlay fasActions/support only, and not with the flag off', async () => {
+  it('v1 and v2 drafts are format-stale and never change a cell; flag off -> state none', async () => {
     const b = await call('build');
     const row = rowOf(b.model, ROC_KEY);
-    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: { fasActions: '• v1', support: 'None', oemYN: 'Y', draftedAt: 'x', unitsHash: row.unitsHash, dropped: 0 } };
-    let r = rowOf((await call('get')).model, ROC_KEY);
-    expect(r.cells.fasActions).toBe('• v1');
-    expect(r.cells.oemYN).toBe(row.cells.oemYN);
-    expect(r.source.oemYN).toBe('computed');
-    expect(r.draft.state).toBe('ok');
-    flags = { enabled: true, aiDraft: false };
-    r = rowOf((await call('get')).model, ROC_KEY);
-    expect(r.cells.fasActions).toBe(row.cells.fasActions);
-    expect(r.draft.state).toBe('none');
+    for (const d of [
+      { fasActions: '• v1', support: 'None', oemYN: 'Y', draftedAt: 'x', unitsHash: row.unitsHash, dropped: 0 },
+      v2Draft(row),
+    ]) {
+      store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: d };
+      flags = { enabled: true, aiDraft: true };
+      let r = rowOf((await call('get')).model, ROC_KEY);
+      expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'format' });
+      expect(r.cells).toEqual(row.cells);
+      expect(Object.values(r.source)).not.toContain('ai');
+      flags = { enabled: true, aiDraft: false };
+      r = rowOf((await call('get')).model, ROC_KEY);
+      expect(r.cells.fasActions).toBe(row.cells.fasActions);
+      expect(r.draft.state).toBe('none');
+    }
   });
 
   it('AC13: the relay call is isolated + preferAki + source fleet_dbr with the per-call timeout', async () => {
@@ -423,7 +457,7 @@ describe('draft v2 (FEAT-004)', () => {
     fleet.rows.find((x) => x.equipmentId === ROC[3]).repairTimeline = '11/10 - dealer: tech on site';
     let r = rowOf((await call('build')).model, ROC_KEY);
     expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'evidence' });
-    expect(r.source.fasActions).toBe('ai'); // a stale draft still overlays
+    expect(r.source.fasActions).toBe('computed'); // a stale draft is never overlaid
     fleet.rows.find((x) => x.equipmentId === ROC[3]).vendor = 'Amerit';
     r = rowOf((await call('build')).model, ROC_KEY);
     expect(r.draft).toMatchObject({ state: 'stale', staleReason: 'units' });
@@ -456,7 +490,7 @@ describe('draft v2 (FEAT-004)', () => {
     expect(r.ok).toBe(true);
     for (const k of ['cells', 'sources', 'flags', 'etcUnits', 'etcDisagreements', 'etcOverrides', 'provenance', 'unverifiedNames',
       'unboundDates', 'disagreements', 'coverageFilled', 'dropped', 'rounds', 'reviewSkipped', 'mode', 'draftedAt', 'saved', 'model',
-      'fasActions', 'support']) expect(r).toHaveProperty(k);
+      'fasActions', 'support', 'unitNotes', 'sheet', 'sheetDrops', 'sheetSkipped']) expect(r).toHaveProperty(k);
     expect(Object.keys(r.cells).sort()).toEqual(F.AI_CELL_IDS.slice().sort());
     expect(r.etcUnits).toHaveLength(ROC.length);
     expect(r.sources.fasActions).toBe('ai');
@@ -493,7 +527,7 @@ describe('draft v2 (FEAT-004)', () => {
     const pending = [];
     reset({
       userAlias: vi.fn(() => pendingAlias),
-      ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))),
+      ask: vi.fn((p) => (p.includes('REVIEW CHECKLIST') || p.includes('SHEET CONTRACT') ? Promise.resolve(OK_ANSWER) : new Promise((res) => pending.push(res)))),
     });
     await call('build');
     const p1 = call('draft', { key: ROC_KEY });
@@ -565,10 +599,97 @@ describe('draft v2 (FEAT-004)', () => {
     const info = logCalls.filter((c) => c.lvl === 'info' && c.a[0] === '[fleet-dbr] draft').pop();
     expect(info.a[1]).toMatchObject({ key: ROC_KEY, outcome: 'ok', mode: 'single', alias: false });
     expect(typeof info.a[1].demand).toBe('number');
-    expect(info.a[1].calls).toBe(2);
+    expect(info.a[1].calls).toBe(3);   // draft + review + sheet (FEAT-003)
     for (const k of ['maxOutChars', 'maxPromptChars', 'envOver', 'envMissing', 'fasTagged', 'mapRetries']) expect(typeof info.a[1][k]).toBe('number');
     expect(info.a[1].dropReasons).toBeTypeOf('object');
     expect(info.a[1].fieldOver).toBeTypeOf('object');
+    expect(info.a[1]).toMatchObject({ sheetCells: 0, sheetDrops: {}, sheetSkipped: 'ai-invalid' });
+  });
+});
+
+// Answers the sheet call with SHEET (a JSON string) and every other call with OK_ANSWER.
+const sheetAsk = (sheet) => vi.fn(async (p) => (p.includes('SHEET CONTRACT') ? JSON.stringify({ sheet }) : OK_ANSWER));
+const warnsOf = (tag) => logCalls.filter((c) => c.lvl === 'warn' && c.a[0] === tag);
+
+describe('snapshot version, v3 drafts, roster (FEAT-004)', () => {
+  it('DR2-1: a stored version:1 snapshot for today -> get returns model:null; currentModel() rebuilds', async () => {
+    await call('build');
+    store.data.fleetDbrSnapshot.version = 1;
+    expect(await call('get')).toEqual({ ok: true, model: null });
+    for (const k of ['save-edit', 'reset-row']) expect((await call(k, { key: ROC_KEY, col: 'support', value: 'x' })).code).toBe('not-built');
+    const cm = ipc.currentModel();
+    expect(cm.ok).toBe(true);
+    expect(cm.built).toBe(true);
+    expect(store.data.fleetDbrSnapshot.version).toBe(2);
+    expect((await call('get')).model).not.toBeNull();
+  });
+
+  it('DR2-1: draftPending() rebuilds before drafting when the snapshot is old; a failed build returns its code', async () => {
+    await call('build');
+    const hash = rowOf((await call('get')).model, ROC_KEY).unitsHash;
+    store.data.fleetDbrSnapshot.version = 1;
+    store.data.fleetDbrSnapshot.drafts = { [ROC_KEY]: { version: 2, cells: { fasActions: '• old' }, unitsHash: hash } };
+    const out = await ipc.draftPending();
+    expect(out.ok).toBe(true);
+    expect(out.eligible).toBeGreaterThan(0);
+    expect(out.drafted).toBe(out.eligible);
+    const snap = store.data.fleetDbrSnapshot;
+    expect(snap.version).toBe(2);
+    expect(snap.drafts[ROC_KEY].version).toBe(3); // the carried v2 draft was format-stale and redrafted
+    store.data.fleetDbrSnapshot.version = 1;
+    fleet = { rows: [] };
+    expect(await ipc.draftPending()).toEqual({ ok: false, code: 'no-fleet-data' });
+  });
+
+  it('a draft whose sheet cells pass validateSheet is stored as v3 and overlays only those cells; logs carry counts only', async () => {
+    reset({ ask: sheetAsk({ fasActions: SHEET_FAS, support: 'None', oemDetails: 'Volvo offsite: ' + ROC[0] + ' under diagnosis.' }) });
+    await call('build');
+    const r = await call('draft', { key: ROC_KEY });
+    expect(r.ok).toBe(true);
+    expect(r.sheet).toEqual({ fasActions: SHEET_FAS, support: 'None.' });
+    expect(r.sheetDrops).toEqual({ oemDetails: 'sheet-not-yes' });
+    expect(r.sheetSkipped).toBe(null);
+    const stored = store.data.fleetDbrSnapshot.drafts[ROC_KEY];
+    expect(stored).toMatchObject({ version: 3, sheet: r.sheet, sheetDrops: r.sheetDrops, sheetSkipped: null });
+    expect(stored.unitNotes.fasActions).toBe(r.fasActions);
+    const row = rowOf(r.model, ROC_KEY);
+    expect([row.cells.fasActions, row.source.fasActions]).toEqual([SHEET_FAS, 'ai']);
+    expect([row.cells.support, row.source.support]).toEqual(['None.', 'ai']);
+    expect(row.source.oemDetails).toBe('computed');
+    const info = logCalls.filter((c) => c.lvl === 'info' && c.a[0] === '[fleet-dbr] draft').pop();
+    expect(info.a[1]).toMatchObject({ sheetCells: 2, sheetDrops: { 'sheet-not-yes': 1 }, sheetSkipped: null });
+    const text = JSON.stringify(logCalls);
+    for (const s of [SHEET_FAS, 'Volvo offsite', 'AI_SECRET']) expect(text).not.toContain(s);
+  });
+
+  it('roster loaded (_o.fasForExact / _o.rosterSize): mine, exact FAS Name, fasSource, rosterHint, model rosterLoaded / userName', async () => {
+    reset({ rosterSize: 12, storeInit: { fleetDbrEdits: { version: 1, fasName: ROSTER, day: TODAY, rows: {} } } });
+    fasFor.mockImplementation((scac, dom) => (scac === 'TUZR' && dom === 'ABE40' ? ROSTER : (scac === 'AUVTE' ? 'Site Person' : '')));
+    const m = (await call('build')).model;
+    expect([m.rosterLoaded, m.userName]).toEqual([true, ROSTER]);
+    const tuzr = rowOf(m, TUZR_KEY);
+    expect([tuzr.cells.fasName, tuzr.fasSource, tuzr.mine, tuzr.rosterHint]).toEqual([ROSTER, 'roster', true, '']);
+    const roc = rowOf(m, ROC_KEY);
+    expect([roc.cells.fasName, roc.fasSource, roc.mine, roc.rosterHint]).toEqual(['', 'none', false, 'Site Person']);
+    expect(m.rows.filter((x) => x.mine).map((x) => x.key)).toEqual([TUZR_KEY]);
+    expect(fasForExact).toHaveBeenCalledWith('TUZR', 'ABE40');
+    expect(warnsOf('[fleet-dbr] roster')).toEqual([]);
+  });
+
+  it('rosterSize 0 -> rosterLoaded false, the user name fills rows without an exact match, one roster-unavailable warn per model', async () => {
+    reset({ storeInit: { fleetDbrEdits: { version: 1, fasName: USER, day: TODAY, rows: {} } } });
+    const m = (await call('build')).model;
+    expect([m.rosterLoaded, m.userName]).toEqual([false, USER]);
+    expect([rowOf(m, ROC_KEY).cells.fasName, rowOf(m, ROC_KEY).fasSource, rowOf(m, ROC_KEY).mine]).toEqual([USER, 'you', false]);
+    expect([rowOf(m, TUZR_KEY).cells.fasName, rowOf(m, TUZR_KEY).fasSource]).toEqual([ROSTER, 'roster']);
+    expect(warnsOf('[fleet-dbr] roster').map((c) => c.a[1])).toEqual([{ code: 'roster-unavailable' }]);
+    await call('get');
+    expect(warnsOf('[fleet-dbr] roster')).toHaveLength(2);
+    // A throwing rosterSize seam is treated as no roster.
+    reset();
+    rosterSize.mockImplementation(() => { throw new Error('store ' + SECRET); });
+    expect((await call('build')).model.rosterLoaded).toBe(false);
+    expect(JSON.stringify(logCalls)).not.toContain(SECRET);
   });
 });
 
@@ -601,6 +722,6 @@ describe('builder parity', () => {
     const m = (await call('build')).model;
     const built = F.buildFleetDbr(fleet.rows, { today: TODAY });
     expect(m.rows.map((r) => r.key)).toEqual(built.rows.map((r) => r.key));
-    expect(rowOf(m, ROC_KEY).cells.partnerYN).toBe('Y');
+    expect(rowOf(m, ROC_KEY).cells.partnerYN).toBe('N'); // a CEI vendor is no longer a Partner hit (design §3.6, Q5)
   });
 });

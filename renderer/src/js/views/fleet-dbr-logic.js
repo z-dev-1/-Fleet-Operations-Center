@@ -62,6 +62,115 @@ export function fillColumnsTsv(model, rows, getValue) {
 
 const _down = (row) => (row && row.pair && Number(row.pair.down)) || 0;
 
+// ── Copy for SharePoint (golden sheet format, design §3.12, I4) ─────────────
+// Column kinds by id (the ids come from model.columns; nothing else is hard-coded).
+const _isYn = (id) => /YN$/.test(String(id));
+const _isUptime = (id) => /Uptime$/.test(String(id));
+const COUNT_IDS = new Set(['etcToday', 'noEtc', 'missedEtc']);
+
+// The one formatter for copied cells and on-screen non-editable cells: Y/N -> Yes/No, uptime
+// '69%' -> '69', ETC counts -> the first line's digits (legacy "1\n• …" -> "1"), every value
+// single-line (fillCell). A user-edited cell (source 'edit') is never normalized beyond fillCell,
+// so typed text such as "1 – 211022: waiting on parts" copies as typed (DR2-6).
+export function sheetValue(colId, v, source) {
+  const s = fillCell(v);
+  if (source === 'edit') return s;
+  if (_isYn(colId)) {
+    if (/^y/i.test(s)) return 'Yes';
+    if (/^n/i.test(s)) return 'No';
+    return s;
+  }
+  if (_isUptime(colId)) return s.replace(/\s*%$/, '');
+  if (COUNT_IDS.has(colId)) {
+    const first = String(v == null ? '' : v).split(/\r?\n/)[0];
+    const m = /^\s*(\d+)/.exec(first);
+    return m ? m[1] : s;
+  }
+  return s;
+}
+
+// TSV in the golden sheet format: sheetValue per cell, then tsvCell (a cell still holding '"'
+// is quoted). getValue(row, colId) reads live values; opts.getSource(row, colId) the cell source
+// (default row.source[colId]); opts.header adds the column headers line.
+export function sheetTsv(columns, rows, getValue, opts = {}) {
+  const cols = Array.isArray(columns) ? columns : [];
+  const get = typeof getValue === 'function' ? getValue : _cellOf;
+  const src = opts && typeof opts.getSource === 'function' ? opts.getSource : (r, id) => (r && r.source ? r.source[id] : undefined);
+  const lines = [];
+  if (opts && opts.header) lines.push(cols.map((c) => tsvCell(c.header)).join('\t'));
+  for (const r of rows || []) lines.push(cols.map((c) => tsvCell(sheetValue(c.id, get(r, c.id), src(r, c.id)))).join('\t'));
+  return lines.join('\n');
+}
+
+// Table and copy order (a view concern; the builder sort is unchanged): the user's pairs first,
+// then pair units down desc, SCAC units down desc, domicile asc, SCAC asc.
+export function sheetOrder(rows) {
+  const n = (v) => Number(v) || 0;
+  const s = (v) => String(v == null ? '' : v);
+  return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => (
+    (b && b.mine ? 1 : 0) - (a && a.mine ? 1 : 0)
+    || _down(b) - _down(a)
+    || n(b && b.scacStats && b.scacStats.down) - n(a && a.scacStats && a.scacStats.down)
+    || (s(a && a.domicile) < s(b && b.domicile) ? -1 : s(a && a.domicile) > s(b && b.domicile) ? 1 : 0)
+    || (s(a && a.scac) < s(b && b.scac) ? -1 : s(a && a.scac) > s(b && b.scac) ? 1 : 0)));
+}
+
+// The copy-scope choice: 'mine' (the user's roster pairs with units down) needs a loaded roster,
+// a user name and at least one matching pair (DR2-13); otherwise it is disabled with a note and
+// copy falls back to the visible rows.
+// -> { mineOk, note, mineCount, visibleCount }
+export function copyScopeInfo(model, hideZero, scacs) {
+  const rows = model && Array.isArray(model.rows) ? model.rows : [];
+  const mineCount = rows.filter((r) => r && r.mine && _down(r) > 0).length;
+  const visibleCount = visibleRows(model, hideZero, scacs).length;
+  const name = String((model && model.userName) || '').trim();
+  let note = '';
+  if (!(model && model.rosterLoaded)) note = 'FAS roster not loaded \u2014 copying all visible rows';
+  else if (!name) note = 'Set your FAS name to copy only your pairs';
+  else if (!rows.some((r) => r && r.mine)) note = "No roster pairs match '" + name + "' \u2014 check your FAS name";
+  return { mineOk: !note, note, mineCount, visibleCount };
+}
+
+// Rows a Copy writes, in sheetOrder: 'mine' -> the user's pairs with units down (when the scope is
+// available), anything else -> the visible rows (SCAC filter + hide-zero).
+export function copyRows(model, scope, hideZero, scacs) {
+  if (scope === 'mine' && copyScopeInfo(model, hideZero, scacs).mineOk) {
+    return sheetOrder((model.rows || []).filter((r) => r && r.mine && _down(r) > 0));
+  }
+  return sheetOrder(visibleRows(model, hideZero, scacs));
+}
+
+// ── Freshness (design §3.13) ────────────────────────────────────────────────
+export const FRESH_MAX_MS = 2 * 60 * 60 * 1000;
+
+// "3h 9m" / "45m".
+function _ageLabel(min) {
+  const m = Math.max(0, Math.floor(Number(min) || 0));
+  const h = Math.floor(m / 60);
+  return h ? h + 'h ' + (m % 60) + 'm' : m + 'm';
+}
+
+// -> { ageMin, stale, label, syncedAt }: stale when the fleet sync time is missing/invalid or
+// more than FRESH_MAX_MS before nowMs.
+export function freshness(model, nowMs) {
+  const syncedAt = (model && model.fleetSyncedAt) || null;
+  const t = Date.parse(syncedAt);
+  if (!syncedAt || !Number.isFinite(t)) return { ageMin: null, stale: true, label: '', syncedAt: null };
+  const ms = Math.max(0, (Number(nowMs) || 0) - t);
+  const ageMin = Math.floor(ms / 60000);
+  return { ageMin, stale: ms > FRESH_MAX_MS, label: _ageLabel(ageMin), syncedAt };
+}
+
+// The stale-data alert ('' when fresh).
+export function staleBannerHtml(fresh) {
+  const f = fresh || {};
+  if (!f.stale) return '';
+  const text = f.label
+    ? '\u26a0 Fleet data is ' + f.label + ' old (last sync ' + (_hhmm(f.syncedAt) || 'unknown') + '). Sync, then \u21ba Rebuild before you copy for SharePoint.'
+    : '\u26a0 Fleet sync time unknown \u2014 sync before copying.';
+  return '<div class="fdbr-banner fdbr-banner--stale" role="alert">' + esc(text) + '</div>';
+}
+
 // ── SCAC filter ─────────────────────────────────────────────────────────────
 const _sortStr = (a, b) => a.localeCompare(b);
 
@@ -132,8 +241,9 @@ export function aiCellIds(model) {
 }
 
 // Auto-draft eligibility: has down units, the user hasn't edited EVERY editable AI cell, and
-// the draft is missing (none) or stale by 'units' / 'identity'. A draft stale only by
-// 'evidence' is queued by "Draft all" / ↻ (includeEvidenceStale), not on panel open.
+// the draft is missing (none) or stale by 'units' / 'identity'. A draft stale by 'format' (an
+// older draft version) or 'evidence' is queued on panel open only for the user's pairs
+// (row.mine); "Draft all" / ↻ (includeEvidenceStale) queues it for every row.
 // Only rows visible under { hideZero, scacs } are considered (no opts = every row).
 export function eligibleForAutoDraft(model, { includeEvidenceStale = false, hideZero = false, scacs } = {}) {
   const rows = visibleRows(model, hideZero, scacs);
@@ -149,7 +259,7 @@ export function eligibleForAutoDraft(model, { includeEvidenceStale = false, hide
     const state = d.state || 'none';
     if (state === 'stale') {
       const why = d.staleReason || 'units';
-      if (why === 'evidence' && !includeEvidenceStale) continue;
+      if ((why === 'evidence' || why === 'format') && !includeEvidenceStale && !r.mine) continue;
     } else if (state !== 'none') continue;
     out.push(r.key);
   }
@@ -181,11 +291,11 @@ export function etaMinutes({ done = 0, total = 0, startedAt = 0, now = 0, slots 
 }
 
 // ── Notes ───────────────────────────────────────────────────────────────────
-export const ETC_NOTE = "ETC is best-effort: parsed from notes/timeline text (ETC / ETR / estimated completion / expected ready + a date). The ETC cells are whole-number counts; the unit IDs are in each row's drill-down. 'Expected today' counts every down unit with an ETC today (not only 1P/OEM). A bare parts/tow 'ETA' is not an ETC. Nothing is guessed.";
-export const OEM_NOTE = 'OEM = at OEM/dealer and stalled (waiting/diagnosis/no dealer status/\u226514d).';
+export const ETC_NOTE = "ETC is best-effort: read from Relay, notes and timeline (ETC / ETR / expected completion + a date). 'Expected today' counts a down unit only when its ETC is today and nothing undercuts it (a newer 'no ETC' / at-risk / blocked note, parts not arrived, repair not started, an appointment date, a vendor ETR re-dated 5+ times, or an ETR stated over 7 days ago). Missed ETC needs an explicit miss, or a saved 'No ETC' note plus an extracted ETR that already passed. Everything else is NO ETC, so the three whole-number counts add up to the units down. Reasons per unit are in each row's drill-down. A bare parts/tow 'ETA' is not an ETC.";
+export const OEM_NOTE = 'OEM = unit at an OEM/dealer (or Offsite Shop Repair), unless the dealer finished and the unit was released.';
 export const ROW_NOTE = 'One row per Domicile \u00d7 SCAC in your fleet data; Domicile and SCAC uptime are whole-domicile / whole-SCAC figures.';
 export const DOWN_NOTE = 'Down = lifecycle state Unavailable; Ordered units count in totals, not as down.';
-export const AI_NOTE = "AI decides each barrier Y/N and writes Details, ETC, FAS Actions and Support from every down unit's full record. Specifics are fact-checked against the evidence. \u26a0 marks cells to review. Review before pasting.";
+export const AI_NOTE = 'Y/N and counts come from rules. AI writes only Details, FAS Actions and Support, and only when its sentence passes the fact check; otherwise auto text is shown.';
 export const OFF_NOTICE = 'Fleet DBR is turned off (settings.dbr.fleetData = false).';
 export const UNAVAILABLE_NOTICE = 'Fleet DBR unavailable in this build.';
 export const TITLE = '\ud83d\udcca DBR \u2014 Fleet Health (from fleet data)';
@@ -209,7 +319,9 @@ export function statusLine(model, opts = {}) {
   const built = _hhmm(model.builtAt);
   if (built) {
     const synced = _hhmm(model.fleetSyncedAt);
-    parts.push('Built ' + built + (synced ? ' from fleet sync ' + synced : ''));
+    // opts.nowMs given -> the fleet data age: "Built 13:05 from fleet sync 11:56 (3h 9m old)".
+    const fresh = synced && opts && Number.isFinite(opts.nowMs) ? freshness(model, opts.nowMs) : null;
+    parts.push('Built ' + built + (synced ? ' from fleet sync ' + synced : '') + (fresh && fresh.label ? ' (' + fresh.label + ' old)' : ''));
   }
   if (model.day) parts.push(model.day);
   if (sel.length) {
@@ -267,6 +379,58 @@ function _aiUnitLines(r, id, units) {
   return out.map(_line).join('');
 }
 
+const BUCKET_LABEL = { today: 'ETC Today', none: 'NO ETC', missed: 'Missed ETC' };
+const BUCKET_REASON = {
+  'etc-today': 'ETC today, nothing undercuts it',
+  'explicit-miss': 'explicit miss reported',
+  'no-etc-note-passed-etr': "saved note says No ETC and the extracted ETR passed",
+  future: 'ETC is after today',
+  'no-etc': 'no ETC stated',
+  'newer-negation': 'a newer line says the ETC is gone, unsure or blocked',
+  'parts-wait': 'parts not arrived',
+  'not-started': 'repair not started',
+  appointment: 'the date is an appointment, not completion',
+  'rolling-etr': 'vendor ETR re-dated 5+ times',
+  'stale-etr': 'ETR stated more than 7 days ago',
+};
+// 'YYYY-MM-DD' -> 'M/D' ('' otherwise).
+function _md(ymd) {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(ymd || ''));
+  return m ? (+m[1]) + '/' + (+m[2]) : '';
+}
+// Sheet-bucket, override and evidence lines of one unit (escaped by _line).
+function _unitEtcLines(u) {
+  const etc = u.etc || {};
+  const out = [];
+  if (etc.bucket) {
+    const why = BUCKET_REASON[etc.bucketReason] || etc.bucketReason || '';
+    out.push('Sheet: ' + (BUCKET_LABEL[etc.bucket] || etc.bucket) + (why ? ' \u2014 ' + why : '') + (etc.undercut ? ": '" + etc.undercut + "'" : ''));
+  }
+  if (etc.overrode && etc.bucket === 'missed') {
+    out.push('Missed ETC ' + (_md(etc.date) || '?') + ' (' + (etc.source || 'extracted') + ") \u2014 overrode the saved note '" + (etc.overrode.userSnippet || '') + "'");
+  } else if (etc.missDowngraded && etc.passedDate && etc.bucket !== 'missed') {
+    out.push('ETR ' + _md(etc.passedDate) + ' passed, no miss reported');
+  }
+  const why = u.why && typeof u.why === 'object' ? u.why : {};
+  for (const [b, text] of Object.entries(why)) if (text) out.push((BARRIER_LABEL[b] || b) + ': ' + text);
+  if (_arr(u.systems).length) out.push('systems: ' + u.systems.join(', '));
+  return out;
+}
+// AI unit notes (drill-down only, never copied): the draft's bullets naming this unit.
+function _unitNoteLines(r, id) {
+  const notes = r.unitNotes && typeof r.unitNotes === 'object' ? r.unitNotes : {};
+  const flags = r.unitNoteFlags && typeof r.unitNoteFlags === 'object' ? r.unitNoteFlags : {};
+  const head = '\u2022 ' + id + ':';
+  const out = [];
+  for (const [cell, text] of Object.entries(notes)) {
+    for (const ln of String(text || '').split('\n')) {
+      const t = ln.trim();
+      if (t.startsWith(head)) out.push('AI note (' + cell + '): ' + t.slice(head.length).trim() + (flags[cell] === 'review' ? ' \u26a0 check' : ''));
+    }
+  }
+  return out;
+}
+
 export function unitsDrillHtml(row) {
   const r = row || {};
   const pair = r.pair || {};
@@ -285,14 +449,20 @@ export function unitsDrillHtml(row) {
     const tags = [...(u.barriers || []), ...(u.categories || [])];
     return '<li><strong>' + esc(u.id) + '</strong> ' + bits
       + '<br><span class="fdbr-muted">' + esc(etcBits) + (etc.snippet ? ': ' + esc(etc.snippet) : '') + '</span>'
+      + _unitEtcLines(u).map(_line).join('')
       + (tags.length ? '<br><span class="fdbr-muted">tags: ' + esc(tags.join(', ')) + '</span>' : '')
+      + _unitNoteLines(r, u.id).map(_line).join('')
       + _aiUnitLines(r, u.id, units.length)
       + '</li>';
   }).join('');
   const rowLines = [];
+  for (const w of _arr(r.missedWhy)) {
+    if (w && w.unit) rowLines.push('Missed ETC: ' + w.unit + (w.date ? ' (ETC ' + _md(w.date) + ')' : '') + (w.why ? ': ' + w.why : ''));
+  }
+  // The Y/N cells are the rules' values (AI Y/N is never overlaid); a disagreement is the opposite.
   const dis = _arr(r.disagreements).map((b) => {
-    const ai = String((r.cells && r.cells[b + 'YN']) || '').trim().toUpperCase().startsWith('Y') ? 'Y' : 'N';
-    return (BARRIER_LABEL[b] || b) + ' AI=' + ai + ' rules=' + (ai === 'Y' ? 'N' : 'Y');
+    const rules = String((r.base && r.base[b + 'YN']) || (r.cells && r.cells[b + 'YN']) || '').trim().toUpperCase().startsWith('Y') ? 'Y' : 'N';
+    return (BARRIER_LABEL[b] || b) + ' AI=' + (rules === 'Y' ? 'N' : 'Y') + ' rules=' + rules;
   });
   if (dis.length) rowLines.push('AI vs rules: ' + dis.join('; '));
   if (r.reviewSkipped) rowLines.push('AI self-review skipped: ' + r.reviewSkipped);
@@ -310,7 +480,7 @@ export function badgeHtml(row, status) {
   if (s.state === 'pending') return '<span class="fdbr-badge">\u23f3 drafting</span>';
   if (s.state === 'error') return '<span class="fdbr-badge fdbr-badge--warn">\u26a0 ' + esc(s.code || 'failed') + '</span>';
   const d = (row && row.draft && row.draft.state) || 'none';
-  if (d === 'stale') return '<span class="fdbr-badge fdbr-badge--warn">\u26a0 data changed since draft</span>';
+  if (d === 'stale') return '<span class="fdbr-badge fdbr-badge--warn">\u26a0 AI draft out of date \u2014 showing auto text</span>';
   if (d === 'ok') return '<span class="fdbr-badge fdbr-badge--ok">\u2713 AI draft</span>';
   return '';
 }
@@ -318,18 +488,34 @@ export function badgeHtml(row, status) {
 // ── Table ───────────────────────────────────────────────────────────────────
 // Text markers (never color-only): "edited", "AI" on AI-written cells, "⚠ check" on
 // cells the fact-check flagged for review (not shown once the user edited the cell).
+// Missed ETC: "↺ overrode the saved note" when an extracted miss overrode a saved "No ETC" note
+// (the title names each unit, the note and the evidence). NO ETC: "⚠ counts ≠ N down" when the
+// three ETC cells don't add up to the pair's units down (a user edit can break the sum, I1).
+// Markers are never cell text, so the copied cell stays a bare number.
+const _count = (v) => { const m = /^\s*(\d+)/.exec(String(v == null ? '' : v)); return m ? Number(m[1]) : NaN; };
 export function markHtml(row, col) {
   const src = (row && row.source) || {};
   const flags = (row && row.flags) || {};
   if (src[col] === 'edit') return '<span class="fdbr-mark">edited</span>';
   let out = src[col] === 'ai' ? '<span class="fdbr-mark">AI</span>' : '';
   if (flags[col] === 'review') out += '<span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span>';
+  if (col === 'missedEtc' && _arr(row && row.userEtcOverrides).length) {
+    const title = row.userEtcOverrides.filter(Boolean).map((o) => (o.unit || '') + ": saved note '" + (o.userSnippet || '')
+      + "' \u2192 Relay/offsite: '" + (o.extractedSnippet || '') + "'").join('\n');
+    out += '<span class="fdbr-mark fdbr-mark--warn" title="' + esc(title) + '">\u21ba overrode the saved note</span>';
+  }
+  if (col === 'noEtc' && row && row.pair) {
+    const c = (row.cells) || {};
+    const sum = _count(c.etcToday) + _count(c.noEtc) + _count(c.missedEtc);
+    if (sum !== _down(row)) out += '<span class="fdbr-mark fdbr-mark--warn">\u26a0 counts \u2260 ' + _down(row) + ' down</span>';
+  }
   return out;
 }
-// Inner HTML of a non-editable AI cell (value + markers, escaped); refreshRow patches it.
+// Inner HTML of a non-editable AI cell (value in the sheet format + markers, escaped);
+// refreshRow patches it.
 export function cellInnerHtml(row, col, value) {
   const v = value !== undefined ? value : _cellOf(row, col);
-  return esc(v) + markHtml(row, col);
+  return esc(sheetValue(col, v, row && row.source ? row.source[col] : undefined)) + markHtml(row, col);
 }
 
 // 24 <th scope="col"> in model.columns order, plus one UI-only last column
@@ -341,7 +527,7 @@ export function tableHtml(model, opts = {}) {
   const aiDraft = !!opts.aiDraft;
   const rowStatus = opts.rowStatus || {};
   const get = typeof opts.getValue === 'function' ? opts.getValue : _cellOf;
-  const rows = visibleRows(model, !!opts.hideZero, opts.scacs);
+  const rows = sheetOrder(visibleRows(model, !!opts.hideZero, opts.scacs));
   if (!rows.length) {
     const scacOn = normalizeScacs(opts.scacs, model).length > 0;
     return '<div class="dc-empty">' + (model && model.rows && model.rows.length
@@ -357,13 +543,16 @@ export function tableHtml(model, opts = {}) {
     const tds = cols.map((c) => {
       const v = get(r, c.id);
       if (!c.editable) {
-        if (!aiIds.has(c.id)) return '<td>' + esc(v) + '</td>';
+        if (!aiIds.has(c.id)) return '<td>' + esc(sheetValue(c.id, v, r.source && r.source[c.id])) + '</td>';
         return '<td data-key="' + esc(r.key) + '" data-col="' + esc(c.id) + '">' + cellInnerHtml(r, c.id, v) + '</td>';
       }
+      // Screen-only hint under an empty FAS Name: the site/SCAC fallback owner (never copied).
+      const hint = c.id === 'fasName' && !String(v == null ? '' : v).trim() && r.rosterHint
+        ? '<span class="fdbr-muted">site match: ' + esc(r.rosterHint) + '</span>' : '';
       return '<td class="fdbr-td">'
         + '<textarea class="dc-input fdbr-cell" rows="2" data-key="' + esc(r.key) + '" data-col="' + esc(c.id) + '"'
         + ' aria-label="' + esc(c.header + ' \u2014 ' + label) + '">' + esc(v) + '</textarea>'
-        + '<span class="fdbr-marks" data-mark-key="' + esc(r.key) + '" data-mark-col="' + esc(c.id) + '">' + markHtml(r, c.id) + '</span></td>';
+        + '<span class="fdbr-marks" data-mark-key="' + esc(r.key) + '" data-mark-col="' + esc(c.id) + '">' + markHtml(r, c.id) + '</span>' + hint + '</td>';
     }).join('');
     const btn = (action, text, aria) => '<button type="button" class="detail-panel__btn detail-panel__btn--secondary fdbr-mini"'
       + ' data-fdbr-action="' + action + '" data-key="' + esc(r.key) + '" aria-label="' + esc(aria + ' ' + label) + '">' + text + '</button>';
@@ -443,6 +632,7 @@ export const PANEL_CSS = `
     #dbr-overlay .fdbr-badge--warn { color: #f0a800; }
     #dbr-overlay .fdbr-badge--ok { color: #3fb950; }
     #dbr-overlay .fdbr-banner { margin: 0 18px 6px; padding: 6px 10px; font-size: 11px; border: 1px solid #f0a800; border-radius: 4px; }
+    #dbr-overlay .fdbr-banner--stale { border-color: #f85149; font-weight: 600; }
     #dbr-overlay .fdbr-status { font-size: 11px; color: var(--mut, #888); padding: 0 18px 6px; min-height: 14px; }
     #dbr-overlay .fdbr-scac { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; border: 1px solid var(--border, #444); border-radius: 4px; padding: 2px 8px; margin: 0; font-size: 11px; }
     #dbr-overlay .fdbr-scac legend { padding: 0 4px; font-size: 10px; color: var(--mut, #888); }
@@ -468,8 +658,22 @@ function _scacHtml(options, selected) {
     + '</fieldset>';
 }
 
+// Copy-scope select: "Copy: My pairs with units down (N) | All visible rows (M)". The 'mine'
+// option is disabled (with the reason) when copyScopeInfo says it is unavailable.
+function _copyScopeHtml(scope, info) {
+  if (!info) return '';
+  const mine = info.mineOk && scope !== 'visible';
+  return '<label style="font-size:11px;display:flex;align-items:center;gap:4px;">Copy:'
+    + '<select class="dc-input" style="width:auto;display:inline-block;" data-fdbr-field="copyScope" aria-label="Rows to copy">'
+    + '<option value="mine"' + (mine ? ' selected' : '') + (info.mineOk ? '' : ' disabled') + '>My pairs with units down (' + esc(info.mineCount) + ')</option>'
+    + '<option value="visible"' + (mine ? '' : ' selected') + '>All visible rows (' + esc(info.visibleCount) + ')</option>'
+    + '</select></label>'
+    + (info.note ? '<span class="fdbr-muted" role="note">' + esc(info.note) + '</span>' : '');
+}
+
 // state: { status:'ready'|'loading'|'off'|'unavailable'|'error', aiDraft, drafting,
-//          fasName, hideZero, message, conflicts:[{id}], scacOptions:[], scacs:[] }
+//          fasName, hideZero, message, conflicts:[{id}], scacOptions:[], scacs:[],
+//          copyScope:'mine'|'visible', copyInfo: copyScopeInfo(...) | undefined }
 export function panelHtml(state = {}) {
   const s = state || {};
   const isView = s.mode === 'view';
@@ -492,6 +696,7 @@ export function panelHtml(state = {}) {
     + ' placeholder="Enter your FAS name" value="' + esc(fas) + '"></label>'
     + btn('build', isView ? '\u21ba Rebuild' : '\u21ba Build from fleet data')
     + ai
+    + _copyScopeHtml(s.copyScope, s.copyInfo)
     + btn('copy', '\ud83d\udccb Copy rows', ' detail-panel__btn--secondary')
     + btn('copy-header', '\ud83d\udccb Copy with header', ' detail-panel__btn--secondary')
     + btn('copy-fill', '\ud83d\udccb Copy fill columns', ' detail-panel__btn--secondary')

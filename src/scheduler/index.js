@@ -54,10 +54,8 @@ let _dbrScheduleTimer   = null;
 // Slot defaults — used when no saved config exists
 const DEFAULT_SP_SLOTS    = [{ h: 7,  m: 30, label: '07:30' }, { h: 15, m: 30, label: '15:30' }];
 const DEFAULT_EMAIL_SLOTS = [{ h: 8,  m: 0,  label: '08:00' }, { h: 15, m: 15, label: '15:15' }];
-// DBR DATA pull — a SINGLE daily slot (used to fire BOTH the AFP and DSP
-// channels). DSP data historically publishes later than AFP, so the per-source
-// freshness gate + recovery sweep retry each independently until each shows
-// today's (PT) data.
+// DBR DATA pull — a SINGLE daily slot that builds 📊 DBR — Fleet Health and
+// AI-drafts its rows; the recovery sweep retries until today's fleet sync lands.
 const DEFAULT_DBR_SLOTS   = [{ h: 7, m: 0, label: '07:00' }];
 
 let SP_SLOTS    = DEFAULT_SP_SLOTS.slice();
@@ -192,10 +190,11 @@ function _fireEmail(dateKey, slot, origin, testMode) {
     .catch(e => { logger.error('Auto-email error:', e.message); _ctx.pushStatus('\u274C Auto-email error: ' + e.message); });
 }
 
-// ── Scheduled DBR DATA pull (AFP + DSP) ────────────────────────────────────────
-// One slot fires BOTH independent channels. Each channel self-gates on
-// today-PT freshness and self-retries via the recovery sweep, so AFP can
-// complete while DSP keeps retrying (and vice versa).
+// ── Scheduled DBR DATA pull (📊 DBR — Fleet Health) ────────────────────────────
+// One slot, one channel (ledger dbr-afp, kept for persisted jobs). The job
+// rebuilds Fleet Health from fleet data, waits for a same-day fleet sync (the
+// recovery sweep retries while blocked), then AI-drafts rows with units down.
+const DBR_CH = () => ledger.CHANNELS.DBR_AFP;
 function _scheduleAutoDbr() {
   if (_dbrScheduleTimer) clearInterval(_dbrScheduleTimer);
   _dbrScheduleTimer = setInterval(() => {
@@ -204,22 +203,25 @@ function _scheduleAutoDbr() {
     const slot = DBR_SLOTS.find(s => s.h === now.getHours() && s.m === now.getMinutes());
     if (!slot) return;
     const dateKey = _todayPrefix();
-    // Fire each channel only if its OWN slot hasn't completed today.
-    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_AFP, dateKey, slot.label) && _claimSlotFire('dbr-afp', dateKey, slot.label)) _fireDbr('afp', dateKey, slot, 'scheduled');
-    if (!ledger.isSlotCompleted(ledger.CHANNELS.DBR_DSP, dateKey, slot.label) && _claimSlotFire('dbr-dsp', dateKey, slot.label)) _fireDbr('dsp', dateKey, slot, 'scheduled');
+    if (!ledger.isSlotCompleted(DBR_CH(), dateKey, slot.label) && _claimSlotFire('dbr-afp', dateKey, slot.label)) _fireDbr(dateKey, slot, 'scheduled');
   }, 30000);
 }
 
-function _fireDbr(kind, dateKey, slot, origin) {
-  const label = kind === 'dsp' ? 'DSP' : 'AFP';
+function _dbrDone(r) {
+  const d = r && r.drafts;
+  const drafted = d && d.ok ? ', ' + d.drafted + '/' + d.eligible + ' AI drafts' : '';
+  return (r.rowCount != null ? r.rowCount + ' rows' : 'ok') + drafted;
+}
+
+function _fireDbr(dateKey, slot, origin) {
+  const label = 'Fleet Health';
   if (!_mayFireProductionJob('DBR ' + label + ' ' + slot.label)) return;
   logger.info('DBR ' + label + ' pull (' + origin + '): slot=' + slot.label);
   _ctx.pushStatus('\uD83D\uDCCA DBR ' + label + ': ' + slot.label + ' (' + origin + ')...');
-  const run = kind === 'dsp' ? pipeline.runDbrDspJob : pipeline.runDbrAfpJob;
-  run(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: false })
+  pipeline.runDbrJob(_ctx, { dateKey, slotLabel: slot.label, origin, testMode: false })
     .then(r => {
-      if (r.ok) _ctx.pushStatus('\u2705 DBR ' + label + ' pulled (' + (r.rowCount != null ? r.rowCount + ' rows' : 'ok') + ')');
-      else if (r.blocked) _ctx.pushStatus('\u23F3 DBR ' + label + ' not ready yet (data as of ' + (r.dataAsOf || '?') + ') — will retry');
+      if (r.ok) _ctx.pushStatus('\u2705 DBR ' + label + ' pulled (' + _dbrDone(r) + ')');
+      else if (r.blocked) _ctx.pushStatus('\u23F3 DBR ' + label + ' waiting for today\'s fleet sync (last ' + (r.dataAsOf || '?') + ') — will retry');
       else if (r.skipped) logger.info('DBR ' + label + ' skipped: ' + r.skipped);
       else _ctx.pushStatus('\u26A0\uFE0F DBR ' + label + ' pull did not complete (' + slot.label + ')');
     })
@@ -252,20 +254,15 @@ function _catchUpMissedSlots() {
   });
 
   // DBR: a slot missed earlier today (app wasn't running at slot time) still
-  // fires each not-yet-completed channel. DBR commonly isn't fresh until later
-  // in the day, so use a WIDER catch-up window than SP/email's 120min — a slot
-  // set for 07:00 should still fire if the app opens at (say) 10:00 so the
-  // recovery sweep can then retry until the data publishes.
+  // fires if not completed. Wider window than SP/email's 120min so a 07:00 slot
+  // still fires when the app opens at (say) 10:00.
   if (_enabled('dbr')) DBR_SLOTS.forEach(slot => {
     const missedBy = currentMinutes - (slot.h * 60 + slot.m);
     if (missedBy <= 0 || missedBy > RECOVERY_WINDOW_MIN) return; // within the 4h recovery window
-    ['afp', 'dsp'].forEach(kind => {
-      const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
-      if (ledger.isSlotCompleted(ch, dateKey, slot.label)) return;
-      if (!_claimSlotFire('dbr-' + kind, dateKey, slot.label)) return;
-      logger.info('Catch-up: missed DBR ' + kind.toUpperCase() + ' slot ' + slot.label + ' (' + missedBy + 'min ago)');
-      setTimeout(() => _fireDbr(kind, dateKey, slot, 'catchup'), kind === 'dsp' ? 20000 : 15000);
-    });
+    if (ledger.isSlotCompleted(DBR_CH(), dateKey, slot.label)) return;
+    if (!_claimSlotFire('dbr-afp', dateKey, slot.label)) return;
+    logger.info('Catch-up: missed DBR Fleet Health slot ' + slot.label + ' (' + missedBy + 'min ago)');
+    setTimeout(() => _fireDbr(dateKey, slot, 'catchup'), 15000);
   });
 }
 
@@ -335,30 +332,25 @@ async function _recoverBlockedSlots() {
       }
     }
 
-    // ── DBR: recover each channel independently ──
-    // This is the mechanism that satisfies "keep retrying until the data
-    // populates for today": a DBR job that found not-today data sits in
-    // BLOCKED_STALE_DATA; this sweep re-queues + re-fires it. The per-source
-    // freshness gate means AFP stops (COMPLETED) as soon as its data is fresh
-    // while DSP keeps getting retried until ITS data publishes.
+    // ── DBR: recover the Fleet Health pull ──
+    // A pull that found no same-day fleet sync sits in BLOCKED_STALE_DATA; this
+    // sweep re-queues + re-fires it until today's sync lands.
     if (_enabled('dbr')) {
       for (const slot of DBR_SLOTS) {
         const slotMin = slot.h * 60 + slot.m;
         const age = now - slotMin;
         if (age <= 0 || age > RECOVERY_WINDOW_MIN) continue;
-        for (const kind of ['afp', 'dsp']) {
-          const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
-          if (ledger.isSlotCompleted(ch, dateKey, slot.label)) continue;
-          const blocked = ledger.listJobs({ channel: ch, dateKey, testMode: false })
-            .filter(j => j.slotLabel === slot.label && recoverableStates.includes(j.state));
-          if (!blocked.length) continue;
-          for (const j of blocked) {
-            await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'auto-recovery re-queue');
-          }
-          logger.info('Auto-recovery: re-attempting blocked DBR ' + kind.toUpperCase() + ' slot ' + slot.label + ' (' + blocked.length + ' job(s), ' + age + 'min late)');
-          _ctx.pushStatus('\u267B\uFE0F Auto-recovery: retrying ' + slot.label + ' DBR ' + kind.toUpperCase() + '...');
-          _fireDbr(kind, dateKey, slot, 'recovery');
+        const ch = DBR_CH();
+        if (ledger.isSlotCompleted(ch, dateKey, slot.label)) continue;
+        const blocked = ledger.listJobs({ channel: ch, dateKey, testMode: false })
+          .filter(j => j.slotLabel === slot.label && recoverableStates.includes(j.state));
+        if (!blocked.length) continue;
+        for (const j of blocked) {
+          await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'auto-recovery re-queue');
         }
+        logger.info('Auto-recovery: re-attempting blocked DBR Fleet Health slot ' + slot.label + ' (' + blocked.length + ' job(s), ' + age + 'min late)');
+        _ctx.pushStatus('\u267B\uFE0F Auto-recovery: retrying ' + slot.label + ' DBR Fleet Health...');
+        _fireDbr(dateKey, slot, 'recovery');
       }
     }
   } finally {
@@ -426,30 +418,23 @@ async function runEmailNow(slotLabel) {
   return pipeline.runEmailSlot(_ctx, { dateKey, slotLabel: slot.label, origin: ledger.ORIGINS.MANUAL, testMode: false, useExistingIfFresh: true });
 }
 
-// "Pull DBR now" — manual on-demand pull of BOTH AFP and DSP (the "Pull All"
-// button). Re-queues any of today's blocked/failed DBR jobs for the chosen
-// label so a manual run isn't skipped as "paused", then fires both channels.
-// Returns { afp, dsp } with each channel's run result.
+// "Pull DBR now" — manual on-demand Fleet Health pull. Re-queues any of today's
+// blocked/failed DBR jobs for the chosen label so a manual run isn't skipped as
+// "paused", then runs the pull. Returns { fleetHealth: <runResult> }.
 async function runDbrNow(slotLabel) {
   const dateKey = _todayPrefix();
   const label = slotLabel || ('manual-' + new Date().toTimeString().slice(0, 5));
   const requeueStates = [ledger.STATES.BLOCKED_STALE_DATA, ledger.STATES.BLOCKED_AUTH, ledger.STATES.RETRY, ledger.STATES.PARTIAL_FAILURE, ledger.STATES.FAILED];
-  const out = {};
-  for (const kind of ['afp', 'dsp']) {
-    const ch = kind === 'dsp' ? ledger.CHANNELS.DBR_DSP : ledger.CHANNELS.DBR_AFP;
-    const blocked = ledger.listJobs({ channel: ch, dateKey, testMode: false })
-      .filter(j => j.slotLabel === label && requeueStates.includes(j.state));
-    for (const j of blocked) {
-      await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'manual DBR re-run');
-    }
-    const run = kind === 'dsp' ? pipeline.runDbrDspJob : pipeline.runDbrAfpJob;
-    try {
-      out[kind] = await run(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false });
-    } catch (e) {
-      out[kind] = { error: e.message };
-    }
+  const blocked = ledger.listJobs({ channel: DBR_CH(), dateKey, testMode: false })
+    .filter(j => j.slotLabel === label && requeueStates.includes(j.state));
+  for (const j of blocked) {
+    await ledger.transition(j.jobId, ledger.STATES.QUEUED, { attempts: 0, nextRetryAt: null }, 'manual DBR re-run');
   }
-  return out;
+  try {
+    return { fleetHealth: await pipeline.runDbrJob(_ctx, { dateKey, slotLabel: label, origin: ledger.ORIGINS.MANUAL, testMode: false }) };
+  } catch (e) {
+    return { fleetHealth: { error: e.message } };
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

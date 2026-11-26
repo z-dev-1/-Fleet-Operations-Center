@@ -216,24 +216,23 @@ function _viewHtml() {
     + '<span class="sched-settings-status" id="sched-cb-status"></span></div>'
     + '</div></div></div>'
 
-    // DBR DATA card — single daily slot fires BOTH AFP + DSP pulls; each
-    // retries on its own until its "Data as of (PT)" shows today.
+    // DBR DATA card — single daily slot builds 📊 DBR — Fleet Health from fleet
+    // data and AI-drafts its rows; retries until today's fleet sync lands.
     + '<div class="sched-card" id="sched-card-dbr">'
     + '<div class="sched-card__head"><div class="sched-card__icon sched-card__icon--sp">\ud83d\udcca</div>'
     + '<div><div class="sched-card__title">DBR DATA Pull</div><div class="sched-card__sub" id="sched-dbr-sub">Weekdays \u2014</div></div>'
     + '<label class="sched-toggle" title="Enable/disable scheduled DBR pull"><input type="checkbox" id="sched-dbr-enabled" /><span>On</span></label>'
     + '<div class="sched-card__badge" id="sched-dbr-badge">\u2014</div></div>'
     + '<div class="sched-card__meta">'
-    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">AFP last</span><span class="sched-card__meta-val" id="sched-dbr-afp-last">\u2014</span></div>'
-    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">DSP last</span><span class="sched-card__meta-val" id="sched-dbr-dsp-last">\u2014</span></div>'
+    + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Last pull</span><span class="sched-card__meta-val" id="sched-dbr-afp-last">\u2014</span></div>'
     + '<div class="sched-card__meta-item"><span class="sched-card__meta-label">Next</span><span class="sched-card__meta-val" id="sched-dbr-next">\u2014</span></div>'
     + '</div>'
     + '<div class="sched-time-editor">'
     + '<span class="sched-time-editor__label">Run at</span><input class="sched-time-input" type="time" id="sched-dbr-time" />'
     + '<button class="sched-btn sched-btn--save" id="sched-dbr-save">\u2713 Save</button></div>'
-    + '<div class="sched-card__sub" style="font-size:9px;padding:0 2px">AFP + DSP are pulled independently. A source that isn\'t published for today yet keeps retrying until it is.</div>'
+    + '<div class="sched-card__sub" style="font-size:9px;padding:0 2px">Builds \ud83d\udcca DBR \u2014 Fleet Health (from fleet data) and AI-drafts rows with units down. Waits for today\'s fleet sync and retries until it lands.</div>'
     + '<div class="sched-card__actions">'
-    + '<button class="sched-btn sched-btn--primary" id="sched-dbr-trigger">\ud83d\udcca Pull DBR Now (AFP + DSP)</button>'
+    + '<button class="sched-btn sched-btn--primary" id="sched-dbr-trigger">\ud83d\udcca Pull DBR Now (Fleet Health)</button>'
     + '</div></div>'
 
     + '</div>'   // /sched-grid
@@ -460,17 +459,14 @@ function _rDbrCard() {
   const next = _state.nextSlot && _state.nextSlot.dbr;
   const nextEl = _q('sched-dbr-next');
   if (nextEl) nextEl.textContent = next ? (next.label + (next.when === 'today' ? '' : ' (' + next.when + ')')) : '\u2014';
-  // Per-source last-verified + a badge reflecting the worst current state.
-  const afp = _state.dbrAfp || {}, dsp = _state.dbrDsp || {};
-  const afpLast = _q('sched-dbr-afp-last');
-  if (afpLast) afpLast.textContent = afp.lastVerified ? _fmtDT(afp.lastVerified.updatedAt) : '\u2014';
-  const dspLast = _q('sched-dbr-dsp-last');
-  if (dspLast) dspLast.textContent = dsp.lastVerified ? _fmtDT(dsp.lastVerified.updatedAt) : '\u2014';
+  // Fleet Health pull (ledger channel dbr-afp): last-verified + current-state badge.
+  const ch = _state.dbrAfp || {};
+  const last = _q('sched-dbr-afp-last');
+  if (last) last.textContent = ch.lastVerified ? _fmtDT(ch.lastVerified.updatedAt) : '\u2014';
   const badge = _q('sched-dbr-badge');
   if (badge) {
-    const activeOf = (ch) => (ch.active && ch.active[0]) || (ch.blockedStale && ch.blockedStale[0]) || (ch.retrying && ch.retrying[0]) || null;
-    const a = activeOf(afp) || activeOf(dsp);
-    const stateVal = a ? a.state : ((afp.lastVerified && dsp.lastVerified) ? 'completed' : (afp.lastFailure || dsp.lastFailure ? 'retry' : null));
+    const a = (ch.active && ch.active[0]) || (ch.blockedStale && ch.blockedStale[0]) || (ch.retrying && ch.retrying[0]) || null;
+    const stateVal = a ? a.state : (ch.lastVerified ? 'completed' : (ch.lastFailure ? 'retry' : null));
     badge.innerHTML = _badge(stateVal);
   }
 }
@@ -1005,21 +1001,21 @@ function _closeCbOverlay() {
 
 async function _runDbrNow() {
   await _guard(async () => {
-    _toast('info', 'DBR pull started (AFP + DSP)...');
+    _toast('info', 'DBR pull started (Fleet Health build + AI drafts)...');
     const r = await window.fleetScheduler.runDbrNow();
     const res = r && r.result;
-    if (!res) { _toast('error', 'DBR pull failed to start'); return; }
-    const describe = (x, name) => {
-      if (!x) return name + ': —';
-      if (x.state === 'ok') return name + ': ' + (x.rowCount != null ? x.rowCount + ' rows' : 'ok');
-      if (x.state === 'not-ready') return name + ': not ready yet (data as of ' + (x.dataAsOf || '?') + ') — will retry';
-      if (x.state === 'skipped') return name + ': ' + x.skipped;
-      if (x.state === 'failed' || x.state === 'error') return name + ': failed';
-      return name + ': ' + x.state;
-    };
-    const msg = describe(res.afp, 'AFP') + ' \u00b7 ' + describe(res.dsp, 'DSP');
-    const anyNotReady = (res.afp && res.afp.state === 'not-ready') || (res.dsp && res.dsp.state === 'not-ready');
-    _toast(anyNotReady ? 'warning' : 'success', msg);
+    const x = res && res.fleetHealth;
+    if (!x) { _toast('error', 'DBR pull failed to start'); return; }
+    let msg;
+    if (x.state === 'ok') {
+      msg = 'Fleet Health: ' + (x.rowCount != null ? x.rowCount + ' rows' : 'built')
+        + (x.downRows != null ? ', ' + x.downRows + ' with units down' : '')
+        + (x.drafts ? ', ' + x.drafts.drafted + '/' + x.drafts.eligible + ' AI drafts' + (x.drafts.failed ? ' (' + x.drafts.failed + ' failed)' : '') : '');
+    } else if (x.state === 'not-ready') msg = 'Fleet Health: waiting for today\'s fleet sync (last ' + (x.dataAsOf || '?') + ') \u2014 will retry';
+    else if (x.state === 'skipped') msg = 'Fleet Health: ' + x.skipped;
+    else if (x.state === 'failed' || x.state === 'error') msg = 'Fleet Health: failed' + (x.error ? ' (' + x.error + ')' : (x.failed ? ' (' + x.failed + ')' : ''));
+    else msg = 'Fleet Health: ' + x.state;
+    _toast(x.state === 'ok' ? 'success' : 'warning', msg);
   });
 }
 

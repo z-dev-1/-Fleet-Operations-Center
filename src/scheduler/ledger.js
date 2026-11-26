@@ -56,10 +56,9 @@ const PRECOMMIT_STATES = Object.freeze([STATES.SENT]);
 // Paused states awaiting external action (auth / stale data / reconciliation).
 const PAUSED_STATES = Object.freeze([STATES.BLOCKED_AUTH, STATES.BLOCKED_STALE_DATA, STATES.DELIVERY_UNCERTAIN, STATES.PARTIAL_FAILURE, STATES.RETRY]);
 
-// DBR_AFP / DBR_DSP are two INDEPENDENT channels (not one "dbr" channel) so
-// the AFP and DSP QuickSight pulls get separate leases, separate retry/backoff,
-// and separate completed-slot stamps — i.e. if AFP's data is fresh-for-today
-// but DSP's isn't yet, only DSP keeps retrying while AFP is marked done.
+// DBR_AFP ('dbr-afp') is the DBR DATA pull channel, now the 📊 DBR — Fleet Health
+// pull (the QuickSight AFP/DSP scrape was removed 2026-11-24). DBR_DSP is no longer
+// fired; it stays defined so jobs and slot stamps already in the ledger still parse.
 const CHANNELS = Object.freeze({ SHAREPOINT: 'sharepoint', EMAIL: 'email', DBR_AFP: 'dbr-afp', DBR_DSP: 'dbr-dsp' });
 const ORIGINS  = Object.freeze({ SCHEDULED: 'scheduled', CATCHUP: 'catchup', MANUAL: 'manual', TEST: 'test' });
 

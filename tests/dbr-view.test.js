@@ -95,6 +95,7 @@ function setupView({ fleetSyncedAt, build, buildTimeoutMs } = {}) {
   const ctl = P.__test__.createController({
     api, doc, clipboard: { writeText: vi.fn(async () => true) }, storage, bus,
     mode: 'view', container, getFleetSyncedAt: () => fleetSyncedAt, buildTimeoutMs,
+    now: () => Date.parse('2026-11-10T16:10:00Z'), // fleet data < 2 h old: no stale-data alert
   });
   return { ctl, doc, container, api };
 }

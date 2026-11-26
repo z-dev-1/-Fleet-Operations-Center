@@ -9,6 +9,8 @@ import path from 'path';
 import os from 'os';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
+// The DBR precedence case asserts the legacy DBR lookup reply (dbr.fleetData off).
+process.env.FLEET_DBR_FLEET_DATA = '0';
 const tmpDir = path.join(os.tmpdir(), 'carrier-intel-orcha-' + process.pid);
 fs.mkdirSync(tmpDir, { recursive: true });
 require('../src/config/paths').setDataDir(tmpDir);

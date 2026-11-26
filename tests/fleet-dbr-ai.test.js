@@ -71,7 +71,12 @@ function reduceAnswer(ids) {
     support: 'None',
   };
 }
+// The sheet call (design §3.9): a valid FAS Actions + Support sheet for the row's first unit.
+function sheetAnswer(ids) {
+  return { sheet: { fasActions: 'Following up TA Rochester on ' + ids[0] + ' diag/repair progress.', support: 'None.' } };
+}
 function kindOf(p) {
+  if (p.includes('SHEET CONTRACT')) return 'sheet';
   if (p.includes('REVIEW CHECKLIST')) return p.includes(AI.FACTS_OPEN) ? 'review-mr' : 'review';
   if (p.includes('MAP BATCH')) return 'map';
   if (p.includes('REDUCE CONTRACT')) return 'reduce';
@@ -88,7 +93,7 @@ function smartAsk(h = {}) {
     seen.opts.push(o);
     seen.count[kind] = (seen.count[kind] || 0) + 1;
     const ids = idsIn(p);
-    const def = { single: rowAnswer, review: rowAnswer, map: mapAnswer, reduce: reduceAnswer, 'review-mr': reduceAnswer }[kind];
+    const def = { single: rowAnswer, review: rowAnswer, map: mapAnswer, reduce: reduceAnswer, 'review-mr': reduceAnswer, sheet: sheetAnswer }[kind];
     const ans = (h[kind] || def)(ids, p, seen.count[kind]);
     return typeof ans === 'string' ? ans : J(ans);
   });
@@ -150,16 +155,16 @@ describe('constants and contracts', () => {
 });
 
 describe('single mode', () => {
-  it('AC1: 14-unit pair with a full answer -> exactly 14 FAS lines in builder order; draft + review = 2 calls', async () => {
+  it('AC1: 14-unit pair with a full answer -> exactly 14 FAS lines in builder order; draft + review + sheet = 3 calls', async () => {
     const p = pair(14);
     const ask = smartAsk();
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
     expect(r.mode).toBe('single');
     expect(typeof r.demand).toBe('number');
-    expect(ask).toHaveBeenCalledTimes(2);
-    expect(r.calls).toBe(2);
-    expect(ask.seen.kinds).toEqual(['single', 'review']);
+    expect(ask).toHaveBeenCalledTimes(3);
+    expect(r.calls).toBe(3);
+    expect(ask.seen.kinds).toEqual(['single', 'review', 'sheet']);
     const lines = fasLines(r);
     expect(lines).toHaveLength(14);
     lines.forEach((l, i) => expect(l).toBe('• ' + p.ids[i] + ': 11/10 called TA re tech callout; next: confirm tech on site'));
@@ -229,7 +234,7 @@ describe('single mode', () => {
     expect(JSON.stringify(r.cells)).not.toContain('Fake Name');
   });
 
-  it('AC9: the review final is used (2 calls); a hallucination only in the review is gated out; rounds 0 = the gated draft', async () => {
+  it('AC9: the review final is used (2 calls + sheet); a hallucination only in the review is gated out; rounds 0 = the gated draft', async () => {
     const p = pair(3, { extra: { B61002: { repairTimeline: '11/08 - Parts ETA 11/14 turbo' } } });
     const review = (ids) => rowAnswer(ids, { barriers: Object.assign(rowAnswer(ids).barriers, {
       parts: { yn: 'Y', details: [{ units: ['B61002'], text: 'Turbo back-ordered, parts ETA 11/14' }] },
@@ -237,7 +242,7 @@ describe('single mode', () => {
     }) });
     const ask = smartAsk({ review });
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
-    expect(ask).toHaveBeenCalledTimes(2);
+    expect(ask).toHaveBeenCalledTimes(3);
     expect(r.cells.partsYN).toBe('Y');
     expect(r.cells.partsDetails).toContain('Turbo back-ordered');
     for (const v of Object.values(r.cells)) expect(v).not.toContain('9,999');
@@ -246,7 +251,8 @@ describe('single mode', () => {
 
     const ask0 = smartAsk();
     const r0 = await AI.draftRow(Object.assign({ ask: ask0, reviewRounds: 0 }, p.args));
-    expect(ask0).toHaveBeenCalledTimes(1);
+    expect(ask0).toHaveBeenCalledTimes(2);
+    expect(ask0.seen.kinds).toEqual(['single', 'sheet']);
     const ctx = AI.draftContext(p.args);
     const gated = G.renderCells(G.validateRowDraft(J(rowAnswer(ctx.ids)), ctx.gate, { kind: 'row' }), ctx.gate);
     expect(r0.cells).toEqual(gated.cells);
@@ -301,7 +307,7 @@ describe('single mode', () => {
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
     expect(r.reviewSkipped).toBeUndefined();
-    expect(r.calls).toBe(2);
+    expect(r.calls).toBe(3);
     expect(r.cells.vendor1pDetails.split('\n').length + r.cells.partsDetails.split('\n').length).toBe(16);
     for (const e of r.log) expect(e.promptChars).toBeLessThanOrEqual(56000);
     expect(r.log[1].embedD).toBeGreaterThanOrEqual(60);
@@ -324,7 +330,7 @@ describe('single mode', () => {
       const r = await AI.draftRow(Object.assign({ ask }, p.args));
       expect(r.ok).toBe(true);
       expect(builds).toBe(2);
-      expect(ask.seen.kinds).toEqual(['single', 'review']);
+      expect(ask.seen.kinds).toEqual(['single', 'review', 'sheet']);
       const draftEv = evOf(ask.seen.prompts[0]);
       expect(draftEv.length).toBeLessThan(before - 2500);
       expect(evOf(ask.seen.prompts[1])).toBe(draftEv);
@@ -345,44 +351,44 @@ describe('single mode', () => {
     } finally { AI.buildDraftPrompt = orig; }
   });
 
-  it('review that cannot fit -> reviewSkipped too-large, ok, no extra call', async () => {
+  it('review that cannot fit -> reviewSkipped too-large, ok, no review call (the sheet call still runs)', async () => {
     const p = pair(3);
     const orig = AI.buildReviewPrompt;
     AI.buildReviewPrompt = () => ({ tooLarge: true });
     try {
       const ask = smartAsk();
       const r = await AI.draftRow(Object.assign({ ask }, p.args));
-      expect(r).toMatchObject({ ok: true, reviewSkipped: 'too-large', calls: 1 });
-      expect(ask).toHaveBeenCalledTimes(1);
+      expect(r).toMatchObject({ ok: true, reviewSkipped: 'too-large', calls: 2 });
+      expect(ask.seen.kinds).toEqual(['single', 'sheet']);
     } finally { AI.buildReviewPrompt = orig; }
   });
 });
 
 describe('map / reduce (AC11)', () => {
-  it('40 units x ~2.5k: 3 batches (14, 13, 13), 3 + 1 + 1 calls, every prompt <= 56,000, all 40 in FAS Actions', async () => {
+  it('40 units x ~2.5k: 3 batches (14, 13, 13), 3 + 1 + 1 + 1 (sheet) calls, every prompt <= 56,000, all 40 in FAS Actions', async () => {
     const p = pair(40, { tlChars: 2150 });
     expect(p.ctx.mode).toBe('mapreduce');
     expect(p.ctx.batches.map((b) => b.length)).toEqual([14, 13, 13]);
     const ask = smartAsk();
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
-    expect(ask.seen.kinds).toEqual(['map', 'map', 'map', 'reduce', 'review-mr']);
-    expect(r.calls).toBe(5);
+    expect(ask.seen.kinds).toEqual(['map', 'map', 'map', 'reduce', 'review-mr', 'sheet']);
+    expect(r.calls).toBe(6);
     for (const pr of ask.seen.prompts) expect(pr.length).toBeLessThanOrEqual(56000);
     const lines = fasLines(r);
     expect(lines).toHaveLength(40);
     lines.forEach((l, i) => expect(l.startsWith('• ' + p.ids[i] + ': 11/10 called TA')).toBe(true));
   });
 
-  it('9 x 14k -> batches 3, 2, 2, 2 each water-filled to <= 36,000; planned = 4 + 1 + rounds', async () => {
+  it('9 x 14k -> batches 3, 2, 2, 2 each water-filled to <= 36,000; planned = 4 + 1 + rounds + 1 (sheet)', async () => {
     const p = pair(9, { tlChars: 15000 });
     expect(p.ctx.batches.map((b) => b.length)).toEqual([3, 2, 2, 2]);
     for (const b of p.ctx.batches) expect(b.reduce((s, e) => s + e.text().length, 0)).toBeLessThanOrEqual(36000);
     const ask = smartAsk();
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
-    expect(r.planned).toBe(6);
-    expect(r.calls).toBe(6);
+    expect(r.planned).toBe(7);
+    expect(r.calls).toBe(7);
     expect(fasLines(r)).toHaveLength(9);
     for (const pr of ask.seen.prompts) expect(pr.length).toBeLessThanOrEqual(56000);
   });
@@ -421,8 +427,9 @@ describe('map / reduce (AC11)', () => {
     const ask = smartAsk();
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
-    expect(ask.seen.kinds).toEqual(['map', 'map', 'map', 'map', 'reduce', 'review-mr']);
+    expect(ask.seen.kinds).toEqual(['map', 'map', 'map', 'map', 'reduce', 'review-mr', 'sheet']);
     for (const pr of ask.seen.prompts) expect(pr.length).toBeLessThanOrEqual(56000);
+    expect(ask.seen.prompts[6].length).toBeLessThanOrEqual(AI.SHEET_PROMPT_MAX);
     const rev = r.log.find((e) => e.kind === 'review');
     expect(rev.embedChars).toBeLessThanOrEqual(AI.DRAFT_EMBED_MAX);
     expect(fasLines(r)).toHaveLength(96);
@@ -468,7 +475,7 @@ describe('map / reduce (AC11)', () => {
     const ask = smartAsk({ map: flaky() });
     const r = await AI.draftRow(Object.assign({ ask }, p.args));
     expect(r.ok).toBe(true);
-    expect(r.calls).toBe(6);
+    expect(r.calls).toBe(7);
     expect(r.mapRetries).toBe(1);
     expect(r.log.some((e) => e.kind === 'map-retry' && e.batch === 1)).toBe(true);
     expect(fasLines(r).every((l) => !l.includes('⚠'))).toBe(true);
@@ -567,7 +574,7 @@ describe('deadlines, timeouts and failures', () => {
     const inner = smartAsk();
     const r = await AI.draftRow(Object.assign({ ask: async (pr, o) => ({ text: await inner(pr, o) }) }, p.args));
     expect(r.ok).toBe(true);
-    expect(r.log.map((e) => e.kind)).toEqual(['draft', 'review']);
+    expect(r.log.map((e) => e.kind)).toEqual(['draft', 'review', 'sheet']);
     for (const e of r.log) {
       expect(typeof e.promptChars).toBe('number');
       expect(e.outChars).toBeGreaterThan(0);
@@ -577,6 +584,71 @@ describe('deadlines, timeouts and failures', () => {
     expect(r.log[0].fasTagged).toBe(3);
     const s = JSON.stringify(r.log);
     for (const tok of ['Rochester', 'called TA', 'B61001', 'next:']) expect(s).not.toContain(tok);
+  });
+});
+
+describe('sheet call (design §3.9)', () => {
+  it('runs once after the review with kind sheet; prompt <= 14,000 with SHEET_EXAMPLES and CELLS TO WRITE; valid cells returned', async () => {
+    const p = pair(3);
+    const ask = smartAsk();
+    const r = await AI.draftRow(Object.assign({ ask }, p.args));
+    expect(r.ok).toBe(true);
+    expect(ask.seen.kinds).toEqual(['single', 'review', 'sheet']);
+    expect(r.log.map((e) => e.kind)).toEqual(['draft', 'review', 'sheet']);
+    expect(r.planned).toBe(3);
+    const sp = ask.seen.prompts[2];
+    expect(sp.length).toBeLessThanOrEqual(AI.SHEET_PROMPT_MAX);
+    for (const v of Object.values(AI.SHEET_EXAMPLES)) expect(sp).toContain(v);
+    expect(sp).toContain(AI.SHEET_STYLE);
+    expect(sp).toContain(AI.SHEET_CONTRACT);
+    expect(sp).toContain('- vendor1pDetails (1P Vendor Barrier): units ' + p.ctx.gate.rules.vendor1p.units.join(', '));
+    expect(sp).not.toContain('oemDetails (OEM Barrier)');
+    for (const id of p.ids) expect(sp).toContain('\n' + id + ' \u00b7 ');
+    expect(r.sheet).toEqual({ fasActions: 'Following up TA Rochester on ' + p.ids[0] + ' diag/repair progress.', support: 'None.' });
+    expect(r.sheetDrops).toEqual({});
+    expect(r.sheetSkipped).toBeNull();
+    expect(r.log[2]).toMatchObject({ sheetCells: 2, sheetDrops: 0 });
+  });
+  it('UNIT FACTS lines stay within floor(9000 / n) and the 96-unit prompt fits 14,000', () => {
+    const p = pair(96);
+    const sp = AI.buildSheetPrompt(p.ctx, { fas: {}, barriers: {} });
+    expect(sp.length).toBeLessThanOrEqual(AI.SHEET_PROMPT_MAX);
+    const facts = sp.slice(sp.indexOf('=== UNIT FACTS'), sp.indexOf('=== END UNIT FACTS')).split('\n').slice(1).filter(Boolean);
+    expect(facts).toHaveLength(96);
+    for (const l of facts) expect(l.length).toBeLessThanOrEqual(Math.floor(9000 / 96));
+  });
+  it('a failing cell is dropped with its code; the draft stays ok', async () => {
+    const p = pair(3);
+    const ask = smartAsk({ sheet: (ids) => ({ sheet: { fasActions: '11/10 called TA re tech callout for ' + ids[0], support: 'Support on ' + ids[0] + ' (RO 448899 release).', oemDetails: 'Volvo dealer offsite: ' + ids[0] + ' under diagnosis now.' } }) });
+    const r = await AI.draftRow(Object.assign({ ask }, p.args));
+    expect(r.ok).toBe(true);
+    expect(r.sheet).toEqual({});
+    expect(r.sheetDrops).toEqual({ fasActions: 'sheet-claim', support: 'sheet-forbidden', oemDetails: 'sheet-not-yes' });
+    expect(r.sheetSkipped).toBeNull();
+  });
+  it('failure / timeout / junk / too large / deadline -> ok:true with sheetSkipped and an empty sheet', async () => {
+    const p = pair(3);
+    const run = async (sheet, extra) => AI.draftRow(Object.assign({ ask: smartAsk({ sheet }) }, p.args, extra || {}));
+    const f = await run(() => { throw new Error('lane down'); });
+    const t = await run(() => { throw Object.assign(new Error('AI timeout after 90s'), { code: 'AI_TIMEOUT' }); });
+    const j = await run(() => 'no json here');
+    for (const [r, code] of [[f, 'ai-failed'], [t, 'ai-timeout'], [j, 'ai-invalid']]) {
+      expect(r).toMatchObject({ ok: true, sheet: {}, sheetDrops: {}, sheetSkipped: code });
+      expect(r.cells.fasActions.split('\n')).toHaveLength(3);
+    }
+    const orig = AI.buildSheetPrompt;
+    AI.buildSheetPrompt = () => 'x'.repeat(AI.SHEET_PROMPT_MAX + 1);
+    try {
+      const ask = smartAsk();
+      const big = await AI.draftRow(Object.assign({ ask }, p.args));
+      expect(big).toMatchObject({ ok: true, sheetSkipped: 'too-large', calls: 2 });
+      expect(ask.seen.kinds).toEqual(['single', 'review']);
+    } finally { AI.buildSheetPrompt = orig; }
+    let now = 0;
+    const inner = smartAsk();
+    const slow = vi.fn(async (pr, o) => { now += 200000; return inner(pr, o); });
+    const d = await AI.draftRow(Object.assign({ ask: slow, now: () => now, deadlineMs: 300000 }, p.args));
+    expect(d).toMatchObject({ ok: true, reviewSkipped: 'deadline', sheetSkipped: 'deadline', calls: 1 });
   });
 });
 

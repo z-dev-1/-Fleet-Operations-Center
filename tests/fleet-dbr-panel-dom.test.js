@@ -62,6 +62,15 @@ const modelWith = (drafts = {}, extra = {}) => F.applyOverlays(BUILT, { today: T
 const DOWN_KEYS = BUILT.rows.filter((r) => r.pair.down > 0).map((r) => r.key);
 const ZERO_KEYS = BUILT.rows.filter((r) => r.pair.down === 0).map((r) => r.key);
 const hashOf = (k) => BUILT.rows.find((r) => r.key === k).unitsHash;
+const SYNC_MS = Date.parse(BUILT.fleetSyncedAt);
+const FRESH_NOW = SYNC_MS + 30 * 60000;
+// A stored v3 draft (overlay v3: only its sheet prose cells overlay).
+const v3d = (k, sheet, over = {}) => {
+  const r = BUILT.rows.find((x) => x.key === k);
+  return Object.assign({ version: 3, unitsHash: r.unitsHash, evidenceHash: r.evidenceHash, draftedAt: 'X', sheet, identity: { alias: true, names: 0, fasTagged: 0 } }, over);
+};
+// Visible-scope copy (no roster in the fixture -> the 'mine' scope is unavailable) in sheet order.
+const visibleCopy = (m, hideZero = false, scacs = []) => L.copyRows(m, 'visible', hideZero, scacs);
 
 let api; let calls; let drafts; let pendingDrafts; let maxInFlight; let inFlight; let manualDraft;
 function makeApi({ enabled = true, aiDraft = true, getModel = null } = {}) {
@@ -79,8 +88,8 @@ function makeApi({ enabled = true, aiDraft = true, getModel = null } = {}) {
       inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
       const done = (res) => { inFlight--; return res; };
       if (!manualDraft) {
-        drafts[p.key] = { fasActions: '\u2022 ' + p.key + ': call vendor', support: 'None', unitsHash: hashOf(p.key) };
-        return Promise.resolve(done({ ok: true, key: p.key, fasActions: drafts[p.key].fasActions, support: 'None', model: modelWith(drafts) }));
+        drafts[p.key] = v3d(p.key, { fasActions: '\u2022 ' + p.key + ': call vendor', support: 'None' });
+        return Promise.resolve(done({ ok: true, key: p.key, sheet: drafts[p.key].sheet, model: modelWith(drafts) }));
       }
       return new Promise((resolve) => pendingDrafts.push({ key: p.key, resolve: (res) => resolve(done(res)) }));
     }),
@@ -97,8 +106,12 @@ function setup(opts = {}) {
   const busHandlers = {};
   const bus = { on: vi.fn((ev, fn) => { busHandlers[ev] = fn; return unsub; }) };
   const returnFocusEl = { focus: vi.fn() };
-  const ctl = P.__test__.createController({ api, doc, clipboard, storage, bus, returnFocusEl });
-  return { ctl, doc, clipboard, store, bus, busHandlers, unsub, returnFocusEl };
+  // Clock 30 min after the fixture's fleet sync, so the stale-data alert is off unless a test moves it.
+  const clock = { t: opts.nowMs || FRESH_NOW };
+  const extra = { now: () => clock.t };
+  if (opts.setTimeout) Object.assign(extra, { setTimeout: opts.setTimeout, clearTimeout: opts.clearTimeout });
+  const ctl = P.__test__.createController({ api, doc, clipboard, storage, bus, returnFocusEl, ...extra });
+  return { ctl, doc, clipboard, store, bus, busHandlers, unsub, returnFocusEl, clock };
 }
 const overlayOf = (t) => t.doc.body.children[0];
 const box = (t) => overlayOf(t).children[0];
@@ -185,23 +198,26 @@ describe('edits and copy', () => {
     expect(part(t, 'fdbr-status').textContent).toContain("Couldn't save edit (save-failed)");
     expect(t.ctl.state.live[DOWN_KEYS[0]].support).toBe('keep me');
   });
-  it('Copy rows / Copy with header write exactly rowsToTsv output, including the unsaved edit', async () => {
+  it('Copy rows / Copy with header write exactly sheetTsv output (golden format), including the unsaved edit as typed', async () => {
     const t = setup({ aiDraft: false });
     await t.ctl.open(); await flush();
     const key = DOWN_KEYS[1];
     await overlayOf(t).emit('input', typing(key, 'noEtc', 'unsaved\ttext'));
     const m = modelWith();
     const live = (r, c) => (r.key === key && c === 'noEtc' ? 'unsaved\ttext' : r.cells[c]);
+    const getSource = (r, c) => (r.key === key && c === 'noEtc' ? 'edit' : r.source[c]);
     const a = act('copy');
     await overlayOf(t).emit('click', a); await flush();
     expect(t.clipboard.writeText).toHaveBeenCalledTimes(1);
-    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.rowsToTsv(m.columns, m.rows, live));
-    expect(t.clipboard.writeText.mock.calls[0][0]).toContain('"unsaved\ttext"');
+    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.sheetTsv(m.columns, visibleCopy(m), live, { getSource }));
+    expect(t.clipboard.writeText.mock.calls[0][0]).toContain('\tunsaved text\t');
+    expect(t.clipboard.writeText.mock.calls[0][0]).not.toMatch(/\t(Y|N)\t/);
     expect(a.el.textContent).toBe('\u2713 Copied');
     await overlayOf(t).emit('click', act('copy-header')); await flush();
     const withHeader = t.clipboard.writeText.mock.calls[1][0];
-    expect(withHeader).toBe(L.rowsToTsv(m.columns, m.rows, live, { header: true }));
+    expect(withHeader).toBe(L.sheetTsv(m.columns, visibleCopy(m), live, { header: true, getSource }));
     expect(withHeader.split('\n')[0].split('\t').length).toBe(24);
+    expect(part(t, 'fdbr-status').textContent).toContain('Copied 21 rows (all visible rows)');
   });
   it('hide-zero toggle persists and Copy honours it; Copy row copies one row', async () => {
     const t = setup({ aiDraft: false });
@@ -215,9 +231,7 @@ describe('edits and copy', () => {
     expect(one.split('\n').length).toBe(1);
     // Copy row = the 17 fill columns, starting at "1P Vendor Barrier Y/N?".
     expect(one.split('\t').length).toBe(17);
-    const m1 = t.ctl.state.model;
-    expect(L.fillColumns(m1)[0].header).toBe('1P Vendor Barrier Y/N?');
-    expect(one).toBe(L.fillColumnsTsv(m1, [m1.rows.find((r) => r.key === DOWN_KEYS[0])], null));
+    expect(L.fillColumns(t.ctl.state.model)[0].header).toBe('1P Vendor Barrier Y/N?');
   });
   it('clipboard failure shows the manual-copy hint', async () => {
     const t = setup({ aiDraft: false });
@@ -258,8 +272,8 @@ describe('AI drafting', () => {
     while (pendingDrafts.length) {
       expect(inFlight).toBeLessThanOrEqual(2);
       const d = pendingDrafts.shift();
-      drafts[d.key] = { fasActions: '\u2022 ' + d.key + ': call vendor', support: 'None', unitsHash: hashOf(d.key) };
-      d.resolve({ ok: true, key: d.key, fasActions: drafts[d.key].fasActions, support: 'None', model: modelWith(drafts) });
+      drafts[d.key] = v3d(d.key, { fasActions: '\u2022 ' + d.key + ': call vendor', support: 'None' });
+      d.resolve({ ok: true, key: d.key, sheet: drafts[d.key].sheet, model: modelWith(drafts) });
       await flush();
     }
     expect(maxInFlight).toBe(2);
@@ -279,7 +293,7 @@ describe('AI drafting', () => {
   it('rows already drafted (ok) or with both AI cells edited are skipped; Redraft forces one row', async () => {
     const [okKey, bothKey] = DOWN_KEYS;
     const allEdited = Object.fromEntries(F.AI_CELL_IDS.filter((id) => F.EDITABLE_IDS.includes(id)).map((id) => [id, 'x']));
-    const m = modelWith({ [okKey]: { fasActions: 'a', support: 'b', unitsHash: hashOf(okKey) } }, { edits: { [bothKey]: allEdited } });
+    const m = modelWith({ [okKey]: v3d(okKey, { fasActions: 'a', support: 'b' }) }, { edits: { [bothKey]: allEdited } });
     const t = setup({ getModel: m });
     await t.ctl.open(); await flush();
     const drafted = api.draft.mock.calls.map((c) => c[0].key);
@@ -303,8 +317,8 @@ describe('AI drafting', () => {
     expect(part(t, 'fdbr-frame').innerHTML).toContain('data-fdbr-action="stop"');
     await overlayOf(t).emit('click', act('stop'));
     const first = pendingDrafts.shift();
-    drafts[first.key] = { fasActions: 'landed', support: 'None', unitsHash: hashOf(first.key) };
-    first.resolve({ ok: true, key: first.key, fasActions: 'landed', support: 'None', model: modelWith(drafts) });
+    drafts[first.key] = v3d(first.key, { fasActions: 'landed', support: 'None' });
+    first.resolve({ ok: true, key: first.key, sheet: drafts[first.key].sheet, model: modelWith(drafts) });
     pendingDrafts.shift().resolve({ ok: false, code: 'ai-timeout' });
     await flush();
     expect(api.draft).toHaveBeenCalledTimes(2);
@@ -346,20 +360,12 @@ describe('AI drafting', () => {
   });
 });
 
-// v2 stored draft for one row (FEAT-004).
-const rowOfBuilt = (k) => BUILT.rows.find((r) => r.key === k);
-function v2(k, over = {}) {
-  const r = rowOfBuilt(k);
-  return Object.assign({
-    version: 2, unitsHash: r.unitsHash, evidenceHash: r.evidenceHash, draftedAt: 'X',
-    cells: { oemYN: 'Y', oemDetails: '\u2022 AI oem', fasActions: '\u2022 AI fas', support: 'None' },
-    sources: { oemYN: 'ai', oemDetails: 'ai', fasActions: 'ai', support: 'ai' },
-    flags: { oemYN: 'review', fasActions: 'review' }, identity: { alias: true, names: 0, fasTagged: 0 },
-  }, over);
-}
+// v3 stored draft for one row (overlay v3).
+const v2 = (k, over = {}) => v3d(k, { oemYN: 'Y', oemDetails: 'AI oem sentence.', fasActions: 'AI fas sentence.', support: 'None.' },
+  Object.assign({ unitNotes: { fasActions: '\u2022 AI fas' }, flags: { oemYN: 'review', fasActions: 'review' } }, over));
 
-describe('AI v2 cells (FEAT-004)', () => {
-  it('24 columns with AI on; AI / ⚠ check markers render on the drafted row', async () => {
+describe('AI v3 cells (FEAT-004)', () => {
+  it('24 columns with AI on; only the sheet prose cells carry the AI marker; Y/N stay computed', async () => {
     const k = DOWN_KEYS[0];
     const okAll = Object.fromEntries(DOWN_KEYS.map((x) => [x, v2(x)]));
     const t = setup({ getModel: modelWith(okAll) });
@@ -367,49 +373,43 @@ describe('AI v2 cells (FEAT-004)', () => {
     expect(api.draft).not.toHaveBeenCalled(); // every row has an ok draft
     const table = part(t, 'fdbr-table').innerHTML;
     expect((table.match(/<th scope="col">/g) || []).length).toBe(25);
-    expect(table).toContain('<td data-key="' + L.esc(k) + '" data-col="oemYN">Y<span class="fdbr-mark">AI</span><span class="fdbr-mark fdbr-mark--warn">\u26a0 check</span></td>');
+    expect(table).toContain('<td data-key="' + L.esc(k) + '" data-col="oemYN">No</td>');
+    expect(table).toContain('aria-label="FAS Actions \u2014 ' + k.replace('|', '/') + '">AI fas sentence.</textarea>'
+      + '<span class="fdbr-marks" data-mark-key="' + L.esc(k) + '" data-mark-col="fasActions"><span class="fdbr-mark">AI</span></span>');
+    expect(table).not.toContain('\u26a0 check</span></td>');
   });
 
-  it('AC26 / AC37: Copy notes the flagged cells; the pasted text is unchanged', async () => {
-    const k = DOWN_KEYS[0];
-    const m = modelWith({ [k]: v2(k, { cells: { partsYN: 'N', fasActions: '\u2022 AI fas' }, sources: { partsYN: 'ai', fasActions: 'ai' }, flags: { partsYN: 'review', fasActions: 'review' } }) });
-    const t = setup({ aiDraft: false, getModel: m });
-    await t.ctl.open(); await flush();
-    await overlayOf(t).emit('click', act('copy-row', { key: k })); await flush();
-    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.fillColumnsTsv(m, [m.rows.find((r) => r.key === k)], null));
-    expect(part(t, 'fdbr-status').textContent).toContain('2 cells flagged \u26a0 \u2014 review before pasting');
-    // An unsaved edit of a flagged cell is not counted.
-    await overlayOf(t).emit('input', typing(k, 'fasActions', 'mine'));
-    await overlayOf(t).emit('click', act('copy-row', { key: k })); await flush();
-    expect(part(t, 'fdbr-status').textContent).toContain('1 cell flagged \u26a0');
-    // No flagged cell -> no note.
-    await overlayOf(t).emit('click', act('copy-row', { key: DOWN_KEYS[1] })); await flush();
-    expect(part(t, 'fdbr-status').textContent).not.toContain('flagged');
-  });
-
-  it('AC30: ok with cells and no model (no sources) patches every AI cell and the next queued row starts', async () => {
+  it('AC30: _patchDraft v3 — res.sheet patches only the draft sheet ids (Details only when Y); the next queued row starts', async () => {
     const t = setup({ manualDraft: true, getModel: modelWith() });
     await t.ctl.open(); await flush();
     expect(pendingDrafts.length).toBe(2);
     const first = pendingDrafts.shift();
-    const cells = Object.fromEntries(F.AI_CELL_IDS.map((id) => [id, id.endsWith('YN') ? 'Y' : 'AI ' + id]));
-    first.resolve({ ok: true, key: first.key, cells, flags: { oemYN: 'review' }, draftedAt: 'T' });
+    const before = t.ctl.state.model.rows.find((r) => r.key === first.key);
+    const sheet = { oemYN: 'Y', oemDetails: 'AI oem', fasActions: 'AI fas', support: 'None.', etcToday: '9', domicileDown: '999' };
+    first.resolve({ ok: true, key: first.key, sheet, unitNotes: { fasActions: '\u2022 X: y' }, flags: { fasActions: 'review', oemYN: 'review' }, draftedAt: 'T' });
     await flush();
     expect(api.draft).toHaveBeenCalledTimes(3); // the next queued row started (no stall)
     const row = t.ctl.state.model.rows.find((r) => r.key === first.key);
-    for (const id of F.AI_CELL_IDS) { expect(row.cells[id]).toBe(cells[id]); expect(row.source[id]).toBe('ai'); }
-    expect(row.flags).toEqual({ oemYN: 'review' });
+    expect([row.cells.fasActions, row.source.fasActions]).toEqual(['AI fas', 'ai']);
+    expect([row.cells.support, row.source.support]).toEqual(['None.', 'ai']);
+    for (const id of ['oemYN', 'oemDetails', 'etcToday', 'domicileDown']) {
+      expect(row.cells[id], id).toBe(before.cells[id]);
+      expect(row.source[id], id).toBe('computed');
+    }
+    expect(row.unitNotes).toEqual({ fasActions: '\u2022 X: y' });
+    expect(row.unitNoteFlags).toEqual({ fasActions: 'review' });
+    expect(row.flags).toEqual({});
     expect(row.draft.state).toBe('ok');
     expect(row.etcUnits).toEqual([]);
     const table = part(t, 'fdbr-table').innerHTML;
-    expect(table).toContain('data-col="oemDetails" aria-label="OEM Barrier \u2014 Details \u2014 ' + first.key.replace('|', '/') + '">AI oemDetails</textarea>');
-    expect(table).toContain('data-col="partsYN">Y<span class="fdbr-mark">AI</span></td>');
-    // v1-shaped response (no cells) still patches fasActions/support only.
+    expect(table).toContain('data-col="fasActions" aria-label="FAS Actions \u2014 ' + first.key.replace('|', '/') + '">AI fas</textarea>');
+    // A response without `sheet` (v1/v2 shape) patches no cell.
     const second = pendingDrafts.shift();
-    second.resolve({ ok: true, key: second.key, fasActions: '\u2022 v1', support: 'None' });
+    const before2 = t.ctl.state.model.rows.find((r) => r.key === second.key).cells;
+    second.resolve({ ok: true, key: second.key, fasActions: '\u2022 v1', support: 'None', cells: { oemYN: 'Y' } });
     await flush();
     const r2 = t.ctl.state.model.rows.find((r) => r.key === second.key);
-    expect(r2.cells.fasActions).toBe('\u2022 v1');
+    expect(r2.cells).toEqual(before2);
     expect(r2.source.oemYN).toBe('computed');
     expect(api.draft).toHaveBeenCalledTimes(4);
   });
@@ -523,8 +523,8 @@ describe('SCAC filter', () => {
     expect(pendingDrafts.length).toBe(2); // nothing aborted
     for (let i = 0; i < 10 && pendingDrafts.length; i++) {
       const d = pendingDrafts.shift();
-      drafts[d.key] = { fasActions: 'landed ' + d.key, support: 'None', unitsHash: hashOf(d.key) };
-      d.resolve({ ok: true, key: d.key, fasActions: drafts[d.key].fasActions, support: 'None', model: modelWith(drafts) });
+      drafts[d.key] = v3d(d.key, { fasActions: 'landed ' + d.key, support: 'None' });
+      d.resolve({ ok: true, key: d.key, sheet: drafts[d.key].sheet, model: modelWith(drafts) });
       await flush();
     }
     for (const k of dropped) expect(draftedKeys()).not.toContain(k);
@@ -557,13 +557,125 @@ describe('SCAC filter', () => {
     const tsv = t.clipboard.writeText.mock.calls[0][0];
     const m = modelWith();
     const live = (r, c) => (r.key === key && c === 'support' ? 'two\nlines' : r.cells[c]);
-    expect(tsv).toBe(L.fillColumnsTsv(m, L.visibleRows(m, false, ['TUZR']), live));
+    const getSource = (r, c) => (r.key === key && c === 'support' ? 'edit' : r.source[c]);
+    // Fill columns also go through sheetValue (Yes/No, bare counts).
+    expect(tsv).toBe(L.sheetTsv(L.fillColumns(m), visibleCopy(m, false, ['TUZR']), live, { getSource }));
+    expect(tsv.split('\n')[0].split('\t')[0]).toMatch(/^(Yes|No)$/);
     const lines = tsv.split('\n');
     expect(lines.length).toBe(3);
     for (const line of lines) expect(line.split('\t').length).toBe(17);
     expect(tsv).toContain('two lines');
     expect(tsv).not.toContain('TUZR'); // SCAC / domicile identity columns are omitted
     expect(a.el.textContent).toBe('\u2713 Copied');
+  });
+});
+
+describe('copy scope, copy note, freshness (FEAT-004)', () => {
+  const ME = 'Z Santiago';
+  const MINE = ['ROC5|AUVTE', 'ABE40|SAPB', 'AVP40|YTSC'];
+  const roster = (over = {}) => Object.assign({
+    rosterExact: Object.fromEntries(MINE.map((k) => [k, ME])), rosterLoaded: true, fasNameOverride: ME,
+  }, over);
+  const frameOf = (t) => part(t, 'fdbr-frame').innerHTML;
+
+  it('scope select: "mine" by default, persisted on change, invalid stored value -> mine', async () => {
+    const t = setup({ aiDraft: false, getModel: modelWith({}, roster()), store: { [P.__test__.COPY_SCOPE_KEY]: 'bogus' } });
+    await t.ctl.open(); await flush();
+    expect(P.__test__.COPY_SCOPE_KEY).toBe('fleetDbr__copyScope');
+    expect(t.ctl.state.copyScope).toBe('mine');
+    expect(frameOf(t)).toContain('<option value="mine" selected>My pairs with units down (3)</option>');
+    expect(frameOf(t)).toContain('<option value="visible">All visible rows (21)</option>');
+    await overlayOf(t).emit('change', { target: { dataset: { fdbrField: 'copyScope' }, value: 'visible' } });
+    expect(t.store.fleetDbr__copyScope).toBe('visible');
+    expect(frameOf(t)).toContain('<option value="visible" selected>');
+    await overlayOf(t).emit('change', { target: { dataset: { fdbrField: 'copyScope' }, value: '<x>' } });
+    expect(t.store.fleetDbr__copyScope).toBe('mine');
+    const s = setup({ aiDraft: false, getModel: modelWith({}, roster()), store: { fleetDbr__copyScope: 'visible' } });
+    await s.ctl.open(); await flush();
+    expect(s.ctl.state.copyScope).toBe('visible');
+  });
+
+  it('DR2-13: "mine" disabled with a note when no roster, no FAS name, or no pair matches the name', async () => {
+    for (const [extra, text] of [
+      [{ fasNameOverride: ME }, 'FAS roster not loaded \u2014 copying all visible rows'],
+      [roster({ fasNameOverride: '' }), 'Set your FAS name to copy only your pairs'],
+      [roster({ fasNameOverride: 'Z Santiagoo' }), "No roster pairs match &#39;Z Santiagoo&#39; \u2014 check your FAS name"],
+    ]) {
+      const t = setup({ aiDraft: false, getModel: modelWith({}, extra) });
+      await t.ctl.open(); await flush();
+      expect(frameOf(t)).toMatch(/<option value="mine" disabled>/);
+      expect(frameOf(t)).toContain(text);
+      await overlayOf(t).emit('click', act('copy')); await flush();
+      expect(t.clipboard.writeText.mock.calls[0][0].split('\n')).toHaveLength(21); // falls back to the visible rows
+    }
+  });
+
+  it('copy uses the scope and the golden format; note "Copied N rows (your pairs with units down)"; AI clause only with aiDraft (DR2-10)', async () => {
+    const m = modelWith({}, roster());
+    const t = setup({ aiDraft: false, getModel: m });
+    await t.ctl.open(); await flush();
+    await overlayOf(t).emit('click', act('copy-header')); await flush();
+    const tsv = t.clipboard.writeText.mock.calls[0][0];
+    expect(tsv).toBe(L.sheetTsv(m.columns, L.copyRows(m, 'mine', false, []), null, { header: true }));
+    const lines = tsv.split('\n');
+    expect(lines).toHaveLength(4);
+    expect(lines.slice(1).map((l) => l.split('\t')[0])).toEqual([ME, ME, ME]);
+    expect(lines.slice(1).map((l) => l.split('\t')[1] + '|' + l.split('\t')[4]).sort()).toEqual(MINE.slice().sort());
+    // model.flags.aiDraft on and no current drafts -> the auto-text clause.
+    expect(part(t, 'fdbr-status').textContent).toContain('Copied 3 rows (your pairs with units down) \u00b7 3 rows use auto text (AI draft pending)');
+    const k = MINE[0];
+    const t2 = setup({ aiDraft: false, getModel: modelWith({ [k]: v3d(k, { fasActions: 'x' }) }, roster()) });
+    await t2.ctl.open(); await flush();
+    await overlayOf(t2).emit('click', act('copy')); await flush();
+    expect(part(t2, 'fdbr-status').textContent).toContain('\u00b7 2 rows use auto text (AI draft pending)');
+    // AI drafting off -> no clause.
+    const off = F.applyOverlays(BUILT, { today: TODAY, flags: { aiDraft: false }, ...roster() });
+    const t3 = setup({ aiDraft: false, getModel: off });
+    await t3.ctl.open(); await flush();
+    await overlayOf(t3).emit('click', act('copy')); await flush();
+    expect(part(t3, 'fdbr-status').textContent).toContain('Copied 3 rows (your pairs with units down)');
+    expect(part(t3, 'fdbr-status').textContent).not.toContain('auto text');
+    // Copy row keeps the single clicked row, whatever the scope.
+    const zero = ZERO_KEYS[0];
+    await overlayOf(t3).emit('click', act('copy-row', { key: zero })); await flush();
+    expect(t3.clipboard.writeText.mock.calls[1][0]).toBe(L.sheetTsv(L.fillColumns(off), [off.rows.find((r) => r.key === zero)], null, {}));
+    expect(part(t3, 'fdbr-status').textContent).toContain('Copied 1 row');
+  });
+
+  it('AC12: stale banner + status age at 121 min, none at 119 min; the 60 s tick updates the age; copy note warns', async () => {
+    vi.useFakeTimers();
+    const t = setup({ aiDraft: false, getModel: modelWith(), nowMs: SYNC_MS + 119 * 60000 });
+    await t.ctl.open(); await flush();
+    expect(part(t, 'fdbr-banner').innerHTML).toBe('');
+    expect(part(t, 'fdbr-status').textContent).toContain('(1h 59m old)');
+    t.clock.t = SYNC_MS + 121 * 60000;
+    vi.advanceTimersByTime(P.__test__.FRESH_TICK_MS);
+    expect(P.__test__.FRESH_TICK_MS).toBe(60000);
+    const banner = part(t, 'fdbr-banner').innerHTML;
+    expect(banner).toContain('class="fdbr-banner fdbr-banner--stale" role="alert"');
+    expect(banner).toContain('\u26a0 Fleet data is 2h 1m old');
+    expect(part(t, 'fdbr-status').textContent).toContain('(2h 1m old)');
+    t.clock.t += 60000;
+    vi.advanceTimersByTime(60000);
+    expect(part(t, 'fdbr-banner').innerHTML).toContain('2h 2m old');
+    await overlayOf(t).emit('click', act('copy')); await flush();
+    expect(part(t, 'fdbr-status').textContent).toContain('\u00b7 \u26a0 fleet data is 2h 2m old');
+    // The stale alert comes first, then the existing "Fleet data updated" banner.
+    t.busHandlers['fleet:data']({ rows: [], syncedAt: '2026-11-10T18:00:00Z' });
+    const both = part(t, 'fdbr-banner').innerHTML;
+    expect(both.indexOf('fdbr-banner--stale')).toBeLessThan(both.indexOf('Fleet data updated'));
+  });
+
+  it('the freshness tick is cleared on close', async () => {
+    const live = new Map();
+    let seq = 0;
+    const setT = (fn, ms) => { const id = ++seq; live.set(id, { fn, ms }); return id; };
+    const clrT = (id) => { live.delete(id); };
+    const t = setup({ aiDraft: false, getModel: modelWith(), setTimeout: setT, clearTimeout: clrT });
+    await t.ctl.open(); await flush();
+    expect([...live.values()].some((x) => x.ms === P.__test__.FRESH_TICK_MS)).toBe(true);
+    t.ctl.close();
+    expect(live.size).toBe(0);
   });
 });
 

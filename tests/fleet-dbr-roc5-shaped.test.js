@@ -83,15 +83,27 @@ describe('ROC5|AUVTE-shaped pair (AC8)', () => {
 
     // the 7 hard cells equal the builder's through the real overlay, even when the stored draft
     // carries hard-cell keys (domicileDown / scacUptime / fasName are ignored by the whitelist)
+    // (FEAT-004 overlay v3: only validated sheet cells overlay; Y/N and counts stay computed.)
+    const evil = { domicileDown: '999', scacUptime: '1%', fasName: 'Evil', oemYN: 'N', etcToday: '9', missedEtc: '9' };
     const d = {
-      version: 2, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X', flags: r.flags,
-      cells: Object.assign({}, r.cells, { domicileDown: '999', scacUptime: '1%', fasName: 'Evil' }),
+      version: 3, unitsHash: row.unitsHash, evidenceHash: row.evidenceHash, draftedAt: 'X', flags: r.flags,
+      unitNotes: r.cells, sheet: Object.assign({}, r.sheet, evil),
     };
     const ov = Fd.applyOverlays(args.built, { drafts: { [R.KEY]: d }, flags: { aiDraft: true } }).rows.find((x) => x.key === R.KEY);
     for (const h of Fd.HARD_CELL_IDS) expect(ov.cells[h], h).toBe(h === 'fasName' ? '' : row.cells[h]);
-    for (const id of Fd.AI_CELL_IDS) expect(ov.cells[id], id).toBe(r.cells[id]);
+    for (const id of Fd.AI_CELL_IDS) {
+      const yn = /Details$/.test(id) ? row.cells[id.replace(/Details$/, 'YN')] : 'Y';
+      const fromSheet = Fd.DRAFT_SHEET_IDS.includes(id) && typeof (r.sheet || {})[id] === 'string' && r.sheet[id] && yn === 'Y';
+      expect(ov.cells[id], id).toBe(fromSheet ? r.sheet[id] : row.cells[id]);
+    }
     expect(ov.draft.state).toBe('ok');
-    // AC14 basis: the COX "Cannot Complete — Parts Ordered" unit has no 1P vendor rule hit
-    expect(row.units.find((u) => u.id === 'B90103').barriers).not.toContain('vendor1p');
+    // The same draft stored as v2 is 'format'-stale and changes no cell.
+    const v2 = Fd.applyOverlays(args.built, { drafts: { [R.KEY]: Object.assign({}, d, { version: 2, cells: r.cells }) }, flags: { aiDraft: true } })
+      .rows.find((x) => x.key === R.KEY);
+    expect(v2.draft).toMatchObject({ state: 'stale', staleReason: 'format' });
+    for (const id of Fd.AI_CELL_IDS) expect(v2.cells[id], id).toBe(row.cells[id]);
+    // Golden 1P rule: any COX unit is a 1P hit; "Cannot Complete — Parts Ordered" is not read as a rejection
+    expect(row.units.find((u) => u.id === 'B90103').barriers).toContain('vendor1p');
+    expect(row.units.find((u) => u.id === 'B90103').why.vendor1p).not.toMatch(/can't complete/);
   });
 });

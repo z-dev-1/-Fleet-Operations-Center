@@ -38,16 +38,18 @@ describe('block + fact set + mirrors', () => {
     const u = makeUnit({ equipmentId: 'B12195', _factsOn: true, _factEtc: fe });
     expect(F.parseEtc(u, TODAY).slip).toEqual({ count: 1, seq: ['2026-11-09', '2026-11-08', '2026-11-10'] });
     const out = F.buildFleetDbr([u], { today: TODAY }).rows[0];
-    const line = out.cells.missedEtc.split('\n')[1];
-    expect(line).toMatch(/; ETC moved 1\u00d7 \(11\/9\u219211\/8\u219211\/10\)$/);
+    // FEAT-002: the Missed ETC cell is the bare count; the why line moved to row.missedWhy.
+    expect(out.cells.missedEtc).toBe('1');
+    expect(out.missedWhy[0].why).toMatch(/; ETC moved 1\u00d7 \(11\/9\u219211\/8\u219211\/10\)$/);
   });
-  it('DBR rows without slip are unchanged (same parseEtc result, same cell)', () => {
+  it('DBR rows without slip are unchanged (same parseEtc result, same why)', () => {
     const fe = { date: '2026-11-10', kind: 'repairCompletion', state: 'missed', explicitMissDate: '2026-11-10', source: 'x', statedAt: null, snippet: 'ETC missed', negated: false, reason: null };
     const u = makeUnit({ equipmentId: 'B1', _factsOn: true, _factEtc: fe });
     expect('slip' in F.parseEtc(u, TODAY)).toBe(false);
-    expect(F.buildFleetDbr([u], { today: TODAY }).rows[0].cells.missedEtc).toBe("1\n\u2022 B1 (ETC 11/10): ETC 11/10 explicitly missed: 'ETC missed'");
+    const why = (row) => { const r = F.buildFleetDbr([row], { today: TODAY }).rows[0]; return [r.cells.missedEtc, r.missedWhy.map((w) => w.unit + ': ' + w.why)]; };
+    expect(why(u)).toEqual(['1', ["B1: ETC 11/10 explicitly missed: 'ETC missed'"]]);
     const zero = makeUnit({ equipmentId: 'B1', _factsOn: true, _factEtc: Object.assign({}, fe, { slip: { count: 0, seq: ['2026-11-10'] } }) });
-    expect(F.buildFleetDbr([zero], { today: TODAY }).rows[0].cells.missedEtc).toBe("1\n\u2022 B1 (ETC 11/10): ETC 11/10 explicitly missed: 'ETC missed'");
+    expect(why(zero)).toEqual(['1', ["B1: ETC 11/10 explicitly missed: 'ETC missed'"]]);
   });
 });
 

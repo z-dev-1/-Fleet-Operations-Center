@@ -101,6 +101,19 @@ function detectDbrLookup(text, catalog) {
   return { rawTarget: w, mine: false, cue, candidates: [w] };
 }
 
+/**
+ * isGenericDbrAsk(text) -> boolean: a read-only DBR ask with a DBR cue ("today's dbr",
+ * "pull dbr", "get dbr data") and nothing that sends / shares / schedules. Used only by the
+ * Fleet Health path, where there is no pull to run.
+ */
+function isGenericDbrAsk(text) {
+  if (typeof text !== 'string') return false;
+  const t = text.trim().replace(/[\u2018\u2019]/g, "'").toLowerCase();
+  if (!t || t.length > MAX_TEXT) return false;
+  if (OUTWARD.test(t.replace(BENIGN_ME, ' '))) return false;
+  return DBR_CUE.test(t);
+}
+
 const PROMPT_OLD = 'DBR_PULL({type:DBR_PULL}) (runs the DBR pull for AFP+DSP; for `pull dbr`/`get dbr data`)';
 const PROMPT_NEW = 'DBR_PULL({type:DBR_PULL}) (runs the DBR pull for AFP+DSP from QuickSight; ONLY for `pull dbr`/`refresh dbr`/`get dbr data` when NO site, domicile or carrier is named), '
   + 'DBR_LOOKUP({type:DBR_LOOKUP,target:SITE_OR_SCAC,kind:OPTIONAL_domicile|scac|mine}) (read-only: answers DBR data for ONE named site, domicile or carrier SCAC right now from live fleet data, plus QuickSight when it was pulled today; '
@@ -113,4 +126,4 @@ function patchPrompt(prompt) {
   return prompt.includes(PROMPT_OLD) ? prompt.replace(PROMPT_OLD, PROMPT_NEW) : prompt;
 }
 
-module.exports = { detectDbrLookup, patchPrompt, PROMPT_OLD, PROMPT_NEW };
+module.exports = { detectDbrLookup, isGenericDbrAsk, patchPrompt, PROMPT_OLD, PROMPT_NEW };

@@ -1,0 +1,2546 @@
+{
+ "meta": {
+  "note": "Anonymized, trimmed Fleet Health fixture built by scripts/fleet-health-fixture.js from read-only frozen data. Emails/phones redacted, person names -> [name], fullConversation dropped, repairTimeline last 8 lines, asistNotes 3 newest entries; rows outside the user pairs' down units keep only equipmentId, domicileSite, operator, lifecycleState.",
+  "today": "2026-11-25",
+  "fleetSyncedAt": "2026-11-25T16:56:06.834Z",
+  "fleetRows": 263,
+  "userName": "Z Santiago",
+  "userDownPairKeys": [
+   "ABE40|SAPB",
+   "ABE40|TUZR",
+   "AVP40|AGNLI",
+   "AVP40|YTSC",
+   "EOFE01|EOFE",
+   "HBD1|AKJJI",
+   "MIMY01|MIMY",
+   "ROC5|AUVTE",
+   "UNNE01|UNNE"
+  ]
+ },
+ "roster": {
+  "userName": "Z Santiago",
+  "rosterExact": {
+   "ABE40|SAPB": "Z Santiago",
+   "ABE40|TUZR": "Z Santiago",
+   "AVP40|AGNLI": "Z Santiago",
+   "AVP40|YTSC": "Z Santiago",
+   "EOFE01|EOFE": "Z Santiago",
+   "HBD1|AKJJI": "Z Santiago",
+   "MIMY01|MIMY": "Z Santiago",
+   "ROC5|AUVTE": "Z Santiago",
+   "SHIL01|SHIL": "Z Santiago",
+   "UNNE01|UNNE": "Z Santiago",
+   "EWR45|SAPB": "Other FAS"
+  }
+ },
+ "rows": [
+  {
+   "equipmentId": "122121",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "122149",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "122269",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "122278",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "122281",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "124007",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "124092",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "124124",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320121",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320122",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320126",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320129",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320131",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320160",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320162",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320170",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "Amerit",
+   "savedRepairStatus": "Awaiting approval",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Left and right cab air spring bags dry rotted; replacement required on both sides.",
+   "issueDetails": "\nCabin airbag is broken/malfunctioning.\n",
+   "created": "2026-11-23T16:38:44.522Z",
+   "workDuration": "1d 23h 55m",
+   "partsStatus": "ordered",
+   "partsEta": "2026-11-25",
+   "estimateStatus": "approved",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "SOURCING_PARTS",
+   "delayReasonCodes": "Sourcing _ parts",
+   "savedNotes": "11/25 - Left and right cab air spring bags dry rotted; replacement required on both sides.",
+   "repairTimeline": "11/23 - Work order created with Amerit for cab airbag malfunction. No gate code on file; key in ignition.\n11/23 - Diagnosis completed. Root cause confirmed: left and right cab air spring bags dry rotted. Correction scope: raise cab, disconnect air lines, remove and replace both air bags, tighten hardware, reconnect air lines.\n11/24 - Parts ordered: CAB SLEEPER AIR SPRING BAG Part #21338451, qty 2. Parts ETA 11/25. ETC delay reason logged as sourcing parts.\n11/25 - Vendor identified additional labor scope: broken hardware and equipment constraints require extra time per side. Estimate V1 submitted for approval.\n11/25 - Estimate V2 approved. Vendor authorized to proceed with repairs. ETR 11/25; repair completion confirmation pending.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-24T11:55:51.672Z",
+    "snippet": "Expected completion date time: 2026-11-25T18:40:18Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-24",
+      "2026-11-25"
+     ]
+    }
+   },
+   "_factPartsWhy": "Part #21338451 ordered 11/24",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "320207",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320209",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320231",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321060",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321062",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321185",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Accident",
+   "vendor": "CEI (CEI)",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Hit-and-run accident damage: body/cosmetic damage, broken mirror, damaged fairing and CNG cabinet.",
+   "issueDetails": "The carrier reports the unit was in a hit and run accident. It has body and cosmetic damage, a broken mirror, and damage to the fairing and CNG cabinet. All accident-related damage needs a full assessment and repair.",
+   "created": "2026-10-28T18:01:38.435Z",
+   "workDuration": "27d 22h 53m",
+   "savedNotes": "11/24 - Hit-and-run accident damage: body/cosmetic damage, broken mirror, damaged fairing and CNG cabinet.",
+   "repairTimeline": "10/31 - Confirmed vehicle is at the body shop (Push & Pull Autobody) for the estimate.\n11/01-11/06 - [no update logged]\n11/07 - Vehicle still in shop awaiting the estimate. Vendor closed for the weekend; follow-up planned for the next weekday.\n11/08-11/09 - [no update logged]\n11/10 - Vendor reports the estimate is delayed while it waits for CNG parts pricing from the supplier. CNG parts are expected to take 2-3 weeks to ship once ordered.\n11/11-11/20 - [no update logged]\n11/21 - Requested a status update from the vendor. No estimate submitted and no ETC on record. Salesforce case 00034983 remains active.\n11/23 - Contacted body shop, which is waiting for the side fairing to be delivered (parts ETA 12/04). An ETC extension is likely; the revised ETC will be set after the parts arrive.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": "relaygarage/fas",
+    "statedAt": "2026-11-21T14:11:45.010Z",
+    "snippet": "",
+    "negated": true,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "321186",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321187",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321364",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Parts backordered",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Ignition coil blown out of valve cover; spark plug blown out with thread end remaining in head.",
+   "issueDetails": "IGNITION COIL BLOWN OUT OF VALVE COVER. FOUND SPARK PLUG BLOWN OUT AS WELL NUT THREAD END IS STILL IN HEAD. THREADS ARE FINE. MIDDLE PART OF SPARK PLUG BROKE APART AND SEPARATED. COULD BE DUE TO FAULTY SPARK PLUG",
+   "created": "2026-11-11T18:05:50.044Z",
+   "workDuration": "13d 22h 49m",
+   "partsStatus": "backorder",
+   "estimateStatus": "approved",
+   "offsiteStage": "repair",
+   "offsiteStageDetail": "Parts B/O",
+   "savedNotes": "order number 51439690 is cited as an ignition coil order on 11/19-11/20 Uptime Center notes but referenced by dealer on 11/23 as the valve cover sourcing backorder number — conflict in source data, not resolved. No parts ETA provided on ignition coils or valve cover. No repair ETC available. [F1, F2",
+   "repairTimeline": "11/14-11/15 - [no update logged]\n11/16 - Unit arrived at Bergey's Truck Centers - Pennsauken (Volvo). Diagnosis completed; ignition coil and spark plug failure confirmed. Uptime Center requested lead time and findings.\n11/17 - V1 estimate submitted by dealer; internal approval requested.\n11/18 - V1 estimate approved; warranty coverage review requested prior to authorization. Dealer confirmed all warranty coverage expired; proceeding with approved ignition coil and spark plug repairs. V2 estimate (scope: hood R&R, paint, headlamp, step fairing, CNG deflector) also approved same day. ISX12N CNG tag confirmed. No repair ETC documented.\n11/19 - Dealer confirmed ignition coils on backorder from Cummins (CUMQ# 51439740 / 51439690). Hold down screws, ignition coil boots, and spark plugs ordered (CUMQ# 51439608 / 51439819). No parts ETA stated.\n11/20 - Uptime Center escalated ignition coil backorder directly to Cummins. Dealer separately confirmed valve cover (part# 4389554) also outstanding. No ETA on either item.\n11/21 - Internal follow-up submitted to dealer requesting parts ETAs for ignition coils (CUMQ# 51439740 / 51439690) and valve cover (part# 4389554). No repair ETC available; unit cannot proceed to repair until all parts arrive.\n11/23 - Uptime Center followed up with dealer requesting parts ETAs. Dealer confirmed valve cover (part# 4389554) remains outstanding. No parts ETA provided on ignition coils or valve cover. No repair ETC available.",
+   "asistNotes": "2026-11-23 20:31 -_Jeff Corey_- (Bergey's Truck Centers - Pennsauken (Volvo)): Current Case — ((VALVE COVER IS STILL LISTED AS \"SOURCING\" ON BACKORDER # 51439690))...\n2026-11-23 20:24 -_Jeff Corey_- (Bergey's Truck Centers - Pennsauken (Volvo)): Current Case — Currently waiting on # 4389554 COVER,VALVE\n2026-11-23 20:14 [name] (Originator: Uptime Center): Current Case — Good Afternoon Service Team,\n\nPlease advise if you all have received an ETA for the parts on order.\n\nThank you",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": "relaygarage/fas",
+    "statedAt": "2026-11-21T14:34:02.617Z",
+    "snippet": "",
+    "negated": true,
+    "reason": null
+   },
+   "_factPartsWhy": "Part #4389554 backorder 11/23",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "321549",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged",
+   "vendor": "Amerit",
+   "savedRepairStatus": "Repair completed",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Air brake assembly on dash leaking.",
+   "issueDetails": "Air Brake Assembly on Dash Is Leaking.",
+   "created": "2026-11-25T14:32:39.397Z",
+   "workDuration": "0d 1h 44m",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage",
+   "savedNotes": "Current status shows repair completed, however WO state remains Work in progress — completion not yet confirmed by vendor. [F1, F2, F3]",
+   "repairTimeline": "11/25 - Work order created with Amerit (Allentown, PA shop) for air brake assembly leak diagnosis and repair. Assigned same day; repair ETR 11/25. NOTE: Current status shows repair completed, however WO state remains Work in progress — completion not yet confirmed by vendor.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage",
+    "statedAt": "2026-11-25T15:10:31.124Z",
+    "snippet": "expectedCompletionDateTime: 2026-11-26T04:38:08.247145400Z",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "321908",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Vehicle arrived",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Windshield wipers inoperative, 4-way hazards not shutting off, and general electrical issues.",
+   "issueDetails": " Windshield wipers not working / 4 way hazards not shutting off / Electrical issues",
+   "created": "2026-11-24T15:44:32.048Z",
+   "workDuration": "1d 1h 10m",
+   "offsiteStageDetail": "No status set by the dealer yet",
+   "savedNotes": "11/25 - Windshield wipers inoperative, 4-way hazards not shutting off, and general electrical issues.",
+   "repairTimeline": "11/21 - [Unplanned #2] Work order in Scheduled state. Amerit has not posted an update; no weekend technicians on site. Unit down about 20 hours.\n11/22-11/23 - [no update logged]\n11/24 - [Unplanned] Work request created in ASIST for the same electrical complaints (ASIST case 21503664; the Decisiv response lists case 21503087, so the case numbers differ across records). Recommendation adjusted to better suit the repair request.\n11/24 - [Unplanned] Request accepted by the Uptime Center in Decisiv. No confirmed appointment time. Unit confirmed ready for pickup at ABE40, not drivable. Assigned to Gabrielli Truck Sales & Service, Bloomsbury NJ (Volvo; Decisiv id VASCC1).\n11/24 - [Unplanned] not resolved in the records.\n11/24 - [Unplanned] Return tow is not to be arranged after repair unless a free tow service is offered. Amazon will arrange carrier pickup. Salesforce case 00036556 created to track this.\n11/24 - [Unplanned] Tow carrier dispatched to move the unit from ABE40 to Gabrielli Truck Sales & Service, Bloomsbury NJ. Tow ETA 60 minutes.\n11/24-11/25 - Current status: Vehicle arrived; WO state Scheduled; repair ETC not stated; Amerit WO has no update logged after 11/21.",
+   "asistNotes": "2026-11-24 17:12 [name] Hernandez (Uptime Center): Current Case — Mechanics Plus Towing Transport will be towing unit\n\nFrom:  1132 N Irving St, Allentown, PA 18109\nTo:  Gabrielli Truck Sales & Service 963 NJ-173, Bloomsbury, NJ 08804\nETA:  60 mins\n2026-11-24 15:50 [name] (Uptime Center): Current Case — FAS HAS CONFIRMED WITH POC THAT UNIT IS READY FOR PICK UP\nAmazon POC: Z SANTIAGO\nPhone number: 7166142167\nEmail: [redacted]\nLocation: ABE40 @ 1132 N Irving St, Allentown, PA 18109\nUnit: 321908\nKey location: ignition\nGate Code: none\nUnit ready: YES\nUnit Drive-able: NO\nCompliant: wipers inoperative, 4-ways not shutting off, general electrical. Please assign to Gabrielli Truck Sales & Service @ 963 NJ-173, Bloomsbury, NJ 08804\n\n--- Service Request responses ---\nResponses\nAccepted by [name] - Uptime Center\n11/24/2026 at 10:50 am EST\nConfirmed Appointment Time: none...\nCase #: 21503087",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "321925",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321938",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "Amerit",
+   "savedRepairStatus": "Repair in progress",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Coolant is leaking from the lower left side of the radiator, and the radiator needs to be replaced.",
+   "issueDetails": "Coolant Leak.",
+   "created": "2026-11-24T15:55:06.897Z",
+   "workDuration": "0d 22h 59m",
+   "estimateStatus": "approved",
+   "repairEtc": "2026-11-26",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "SOURCING_PARTS",
+   "delayReasonCodes": "Sourcing _ parts",
+   "savedNotes": "11/25 - Coolant is leaking from the lower left side of the radiator, and the radiator needs to be replaced.",
+   "repairTimeline": "11/24 - Work order created for a coolant leak at ABE40 and assigned to Amerit.\n11/25 - Diagnosis completed: a coolant system pressure test found a leak at the lower left side of the radiator. To replace the radiator, the vendor must drain the coolant, evacuate the A/C system and remove the condenser.\n11/25 - Vendor submitted a repair estimate for internal approval. Parts in scope: radiator Part #23459369 (qty 1), Heavy Duty Extended Life 50/50 coolant Part #PTAF2301R (qty 12) and A/C refrigerant Part #R134A (qty 3).\n11/25 - Warranty review recorded for radiator Part #23459369; no outcome logged.\n11/25 - Estimate approved and the vendor is authorized to proceed. Repair ETR is 11/26 and parts are still being sourced; no parts ETA has been logged.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-26",
+    "kind": "repairCompletion",
+    "state": "future",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:04:38.989Z",
+    "snippet": "Expected completion date time: 2026-11-26T17:59:12Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-25",
+      "2026-11-26"
+     ]
+    }
+   },
+   "_factPartsWhy": "Part #23459369; Part #PTAF2301R; Part #R134A",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "321946",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321950",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321952",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321963",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Parts received",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Excessive valve tap and top-end engine noise with normal oil level; local mechanic advised immediate grounding for diagnosis.",
+   "issueDetails": "Very high valve tap on unit, oil was checked and oil is fine which shows something serious is wrong. we had our local mechanic look at it and he said the unit needs to be downed and immediately looked at.",
+   "created": "2026-10-23T18:38:03.257Z",
+   "workDuration": "32d 22h 17m",
+   "partsStatus": "arrived",
+   "partsEta": "2026-11-19",
+   "estimateStatus": "approved",
+   "repairEtc": "2026-11-06",
+   "repairEtcSource": "relaygarage/fas",
+   "offsiteStage": "repair",
+   "offsiteStageDetail": "Waiting",
+   "savedNotes": "MV Contract Maintenance appears as case participant in Decisiv records from this date — conflicts with TransEdge Truck Sales and Service - Allentown (Volvo) identified at 10/26 check-in; dealer name discrepancy not resolved in source data. [F9, F10]\n11/20 - Per dealer via Uptime Center, repairs are",
+   "repairTimeline": "11/20 - Per dealer via Uptime Center, repairs are extensive and in progress. Lower engine gasket kit still outstanding. Repair ETC revised to first week of December.\n11/21 - Follow-up submitted requesting confirmation that lower gasket kit is ordered, parts ETA, order or backorder reference number, and projected completion date. Warranty coverage still not confirmed.\n11/22 - [no update logged]\n11/23 - Dealer confirmed still awaiting lower engine gasket kit. Parts tracking or ETA requested to allow Cummins escalation if needed.\n11/23 Parts: Lower engine gasket kit ordered, not yet arrived (per Transedge Truck Center email 11/23) [em:9954d3ec]\n11/23 Blocker: Repair blocked waiting on lower engine gasket kit (per Transedge Truck Center email 11/23) [em:da0c0517]\n11/24 - Parts department queried for gasket kit ETA. Dealer subsequently confirmed lower gasket kit has arrived. Unit to return to bay as soon as a technician is available.\n11/25 - Parts received confirmed per 11/24 dealer note. Repair awaiting technician assignment. ETC of first week of December not yet reconfirmed following parts arrival. Warranty coverage remains unconfirmed.",
+   "asistNotes": "2026-11-24 16:46 [name] (TransEdge Truck Sales and Service - Allentown (Volvo)): Current Case — Part just arrived.  I will work on getting this back in the bay as soon as a tech is freed up.\n2026-11-24 16:01 [name] (TransEdge Truck Sales and Service - Allentown (Volvo)): Current Case — I sent a request to the parts to get an ETA - once I get the response I will advise.\n2026-11-24 15:47 [name] (MV Contract Maintenance): Current Case — Can you let us know the order info on the gasket kit or tracking? Thanks",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "322138",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322283",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Ready for pickup",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Exhaust catalyst efficiency concern with elevated O2 sensor fault codes; transmission and MTM failure also identified during repair.",
+   "issueDetails": "Dealer tracking only Uptake Insights flagging exhaust catalyst efficiency concern via O2 sensor monitoring with elevated fault code activity.",
+   "created": "2026-09-16T19:06:54.344Z",
+   "workDuration": "69d 21h 48m",
+   "partsStatus": "arrived",
+   "estimateStatus": "approved",
+   "offsiteStage": "ready",
+   "offsiteStageDetail": "Complete (here)",
+   "savedNotes": "11/25 - Exhaust catalyst efficiency concern with elevated O2 sensor fault codes; transmission and MTM failure also identified during repair.",
+   "repairTimeline": "11/16 - No response to ETR request received. Unit 61 days down. Dealer reported transmission repairs completed; PM-B and driver alert speaker fault being addressed; body repairs and final QC to follow.\n11/16 Vendor: Vendor finishing PM-B service and new driver-side driver alert speaker fault (per Bergeys Truck Centers Pennsauk email 11/16) [em:90b10be8]\n11/18 - Unit failed post-repair road test for a new CEL. Dealer diagnosing new fault. No ETR provided.\n11/19 - Repair status update requested from dealer via ASIST case 21365790. Reminder submitted for signed PM-B inspection sheet upload. Pending response.\n11/20 - Called dealer to request CEL diagnostic update; placed on hold with no update obtained. No ETC provided.\n11/21 - Follow-up submitted via ASIST case 21365790 requesting CEL diagnostic findings, revised ETR, and PM-B inspection sheet confirmation. Dealer was unreachable on 11/20. Pending response. No ETC provided.\n11/23 - Coordinator reminder submitted: PM-B not to be performed outside the approved estimate scope. Dealer confirmed PM-B already completed, speaker arrived and to be installed, hood decals installed, and wrap-up expected mid-week.\n11/24 - Dealer system confirmed repairs complete and unit ready. Salesforce case 00034097 standing instruction applies: no return tow (FLEETNET) to be arranged without FAS or AFP team confirmation. Pickup arrangements pending FAS/AFP authorization.",
+   "asistNotes": "2026-11-23 21:21 [name] (Originator: Uptime Center): Current Case — Good Afternoon,\n\nDealer Advised:\nPM-B already completed. speaker arrived will be installed, hood decals installed and should be wrapped up by mid week.\n\nThank you\n2026-11-23 20:01 -_Jeff Corey_- (Bergey's Truck Centers - Pennsauken (Volvo)): Current Case — Good afternoon, speaker arrived will be installed, hood decals installed and should be wrapped up by mid week.\n2026-11-23 20:00 -_Jeff Corey_- (Bergey's Truck Centers - Pennsauken (Volvo)): Current Case — PM-B already completed",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": "relaygarage/fas",
+    "statedAt": "2026-11-21T14:57:29.933Z",
+    "snippet": "",
+    "negated": true,
+    "reason": null
+   },
+   "dealerCallAttempts": 1
+  },
+  {
+   "equipmentId": "322337",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322340",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322355",
+   "domicileSite": "ABE40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322356",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322377",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322396",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322468",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged",
+   "vendor": "Amerit",
+   "savedRepairStatus": "Repair in progress",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Active air leak and transmission warning present on unit.",
+   "issueDetails": "UNIT HAS AN AIR LEAK AND A TRANSMISSION WARNING\nUNIT IS AT THE CARRIERS YARD ABE40 1132 N IRVING ST Allentown, PA 18109\nPOC 3127894329",
+   "created": "2026-11-24T19:55:48.956Z",
+   "workDuration": "0d 20h 55m",
+   "repairEtc": "2026-11-26",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "WAITING_FOR_DIAGNOSIS",
+   "delayReasonCodes": "Waiting _ for _ diagnosis",
+   "savedNotes": "11/25 - Active air leak and transmission warning present on unit.",
+   "repairTimeline": "11/24 - Work order created with Amerit for air leak and transmission warning diagnosis. Unit at ABE40 domicile.\n11/25 - Vendor identified air fitting as root cause of air leak. Repair ETR set to 11/26.\n11/25 - Vendor logged diagnosis delay on transmission warning scope; diagnosis still in progress. Awaiting findings.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-26",
+    "kind": "repairCompletion",
+    "state": "future",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T11:58:15.123Z",
+    "snippet": "Expected completion date time: 2026-11-26T21:57:39Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-25",
+      "2026-11-26"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "322472",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322495",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322504",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322545",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322599",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322600",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "324040",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "324123",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Repair completed",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "APU/cab outlets not working; truck needs an alignment and shakes above 60 mph on the highway.",
+   "issueDetails": "APU not working - All plugs in the truck are not operational. Also truck needs an alignment. Drivers escalated that when going over 60 on the highway the trucks shakes. ",
+   "created": "2026-11-17T20:34:54.710Z",
+   "workDuration": "7d 20h 20m",
+   "offsiteStage": "ready",
+   "offsiteStageDetail": "Complete (gone)",
+   "savedNotes": "11/25 - APU/cab outlets not working; truck needs an alignment and shakes above 60 mph on the highway.",
+   "repairTimeline": "11/19 - Diagnosis: inverter output and all outlets work on cab power. Unit has an accessory battery pack, not an APU, and those batteries are below 2V. The bi-stable relay on the main power cable is inactive because its wiring was disconnected.\n11/19 Repair stage: Case status is Diagnosing at TransEdge Allentown (per Transedge Truck Center email 11/19) [em:ebc8d159]\n11/19 Vendor: Tech found accessory batteries below 2v and wiring to bi-stable relay disconnected (per Transedge Truck Center email 11/19) [em:6203aff8]\n11/20 - Uptime Center relayed the dealer diagnosis. No repair ETC stated.\n11/21-11/22 - [no update logged]\n11/23 - Uptime Center requested a status update from dealer.\n11/24 - Dealer confirmed repairs complete; unit ready for pickup. Dealer notes contain no findings on the alignment or highway vibration concern.\n11/24 - Asset released and unit towed out by carrier. Case status set to Asset Released.",
+   "asistNotes": "2026-11-24 21:18 [name] (Originator: Uptime Center): Current Case — dealer update\n\nAsset was Released.\nNOTE: Unit towed out by Yocum.\nCase status set to Asset Released.\n2026-11-24 15:24 [name] (TransEdge Truck Sales and Service - Allentown (Volvo)): Current Case — Unit is complete and ready for pickup.\n2026-11-23 20:21 [name] (Originator: Uptime Center): Current Case — Good Afternoon Service Team,\n\nPlease advise if there are any updates on this unit.\n\nThank you",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "39096",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39110",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged",
+   "vendor": "TA",
+   "savedRepairStatus": "Awaiting approval",
+   "serviceState": "Estimate rejected",
+   "subState": "Work order assigned",
+   "issueSummary": "Flat steer tire requiring inspection and replacement to return unit to service.",
+   "issueDetails": "Unit has a flat tire requiring replacement. Tire must be inspected and replaced to return unit to service.",
+   "created": "2026-11-24T15:40:10.955Z",
+   "workDuration": "0d 22h 55m",
+   "estimateStatus": "rejected",
+   "repairEtc": "2026-11-24",
+   "repairEtcSource": "relaygarage/vendor",
+   "escalations": "MCS Lead",
+   "savedNotes": "11/25 - Flat steer tire requiring inspection and replacement to return unit to service.",
+   "repairTimeline": "11/24 - Work order created with TA (TA-Petro Scranton) for flat steer tire replacement. Vendor notified to inspect and replace flat tire.\n11/24 - TA indicated steer tire replacement was previously completed under WO 269201 and attempted to void this work order. Coordinator disputed the void, noting only one tire was available at the time of prior service under WO 269201. Estimate V1 rejected (Question/Concern). Dispute unresolved; awaiting vendor resubmission or response.\n11/25 - MCS Lead escalation submitted; carrier requesting status update. Estimate remains rejected and dispute is unresolved. Vendor response pending.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 0,
+     "seq": [
+      "2026-11-25",
+      "2026-11-24"
+     ]
+    }
+   },
+   "_factPartsWhy": "Part #DO NOT PAY OUT WITH THIS PLU.; Part #1",
+   "_factEstimateWhy": "V1 rejected: Question/Concern · rejected 1× since 11/24",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "39123",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39212",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39237",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39263",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39309",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39339",
+   "domicileSite": "ABE40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39351",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Offsite Shop Repair",
+   "vendor": "Volvo (ASIST)",
+   "savedRepairStatus": "Repair in progress",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Multiple defects: frayed seatbelt, fifth wheel saddle play, worn tire, loose side step, dead batteries, cracked windshield.",
+   "issueDetails": "Unit presents with multiple deficiencies identified during dealer tracking: frayed driver-side seatbelt, excessive fifth wheel saddle play (video documented), excessively worn right rear outer tire, unsecured lower side step with missing mounting bolts, extremely weak batteries that failed to crank and fully discharged, windshield damage in driver field of view requiring DOT replacement, and loose driver-side door panel. Unit to be sent to nearest Volvo dealer for full inspection and repair.",
+   "created": "2026-10-20T00:04:55.241Z",
+   "workDuration": "36d 16h 50m",
+   "offsiteStage": "repair",
+   "offsiteStageDetail": "Waiting",
+   "savedNotes": "11/25 - Multiple defects: frayed seatbelt, fifth wheel saddle play, worn tire, loose side step, dead batteries, cracked windshield.",
+   "repairTimeline": "11/12 - Dealer advised the unit is queued behind unit 39582 and will enter the bay once that repair is complete. No ETA available.\n11/13-11/15 - [no update logged]\n11/16 - Dealer advised unit 39582 has a lengthy repair expected to finish around 11/19; unit 39351 is next in queue. Records disagree on the dealer name: Decisiv lists MV Contract Maintenance (11/16) and M&K Dunmore (11/3).\n11/17 - Dealer advised repairs on unit 39351 to begin 11/19.\n11/19 - Repairs scheduled to begin; no ETC. Repair start not confirmed because completion of unit 39582 that day was still in question. Requested confirmation of active work and ETC.\n11/20 - Uptime Center contacted dealer for ETR; no answer from service.\n11/21-11/22 - [no update logged]\n11/23 - Requested repair progress and ETC. Dealer confirmed repairs in progress. Sources disagree on ETC: one call log reports expected completion 11/25, while the dealer case note gives no firm ETC and advises checking back 11/25. Awaiting repair completion and pickup readiness.",
+   "asistNotes": "2026-11-23 21:45 [name] (Originator: Uptime Center): Current Case — Called M & K Truck Centers - Dunmore, PA spoke with [name] advised that they are working on repairs for this unit, advised checking back in on Wednesday for more information on this unit.\n2026-11-23 14:14 [name] (Amazon Bos3): Current Case — Following up on unit 39351 — repairs were confirmed underway on 11/19 but no ETC has been provided and our 11/20 call went unanswered. Can you confirm current repair progress and provide an estimated completion date?\n2026-11-20 19:28 [name] (Originator: Uptime Center): Current Case — Called M & K Truck Centers - Dunmore, PA no answer from service following up on ETR",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": "relaygarage/fas",
+    "statedAt": "2026-11-23T14:14:18.709Z",
+    "snippet": "",
+    "negated": true,
+    "reason": null
+   },
+   "dealerCallAttempts": 2
+  },
+  {
+   "equipmentId": "39356",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39421",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39452",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39455",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39461",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39470",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39489",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39498",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39528",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "FIRST_ADVANTAGE",
+   "savedRepairStatus": "Waiting for vendor",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Unit needs a new license plate.",
+   "issueDetails": "Unit needs new license plate",
+   "created": "2026-11-18T22:57:13.168Z",
+   "workDuration": "6d 17h 58m",
+   "savedNotes": "11/24 - Unit needs a new license plate.",
+   "repairTimeline": "11/18 - Work order created with FIRST_ADVANTAGE for a new license plate (accessories); unit unavailable, work order Scheduled.\n11/19 - Internal comment logged referencing SIM issue V2465093196, with no repair details provided. Status remains waiting for vendor; no repair ETC stated and no ETC change recorded.\n11/19 Blocker: License plate fell off and could not be recovered; unit needs replacement plate to stay compliant and in service 11/18 (per [name] email 11/19) [em:8710b55e]\n11/20 Vendor: Duplicate license plate ask submitted to vendor First Advantage, case 52553583. 11/20 (per [name] email 11/20) [em:6360bc7a]\n11/22 Vendor: Plate ask case is in 'Pending FADV' status in Road Ready; awaiting vendor First Advantage 11/22 (per [name] email 11/22) [em:132a95a5]\n11/23 Vendor: Plate ask still pending with vendor First Advantage; no info as of 2026-11-23 11/23 (per [name] email 11/23) [em:4bda444c]\n11/24 Parts: Replacement license plate shipped; UPS tracking 1ZX9W8360199675928 provided 11/24 (per [name] email 11/24) [em:d2d0abbe]",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "39534",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39546",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39558",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39571",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "39582",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "39592",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "516432",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "520063",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "521008",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "Amerit",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Passenger side hood latch is broken.",
+   "issueDetails": "Passenger Side Hood Latch Is Broken.",
+   "created": "2026-11-23T18:38:57.914Z",
+   "workDuration": "1d 21h 35m",
+   "partsStatus": "ordered",
+   "partsEta": "2026-11-25",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "SOURCING_PARTS",
+   "delayReasonCodes": "Sourcing _ parts",
+   "savedNotes": "11/25 - Passenger side hood latch is broken.",
+   "repairTimeline": "11/23 - Work order created for broken passenger side hood latch and assigned to Amerit. Leadership directed that dwell be worked.\n11/24 - Vendor confirmed hood latch parts on order, parts ETA 11/25.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:01:42.587Z",
+    "snippet": "Expected completion date time: 2026-11-25T21:14:14Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-24",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "521203",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "59080",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "59083",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "59090",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "59243",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "59270",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "611565",
+   "domicileSite": "ABE40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "622008",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "622086",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "622092",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "639283",
+   "domicileSite": "EOFE01",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "892514",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "892529",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "ALLEGIANCE_AND_ASCENDANCE",
+   "savedRepairStatus": "Under diagnosis",
+   "serviceState": "Created",
+   "subState": "Work order assigned",
+   "issueSummary": "Reported leaf suspension issue at the front of the truck, both sides; the carrier also reported front axle and steering wheel noise when turning.",
+   "issueDetails": " leaf suspension issue / front of truck - both sides ",
+   "created": "2026-11-23T14:08:09.802Z",
+   "workDuration": "2d 1h 3m",
+   "repairEtc": "2026-11-23",
+   "repairEtcSource": "relaygarage",
+   "savedNotes": "11/24 - Reported leaf suspension issue at the front of the truck, both sides; the carrier also reported front axle and steering wheel noise when turning.",
+   "repairTimeline": "11/23 - Work order created with Allegiance and Ascendance (Ascendance - Allentown) for a front leaf suspension issue on both sides. VRE override changed the recommendation to better suit the repair request. Amazon to handle the tow to the dealer (tow ref amz-dxuavkuqxxu6ym).\n11/23 - Dealer asked whether the unit is due for services (PM, DOT). Dealer reported it was not seeing anything with the springs, but did see a couple of other things. Dealer uploaded findings and asked for clarification on the spring issue, such as sagging.\n11/23 - Dealer requested an update. An escalation was raised noting the dealer is requesting follow-up on the reported issue.\n11/24 - Dealer requested another update. The original carrier complaint was provided to the dealer: front axle noise and steering wheel noise when turning. Dealer acknowledged and will check it out. Unit is under diagnosis and the work order is in Created state (about 1.3d). No ETC is counted. The last stated ETR of 11/23 has passed with no miss stated. No answer to the dealer's PM and DOT question is logged.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "892572",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "9010384",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "9010423",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "9010424",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "922483",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Expired Inspection",
+   "savedRepairStatus": "Parts backordered",
+   "issueSummary": "Chassis repair needed; unit unavailable because its inspection has expired.",
+   "savedNotes": "11/25 - Chassis repair needed; unit unavailable because its inspection has expired.",
+   "repairTimeline": "11/02 - Reimbursement to be processed through OTP with the Payments Disputes Team.\n11/03-11/25 - Awaiting vendor update. Parts remain on backorder and no vendor is assigned yet.\n11/24 Repair stage: Work order in progress (per unknown sender email 11/24) [em:fbe40d57]\n11/24 Est. completion: Expected completion 2026-11-25 11/25 (per unknown sender email 11/24) [em:0c6a9a35]\n11/24 Blocker: Delay reason: sourcing parts (right steer ABS bracket), no part ETA listed (per unknown sender email 11/24) [em:ca914fae]\n11/25 Parts ETA: ABS bracket ETA is 11/26 (per unknown sender email 11/25) [em:f1404af2]",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "922490",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "922516",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "AMZ495304",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "AMZ503669",
+   "domicileSite": "ABE40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "AMZ503985",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "AMZ503986",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "AMZ503987",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "AMZ503988",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "B13066",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B13067",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B13070",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B13340",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62195",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged",
+   "vendor": "TA",
+   "savedRepairStatus": "Parts received",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Leaking valves on the CNG system; this work order is for payment processing of related repairs.",
+   "issueDetails": "Payment processing work order only. Agility performed repairs to the CNG tank on unit B12195",
+   "created": "2026-11-09T17:34:30.561Z",
+   "workDuration": "14d 21h 49m",
+   "partsStatus": "ordered",
+   "estimateStatus": "approved",
+   "repairEtc": "2026-11-12",
+   "repairEtcSource": "relaygarage/vendor",
+   "savedNotes": "11/24 - CNG tank valve leaks on unit B62195 requiring parts replacement and mobile technician repair; payment processing WO for Hexagon Agility repairs.",
+   "repairTimeline": "11/17 - Requested repair status from the vendor and reached out through REACH. Vendor plans to be on site the following week, and the technician will coordinate an ETA. FAS escalation closed with the note: part ordered, pending vendor on-site visit.\n11/18 - Carrier reported parts on site, with Hexagon Agility still needing to schedule a date to continue repairs. Vendor contact separately reported parts ordered and expected the following week; Vendor to provide the service date.\n11/19-11/20 - Awaiting parts arrival and repair status update.\n11/20 Repair stage: Awaiting parts arrival and service date confirmation (was 11/02) (per [name] email 11/20) [em:b45922df]\n11/20 Vendor: Pending vendor info from TA (per [name] email 11/20) [em:21618e12]\n11/22 - Requested an update from the vendor. Hexagon Agility shop was closed; vendor to check back at 8:00 AM EST.\n11/23 - Vendor reported parts on site and repairs to follow once the technician is on site, expected 11/25.\n11/24 - Parts on site; technician expected 11/25 to complete repairs. No ETC counted. Both dates have passed with no miss stated, and the repair remains open.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62274",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62280",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Driver- and passenger-side body mounting J bolts are loose, cannot be tightened, and need replacement.",
+   "issueDetails": "The J bolt behind the driver's door is loose, and the passenger side J bolt is also loose.",
+   "created": "2026-11-17T15:39:04.848Z",
+   "workDuration": "7d 23h 5m",
+   "partsStatus": "arrived",
+   "repairEtc": "2026-11-23",
+   "repairEtcSource": "relaygarage/fas",
+   "vendorDelayReason": "TECH_SHORTAGE",
+   "delayReasonCodes": "Tech _ shortage",
+   "savedNotes": "11/24 - Driver- and passenger-side body mounting J bolts are loose, cannot be tightened, and need replacement.",
+   "repairTimeline": "11/18 - Parts ordered: bolts and tie bars for the loose mounts. Parts ETA 11/19.\n11/19 - J bolts on both sides still need replacement. Parts still expected 11/19.\n11/20 - Repair update requested from the vendor with no response; FAS to follow up by phone. The vendor reported that the bolts and tie bars arrived 11/20, but the driver-side J bolt was the wrong length. Correct J bolt parts ETA 11/23.\n11/20 Est. completion: ETR 11/20 passed with no parts arrival or repair completion confirmed (per [name] email 11/20) [em:7234560b]\n11/20 Vendor: Repair status and changed ETR pending from Cox (per [name] email 11/20) [em:020b935d]\n11/21-11/22 - [no update logged]\n11/23 - Confirmed that one body J bolt arrived 11/20 was incorrect. Correct replacement parts ETA 11/23. ETC 11/23.\n11/24 - Both give parts ETA 11/25. Service appointment set to Cannot Complete, reason Ran out of time. The last stated ETC of 11/23 has passed and no revised ETC has been given. The ETC has been revised 9 times (slipped 6, pulled in 3). The unit has been in work in progress for 7.3 days.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 7,
+     "seq": [
+      "2026-11-17",
+      "2026-11-17",
+      "2026-11-18",
+      "2026-11-18",
+      "2026-11-19",
+      "2026-11-20",
+      "2026-11-23",
+      "2026-11-20",
+      "2026-11-23",
+      "2026-11-23",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62281",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62282",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62284",
+   "domicileSite": "HBD1",
+   "operator": "AKJJI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260214",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260216",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260217",
+   "domicileSite": "ABE40",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260218",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260219",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260220",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260223",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260224",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260225",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260226",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260227",
+   "domicileSite": "ABE40",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260228",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260543",
+   "domicileSite": "MIMY01",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260575",
+   "domicileSite": "MIMY01",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260586",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260589",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260591",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260596",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260599",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260620",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260625",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260694",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260701",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260702",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260703",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "Freightliner (DAIMLER)",
+   "savedRepairStatus": "Under diagnosis",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Parking/door sensor malfunctioning and generating false alerts to driver.",
+   "issueDetails": "The parking / door sensor is malfunctioning and is false alerting driver",
+   "created": "2026-11-17T18:53:39.001Z",
+   "workDuration": "7d 22h 1m",
+   "offsiteStage": "ready",
+   "offsiteStageDetail": "Closed",
+   "savedNotes": "11/25 - Parking/door sensor malfunctioning and generating false alerts to driver.",
+   "repairTimeline": "11/17 - Work order created with Freightliner (DAIMLER) for parking/door sensor malfunction causing false driver alerts. FLEETNET tow arranged (amz-r938dmz7fhqtg8) to transport unit to dealer. Salesforce case 00036143 created; standing instruction: do not set up return tow without FAS or work order creator confirmation.\n11/19 - Repair order R001070600 opened at dealer. Scope: courtesy inspection and electrical diagnosis of parking/door sensor fault. Unit confirmed under active Detroit Assurance warranty coverage (covered through 08/28/29). No diagnosis findings or ETC provided at this stage.\n11/20-11/22 - [no update logged]\n11/23 - Dealer update received; message content truncated in system feed and full details are not retrievable via standard data feed. Follow-up required via DAIMLER case to obtain complete diagnostic findings and ETC. No ETC stated.",
+   "asistNotes": "November 23, 2026 at 4:43 PM — [name]: [General] This Comment is truncated from the UTM API Response due to data size considerations. To access the entire message use the value of this CommentID with a GET Operation on the utm/v/comments/ Endpoint\nNovember 23, 2026 at 4:34 PM — CRM Admin: [Services Tracker Comment] Rules of Engagement Attached\nNovember 19, 2026 at 2:48 PM — BERUBE, BROOKE: [DMS] -M- CONTACT NAME: AMAZON LOGISTICS (RAMA1) CONTACT PHONE: (No Phone Contact) CONTACT EMAIL: (No Email Contact) PRE-AUTHORIZATION LIMIT: $0",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "FLD260887",
+   "domicileSite": "ABE40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260892",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260893",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260894",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260895",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260896",
+   "domicileSite": "SHIL01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260897",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260898",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260899",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260900",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged",
+   "savedRepairStatus": "Repair completed",
+   "issueSummary": "Parking system fault with burning smell under hood; air dryer purge valve stuck open causing air loss and brake lock-up.",
+   "savedNotes": "11/24 - Parking system fault with burning smell under hood; air dryer purge valve stuck open causing air loss and brake lock-up.",
+   "repairTimeline": "11/19 - Estimate approved. Vendor requested to include part number and details in next submission. Vendor notified of approval; awaiting estimated completion.\n11/20-11/22 - [no update logged]\n11/23 - Follow-up requested from vendor after 3 days without update. Pending response.\n11/23 - Technician unable to access lock box with the code initially provided. Updated access code obtained and provided to vendor.\n11/23 - Air dryer assembly replaced. Technician found a second issue: air distribution module leaking air internally. Unit requires dealership service or replacement of the module, likely under warranty. Repair verification: repair complete. Asset reactivation not attempted. Follow-up work request created.\n11/23 - Vendor submitted updated invoice reflecting revised scope. Revised estimate not yet received; vendor asked to provide it.\n11/24 - Vendor submitted corrected invoice and requested approval. Estimate temporarily rejected for missing part name and number.\n11/24 - Vendor provided part information (replaced air dryer assembly) and resubmitted the estimate. Revised estimate approved.",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "FLD260901",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260902",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260903",
+   "domicileSite": "SHIL01",
+   "operator": "SHIL",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260904",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261019",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261020",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261021",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261022",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261023",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "FLD261024",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261025",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "FLD261026",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261027",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261028",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261029",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261030",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261031",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD261032",
+   "domicileSite": "AVP40",
+   "operator": "AZNG",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260153",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260154",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "savedRepairStatus": "Waiting for vendor",
+   "issueSummary": "Unit requires PM service; work order pending vendor assignment.",
+   "savedNotes": "11/25 - Unit requires PM service; work order pending vendor assignment.",
+   "repairTimeline": "11/25 - Work order created for PM service. Vendor unassigned; pending assignment and estimate.",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "IND260155",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260260",
+   "domicileSite": "ABE40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260261",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Accident",
+   "vendor": "TA",
+   "savedRepairStatus": "Repair in progress",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Deer collision damaged the front body (hood, bumper, headlight, cab extender/fairing); unit was towed to EOFE01.",
+   "issueDetails": "driver hit a deer resulting in towing of IND260261 back to carrier domicile: EOFE01",
+   "created": "2026-10-26T20:33:30.530Z",
+   "workDuration": "24d 0h 57m",
+   "partsStatus": "ordered",
+   "partsEta": "2026-11-17",
+   "estimateStatus": "approved",
+   "repairEtc": "2026-11-20",
+   "repairEtcSource": "relaygarage/vendor",
+   "savedNotes": "11/24 - Deer collision damaged the front body (hood, bumper, headlight, cab extender/fairing); unit was towed to EOFE01.",
+   "repairTimeline": "11/14 - Vendor confirmed ETC 11/20.\n11/15-11/16 - [no update logged]\n11/17 - Vendor ETC of 11/20 noted; monitoring continues.\n11/18-11/19 - [no update logged]\n11/20 - ETC 11/20 reached with no repair completion or parts arrival confirmed. Unit 19 days down. Update requested from vendor.\n11/20 - Vendor reports the hood is being painted.\n11/21-11/23 - [no update logged]\n11/24 - Contacted vendor by phone; vendor is picking up parts from the body shop. prior vendor ETC 11/20 (now past). Awaiting confirmation of the revised ETC.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "_factPartsWhy": "Part #6121796C1 ordered 11/07; Part #4125033C96 ordered 11/07; Part #6743200C91 ordered 11/07; Part #4049968C99 ordered 11/07; Part #6121232C1 ordered 11/07; Part #4280358C2 ordered 11/07",
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "IND260262",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260263",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260264",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260265",
+   "domicileSite": "EOFE01",
+   "operator": "EOFE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260266",
+   "domicileSite": "ABE40",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260386",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260505",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260506",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260507",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260508",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260509",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260510",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260511",
+   "domicileSite": "UNNE01",
+   "operator": "UNNE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260570",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260571",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260572",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260573",
+   "domicileSite": "AVP40",
+   "operator": "YTSC",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260574",
+   "domicileSite": "MIMY01",
+   "operator": "MIMY",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260575",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260576",
+   "domicileSite": "AVP40",
+   "operator": "AGNLI",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "KWD260026",
+   "domicileSite": "SHIL01",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "KWD260085",
+   "domicileSite": "BUF",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "KWD260086",
+   "domicileSite": "BUF",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "KWD260087",
+   "domicileSite": "BUF",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "KWD260088",
+   "domicileSite": "BUF",
+   "operator": "AZNG",
+   "lifecycleState": "Ordered"
+  },
+  {
+   "equipmentId": "122212",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "122267",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "208336",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "211022",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "212163",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "212468",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320188",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320205",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "320256",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321120",
+   "domicileSite": "EWR40",
+   "operator": "TUZR",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "321256",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321437",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321575",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321768",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "321838",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Unavailable"
+  },
+  {
+   "equipmentId": "321958",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322341",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322449",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "322542",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "520109",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "521004",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "521064",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "521204",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "521218",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "716785",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "751857",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "796565",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "834994",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "892562",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "892568",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "9010315",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "922529",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12008",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12029",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12195",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Engine no-start confirmed due to severe corrosion on positive battery terminals; batteries and battery cable require replacement.",
+   "issueDetails": "The engine is not working and the starter is not functioning.",
+   "created": "2026-11-07T20:54:59.851Z",
+   "workDuration": "16d 9h 37m",
+   "partsStatus": "ordered",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "PARTS_ON_BACK_ORDER",
+   "delayReasonCodes": "Parts _ on _ back _ order",
+   "savedNotes": "11/25 - Engine no-start confirmed due to severe corrosion on positive battery terminals; batteries and battery cable require replacement.",
+   "repairTimeline": "11/10-11/13 - Parts order status unchanged across multiple vendor updates; batteries and battery cable on order with no ETA provided.\n11/16-11/17 - Parts order confirmed active; batteries and battery cable still on order. No ETA provided.\n11/18 - Follow-up submitted requesting parts status update. No vendor response received at time of submission.\n11/19 - Vendor confirmed sourcing details: batteries ordered from Great Dane Northeast; battery cable ordered from Tracys. Parts ETA 11/24 for battery cable; battery ETA not confirmed.\n11/20 - Vendor reiterated parts sourcing status; battery cable ETA 11/24, batteries from Great Dane Northeast with no confirmed ETA. No repair ETC provided.\n11/21-11/23 - [no update logged]\n11/24 - Battery cable arrived. Batteries from Great Dane Northeast still pending delivery. Repair cannot proceed until batteries arrive. No repair ETC provided.\n11/25 - Batteries from Great Dane Northeast still awaited; no new ETA from vendor. Repair remains blocked pending battery delivery. No ETC provided.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:55:49.454Z",
+    "snippet": "Expected completion date time: 2026-11-26T04:31Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 13,
+     "seq": [
+      "2026-11-09",
+      "2026-11-08",
+      "2026-11-10",
+      "2026-11-11",
+      "2026-11-12",
+      "2026-11-12",
+      "2026-11-16",
+      "2026-11-16",
+      "2026-11-17",
+      "2026-11-17",
+      "2026-11-18",
+      "2026-11-19",
+      "2026-11-22",
+      "2026-11-24",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B12257",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12258",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12259",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12260",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12261",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Waiting for vendor",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Check indicator on (chassis).",
+   "issueDetails": "Check indicator on",
+   "created": "2026-11-25T14:52:55.810Z",
+   "workDuration": "0d 0h 26m",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "savedNotes": "wash is overdue by 1067 days and PM A is overdue by 323 days. PM B is due 12/27.\n11/25 - Current status is waiting for vendor. The latest vendor-set ETR is 11/25, due today. No diagnosis or repair update has been logged.",
+   "repairTimeline": "11/25 - Work order opened for the check-indicator complaint. Unit is marked Unavailable / Damaged-Moderate.\n11/25 - Yard location update logged: parking slip PS544.\n11/25 - Work order assigned to Cox Fleet Services - 1100 New York City per VRE. Work order state is now work in progress.\n11/25 - PM B is due 12/27.\n11/25 - Current status is waiting for vendor. The latest vendor-set ETR is 11/25, due today. No diagnosis or repair update has been logged.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T16:07:02.587Z",
+    "snippet": "Expected completion date time: 2026-11-25T13:54Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-25",
+      "2026-11-25",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B12262",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12263",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "Freightliner (DAIMLER)",
+   "savedRepairStatus": "Vehicle arrived",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Unit needs oil dropped and a new gasket installed (engine/motor systems).",
+   "issueDetails": "unit needs to have oil dropped and new gasket installed",
+   "created": "2026-11-20T18:24:57.423Z",
+   "workDuration": "4d 22h 31m",
+   "offsiteStage": "repair",
+   "offsiteStageDetail": "In-repair",
+   "savedNotes": "11/25 - Unit needs oil dropped and a new gasket installed (engine/motor systems).",
+   "repairTimeline": "10/29 Repair stage: Awaiting vendor assignment and dispatch (per [name] email 10/29) [em:3186d30b]\n11/20 - Work order created for unit at Freightliner (DAIMLER) dealer. Repair recommendation was changed to better suit the repair request. Tow to dealer arranged (amz-hhmz3ne7p6dtzf). Dealer case opened.\n11/20 Vendor: Unit has not arrived at the vendor yet; appointment exists (per [name] email 11/20) [em:d132a754]\n11/20 Blocker: Vendor needs clarification of what the unit needs; the appointment notes are vague (per [name] email 11/20) [em:2b707964]\n11/21 - Yard location updates logged (ParkingSlip PS984 and PS979).\n11/22-11/22 - [no update logged]\n11/23 - First communication date updated and intake pictures attached. Rules of engagement attached to the dealer case.\n11/24 - Request made to set up the tow again. New tow to dealer arranged (amz-bepu6mppaubw75). Sources disagree on status: the current status shows vehicle arrived, but a new tow to dealer was issued on this date. Work order state is Scheduled. No repair ETC stated.",
+   "asistNotes": "November 23, 2026 at 12:57 PM — CRM Admin: [Services Tracker Comment] Rules of Engagement Attached\nNovember 23, 2026 at 10:18 AM — [name]: [First Communication] Updated First Communication Date 11/23/2026 10:17 AM PST Comment: ATTACHED ARE THE INTAKE PICTURES OF UNIT B12263",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B12266",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12267",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12268",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12269",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12271",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12275",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12342",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B12343",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Engine oil level reported low and engine reported as not running correctly.",
+   "issueDetails": "The engine assembly needs attention: oil level is low and the engine does not appear to be running correctly. Service is required.",
+   "created": "2026-11-24T03:41:31.547Z",
+   "workDuration": "1d 7h 50m",
+   "partsStatus": "ordered",
+   "repairEtc": "2026-11-26",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "PARTS_ON_BACK_ORDER",
+   "delayReasonCodes": "Parts _ on _ back _ order",
+   "savedNotes": "11/25 - Engine oil level reported low and engine reported as not running correctly.",
+   "repairTimeline": "11/24 - COX opened RO 206910709 for the engine complaint. Inspection found engine oil at the fill line, no check engine light, and the engine running as intended; cause listed as unknown. Vendor placed engine oil on order.\n11/24 - Vendor set the repair to Cannot Complete, reason Parts Ordered. Vendor ordered 4 quarts of 15W-40 CNG engine oil from Tracey Road Equipment and will provide the part number when available. Last stated ETR was 11/24.\n11/24 - Yard location updated by RelayGarage: parking slip PS984, DSP.\n11/25 - Tracey Road Equipment did not have the oil in stock. Vendor sent a parts inquiry to Great Dane Northeast. Status remains Cannot Complete with parts on order, work order in progress, and the unit unavailable. The last stated ETR of 11/24 has passed and no revised ETC has been given. No parts ETA yet; waiting on the vendor for a parts ETA and a revised ETC.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-26",
+    "kind": "repairCompletion",
+    "state": "future",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:55:49.705Z",
+    "snippet": "Expected completion date time: 2026-11-26T05:04Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 2,
+     "seq": [
+      "2026-11-24",
+      "2026-11-24",
+      "2026-11-24",
+      "2026-11-26"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B13014",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Accident",
+   "vendor": "DSP_ENTERED",
+   "savedRepairStatus": "Awaiting estimate",
+   "serviceState": "Scheduled",
+   "subState": "Created",
+   "issueSummary": "Accident front-end damage; driver-side front hood came off the box truck.",
+   "issueDetails": "BODY-OTHER_COMPONENTS\n\nDriver Vehicle Inspection Report Comments:\n[OTHER] Accident front end messed up: Driver side front hood, Box truck hood fell off",
+   "created": "2026-09-13T13:15:53.859Z",
+   "workDuration": "73d 3h 40m",
+   "savedNotes": "11/24 - Accident front-end damage; driver-side front hood came off the box truck.",
+   "repairTimeline": "11/09-11/11 - [no update logged]\n11/12 - Carrier advised to tow the unit to a body shop for an estimate. Adjuster has not responded further. Unit confirmed still at ROC5.\n11/13-11/16 - [no update logged]\n11/17 - Requested a repair follow-up from the DSP carrier. Pending response.\n11/19 - Requested a unit update from FAS. Pending response.\n11/21 - Carrier reports American Fleet Maintenance will provide a repair estimate. Estimate pending.\n11/21 - Per Carrier American Fleet Maintenance will be providing an EST for the repairs pending response.\n11/23 - Still awaiting the repair estimate from American Fleet Maintenance. No ETC available.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": "relaygarage/fas",
+    "statedAt": "2026-10-14T23:49:35.303Z",
+    "snippet": "",
+    "negated": true,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B13127",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B13353",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B20038",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62020",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Oil pressure warning light on; no oil found on dipstick; power steering leak identified but determined unrelated to oil pressure fault.",
+   "issueDetails": "The oil pressure warning light is on and there is an oil pressure leak reported.",
+   "created": "2026-11-24T04:03:29.170Z",
+   "workDuration": "1d 8h 26m",
+   "partsStatus": "ordered",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "PARTS_ON_BACK_ORDER",
+   "delayReasonCodes": "Parts _ on _ back _ order",
+   "savedNotes": "11/25 - Oil pressure warning light on; no oil found on dipstick; power steering leak identified but determined unrelated to oil pressure fault.",
+   "repairTimeline": "11/24 - Work order created with Cox (RO 206910708). Diagnosis performed: power steering leak found and ruled out as trigger for oil pressure warning light; no oil found on dipstick. Cause documented as unknown. Parts ordered: 24 qts SAE 15w-40 CNG oil from Traceys Road Equipment; part number and ETA pending.\n11/25 - Traceys Road Equipment confirmed unable to supply oil. Parts inquiry submitted to Great Dane Northeast. Parts ETA pending; repair blocked pending supplier response.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:56:14.245Z",
+    "snippet": "Expected completion date time: 2026-11-26T03:45Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 2,
+     "seq": [
+      "2026-11-24",
+      "2026-11-24",
+      "2026-11-24",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62049",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts ordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Liftgate assembly leaking hydraulic oil at the piston seal; air suspension dump not functioning.",
+   "issueDetails": "The liftgate assembly is leaking. Additionally, the air suspension dump is not functioning.",
+   "created": "2026-11-24T20:51:07.250Z",
+   "workDuration": "0d 7h 25m",
+   "partsStatus": "ordered",
+   "repairEtc": "2026-11-25",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "PARTS_ON_BACK_ORDER",
+   "delayReasonCodes": "Parts _ on _ back _ order",
+   "savedNotes": "11/25 - Liftgate assembly leaking hydraulic oil at the piston seal; air suspension dump not functioning.",
+   "repairTimeline": "11/24 - Work order created with COX for liftgate hydraulic leak and inoperative air suspension dump.\n11/25 - Vendor inspected liftgate assembly under RO 206910720. Root cause confirmed: left-side hydraulic ram leaking oil at piston seal. New ram placed on order. Parts inquiry submitted to supplier; availability pending. Service appointment updated to Cannot Complete — parts on order. Root cause of air suspension dump fault not yet determined.\n11/25 - ETR 11/24 has passed; repairs not yet complete. No new repair ETC set. Awaiting parts availability confirmation and suspension diagnosis update.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": "2026-11-25",
+    "kind": "repairCompletion",
+    "state": "today",
+    "explicitMissDate": null,
+    "source": "relaygarage/vendor",
+    "statedAt": "2026-11-25T12:55:42.438Z",
+    "snippet": "Expected completion date time: 2026-11-26T03:49Z",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 1,
+     "seq": [
+      "2026-11-25",
+      "2026-11-24",
+      "2026-11-25"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62053",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62059",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Damaged-Moderate",
+   "vendor": "COX",
+   "savedRepairStatus": "Parts backordered",
+   "serviceState": "Work in progress",
+   "subState": "Work order assigned",
+   "issueSummary": "Hood shocks broken from damage and air tank drain lines worn through; replacement hood shocks have no parts ETA.",
+   "issueDetails": "The air drain lines for the air compressor are still not attached (previously reported). The methane fume detector for the engine has a fault. The hood release/shock is not attached. The rear roll-up door sticks and needs to be serviced.",
+   "created": "2026-11-03T19:49:42.684Z",
+   "workDuration": "21d 12h 33m",
+   "partsStatus": "ordered",
+   "repairEtc": "2026-11-24",
+   "repairEtcSource": "relaygarage/vendor",
+   "vendorDelayReason": "CC - Parts Ordered",
+   "savedNotes": "11/25 - Hood shocks broken from damage and air tank drain lines worn through; replacement hood shocks have no parts ETA.",
+   "repairTimeline": "11/09-11/13 - Service appointment remains Cannot Complete (parts ordered). Vendor reports hood shocks on order with no ETA.\n11/16-11/17 - Service appointment remains Cannot Complete (parts ordered). Vendor notes good shocks are needed; parts on order, no ETA.\n11/19 - Service appointment remains Cannot Complete. Vendor awaiting ETA.\n11/20 - Vendor reports its primary supplier does not carry these parts. Vendor to contact other suppliers for availability and ETA.\n11/21 - Internal follow-up logged. Hood shocks on order since 11/4; no parts ETA established; unit down 17 days. Update requested from vendor; pending response.\n11/22 - [no update logged]\n11/23 - Vendor reports its primary supplier cannot source the parts. Parts must be ordered from Peterbilt or Kenworth, which were not open during the technician's shift. Vendor notified internally; awaiting response. Vendor-stated repair ETR is 11/24.\n11/24 - Technician requested hood shocks from day shift; no response or parts ETA received. Service appointment remains Cannot Complete (parts ordered). Vendor-stated repair ETR of 11/24 has passed with no miss stated and no revised date; the ETR slipped repeatedly, while vendor notes still show no parts ETA.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null,
+    "slip": {
+     "count": 17,
+     "seq": [
+      "2026-11-04",
+      "2026-11-04",
+      "2026-11-04",
+      "2026-11-05",
+      "2026-11-08",
+      "2026-11-09",
+      "2026-11-10",
+      "2026-11-11",
+      "2026-11-13",
+      "2026-11-15",
+      "2026-11-16",
+      "2026-11-18",
+      "2026-11-19",
+      "2026-11-20",
+      "2026-11-20",
+      "2026-11-22",
+      "2026-11-23",
+      "2026-11-23",
+      "2026-11-24"
+     ]
+    }
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62060",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "B62064",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Unavailable",
+   "lifecycleReason": "Impounded Tow",
+   "vendor": "FLEETNET",
+   "savedRepairStatus": "Waiting for vendor",
+   "serviceState": "Created",
+   "subState": "Work order assigned",
+   "issueSummary": "Unit broke down at a gas station and was impounded; it needs release and a tow back to ROC5.",
+   "issueDetails": "Unit broke down at a gas station and was subsequently impounded. Impound fee requires payment before unit can be released. Unit needs to be towed from impound location back to home yard ROC5 once released.",
+   "created": "2026-11-17T17:50:37.924Z",
+   "workDuration": "7d 21h 36m",
+   "partsStatus": "arrived",
+   "repairEtc": "2026-11-17",
+   "repairEtcSource": "relaygarage",
+   "savedNotes": "11/24 - Unit broke down at a gas station and was impounded; it needs release and a tow back to ROC5.",
+   "repairTimeline": "11/18 Blocker: Impounds team does not handle mechanical-related impounds; leadership/management approval needed to proceed (per [name] email 11/18) [em:6d786bf6]\n11/18 Blocker: Impounds team does not handle tractor-related impounds; needs DSS escalation 11/18 (was access) (per [name] email 11/18) [em:97e86af8]\n11/19 - Vendor pulled the work order from its follow-up list because the Majors department is handling it.\n11/20 - Vendor pulled the work order from its follow-up list because the Majors department is handling it.\n11/21 - Vendor pulled the work order from its follow-up list to get status on the payment, with the Majors department handling it.\n11/22 - Vendor reviewed the work order for follow-up. No call was made because the Majors department is handling it.\n11/23 - Vendor noted the work order is a Majors work order and pulled it from the follow-up list. No new progress logged.\n11/24 - Vendor reviewed the work order for follow-up. No call was made because the Majors department is handling it. Impound payment, release and tow to ROC5 are not confirmed in the log, and ownership between the vendor and Amazon MCS is not clarified.",
+   "_factsOn": true,
+   "_factEtc": {
+    "date": null,
+    "kind": "repairCompletion",
+    "state": "none",
+    "explicitMissDate": null,
+    "source": null,
+    "statedAt": null,
+    "snippet": "",
+    "negated": false,
+    "reason": null
+   },
+   "dealerCallAttempts": 0
+  },
+  {
+   "equipmentId": "B62156",
+   "domicileSite": "ROC5",
+   "operator": "AUVTE",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260692",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "FLD260695",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260300",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260301",
+   "domicileSite": "EWR45",
+   "operator": "SAPB",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260434",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  },
+  {
+   "equipmentId": "IND260435",
+   "domicileSite": "PHL40",
+   "operator": "TUZR",
+   "lifecycleState": "Active"
+  }
+ ]
+}

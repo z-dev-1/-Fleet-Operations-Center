@@ -49,9 +49,9 @@ function registerSchedulerIPC(ctx) {
     return { ok: !(r && r.blocked), result: _redactEmailRun(r) };
   });
 
-  // DBR DATA pull now (the "Pull All" button) — scrapes + AI-parses + reviews
-  // BOTH AFP and DSP. Each is today-PT freshness-gated; a not-ready source
-  // returns { blocked:'stale-data' } and the recovery sweep keeps retrying it.
+  // DBR DATA pull now — builds 📊 DBR — Fleet Health from fleet data and AI-drafts
+  // rows with units down. No same-day fleet sync yet returns { blocked:'stale-data' }
+  // and the recovery sweep keeps retrying it.
   handle('scheduler:run-dbr-now', async (_e, slotLabel) => {
     logger.info('Run DBR pull now requested (slot=' + (slotLabel || 'auto') + ')');
     const r = await scheduler.runDbrNow(slotLabel);
@@ -183,20 +183,23 @@ function _redactEmailRun(r) {
     states: outs.map(o => ({ scope: o.scope, state: o.state, skipped: o.skipped })),
   };
 }
-// runDbrNow returns { afp:<runResult>, dsp:<runResult> }; surface each
-// source's outcome compactly (ok / blocked-not-ready / skipped / failed).
+// runDbrNow returns { fleetHealth:<runResult> }; surface the outcome compactly
+// (ok / blocked-not-ready / skipped / failed).
 function _redactDbrRun(r) {
   if (!r) return null;
   const one = (x) => {
     if (!x) return null;
-    if (x.ok) return { state: 'ok', rowCount: x.rowCount != null ? x.rowCount : null };
+    if (x.ok) {
+      const d = x.drafts && x.drafts.ok ? { drafted: x.drafts.drafted, eligible: x.drafts.eligible, failed: x.drafts.failed } : null;
+      return { state: 'ok', rowCount: x.rowCount != null ? x.rowCount : null, downRows: x.downRows != null ? x.downRows : null, drafts: d };
+    }
     if (x.blocked) return { state: 'not-ready', blocked: x.blocked, dataAsOf: x.dataAsOf || null };
     if (x.skipped) return { state: 'skipped', skipped: x.skipped };
     if (x.failed) return { state: 'failed', failed: x.failed };
     if (x.error) return { state: 'error', error: x.error };
     return { state: 'unknown' };
   };
-  return { afp: one(r.afp), dsp: one(r.dsp) };
+  return { fleetHealth: one(r.fleetHealth) };
 }
 
 module.exports = { registerSchedulerIPC };

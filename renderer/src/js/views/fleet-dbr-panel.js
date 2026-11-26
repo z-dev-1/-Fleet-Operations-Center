@@ -4,9 +4,12 @@
  * retired dashboard-scrape AFP/DSP overlay.
  *
  * - ↺ Build from fleet data, editable cells (debounced save), per-row Reset/Copy.
- * - ✨ Draft with AI / ■ Stop: AI drafts fill the 17 judgment cells (model.aiCellIds;
- *   fact-checked main-side, hard cells never change), carry "AI" / "⚠ check" text
- *   markers, editable cells stay editable, and nothing is sent anywhere.
+ * - ✨ Draft with AI / ■ Stop: AI drafts fill only the prose cells (6 Details, FAS Actions,
+ *   Support) with sentences that passed the main-side sheet gate; Y/N, counts and hard cells
+ *   never change. "AI" text markers, editable cells stay editable, nothing is sent anywhere.
+ * - Copy (rows / with header / fill columns / row) writes the golden sheet format
+ *   (L.sheetTsv); the copy-scope select picks "My pairs with units down" (default) or
+ *   "All visible rows". A stale-fleet-data alert re-renders every 60 s while open.
  *   The only thing that leaves the panel is the clipboard on an explicit Copy.
  * - Accessible dialog: Escape / × / backdrop close, focus returns to the opener.
  *
@@ -25,7 +28,15 @@ const BUSY_RETRIES = 3;
 const STATUS_TICK_MS = 30000;
 const HIDE_ZERO_KEY = 'fleetDbr__hideZero';
 const SCAC_KEY = 'fleetDbr__scacs';
+const COPY_SCOPE_KEY = 'fleetDbr__copyScope';
 const BUILD_TIMEOUT_MS = 60000;
+// Banner + status line (fleet data age) re-render while the panel is open.
+const FRESH_TICK_MS = 60000;
+
+// Persisted copy scope: 'visible' or 'mine' (anything else -> 'mine').
+function _readCopyScope(storage) {
+  try { return storage && storage.getItem(COPY_SCOPE_KEY) === 'visible' ? 'visible' : 'mine'; } catch (_) { return 'mine'; }
+}
 
 // Persisted SCAC selection: JSON array of strings; anything else -> [] (show all).
 function _readScacs(storage) {
@@ -114,6 +125,7 @@ function createController(deps) {
   };
   try { st.hideZero = storage && storage.getItem(HIDE_ZERO_KEY) === '1'; } catch (_) { st.hideZero = false; }
   st.scacs = _readScacs(storage);
+  st.copyScope = _readCopyScope(storage);
   const visibleKeys = () => new Set(L.visibleRows(st.model, st.hideZero, st.scacs).map((r) => r.key));
 
   let overlay = null; let frame = null; let bannerEl = null; let statusEl = null; let tableEl = null;
@@ -176,6 +188,7 @@ function createController(deps) {
       status: st.status, aiDraft: st.aiDraft, drafting: st.drafting, hideZero: st.hideZero,
       fasName: m ? m.fasName : '', conflicts: m ? m.conflicts : [], message: st.note,
       scacOptions: L.scacOptions(m), scacs: L.normalizeScacs(st.scacs, m),
+      copyScope: st.copyScope, copyInfo: m ? L.copyScopeInfo(m, st.hideZero, st.scacs) : undefined,
     });
     if (html === lastFrame) return; // keep focus/caret in the FAS Name input
     lastFrame = html;
@@ -239,16 +252,30 @@ function createController(deps) {
     const etaMin = st.drafting
       ? L.etaMinutes({ done: ai.done, total: ai.total, startedAt: st.draftStartedAt, now: now(), slots: MAX_DRAFTS_IN_FLIGHT })
       : null;
-    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: ai.done, total: ai.total, etaMin }, scacs: st.scacs }) : '';
+    const line = st.status === 'ready' ? L.statusLine(st.model, { ai: { done: ai.done, total: ai.total, etaMin }, scacs: st.scacs, nowMs: now() }) : '';
     statusEl.textContent = [line, st.note].filter(Boolean).join(' \u00b7 ');
   }
   function note(text) { st.note = text || ''; renderStatus(); }
 
+  // The fleet-data-age alert comes first, then the refresh / fallback / "Fleet data updated" banner.
   function renderBanner() {
     if (!bannerEl) return;
-    if (st.refreshing) { bannerEl.innerHTML = L.refreshingBannerHtml(); return; }
-    if (st.refreshFailed) { bannerEl.innerHTML = L.fallbackBannerHtml(st.refreshFailed.builtAt); return; }
-    bannerEl.innerHTML = L.bannerHtml(st.stale && st.status === 'ready');
+    const fresh = st.status === 'ready' && st.model ? L.freshness(st.model, now()) : null;
+    const staleHtml = fresh ? L.staleBannerHtml(fresh) : '';
+    let rest;
+    if (st.refreshing) rest = L.refreshingBannerHtml();
+    else if (st.refreshFailed) rest = L.fallbackBannerHtml(st.refreshFailed.builtAt);
+    else rest = L.bannerHtml(st.stale && st.status === 'ready');
+    bannerEl.innerHTML = staleHtml + rest;
+  }
+
+  // Re-render the banner and status line every FRESH_TICK_MS while open (cleared by close()).
+  function freshTick() {
+    later(() => {
+      if (st.closed) return;
+      renderBanner(); renderStatus();
+      freshTick();
+    }, FRESH_TICK_MS);
   }
 
   function renderAll() { renderFrame(); renderBanner(); renderStatus(); renderTable(); }
@@ -276,6 +303,7 @@ function createController(deps) {
   async function open() {
     mount();
     renderAll();
+    freshTick();
     const btn = !isView && frame.querySelector && frame.querySelector('[data-fdbr-action="close"]');
     if (btn && typeof btn.focus === 'function') btn.focus();
     if (evBus && typeof evBus.on === 'function') {
@@ -453,29 +481,30 @@ function createController(deps) {
     pump();
   }
 
-  // Draft committed but no model came back (snapshot save path): patch locally. Reads
-  // res.cells / sources / flags (v2) or res.fasActions / support (v1); never throws on a
-  // missing field, so runDraft always reaches refreshRow + pump.
+  // Draft committed but no model came back (snapshot save path): patch locally with the same
+  // rule as main's applyOverlays v3: only res.sheet cells of the draft sheet ids (6 Details,
+  // FAS Actions, Support), a Details cell only when its computed Y/N is Y; Y/N and counts are
+  // never touched. res.unitNotes / flags go to the drill-down. Never throws on a missing field,
+  // so runDraft always reaches refreshRow + pump.
   function _patchDraft(key, res) {
     const row = _row(key);
     if (!row) return;
-    const cells = res.cells && typeof res.cells === 'object' ? res.cells : null;
-    const srcs = res.sources && typeof res.sources === 'object' ? res.sources : {};
-    const flags = res.flags && typeof res.flags === 'object' ? res.flags : {};
+    const sheet = res.sheet && typeof res.sheet === 'object' ? res.sheet : {};
+    const ids = st.model && Array.isArray(st.model.draftSheetIds) && st.model.draftSheetIds.length
+      ? st.model.draftSheetIds : L.fillColumns(st.model).map((c) => c.id).filter((id) => /Details$/.test(id) || id === 'fasActions' || id === 'support');
     row.cells = Object.assign({}, row.cells); row.source = Object.assign({}, row.source);
     row.base = Object.assign({}, row.base);
-    const put = (col, v, src) => {
-      if (typeof v !== 'string') return;
+    for (const col of ids) {
+      const v = sheet[col];
+      if (typeof v !== 'string' || !v.trim()) continue;
+      if (/Details$/.test(col) && !/^y/i.test(String(row.base[col.replace(/Details$/, 'YN')] || ''))) continue;
       row.base[col] = v;
-      if (row.source[col] !== 'edit') { row.cells[col] = v; row.source[col] = src; }
-    };
-    if (cells) {
-      for (const col of L.aiCellIds(st.model)) put(col, cells[col], srcs[col] === 'computed' ? 'computed' : 'ai');
-    } else {
-      for (const col of ['fasActions', 'support']) if (res[col]) put(col, res[col], 'ai');
+      if (row.source[col] !== 'edit') { row.cells[col] = v; row.source[col] = 'ai'; }
     }
     const arr = (v) => (Array.isArray(v) ? v : []);
-    row.flags = cells ? Object.assign({}, flags) : (row.flags || {});
+    const obj = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {});
+    row.unitNotes = obj(res.unitNotes);
+    row.unitNoteFlags = Object.fromEntries(Object.entries(obj(res.flags)).filter(([id, f]) => ids.includes(id) && f === 'review'));
     row.disagreements = arr(res.disagreements);
     row.etcUnits = arr(res.etcUnits);
     row.etcDisagreements = arr(res.etcDisagreements);
@@ -582,9 +611,14 @@ function createController(deps) {
     const m = st.model;
     if (m) {
       m.fasName = res.fasName;
+      m.userName = res.fasName;
       m.fasNameSource = res.fasName ? 'panel' : 'none';
+      const norm = (s) => String(s || '').trim().toLowerCase();
       for (const r of m.rows || []) {
-        if (r.fasSource === 'roster') continue;
+        // Same rule as main's applyOverlays: mine = exact roster owner equals the user name.
+        r.mine = !!m.rosterLoaded && !!res.fasName && r.fasSource === 'roster' && norm(r.base && r.base.fasName) === norm(res.fasName);
+        // With the roster loaded, rows without an exact roster owner keep an empty FAS Name.
+        if (r.fasSource === 'roster' || m.rosterLoaded) continue;
         r.fasSource = res.fasName ? 'you' : 'none';
         r.base = Object.assign({}, r.base, { fasName: res.fasName });
         if (!r.source || r.source.fasName !== 'edit') r.cells = Object.assign({}, r.cells, { fasName: res.fasName });
@@ -595,20 +629,36 @@ function createController(deps) {
   }
 
   // ── copy ──────────────────────────────────────────────────────────────────
-  // fillOnly: only the fill columns (L.fillColumns), no identity/count columns, no header.
-  async function copy(rows, header, btnEl, fillOnly) {
+  // Effective copy scope: 'mine' only when that option is available (roster, name, a matching pair).
+  function copyKind() {
+    return st.copyScope === 'mine' && st.model && L.copyScopeInfo(st.model, st.hideZero, st.scacs).mineOk ? 'mine' : 'visible';
+  }
+
+  // Copies in the golden sheet format (L.sheetTsv). fillOnly: only the fill columns
+  // (L.fillColumns), no identity/count columns, no header. kind: 'mine' | 'visible' | 'row'.
+  async function copy(rows, header, btnEl, fillOnly, kind) {
     const m = st.model;
     if (!m) { note('Nothing to copy yet \u2014 \u21ba Build first.'); return; }
-    const tsv = fillOnly ? L.fillColumnsTsv(m, rows, liveValue) : L.rowsToTsv(m.columns, rows, liveValue, { header });
+    const isLive = (r, col) => !!(st.live[r.key] && Object.prototype.hasOwnProperty.call(st.live[r.key], col));
+    // Live (unsaved) typing is a user edit: copied as typed, like a saved edit.
+    const getSource = (r, col) => (isLive(r, col) ? 'edit' : (r.source ? r.source[col] : undefined));
+    const tsv = L.sheetTsv(fillOnly ? L.fillColumns(m) : m.columns, rows, liveValue, { header: !!header && !fillOnly, getSource });
     let ok = false;
     try { ok = (await clipboard.writeText(tsv)) !== false; } catch (_) { ok = false; }
     if (st.closed) return;
     if (!ok) { note('\u26a0 Copy failed \u2014 select the table and Ctrl+C'); return; }
-    // The pasted text is unchanged; the note tells the user what still needs a look.
-    const isLive = (r, col) => !!(st.live[r.key] && Object.prototype.hasOwnProperty.call(st.live[r.key], col));
+    // The pasted text is unchanged; the note tells the user what was copied and what needs a look.
+    const scope = kind === 'mine' ? ' (your pairs with units down)' : (kind === 'visible' ? ' (all visible rows)' : '');
+    let text = 'Copied ' + rows.length + (rows.length === 1 ? ' row' : ' rows') + scope;
+    const fresh = L.freshness(m, now());
+    if (fresh.stale) text += fresh.label ? ' \u00b7 \u26a0 fleet data is ' + fresh.label + ' old' : ' \u00b7 \u26a0 fleet sync time unknown';
+    if (m.flags && m.flags.aiDraft) {
+      const auto = rows.filter((r) => r && r.pair && r.pair.down > 0 && (!r.draft || r.draft.state !== 'ok')).length;
+      if (auto) text += ' \u00b7 ' + auto + (auto === 1 ? ' row uses' : ' rows use') + ' auto text (AI draft pending)';
+    }
     const flagged = L.flaggedCount(rows, isLive);
-    note(flagged ? 'Copied ' + rows.length + (rows.length === 1 ? ' row' : ' rows') + ' \u2014 '
-      + flagged + (flagged === 1 ? ' cell' : ' cells') + ' flagged \u26a0 \u2014 review before pasting' : '');
+    if (flagged) text += ' \u2014 ' + flagged + (flagged === 1 ? ' cell' : ' cells') + ' flagged \u26a0 \u2014 review before pasting';
+    note(text);
     if (btnEl && typeof btnEl.textContent === 'string') {
       const orig = btnEl.textContent;
       btnEl.textContent = '\u2713 Copied';
@@ -631,11 +681,11 @@ function createController(deps) {
       case 'stop': stopDrafts(); return;
       case 'redraft': if (key) startDrafts([key]); return;
       case 'reset-row': if (key) return resetRow(key); return;
-      case 'copy': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), false, el);
-      case 'copy-header': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), true, el);
-      case 'copy-fill': return copy(L.visibleRows(st.model, st.hideZero, st.scacs), false, el, true);
+      case 'copy': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), false, el, false, copyKind());
+      case 'copy-header': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), true, el, false, copyKind());
+      case 'copy-fill': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), false, el, true, copyKind());
       // Copy row = this row's fill columns only (1P Vendor Barrier Y/N? .. Where Do You Need Support?).
-      case 'copy-row': { const row = key ? _row(key) : null; if (row) return copy([row], false, el, true); return; }
+      case 'copy-row': { const row = key ? _row(key) : null; if (row) return copy([row], false, el, true, 'row'); return; }
       default:
     }
   }
@@ -653,6 +703,12 @@ function createController(deps) {
     const t = e && e.target;
     const field = t && t.dataset && t.dataset.fdbrField;
     if (field === 'fasName') return setFasName(String(t.value == null ? '' : t.value));
+    if (field === 'copyScope') {
+      st.copyScope = t.value === 'visible' ? 'visible' : 'mine';
+      if (storage) storage.setItem(COPY_SCOPE_KEY, st.copyScope);
+      renderFrame();
+      return;
+    }
     if (field === 'hideZero') {
       st.hideZero = !!t.checked;
       if (storage) storage.setItem(HIDE_ZERO_KEY, st.hideZero ? '1' : '0');
@@ -695,4 +751,4 @@ function createController(deps) {
   };
 }
 
-export const __test__ = { createController, BUILD_TIMEOUT_MS, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY, SCAC_KEY };
+export const __test__ = { createController, BUILD_TIMEOUT_MS, SAVE_DEBOUNCE_MS, MAX_DRAFTS_IN_FLIGHT, HIDE_ZERO_KEY, SCAC_KEY, COPY_SCOPE_KEY, FRESH_TICK_MS };

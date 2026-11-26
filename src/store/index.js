@@ -119,7 +119,8 @@ const REGISTRY = {
   // Shape: { [unitNumber]: { vehicleId, display, savedAt } }.
   volvoVehicleIds:      () => path.join(P.dataDir, 'volvo_vehicle_ids.json'),
   // DBR DATA (Daily Call) — cached result of the last AFP QuickSight scrape.
-  // See src/scrapers/quicksight_dbr.js + src/ipc/scrapers.js 'quicksight:scrape'.
+  // The QuickSight scraper was removed 2026-11-24; these files are no longer written. Only the
+  // legacy (dbr.fleetData off) Just Me DBR lookup still reads them.
   // Shape: { ok, domicile:[{domicile,uptimePct,unitsUnavailable}],
   //          scac:[{scac,domicile,uptimePct,unitsUnavailable}], scrapedAt, error? }.
   quicksightDbr:        () => path.join(P.dataDir, 'quicksight_dbr.json'),
@@ -128,12 +129,15 @@ const REGISTRY = {
   // scrapedAt, error? }.
   quicksightDbrDsp:     () => path.join(P.dataDir, 'quicksight_dbr_dsp.json'),
   // Fleet DBR (Daily Call, 2026-11-10) — 24-column DBR built from fleetData. See src/dbr/fleet-dbr.js + src/ipc/fleet-dbr.js.
-  // Shape: { version:1, day:'YYYY-MM-DD', builtAt, fleetSyncedAt, rows:[builder row], conflicts:[..],
-  //          drafts:{ [key]: v2 { version:2, cells:{<17 AI cell ids>:string}, sources, flags, disagreements,
+  // Shape: { version:2, day:'YYYY-MM-DD', builtAt, fleetSyncedAt, rows:[builder row], conflicts:[..],
+  //          drafts:{ [key]: v3 { version:3, unitNotes:{<6 Details, fasActions, support>:string},
+  //            sheet:{<same ids>:string (validated sheet cells, the only overlaid cells)}, sheetDrops:{id:code},
+  //            sheetSkipped, sources, flags, disagreements,
   //            etcUnits, etcDisagreements, etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
   //            dropped, dropReasons, mode, calls, mapRetries, rounds, reviewSkipped, identity:{alias,names,fasTagged},
   //            draftedAt, unitsHash, evidenceHash }
-  //            | v1 (read only) { fasActions, support, draftedAt, unitsHash, dropped } } }.  Day-scoped.
+  //            | v2 / v1 (read only, 'format'-stale, never overlaid) } }.  Day-scoped.
+  //          A snapshot with version !== 2 reads as absent (rebuilt).
   fleetDbrSnapshot:     () => path.join(P.dataDir, 'fleet_dbr_snapshot.json'),
   // Shape: { version:1, fasName:'' (persists across days), day:'YYYY-MM-DD', rows:{ [key]: { [colId]: string } } }.
   fleetDbrEdits:        () => path.join(P.dataDir, 'fleet_dbr_edits.json'),

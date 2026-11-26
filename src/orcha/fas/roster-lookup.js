@@ -108,10 +108,26 @@ function umFor(scac, site) {
   return '';
 }
 
+/**
+ * fasForExact(scac, site) — the FAS person for the EXACT SCAC+Site pair only
+ * (order-agnostic, like fasFor's first step); '' when there is no exact pair or
+ * the roster cannot be loaded. No site-only / scac-only fallbacks (Fleet Health
+ * FAS Name cell: a fallback match would paste the wrong owner).
+ */
+function fasForExact(scac, site) {
+  try {
+    const idx = _buildIndex();
+    const a = _norm(scac);
+    const b = _norm(site);
+    if (!a || !b) return '';
+    return idx.byPair.get(a + '|' + b) || idx.byPair.get(b + '|' + a) || '';
+  } catch (_) { return ''; }
+}
+
 // How many roster rows are indexed (0 = roster not fetched yet). Lets callers
 // skip the lookup cleanly when there's no roster.
 function rosterSize() {
   try { return _buildIndex().count || 0; } catch (_) { return 0; }
 }
 
-module.exports = { fasFor, umFor, rosterSize };
+module.exports = { fasFor, fasForExact, umFor, rosterSize };

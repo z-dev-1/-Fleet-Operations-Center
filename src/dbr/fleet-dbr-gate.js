@@ -13,7 +13,7 @@
 
 const { extractJsonObject } = require('../utils/ai-json');
 const { inferDate, etcMentionDates, etcKeywordNegated, parseTimelineLines, EXPECT_READY_RE, NOT_ETC_CONTEXT_RE } = require('./fleet-dbr');
-const { FAS_ACT_SRC, normQuote, redactEvidence, textEvidence } = require('./fleet-dbr-evidence');
+const { FAS_ACT_SRC, normQuote, redactEvidence, textEvidence, EVID_PHONE_RE } = require('./fleet-dbr-evidence');
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const FIELD_MAX = 16000;
@@ -41,9 +41,17 @@ const SUPPORT_FAILED_TEXT = '\u26a0 AI support asks failed the fact check \u2014
 const YES_DROPPED_TEXT = '\u26a0 AI marked Yes but its supporting details failed the fact check \u2014 review: ';
 const NO_REASON = '(no verified reason)';
 const ETC_CELL_OF = Object.freeze({ today: 'etcToday', missed: 'missedEtc', none: 'noEtc', future: null });
+// Fleet Health sheet cells (design §3.8, §5): validation and composer caps.
+const SHEET_DETAILS_MAX = 230;
+const SHEET_FAS_MAX = 240;
+const SHEET_SUPPORT_MAX = 140;
+const SHEET_MIN = 20;
+const SHEET_CELL_IDS = Object.freeze(BARRIERS.map((b) => b.detailsCol).concat(['fasActions', 'support']));
 
 // ── Regexes (§5.2) ──────────────────────────────────────────────────────────
 const NO_FAS_RE = /^\s*No FAS action logged\b/i;
+// D7: the "No FAS action logged" lead of a clause; the remainder is checked like any clause.
+const NO_FAS_PREFIX_RE = /^\s*No FAS action logged\b[^,;\u2013\u2014-]*[,;\u2013\u2014-]?\s*/i;
 const NEXT_PREFIX_RE = /^\s*next\s*:\s*/i;
 const CLAUSE_SPLIT_RE = /;\s*|\.\s+(?=[A-Z])|\n+/;
 // "I" only as a standalone word (I-Shift / I-81 are not a FAS subject). Case-sensitive "I".
@@ -82,13 +90,17 @@ const MONTH_NUM = Object.freeze({ jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6
 const ORD_SRC = '(?:st|nd|rd|th)';
 // "Nov 21" / "Nov-21" and "21 Nov" / "21-Nov" (Excel's d-mmm display).
 const PROSE_MONTH_DAY_RE = new RegExp('\\b(' + MONTH_SRC + ')\\.?(?:\\s{0,2}|-)(\\d{1,2})' + ORD_SRC + '?\\b(?:,?\\s+(\\d{4})\\b)?', 'gi');
-const PROSE_DAY_MONTH_RE = new RegExp('\\b(\\d{1,2})' + ORD_SRC + '?(?:\\s+(?:of\\s+)?|-)(' + MONTH_SRC + ')\\b\\.?(?:,?\\s+(\\d{4})\\b)?', 'gi');
+// D8: no separator too ("parts ETA 21Nov"); the leading \b keeps "A12MAR5" out.
+const PROSE_DAY_MONTH_RE = new RegExp('\\b(\\d{1,2})' + ORD_SRC + '?(?:\\s+(?:of\\s+)?|-|)(' + MONTH_SRC + ')\\b\\.?(?:,?\\s+(\\d{4})\\b)?', 'gi');
 const PROSE_DASH_RE = /(?<![\w/.$#-])(\d{1,2})-(\d{1,2})(?:-(\d{2,4}))?(?![\w/-]|\.\d)/g;
 const PROSE_DOT_RE = /(?<![\w/.$#,-])(\d{1,2})\.(\d{2})(?![\w/.%-])/g;
 // A bare ordinal after a date preposition or an ETA / ETC / ETR / due keyword ("ETA 21st").
 const PROSE_ORD_RE = new RegExp('\\b(?:on|by|until|till|before|after|since|from|the|eta|etc|etr|due)\\s+(?:the\\s+)?(\\d{1,2})' + ORD_SRC + '\\b'
-  + '(?!\\s+(?:of\\b|' + MONTH_SRC + '|party|shift|time|attempt|opinion|call|visit|try|tier|gen|generation|axle|floor|level|quarter|week|day|unit|truck|tow|reminder|follow|request|email|escalation|notice|round|stop|load|trip|bay|tech|vendor|place|option|line|step|one|set|part|pass|leg|row|wheel|position|cylinder|gear)\\b)', 'gi');
+  + '(?!\\s+(?:of\\b|' + MONTH_SRC + '|party|shift|time|thing|attempt|opinion|call|visit|try|tier|gen|generation|axle|floor|level|quarter|week|day|unit|truck|tow|reminder|follow|request|email|escalation|notice|round|stop|load|trip|bay|tech|vendor|place|option|line|step|one|set|part|pass|leg|row|wheel|position|cylinder|gear)\\b)', 'gi');
 const FRACTION_UNIT_RE = /^\s{0,3}(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt)\b/i;
+// D8: a SPACED slash pair followed by a counted thing / done word is a count ("replaced 2 / 4 steer
+// tires", "PM 1 / 2 done"). Unspaced pairs never use it ("11/21 tires replaced" stays a date).
+const COUNT_AFTER_SPACED_RE = /^\s{0,3}(?:[a-z]+\s+)?(?:tires?|wheels?|axles?|bags?|lights?|mirrors?|doors?|batter(?:y|ies)|injectors?|plugs?|sensors?|bolts?|done|complete(?:d)?|finished|left|remaining|replaced)\b/i;
 // Ranges / measures written M-D or M.D ("2-3 days", "1.25 hours") are not dates.
 // "5-7 business days" / "3-4 more days" / "2-3 working days" too.
 const RANGE_UNIT_RE = /^\s{0,3}(?:(?:business|working|calendar|more|additional|extra)\s+)?(?:ton|tons|units?|in|inch|ft|ft-lb|lb|lbs|psi|mm|gal|qt|days?|d|hours?|hrs?|h|weeks?|wks?|months?|mins?|minutes?|miles?|mi|km|k|trucks?|techs?|bays?|times?|x|percent|am|pm)\b|^\s{0,3}%/i;
@@ -114,11 +126,30 @@ const EMAIL_MARKER_ALL_RE = /\s*\[em:[0-9a-f]{8}\]/gi;
 const NAME_TOKEN_RE = /(?<![\w-])[A-Z][A-Za-z]{3,}\b/g;
 const CLAUSE_START_RE = /^\s*(?:\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)?\s*[-\u2013:,]?\s*$/;
 const NAME_ALLOW = new Set([
-  'fas', 'mcs', 'etc', 'etr', 'oem', 'asist', 'afp', 'mmro', 'pmr', 'sla', 'dsp', 'none',
+  'fas', 'mcs', 'etc', 'etr', 'etas', 'oem', 'asist', 'afp', 'mmro', 'pmr', 'sla', 'dsp', 'none',
   'vendor', 'barrier', 'estimate', 'partner', 'parts', 'delay', 'common', 'repairs',
   'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'sept', 'october', 'november', 'december',
   'monday', 'tuesday', 'tues', 'wednesday', 'thursday', 'thur', 'thurs', 'friday', 'saturday', 'sunday',
 ]);
+// Sheet-cell patterns (design §3.8 shortIssue step 3, §5 rule (3)). DR2-8: the shared regexes carry
+// the g flag, so .test() uses non-global copies built once here and replace / matchAll use fresh
+// global copies; no lastIndex is ever shared between calls.
+const _once = (re) => new RegExp(re.source, re.flags.replace('g', ''));
+const _every = (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+const SHEET_EMAIL_RE = /\S+@\S+\.\S+/;
+const SHEET_UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-/i;
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const AMZ_ID_RE = /\bamz-[\w-]+/i;
+const UPS_TRACKING_RE = /\b1Z[0-9A-Z]{16}\b/;
+const LONG_DIGITS_RE = /\b\d{12,22}\b/;
+const PAREN_DIGIT_RE = /\([^()]*\d[^()]*\)/g;
+const HASH_TOKEN_RE = /#\S+/g;
+const URL_1 = _once(URL_RE);
+const REF_1 = _once(REF_RE);
+const TICKET_1 = _once(TICKET_RE);
+const TYPED_REF_1 = _once(TYPED_REF_RE);
+const PHONE_1 = _once(EVID_PHONE_RE);
+const SHEET_FORBIDDEN_RES = Object.freeze([URL_1, REF_1, TYPED_REF_1, SHEET_UUID_RE, SHEET_EMAIL_RE, PHONE_1, AMZ_ID_RE, UPS_TRACKING_RE, LONG_DIGITS_RE]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -196,6 +227,7 @@ function mdDates(text, today, opts = {}) {
   PROSE_MD_RE.lastIndex = 0;
   while ((m = PROSE_MD_RE.exec(t))) {
     if (unitAfter(FRACTION_UNIT_RE, m)) continue;
+    if (/\s/.test(m[0]) && unitAfter(COUNT_AFTER_SPACED_RE, m)) continue;   // D8, !loose only (DR2-14)
     push(m[1], m[2], m[3], m.index, m[0].length);
   }
   for (const [re, moAt, daAt] of [[PROSE_MONTH_DAY_RE, 1, 2], [PROSE_DAY_MONTH_RE, 2, 1]]) {
@@ -380,8 +412,18 @@ function gateContext({ row, evidences, fleetIds, today, unitRows, typed } = {}) 
     };
   });
   const cells = _plainObj(r.cells) ? r.cells : {};
+  // DR2-5: rules[b].units = the cell's unit set (builder order): the units whose barriers include b;
+  // for common, the units of row.common.groups[].ids and row.common.repeat.
+  const cm = _plainObj(r.common) ? r.common : {};
+  const commonIds = new Set();
+  for (const g of Array.isArray(cm.groups) ? cm.groups : []) for (const x of (g && Array.isArray(g.ids) ? g.ids : [])) commonIds.add(_s(x));
+  for (const x of Array.isArray(cm.repeat) ? cm.repeat : []) commonIds.add(_s(x));
+  const unitsOf = (pred) => downIds.filter((id, i) => pred(units[i] || {}));
   for (const b of BARRIERS) {
-    ctx.rules[b.id] = { yn: cells[b.ynCol] === 'Y' ? 'Y' : 'N', details: _s(cells[b.detailsCol]) };
+    const ids = b.id === 'common'
+      ? unitsOf((u) => commonIds.has(_s(u.id)))
+      : unitsOf((u) => Array.isArray(u.barriers) && u.barriers.includes(b.id));
+    ctx.rules[b.id] = { yn: cells[b.ynCol] === 'Y' ? 'Y' : 'N', details: _s(cells[b.detailsCol]), units: ids };
   }
   if (_plainObj(typed)) _addTyped(ctx, typed, today);
   ctx.limits = limits(ctx);
@@ -719,7 +761,8 @@ function _claimVerb(body) {
 }
 // A further action joined to the clause: ", also escalated", "and escalated", "and then emailed",
 // " - escalated". A non-FAS verb after a comma ("bay confirmed for 11/12") is not one.
-const JOINED_ACT_RE = new RegExp('(?:(?:,\\s*|\\s+)(?:also|and(?:\\s+then)?|then|plus|later|again)\\s+|\\s[-\\u2013]\\s*)(' + FAS_ACT_SRC + ')\\b', 'gi');
+// D6: ", escalated" / "& escalated" / "/ escalated" are joined actions too.
+const JOINED_ACT_RE = new RegExp('(?:(?:,\\s*|\\s+)(?:also|and(?:\\s+then)?|then|plus|later|again)\\s+|\\s*[,&/]\\s*|\\s[-\\u2013]\\s*)(' + FAS_ACT_SRC + ')\\b', 'gi');
 // Every claimed FAS action verb of a claim clause: the lead / subject verb plus each joined action.
 function _claimVerbs(body) {
   const out = [];
@@ -745,8 +788,12 @@ function fasClaimProblem(text, env, field, today) {
   if (field === 'fasActions' && NO_FAS_RE.test(text) && fasMd.size) return 'bad-envelope';
   const clauses = _splitClauses(text);
   for (let i = 0; i < clauses.length; i++) {
-    const c = clauses[i];
-    if (NO_FAS_RE.test(c)) continue;
+    let c = clauses[i];
+    // D7: strip the "No FAS action logged" lead and check what follows it like any clause.
+    if (NO_FAS_RE.test(c)) {
+      c = c.replace(NO_FAS_PREFIX_RE, '');
+      if (!c.trim()) continue;
+    }
     const { isNext, body } = nextClause(c, field, today, i === clauses.length - 1);
     const claim = isNext ? (FAS_SUBJ_ACT_RE.test(body) || FAS_LEADVERB_RE.test(body)) : isFasClaim(body, field);
     if (!claim) continue;
@@ -1413,8 +1460,97 @@ function renderCells(draft, ctx) {
   };
 }
 
+// ── Sheet cells (design §3.8, §3.9, §5) ─────────────────────────────────────
+function _hasTicket(t) {
+  return TICKET_1.test(t) && [...t.matchAll(_every(TICKET_RE))].some((m) => /\d/.test(m[0]));
+}
+// Rules (3) and (4) of §5 for one sheet cell: 'sheet-forbidden' for a link, ref, ticket, UUID,
+// email, phone, amz- id, UPS tracking number, 12-22 digit run or bullet; 'sheet-ref' for an
+// ID_TOKEN_RE token that is not a down unit id; else null. Shared by the composer self-check and
+// validateSheet.
+function sheetForbidden(text, downIds) {
+  const t = _s(text);
+  if (!t) return null;
+  if (t.includes('\u2022') || SHEET_FORBIDDEN_RES.some((re) => re.test(t)) || _hasTicket(t)) return 'sheet-forbidden';
+  const ids = new Set((Array.isArray(downIds) ? downIds : []).map((x) => _s(x).trim().toLowerCase()));
+  for (const m of t.matchAll(_every(ID_TOKEN_RE))) if (!ids.has(m[0].toLowerCase())) return 'sheet-ref';
+  return null;
+}
+// shortIssue step 3: every ref / id / contact token removed whole (label and number together), then
+// doubled spaces and dangling punctuation collapsed.
+function stripRefs(text) {
+  let s = _s(text);
+  const cut = (re) => { s = s.replace(_every(re), ' '); };
+  cut(URL_RE);
+  cut(SHEET_EMAIL_RE);
+  cut(UUID_RE);
+  cut(EVID_PHONE_RE);
+  s = s.replace(PAREN_DIGIT_RE, ' ');
+  cut(TYPED_REF_RE);
+  cut(AMZ_ID_RE);
+  cut(REF_RE);
+  s = s.replace(_every(TICKET_RE), (m) => (/\d/.test(m) ? ' ' : m));
+  cut(UPS_TRACKING_RE);
+  cut(LONG_DIGITS_RE);
+  cut(ID_TOKEN_RE);
+  s = s.replace(HASH_TOKEN_RE, ' ');
+  return s.replace(/\(\s*\)/g, ' ').replace(/\s+/g, ' ').replace(/\s+([,;:.!?])/g, '$1')
+    .replace(/([,;:])(?:\s*[,;:])+/g, '$1').replace(/^[\s,;:\-\u2013\u2014]+|[\s,;:\-\u2013\u2014]+$/g, '').trim();
+}
+
+const _SHEET_FIELD = (id) => (id === 'fasActions' ? 'fasActions' : (id === 'support' ? 'support' : 'details'));
+// One AI sheet cell -> { text } | { code } | { skip } (§5 rules (1)-(8), in that order).
+function _sheetCell(id, v, ctx) {
+  if (typeof v !== 'string') return { code: 'sheet-type' };
+  const text = _clean(v);
+  const downIds = Array.isArray(ctx.downIds) ? ctx.downIds : [];
+  const b = BARRIERS.find((x) => x.detailsCol === id);
+  let scope = downIds;
+  if (b) {
+    if (!text) return { skip: true };
+    const rule = (ctx.rules && ctx.rules[b.id]) || {};
+    if (rule.yn !== 'Y') return { code: 'sheet-not-yes' };
+    if (text.length < SHEET_MIN || text.length > SHEET_DETAILS_MAX) return { code: 'sheet-length' };
+    if (!downIds.some((u) => _bounded(u, text, 'i'))) return { code: 'sheet-no-unit' };
+    scope = Array.isArray(rule.units) ? rule.units : [];
+  } else if (id === 'fasActions') {
+    if (text.length < SHEET_MIN || text.length > SHEET_FAS_MAX) return { code: 'sheet-length' };
+  } else {
+    if (/^none\.?$/i.test(text)) return { text: 'None.' };
+    if (!text || text.length > SHEET_SUPPORT_MAX) return { code: 'sheet-length' };
+  }
+  const f = sheetForbidden(text, downIds);
+  if (f) return { code: f };
+  const field = _SHEET_FIELD(id);
+  if (downIds.some((u) => !scope.includes(u) && _bounded(u, text, 'i'))
+    || proseTokens(text, scope, ctx, { field, part: 'ids' })) return { code: 'sheet-units' };
+  if (proseTokens(text, scope, ctx, { field, part: 'tokens' })) return { code: 'sheet-tokens' };
+  if (nameFlags(text, scope, ctx).length) return { code: 'sheet-name' };
+  if (id === 'fasActions' && fasClaimProblem(text, { fas: [] }, 'fasActions', ctx.today)) return { code: 'sheet-claim' };
+  return { text };
+}
+// AI sheet JSON {"sheet":{cellId: text}} (string or object) -> { sheet: {cellId: text} (passing
+// cells only), drops: {cellId: code}, invalid } . invalid = no `sheet` object; unknown keys ignored.
+function validateSheet(input, ctx) {
+  const obj = _parse(input);
+  const sheet = {};
+  const drops = {};
+  if (!obj || !_plainObj(obj.sheet)) return { sheet, drops, invalid: true };
+  const c = ctx || {};
+  for (const id of SHEET_CELL_IDS) {
+    const v = obj.sheet[id];
+    if (v === undefined || v === null) continue;
+    const r = _sheetCell(id, v, c);
+    if (r.code) drops[id] = r.code;
+    else if (!r.skip) sheet[id] = r.text;
+  }
+  return { sheet, drops, invalid: false };
+}
+
 module.exports = {
   FIELD_MAX, OUTPUT_TARGET_CHARS, ENV2, SUP_E, BARRIERS, BARRIER_IDS, SUPPORT_TEAMS, SUPPORT_FAILED_TEXT, YES_DROPPED_TEXT, NO_REASON,
+  SHEET_DETAILS_MAX, SHEET_FAS_MAX, SHEET_SUPPORT_MAX, SHEET_CELL_IDS, SHEET_EMAIL_RE, NO_FAS_PREFIX_RE, COUNT_AFTER_SPACED_RE, JOINED_ACT_RE,
+  sheetForbidden, stripRefs, validateSheet,
   NO_FAS_RE, NEXT_PREFIX_RE, CLAUSE_SPLIT_RE, FAS_SUBJECT_RE, FAS_LEADVERB_RE, FAS_SUBJ_ACT_RE, REL_DATE_RE, BIND_KW_RE,
   BIND_CLASS_RE, REF_RE, ID_TOKEN_RE, TICKET_RE, URL_RE, AMOUNT_RE, GATE_ETC_ABBR_RE, GATE_ETC_PHRASE_RE, EXPECT_READY_RE,
   mdDates, datesAfter, syntheticIds, gateContext, limits, outBudget,

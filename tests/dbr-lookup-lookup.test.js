@@ -364,3 +364,51 @@ describe('production shell: run / detect', () => {
     expect(lookup.detect('dbr for my sites', {})).toMatchObject({ mine: true });
   });
 });
+
+describe('Fleet Health formatter: stale label (FEAT-004, design §3.13)', () => {
+  const F = require('../src/dbr/fleet-dbr');
+  const { makeFleetRows } = require('./fixtures/fleet-dbr/make-rows');
+  const SYNC = '2026-11-10T15:30:00.000Z';
+  const fhModel = () => {
+    const built = F.buildFleetDbr(makeFleetRows(), { today: '2026-11-10' });
+    built.builtAt = '2026-11-10T15:31:00.000Z';
+    built.fleetSyncedAt = SYNC;
+    return F.applyOverlays(built, { today: '2026-11-10', flags: { aiDraft: false } });
+  };
+  const at = (min) => new Date(Date.parse(SYNC) + min * 60000);
+  const WARN = /\u26a0 fleet data (\d+)h old \u2014 sync before submitting/;
+
+  it('past 2 h the built label warns "⚠ fleet data Xh old — sync before submitting"; at or under 2 h it does not', () => {
+    expect(lookup.FH_STALE_SYNC_MS).toBe(2 * 60 * 60 * 1000);
+    for (const fmt of [(now) => lookup.formatFleetHealth({ model: fhModel(), kind: 'domicile', code: 'ROC5', now }),
+      (now) => lookup.formatFleetHealthMine({ model: fhModel(), now })]) {
+      expect(fmt(at(119))).not.toMatch(WARN);
+      expect(fmt(at(120))).not.toMatch(WARN);
+      expect(fmt(at(121)).match(WARN)[1]).toBe('2');
+      expect(fmt(at(185)).match(WARN)[1]).toBe('3');
+    }
+  });
+
+  it('the Missed line override note does not claim "No ETC" for a Path-B override of a dated note', () => {
+    const { makeUnit } = require('./fixtures/fleet-dbr/make-rows');
+    const miss = { date: '2026-11-05', kind: 'repairCompletion', state: 'missed', explicitMissDate: '2026-11-05', source: 'relay',
+      statedAt: '2026-11-06T15:00:00Z', snippet: 'missed the ETC of 11/05', negated: false, reason: null };
+    const built = F.buildFleetDbr([makeUnit({ equipmentId: 'P1', _factsOn: true, canonicalNextStep: 'ETC 11/30', _factEtc: miss })], { today: '2026-11-10' });
+    built.builtAt = '2026-11-10T15:31:00.000Z';
+    built.fleetSyncedAt = SYNC;
+    expect(built.rows[0].units[0].etc.overrode).toMatchObject({ field: 'canonicalNextStep', was: 'future' });
+    const model = F.applyOverlays(built, { today: '2026-11-10', flags: { aiDraft: false } });
+    const text = lookup.formatFleetHealth({ model, kind: 'domicile', code: 'TST1', now: at(5) });
+    expect(text).toContain('P1 overrode the saved note)');
+    expect(text).not.toContain('"No ETC" note');
+  });
+
+  it('the QuickSight label keeps its 4 h threshold and wording', async () => {
+    const at3h = new Date(Date.parse(META.syncedAt) + 3 * 3600000 + 60000);
+    const at5h = new Date(Date.parse(META.syncedAt) + 5 * 3600000 + 60000);
+    expect((await lookup.lookupDbr(base({ now: at3h }))).text).not.toMatch(/\u26a0 \d+h old/);
+    const t5 = (await lookup.lookupDbr(base({ now: at5h }))).text;
+    expect(t5).toMatch(/\u26a0 5h old/);
+    expect(t5).not.toContain('sync before submitting');
+  });
+});
