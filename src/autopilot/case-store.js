@@ -1157,13 +1157,53 @@ function listCases(filter) {
   return { total, items };
 }
 
-/** getCase(caseId, { eventsOffset }) -> { case, runs (latest 5), findings (latest run), events (page of 500), eventsTotal } | null */
+const CITED_FINDINGS_MAX = 400;
+/** Calls add(id) for every string in any `evidenceIds` array inside v (depth-limited). */
+function _collectEvidenceIds(v, add, depth) {
+  const dpt = depth || 0;
+  if (!v || typeof v !== 'object' || dpt > 6) return;
+  if (Array.isArray(v)) { for (const x of v) _collectEvidenceIds(x, add, dpt + 1); return; }
+  for (const k of Object.keys(v)) {
+    if (k === 'evidenceIds' && Array.isArray(v[k])) { for (const id of v[k]) add(id); }
+    else _collectEvidenceIds(v[k], add, dpt + 1);
+  }
+}
+
+/** getCase(caseId, { eventsOffset }) -> { case, runs (latest 5), findings (latest run, then the cited
+ *  earlier-run findings marked cited_from_run), events (page of 500), eventsTotal } | null */
 function getCase(caseId, opts) {
   const c = _get('SELECT * FROM ap_case WHERE case_id = ?', caseId);
   if (!c) return null;
   const off = Math.max(0, parseInt(opts && opts.eventsOffset, 10) || 0);
   const runs = _all('SELECT * FROM ap_run WHERE case_id = ? ORDER BY started_at DESC, run_id DESC LIMIT 5', caseId).map(_parseRun);
   const findings = runs.length ? _all('SELECT * FROM ap_finding WHERE run_id = ? ORDER BY id', runs[0].run_id) : [];
+  // Cited earlier-run evidence (acceptance F1): ids cited by the stored recommendation, the stored AI
+  // output or the returned step trace that are not in the latest run's findings. The newest stored row
+  // of each such id is appended once, with its own run_id and an explicit `cited_from_run: true` marker.
+  // Display only: no investigation path reads getCase().findings, so these rows never become new evidence.
+  if (runs.length) {
+    const have = new Set(findings.map((f) => f.evidence_id));
+    const want = new Set();
+    const add = (id) => { if (typeof id === 'string' && id && !have.has(id)) want.add(id); };
+    _collectEvidenceIds(_parse(c.recommendation_json), add);
+    _collectEvidenceIds(_parse(c.ai_findings_json), add);
+    const stepRows = _all(`SELECT s.summary_json FROM ap_step s LEFT JOIN ap_run r ON r.run_id = s.run_id WHERE s.case_id = ?
+        ORDER BY COALESCE(r.started_at, s.started_at) DESC, s.run_id DESC, s.seq ASC LIMIT 200`, caseId);
+    for (const s of stepRows) _collectEvidenceIds(_parse(s.summary_json), add);
+    const ids = [...want].slice(0, CITED_FINDINGS_MAX);
+    const cited = [];
+    for (let i = 0; i < ids.length; i += 200) {
+      const part = ids.slice(i, i + 200);
+      const rows = _all(`SELECT * FROM ap_finding WHERE case_id = ? AND evidence_id IN (${part.map(() => '?').join(',')}) ORDER BY id DESC`, caseId, ...part);
+      for (const f of rows) {
+        if (have.has(f.evidence_id)) continue;   // newest row per id; never a second copy
+        have.add(f.evidence_id);
+        cited.push(Object.assign({}, f, { cited_from_run: true }));
+      }
+    }
+    cited.sort((a, b) => a.id - b.id);
+    for (const f of cited) findings.push(f);
+  }
   const eventsTotal = _get('SELECT COUNT(*) AS n FROM ap_event WHERE case_id = ?', caseId).n;
   const events = _all('SELECT * FROM ap_event WHERE case_id = ? ORDER BY at ASC, id ASC LIMIT 500 OFFSET ?', caseId, off)
     .map((e) => Object.assign({}, e, { detail: _parse(e.detail_json) }));
@@ -1405,6 +1445,8 @@ function aiMetrics(now, opts) {
 }
 
 const SOURCE_BUCKETS = ['ok', 'not_warm', 'auth', 'cache_only', 'rate_limited', 'error', 'timeout'];
+// Gate source of each live-capable tool (literal copy of tool-registry TOOL_DEFS[*].gateSource for costClass 'live').
+const LIVE_TOOL_SOURCE = Object.freeze({ aap_comments: 'aap_live', decisiv_activity: 'decisiv', paccar_asist: 'decisiv' });
 function _bucketOf(status, code) {
   const c = String(code || '');
   if (status === 'ok' || status === 'empty') return 'ok';
@@ -1447,10 +1489,21 @@ function sourceMetrics(now) {
       for (const code of Object.keys(errs)) o[_bucketOfErrorCode(code)] += Number(errs[code]) || 0;
     }
   }
-  for (const r of _all("SELECT source, status, code, COUNT(*) AS n FROM ap_step WHERE kind = 'tool' AND live = 1 AND started_at >= ? GROUP BY source, status, code", since)) {
-    const b = _bucketOf(r.status, r.code);
-    if (!b || !r.source) continue;
-    row(r.source)[b] += r.n;
+  // Live-capable tool steps (acceptance F2): counted under the tool's gate source (aap_comments ->
+  // aap_live); an ok / empty result counts as a live success only when it holds freshly pulled items
+  // (summary.live), otherwise it was served from cache (cache_only). Steps copied into a resumed run
+  // (started before that run) are counted once, in the run that made them.
+  for (const r of _all(`SELECT s.tool, s.source, s.status, s.code, s.summary_json FROM ap_step s LEFT JOIN ap_run ru ON ru.run_id = s.run_id
+      WHERE s.kind = 'tool' AND s.live = 1 AND s.started_at >= ? AND (ru.started_at IS NULL OR s.started_at >= ru.started_at)`, since)) {
+    const src = LIVE_TOOL_SOURCE[r.tool] || r.source;
+    if (!src) continue;
+    let b;
+    if (r.status === 'ok' || r.status === 'empty') {
+      const sum = _parse(r.summary_json);
+      b = sum && sum.live === true ? 'ok' : 'cache_only';
+    } else b = _bucketOf(r.status, r.code);
+    if (!b) continue;
+    row(src)[b] += 1;
   }
   return out;
 }

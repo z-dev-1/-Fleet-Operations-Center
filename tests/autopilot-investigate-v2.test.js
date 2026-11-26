@@ -160,6 +160,37 @@ describe('AI budget: cap mid-loop and deferral timing', () => {
     expect(F.cs.heldReviewCode(caseId)).toBe(null);
   });
 
+  it('review NIT: a held review case returns to NEEDS_REVIEW on the source-unusable and the failed exits', async () => {
+    const { caseId } = F.seedCase();
+    await inv(caseId, { reason: F.fakePlanner([finalFrom]), cfgOver: { dailyCap: 0, ai: { dailyCap: 0 } } });
+    if (caseOf(caseId).state !== 'NEEDS_REVIEW') F.cs.transition(caseId, 'NEEDS_REVIEW', { reason: 'unit_missing', now: s.ck.now() });
+    const code = events(caseId, 'transition').filter((e) => e.to_state === 'NEEDS_REVIEW').pop().reason_code;
+
+    // 1. the unit has no fleet row (no_row) -> NEEDS_REVIEW with its code, not WAITING_FOR_DATA; retry in ~1 h.
+    s.ck.t = NEXT_MIDNIGHT + H;
+    F.cs.requeueCases({ caseIds: [caseId], trigger: 'ai_capacity', now: s.ck.now() });
+    const rows = s.world.rows;
+    s.world.rows = [];
+    const r1 = await inv(caseId, { reason: F.fakePlanner([finalFrom]), cfgOver: { ai: { dailyCap: 1 } }, trigger: 'ai_capacity' });
+    expect(r1).toMatchObject({ outcome: 'waiting_for_data', state: 'NEEDS_REVIEW' });
+    let c = caseOf(caseId);
+    expect(c).toMatchObject({ state: 'NEEDS_REVIEW', ai_pending_reason: 'cap', last_error_code: 'no_row' });
+    expect(c.ai_retry_at).toBeGreaterThan(s.ck.now() + 50 * MIN);
+    expect(events(caseId, 'transition').pop()).toMatchObject({ to_state: 'NEEDS_REVIEW', reason_code: code });
+
+    // 2. the run fails at max attempts -> NEEDS_REVIEW with its code, not FAILED.
+    s.world.rows = rows;
+    s.ck.t += 2 * H;
+    F.cs.requeueCases({ caseIds: [caseId], trigger: 'ai_capacity', now: s.ck.now() });
+    F.engine.prepare('UPDATE ap_case SET attempts = 99 WHERE case_id = ?').run(caseId);
+    const boom = Object.assign({}, F.cs, { writeFindings: () => { throw Object.assign(new Error('boom'), { code: 'BOOM' }); } });
+    const r2 = await inv(caseId, { reason: F.fakePlanner([finalFrom]), caseStore: boom, cfgOver: { ai: { dailyCap: 1 } }, trigger: 'ai_capacity' });
+    expect(r2).toMatchObject({ outcome: 'failed', state: 'NEEDS_REVIEW', code: 'BOOM' });
+    c = caseOf(caseId);
+    expect(c).toMatchObject({ state: 'NEEDS_REVIEW', last_error_code: 'BOOM', lease_owner: null });
+    expect(events(caseId, 'transition').pop()).toMatchObject({ to_state: 'NEEDS_REVIEW', reason_code: code });
+  });
+
   it('finding 5: a cap-deferred case gets ai_retry_at >= next local midnight with multiTurn on and off', async () => {
     for (const multiTurn of [true, false]) {
       setup();

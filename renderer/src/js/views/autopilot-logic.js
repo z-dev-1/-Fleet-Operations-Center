@@ -150,8 +150,11 @@ export function evidenceRows(findings, conflicts) {
     confidence: Number.isFinite(f.confidence) ? f.confidence.toFixed(2) : '',
     trust: f.trust === 'untrusted_text' ? 'untrusted text' : _str(f.trust),
     authority: _str(f.authority_tag),
-    conflictGroup: _str(f.conflict_group),
-    conflict: !!f.conflict_group || inConflict.has(f.evidence_id),
+    conflictGroup: f.cited_from_run ? '' : _str(f.conflict_group),
+    conflict: !f.cited_from_run && (!!f.conflict_group || inConflict.has(f.evidence_id)),
+    // A cited row from an earlier run (getCase merges it so the stored recommendation stays traceable).
+    earlierRun: !!f.cited_from_run,
+    runId: _str(f.run_id),
   }));
 }
 

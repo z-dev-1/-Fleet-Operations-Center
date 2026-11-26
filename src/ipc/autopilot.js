@@ -259,7 +259,8 @@ function _groupFindings(findings) {
     if (!f) continue;
     const s = f.source || 'unknown';
     (bySource[s] || (bySource[s] = [])).push(f);
-    if (f.conflict_group) (conflicts[f.conflict_group] || (conflicts[f.conflict_group] = [])).push(f.evidence_id);
+    // Cited earlier-run rows (cited_from_run) are shown, but not regrouped into this run's conflicts.
+    if (f.conflict_group && !f.cited_from_run) (conflicts[f.conflict_group] || (conflicts[f.conflict_group] = [])).push(f.evidence_id);
   }
   return { bySource, conflicts };
 }

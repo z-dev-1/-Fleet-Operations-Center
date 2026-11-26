@@ -118,6 +118,8 @@ function envelope(def, status, code, items, extra) {
   };
   if (code) env.error = code;
   if (extra && extra.cacheServed) env.summary.cacheServed = true;
+  // Freshly pulled items in the result (source metrics count a live success only then).
+  if (env.live) env.summary.live = true;
   return env;
 }
 

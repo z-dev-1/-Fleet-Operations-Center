@@ -481,7 +481,10 @@ export function init(mount, deps = {}) {
     for (const row of L.evidenceRows(r.findings, r.conflicts)) {
       const tr = el('tr', row.conflict ? 'ap-conflict' : null);
       if (row.conflictGroup) tr.setAttribute('title', 'Conflict ' + row.conflictGroup);
-      for (const k of ['source', 'field', 'value', 'observed', 'retrieved', 'freshness', 'confidence', 'trust', 'authority']) tr.appendChild(el('td', null, row[k]));
+      if (row.earlierRun) tr.setAttribute('title', 'Cited from earlier run ' + row.runId);
+      for (const k of ['source', 'field', 'value', 'observed', 'retrieved', 'freshness', 'confidence', 'trust', 'authority']) {
+        tr.appendChild(el('td', null, k === 'source' && row.earlierRun ? row.source + ' (earlier run)' : row[k]));
+      }
       et.appendChild(tr);
     }
     d.appendChild(et);

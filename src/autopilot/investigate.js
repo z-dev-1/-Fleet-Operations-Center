@@ -345,6 +345,14 @@ async function runInvestigation(caseId, deps) {
         const t = now();
         const f = Object.assign({}, RELEASE, { next_attempt_at: t + _jitter(HOUR, rand), last_checked_at: t, last_error_code: unusable, evidence_fp: fp });
         if (typeof d.cheapFpOf === 'function') { try { f.cheap_fp = d.cheapFpOf(rec, row); } catch (_) {} }
+        if (heldReview) {
+          // A held review case still waits for a human: back to NEEDS_REVIEW with its code; the
+          // ai_capacity retry waits an hour instead of re-firing on the next tick.
+          f.ai_retry_at = t + _jitter(HOUR, rand);
+          cs.persistRun(caseId, runId, f, S.NEEDS_REVIEW, { reason: heldReview, run: runMeta(outcome), event: { kind: 'evidence', reason: 'source_unusable:' + unusable }, now: t, leaseOwner });
+          try { job.complete({ outcome }); } catch (_) {}
+          return done(outcome, S.NEEDS_REVIEW);
+        }
         cs.persistRun(caseId, runId, f, to, { reason: unusable, run: runMeta(outcome), now: t, leaseOwner });
         try { job.complete({ outcome }); } catch (_) {}
         return done(outcome, to);
@@ -680,6 +688,13 @@ async function runInvestigation(caseId, deps) {
         return done('aborted', S.QUEUED, { code });
       }
       const attempts = (cur.attempts || 0) + 1;
+      if (attempts >= LIMITS.maxAttempts && heldReview) {
+        // A held review case is not failed out of the review queue: back to NEEDS_REVIEW with its code.
+        cs.persistRun(caseId, runId, Object.assign({}, RELEASE, { attempts, last_error_code: code, ai_retry_at: t + _jitter(HOUR, rand) }), S.NEEDS_REVIEW,
+          { reason: heldReview, run: runMeta('failed', { errorCode: code }), event: { kind: 'error', reason: code, detail: { attempts } }, now: t, leaseOwner });
+        try { job.fail(e); } catch (_) {}
+        return done('failed', S.NEEDS_REVIEW, { code });
+      }
       if (attempts >= LIMITS.maxAttempts) {
         cs.persistRun(caseId, runId, Object.assign({}, RELEASE, { attempts, last_error_code: code }), S.FAILED,
           { reason: code, run: runMeta('failed', { errorCode: code }), event: { kind: 'error', reason: code, detail: { attempts } }, now: t, leaseOwner });

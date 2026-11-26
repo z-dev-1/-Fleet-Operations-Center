@@ -734,6 +734,53 @@ describe('V2 coverage writes and reads', () => {
   });
 });
 
+describe('acceptance fixes: cited earlier-run findings (F1) and source metrics (F2)', () => {
+  const fnd = (id, field, extra) => Object.assign({ evidenceId: id, source: 'aap_cache', field, value: field, observedAt: T0, retrievedAt: T0, freshness: 'RECENT', confidence: 0.9, trust: 'structured' }, extra || {});
+
+  it('F1: getCase appends the cited earlier-run findings once, marked cited_from_run with their own run_id', () => {
+    const { caseId } = cs.upsertDetected(cand('U1'), { now: T0 });
+    const r1 = cs.openRun({ caseId, trigger: 'new', now: T0 });
+    cs.writeFindings(caseId, r1, [fnd('ev_a', 'f1'), fnd('ev_b', 'f2', { trust: 'untrusted_text', source: 'email' }), fnd('ev_c', 'f3', { conflictGroup: 'cf_x' }), fnd('ev_z', 'f9')]);
+    const rec = { recommendedActions: [{ action: 'x', evidenceIds: ['ev_a', 'ev_b'] }], actionsRequiringApproval: [{ action: 'y', evidenceIds: ['ev_c', 'ev_nope'] }] };
+    cs.persistRun(caseId, r1, { recommendation_json: JSON.stringify(rec), ai_findings_json: JSON.stringify({ generatedBy: 'ai', confirmedFacts: [{ statement: 's', evidenceIds: ['ev_a'] }] }) }, null, { run: { outcome: 'recommendation' }, now: T0 + 1 });
+    // A later run (harness / cap / unchanged) re-collects only ev_a.
+    const r2 = cs.openRun({ caseId, trigger: 'harness', now: T0 + 10 });
+    cs.writeFindings(caseId, r2, [fnd('ev_a', 'f1')]);
+    cs.persistRun(caseId, r2, {}, null, { run: { outcome: 'unchanged' }, now: T0 + 11 });
+    const g = cs.getCase(caseId);
+    expect(g.findings.map((f) => [f.evidence_id, f.run_id, !!f.cited_from_run])).toEqual([
+      ['ev_a', r2, false], ['ev_b', r1, true], ['ev_c', r1, true],
+    ]);
+    const b = g.findings.find((f) => f.evidence_id === 'ev_b');
+    expect(b).toMatchObject({ source: 'email', trust: 'untrusted_text' });
+    // Read only: nothing was copied into the latest run.
+    expect(cs.findingsForRun(r2).map((it) => it.evidenceId)).toEqual(['ev_a']);
+  });
+
+  it('F2: live tool steps count under the gate source; cache-served ok steps are cache_only; copied steps count once', () => {
+    const { caseId } = cs.upsertDetected(cand('U1'), { now: T0 });
+    expect(cs.leaseRun(caseId, 'p#run1', T0 + 600000, { now: T0 })).toBe(true);
+    const runId = cs.openRun({ caseId, trigger: 'new', now: T0 });
+    const M = { leaseOwner: 'p#run1', now: T0 + 1 };
+    const step = (seq, tool, source, done) => {
+      const s = cs.beginStep({ caseId, runId, seq, turn: 1, kind: 'tool', tool, args: { seq }, source, live: true }, M);
+      cs.completeStep(s.stepId, done, [], M);
+    };
+    step(1, 'aap_comments', 'aap_cache', { status: 'unavailable', code: 'NOT_WARM', summary: { count: 1, cacheServed: true } });
+    step(2, 'decisiv_activity', 'decisiv', { status: 'ok', code: 'CACHE_FRESH', summary: { count: 2 } });
+    step(3, 'paccar_asist', 'decisiv', { status: 'empty', code: 'NOT_PACCAR', summary: { count: 0 } });
+    step(4, 'decisiv_activity', 'decisiv', { status: 'ok', code: null, summary: { count: 3, live: true } });
+    const m = cs.sourceMetrics(T0 + 5);
+    expect(m.aap_live).toMatchObject({ not_warm: 1, ok: 0 });
+    expect(m.aap_cache).toBeUndefined();
+    expect(m.decisiv).toMatchObject({ ok: 1, cache_only: 2 });
+    // A resumed run copies the steps (they keep their earlier started_at): no double count.
+    const r2 = cs.openRun({ caseId, trigger: 'recovered', now: T0 + 10 });
+    cs.copyRunForResume(runId, r2, { now: T0 + 11 });
+    expect(cs.sourceMetrics(T0 + 12)).toEqual(m);
+  });
+});
+
 describe('guard scan of case-store.js', () => {
   const src = fs.readFileSync(require.resolve('../src/autopilot/case-store.js'), 'utf8');
   function functions() {

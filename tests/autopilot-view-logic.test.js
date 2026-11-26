@@ -62,6 +62,13 @@ describe('autopilot-logic helpers', () => {
     expect(rows[2].conflict).toBe(true);
   });
 
+  it('acceptance F1: a cited earlier-run row keeps source and trust, is marked earlierRun with its run id, and is not a conflict of this run', () => {
+    const rows = L.evidenceRows([
+      { evidence_id: 'ev_old', run_id: 'run_1', cited_from_run: true, source: 'email', field: 'note', value_text: 'x', retrieved_at: 2, freshness: 'STALE', confidence: 0.5, trust: 'untrusted_text', conflict_group: 'cf_old' },
+    ], { cf_old: ['ev_old'] });
+    expect(rows[0]).toMatchObject({ source: 'email', trust: 'untrusted text', earlierRun: true, runId: 'run_1', conflict: false, conflictGroup: '' });
+  });
+
   it('supervisor banner: shown only when master ON and the supervisor is off; R13 env override disables the button', () => {
     expect(L.supervisorBanner({ enabled: false, supervisorEnabled: false })).toBe(null);
     expect(L.supervisorBanner({ enabled: true, supervisorEnabled: true })).toBe(null);
