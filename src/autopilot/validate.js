@@ -224,7 +224,15 @@ function validatePlannerTurn(r, opts) {
   if (data.decision === undefined && data.schemaVersion === 1) {
     return { ok: true, decision: 'final', tools: [], memory: { hypotheses: [], openQuestions: [] }, result: data, code: null, warnings: ['v1_shaped_final'] };
   }
-  if (data.schemaVersion !== 2) return bad('invalid_schema');
+  if (data.decision === undefined && data.summary !== undefined && data.recommendedActions !== undefined) {
+    return { ok: true, decision: 'final', tools: [], memory: { hypotheses: [], openQuestions: [] }, result: data, code: null, warnings: ['bare_result_final'] };
+  }
+  // Decide by the decision field first; tolerate the envelope version the model sometimes merges with the nested result's 1.
+  if (DECISIONS.includes(data.decision) && data.schemaVersion !== 2) {
+    if (!(data.schemaVersion === '2' || data.schemaVersion === undefined || data.schemaVersion === 1)) return bad('invalid_schema');
+    warnings.push('schema_version_coerced');
+  }
+  if (data.schemaVersion !== 2 && !warnings.includes('schema_version_coerced')) return bad('invalid_schema');
   if (!DECISIONS.includes(data.decision)) return bad('invalid_decision');
   const known = new Set(_arr(o.toolNames));
   const tools = [];

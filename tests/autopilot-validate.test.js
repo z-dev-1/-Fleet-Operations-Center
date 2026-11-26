@@ -173,6 +173,35 @@ describe('validatePlannerTurn', () => {
     expect(V(d)).toMatchObject({ ok: true, decision: 'final', result: d, tools: [] });
   });
 
+  it('tolerates the envelope version when decision is valid (schema_version_coerced)', () => {
+    const d = base();
+    const a = V({ schemaVersion: 1, decision: 'final', result: d });
+    expect(a).toMatchObject({ ok: true, decision: 'final', result: d });
+    expect(a.warnings).toContain('schema_version_coerced');
+    const b = V({ schemaVersion: '2', decision: 'request_tools', tools: [{ tool: 'dtna_case', args: { unit: '1' } }] });
+    expect(b).toMatchObject({ ok: true, decision: 'request_tools' });
+    expect(b.tools.map((t) => t.tool)).toEqual(['dtna_case']);
+    expect(b.warnings).toContain('schema_version_coerced');
+    const c = V({ decision: 'final', result: d });
+    expect(c).toMatchObject({ ok: true, decision: 'final', result: d });
+    expect(c.warnings).toContain('schema_version_coerced');
+    expect(V({ schemaVersion: 2, decision: 'final', result: d }).warnings).not.toContain('schema_version_coerced');
+  });
+
+  it('a bare result object (no decision, summary + recommendedActions) is a final', () => {
+    const r = { summary: 's', recommendedActions: [] };
+    const v = V(r);
+    expect(v).toMatchObject({ ok: true, decision: 'final', result: r, tools: [] });
+    expect(v.warnings).toContain('bare_result_final');
+  });
+
+  it('still rejects non-objects and unknown decisions', () => {
+    expect(V(42)).toMatchObject({ ok: false, code: 'invalid_schema' });
+    expect(V([])).toMatchObject({ ok: false, code: 'invalid_schema' });
+    expect(V({ decision: 'bogus' })).toMatchObject({ ok: false, code: 'invalid_schema' });
+    expect(V({ schemaVersion: 2, decision: 'bogus' })).toMatchObject({ ok: false, code: 'invalid_decision' });
+  });
+
   it('tools: non-array -> [], malformed entries dropped, unknown names kept, <= 3, why sanitized <= 200', () => {
     expect(V({ schemaVersion: 2, decision: 'request_tools', tools: 'x' }).tools).toEqual([]);
     const v = V({ schemaVersion: 2, decision: 'request_tools', tools: [

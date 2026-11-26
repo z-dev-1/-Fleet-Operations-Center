@@ -200,6 +200,7 @@ const PLANNER_SCHEMA_TEXT = [
   ' "memory":{"hypotheses":[{"statement":"<=200","confidence":0.0,"evidenceIds":["ev_..."]}],',
   '           "openQuestions":[{"question":"<=200","likelySource":"aap|dtna|decisiv|vendor|dsp|slack|email|unknown"}]},',
   ' "result":<required when decision is final: the object described below>}',
+  'The top-level object MUST have "schemaVersion":2; the nested "result" object keeps "schemaVersion":1. Output ONLY the JSON object, no prose, no markdown fences.',
   'The final result object:',
   SCHEMA_TEXT,
 ].join('\n');
