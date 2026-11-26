@@ -32,7 +32,7 @@ const {
   STATES: S, LIMITS, AUTH_DOWN, OPERATIONAL_CADENCE, normUnit, unitIndex, UNIT_KEY_OF, localDate, HOUR, MIN,
 } = require('./constants');
 const { buildScope, inScopeExisting } = require('./scope');
-const { planSources, decisivRef, tireRelevant } = require('./plan');
+const { planSources, decisivRef, tireRelevant, rowWithLinkedDecisiv } = require('./plan');
 const evidence = require('./evidence');
 const fingerprint = require('./fingerprint');
 const resolution = require('./resolution');
@@ -292,7 +292,9 @@ async function runInvestigation(caseId, deps) {
     } else {
       // Plan (written now, R10).
       const unit = rec.unit_id;
-      const ref = decisivRef(row || {});
+      const dealerCases = rec.dealer_cases !== undefined ? rec.dealer_cases : rec.dealer_cases_json;
+      const planRow = rowWithLinkedDecisiv(row || { equipmentId: unit }, dealerCases);
+      const ref = decisivRef(planRow);
       const decDoc = doc('decisivCaseCache');
       const decEntry = ref.estimateId && decDoc && typeof decDoc === 'object' ? decDoc[ref.estimateId] : null;
       let dtnaCount = 0;
@@ -304,7 +306,7 @@ async function runInvestigation(caseId, deps) {
       const lim = d.limiter || null;
       const budgetOf = (s) => !!(lim && lim.tokensLeft(s) > 0 && lim.tickLeft() > 0);
       const plan = planSources({
-        row: row || { equipmentId: unit },
+        row: planRow,
         features,
         now: t0,
         gate: { aap: auth.midway === 'HEALTHY', decisiv: true },
@@ -318,6 +320,7 @@ async function runInvestigation(caseId, deps) {
         hasFasCase: !!(fas && typeof fas === 'object' && fas['unit-' + unit.toLowerCase()]),
         longDwellListed: (rec.reasons || []).some((r) => r && r.code === 'LONG_DWELL_LISTED'),
         aperiaCache,
+        dealerCases,
       });
       ctx.plan = plan.sources;
       cs.writeCheckpoint(runId, null, cpExtra({ plan: plan.sources }));
@@ -325,7 +328,7 @@ async function runInvestigation(caseId, deps) {
 
       // ── step 4: evidence ────────────────────────────────────────────────
       pack = await evidence.collect(plan, ports, lim, signal, {
-        row: row || { equipmentId: unit }, now: t0, syncedAt: fleetDoc.syncedAt, buildAtMs, staleDays, isDown: down,
+        row: planRow, now: t0, syncedAt: fleetDoc.syncedAt, buildAtMs, staleDays, isDown: down,
         docs: d.docs,
       });
       if (aborted()) return onAbort();

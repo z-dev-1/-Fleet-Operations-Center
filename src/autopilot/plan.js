@@ -16,6 +16,8 @@
  *   decisivStageAt                    ms the cached Decisiv stage was fetched, or null
  *   budget: { aap_live, decisiv }     limiter tokens left
  *   dtnaCount, hasEmail, hasFasCase, longDwellListed, aperiaCache (cached() result or null)
+ *   dealerCases                       ap_case.dealer_cases_json (string, array or null); a linked
+ *                                     decisiv / dtna case keeps that source relevant
  * }
  * OPERATIONAL_CADENCE values are scheduling constants, not SLAs.
  */
@@ -53,6 +55,36 @@ function tireRelevant(row) {
 }
 
 function _offsiteUrl(r) { return _s(r.offsiteShopEventUrl) || _s(r.savedOffsiteUrl) || _s(r.asistSrUrl); }
+
+/**
+ * linkedDealerCases(v) -> { decisiv: [id], dtna: [id] } from ap_case.dealer_cases_json
+ * (a JSON string, a parsed array, null or malformed; never throws).
+ */
+function linkedDealerCases(v) {
+  const out = { decisiv: [], dtna: [] };
+  let a = v;
+  if (typeof a === 'string') { try { a = JSON.parse(a); } catch (_) { a = null; } }
+  if (!Array.isArray(a)) return out;
+  for (const x of a) {
+    if (!x || typeof x !== 'object') continue;
+    const k = _s(x.kind).toLowerCase();
+    const id = _s(x.id);
+    if (id && out[k] && !out[k].includes(id)) out[k].push(id);
+  }
+  return out;
+}
+
+/**
+ * rowWithLinkedDecisiv(row, dealerCases) -> row, or a copy carrying decisivCaseId from the
+ * case's linked Decisiv dealer case when the row itself has no Decisiv estimate id, so the
+ * existing Decisiv cache read can find the entry.
+ */
+function rowWithLinkedDecisiv(row, dealerCases) {
+  const r = row || {};
+  if (decisivRef(r).estimateId) return row;
+  const id = linkedDealerCases(dealerCases).decisiv.find((x) => /^\d+$/.test(x));
+  return id ? Object.assign({}, r, { decisivCaseId: id }) : row;
+}
 
 function planSources(input) {
   const i = input || {};
@@ -93,13 +125,16 @@ function planSources(input) {
     add(S.AAP_LIVE, true, !why, why ? 'cache_only:' + why : 'live');
   }
 
+  // A dealer case linked on the case keeps that dealer source relevant.
+  const linked = linkedDealerCases(i.dealerCases);
+
   // DTNA: cache only in V1 (D-1).
-  if ((Number(i.dtnaCount) || 0) > 0 || isDtnaUrl(_offsiteUrl(row))) add(S.DTNA, true, false, 'cache_only:live_disabled_v1');
+  if ((Number(i.dtnaCount) || 0) > 0 || isDtnaUrl(_offsiteUrl(row)) || linked.dtna.length) add(S.DTNA, true, false, 'cache_only:live_disabled_v1');
   else add(S.DTNA, false, false, 'skipped_not_relevant');
 
   // Decisiv: cache plus a warm-only live read.
   const ref = decisivRef(row);
-  if (!ref.estimateId && !ref.srUrl) add(S.DECISIV, false, false, 'skipped_not_relevant');
+  if (!ref.estimateId && !ref.srUrl && !linked.decisiv.length) add(S.DECISIV, false, false, 'skipped_not_relevant');
   else {
     const age = i.decisivStageAt == null ? Infinity : now - i.decisivStageAt;
     let why = null;
@@ -134,4 +169,4 @@ function _wrap(sources) {
   return { sources, bySource };
 }
 
-module.exports = { planSources, decisivRef, primaryWrId, tireRelevant, isDtnaUrl };
+module.exports = { planSources, decisivRef, primaryWrId, tireRelevant, isDtnaUrl, linkedDealerCases, rowWithLinkedDecisiv };
