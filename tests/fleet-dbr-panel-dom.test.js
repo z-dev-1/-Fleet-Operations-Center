@@ -213,7 +213,11 @@ describe('edits and copy', () => {
     await overlayOf(t).emit('click', act('copy-row', { key: DOWN_KEYS[0] })); await flush();
     const one = t.clipboard.writeText.mock.calls[1][0];
     expect(one.split('\n').length).toBe(1);
-    expect(one.split('\t').length).toBe(24);
+    // Copy row = the 17 fill columns, starting at "1P Vendor Barrier Y/N?".
+    expect(one.split('\t').length).toBe(17);
+    const m1 = t.ctl.state.model;
+    expect(L.fillColumns(m1)[0].header).toBe('1P Vendor Barrier Y/N?');
+    expect(one).toBe(L.fillColumnsTsv(m1, [m1.rows.find((r) => r.key === DOWN_KEYS[0])], null));
   });
   it('clipboard failure shows the manual-copy hint', async () => {
     const t = setup({ aiDraft: false });
@@ -372,7 +376,7 @@ describe('AI v2 cells (FEAT-004)', () => {
     const t = setup({ aiDraft: false, getModel: m });
     await t.ctl.open(); await flush();
     await overlayOf(t).emit('click', act('copy-row', { key: k })); await flush();
-    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.rowsToTsv(m.columns, [m.rows.find((r) => r.key === k)], null));
+    expect(t.clipboard.writeText.mock.calls[0][0]).toBe(L.fillColumnsTsv(m, [m.rows.find((r) => r.key === k)], null));
     expect(part(t, 'fdbr-status').textContent).toContain('2 cells flagged \u26a0 \u2014 review before pasting');
     // An unsaved edit of a flagged cell is not counted.
     await overlayOf(t).emit('input', typing(k, 'fasActions', 'mine'));
