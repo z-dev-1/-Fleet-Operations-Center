@@ -560,7 +560,7 @@ export function tableHtml(model, opts = {}) {
       + '<div class="fdbr-row-btns">'
       + (aiDraft && _down(r) > 0 ? btn('redraft', '\u2728 Redraft', 'Redraft AI cells for') : '')
       + btn('reset-row', '\u21ba Reset row', 'Reset edits for')
-      + btn('copy-row', '\ud83d\udccb Copy row', 'Copy row')
+      + btn('copy-row', '\ud83d\udccb Copy row', 'Copy row (1P Vendor Barrier Y/N onward) for')
       + '</div><span data-fdbr-badge="' + esc(r.key) + '">' + badgeHtml(r, rowStatus[r.key]) + '</span></td>';
     return '<tr data-key="' + esc(r.key) + '">' + tds + ui + '</tr>';
   }).join('');

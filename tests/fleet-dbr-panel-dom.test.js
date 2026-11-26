@@ -229,7 +229,9 @@ describe('edits and copy', () => {
     await overlayOf(t).emit('click', act('copy-row', { key: DOWN_KEYS[0] })); await flush();
     const one = t.clipboard.writeText.mock.calls[1][0];
     expect(one.split('\n').length).toBe(1);
-    expect(one.split('\t').length).toBe(24);
+    // Copy row = the 17 fill columns, starting at "1P Vendor Barrier Y/N?".
+    expect(one.split('\t').length).toBe(17);
+    expect(L.fillColumns(t.ctl.state.model)[0].header).toBe('1P Vendor Barrier Y/N?');
   });
   it('clipboard failure shows the manual-copy hint', async () => {
     const t = setup({ aiDraft: false });
@@ -636,7 +638,7 @@ describe('copy scope, copy note, freshness (FEAT-004)', () => {
     // Copy row keeps the single clicked row, whatever the scope.
     const zero = ZERO_KEYS[0];
     await overlayOf(t3).emit('click', act('copy-row', { key: zero })); await flush();
-    expect(t3.clipboard.writeText.mock.calls[1][0]).toBe(L.sheetTsv(off.columns, [off.rows.find((r) => r.key === zero)], null, {}));
+    expect(t3.clipboard.writeText.mock.calls[1][0]).toBe(L.sheetTsv(L.fillColumns(off), [off.rows.find((r) => r.key === zero)], null, {}));
     expect(part(t3, 'fdbr-status').textContent).toContain('Copied 1 row');
   });
 

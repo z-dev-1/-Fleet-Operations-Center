@@ -684,7 +684,8 @@ function createController(deps) {
       case 'copy': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), false, el, false, copyKind());
       case 'copy-header': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), true, el, false, copyKind());
       case 'copy-fill': return copy(L.copyRows(st.model, st.copyScope, st.hideZero, st.scacs), false, el, true, copyKind());
-      case 'copy-row': { const row = key ? _row(key) : null; if (row) return copy([row], false, el, false, 'row'); return; }
+      // Copy row = this row's fill columns only (1P Vendor Barrier Y/N? .. Where Do You Need Support?).
+      case 'copy-row': { const row = key ? _row(key) : null; if (row) return copy([row], false, el, true, 'row'); return; }
       default:
     }
   }
