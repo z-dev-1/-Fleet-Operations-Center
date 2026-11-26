@@ -70,4 +70,17 @@ describe('buildRecord', () => {
     expect(Buffer.byteLength(JSON.stringify(r.record_json), 'utf8')).toBeLessThanOrEqual(16384);
     expect(r.record_json.evidenceRefs.length).toBeLessThan(60);
   });
+
+  it('a source tagged unavailable_in_run in memory keeps that status in record_json.sourceFreshness', () => {
+    const fr = { dtna: { newestObservedAt: null, retrievedAt: null, status: 'unavailable_in_run' }, aap_cache: { newestObservedAt: NOW, retrievedAt: NOW, status: 'ok' } };
+    const r = buildRecord({ rec, analysis, output: aiOut([stage.evidenceId]), pack, memory: { sourceFreshness: fr }, sourceStatus: { dtna: 'cache_only:live_disabled_v1' }, now: NOW });
+    expect(r.record_json.sourceFreshness.dtna).toEqual({ newestObservedAt: null, retrievedAt: null, status: 'unavailable_in_run' });
+  });
+
+  it('no ETA provided is never stored as a repair ETA', () => {
+    const a = Object.assign({}, analysis, { eta: { status: 'NOT_PROVIDED', date: null } });
+    const r = buildRecord({ rec, analysis: a, output: aiOut([stage.evidenceId]), pack, now: NOW });
+    expect(r.repair_eta).toBe(null);
+    expect(r.record_json.repairEtaStatus).toBe('NOT_PROVIDED');
+  });
 });

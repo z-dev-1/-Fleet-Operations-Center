@@ -197,8 +197,11 @@ function buildProposals(input) {
       const ats = cited.map((c) => c.observedAt).filter(Number.isFinite);
       if (!ats.length) continue;
       const newest = Math.max(...ats);
+      // An inference that also restates AI-written or prior-conclusion text is tagged derived_ai, not as a source event.
+      const derived = cited.find((c) => c.trust === 'derived_ai' || c.trust === 'prior_conclusion');
       const ref = cited.find((c) => c.observedAt === newest) || cited[0];
-      push(newest, ref.source, ref.evidenceId, 'inferred', 'inference', _clean(inf.statement));
+      if (derived) push(newest, 'derived_ai', derived.evidenceId, 'inferred', 'inference', _clean(inf.statement));
+      else push(newest, ref.source, ref.evidenceId, 'inferred', 'inference', _clean(inf.statement));
     }
   }
   return out;

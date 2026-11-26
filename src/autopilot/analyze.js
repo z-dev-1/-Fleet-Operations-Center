@@ -73,14 +73,19 @@ function analyze(pack, caseRec, opts) {
     || _structured(items, 'decisiv', 'dealerName') || _structured(items, 'dtna', 'dealerName');
   const dealer = dealerItem ? String(dealerItem.value) : null;
 
+  // The items behind the party, so the fallback can cite them (an uncited party reads as unknown).
+  const canonItem = _structured(items, 'canonical', 'status');
+  let partyItems = [];
   let party = _waitingOnParty(o.canonical && o.canonical.waitingOn);
-  if (!party) {
-    if (has(R.WAITING_PARTS)) party = 'parts_supplier';
-    else if (has(R.WAITING_ESTIMATE_APPROVAL)) party = 'amazon_fleet';
-    else if (has(R.AWAITING_SCHEDULING)) party = 'vendor';
-    else if (dealer) party = 'dealer';
+  if (party) partyItems = [canonItem];
+  else {
+    if (has(R.WAITING_PARTS)) { party = 'parts_supplier'; partyItems = [_structured(items, 'aap_cache', 'partsStatus'), canonItem]; }
+    else if (has(R.WAITING_ESTIMATE_APPROVAL)) { party = 'amazon_fleet'; partyItems = [_structured(items, 'aap_cache', 'offsiteStage'), canonItem]; }
+    else if (has(R.AWAITING_SCHEDULING)) { party = 'vendor'; partyItems = [_structured(items, 'aap_cache', 'serviceState')]; }
+    else if (dealer) { party = 'dealer'; partyItems = [dealerItem]; }
     else party = 'unknown';
   }
+  const responsiblePartyEvidenceIds = [...new Set(partyItems.filter(Boolean).map((i) => i.evidenceId).filter((id) => typeof id === 'string' && id))];
 
   const groups = (p.conflicts && Array.isArray(p.conflicts.groups)) ? p.conflicts.groups : [];
   const loggedFromRow = o.row ? newestLoggedUpdate(o.row.fullConversation, o.syncedAt) : null;
@@ -104,6 +109,7 @@ function analyze(pack, caseRec, opts) {
     repairPhase,
     blockers,
     responsibleParty: PARTIES.includes(party) ? party : 'unknown',
+    responsiblePartyEvidenceIds,
     dealer,
     lastVendorUpdate: newestVendorUpdate(items),
     lastLoggedUpdateAt: Number.isFinite(lastLoggedUpdateAt) ? lastLoggedUpdateAt : null,

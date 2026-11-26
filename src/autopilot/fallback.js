@@ -145,6 +145,9 @@ function deterministicRecommendation(analysis, pack, opts) {
     evidenceIds: (g.positions || []).map((p) => p.evidenceId).filter(Boolean),
   }));
 
+  // A party with no supporting item is reported as unknown.
+  const rpIds = (Array.isArray(a.responsiblePartyEvidenceIds) ? a.responsiblePartyEvidenceIds : []).filter(Boolean).slice(0, 20);
+
   const summary = 'Unit ' + (a.unitId || '?') + ': ' + (reasons.join(', ') || 'no reasons') +
     (a.daysDown != null ? '; ' + (Math.round(a.daysDown * 10) / 10) + ' days down' : '') + '; ETC ' + (eta.status || 'NOT_PROVIDED') + '.';
 
@@ -157,7 +160,7 @@ function deterministicRecommendation(analysis, pack, opts) {
     stageStall: { stalled: null, stage: 'unknown', reasoning: 'not assessed (AI unavailable)', confidence: 0, evidenceIds: [] },
     missingInfo,
     conflicts,
-    responsibleParty: { party: a.responsibleParty || 'unknown', evidenceIds: [] },
+    responsibleParty: { party: rpIds.length ? (a.responsibleParty || 'unknown') : 'unknown', evidenceIds: rpIds },
     recommendedActions: rec,
     actionsRequiringApproval: appr,
     urgency: 'normal',

@@ -244,6 +244,10 @@ function conclude(mem, opts) {
       status: typeof s === 'string' ? _tok(s, 32) : (s.status ? _tok(s.status, 32) : null),
     };
   }
+  // A source a tool found blocked (auth / unavailable) during this run is not reported with its plan status.
+  for (const id of _ids(o.blockedSources, 20)) {
+    m.sourceFreshness[id] = Object.assign({ newestObservedAt: null, retrievedAt: null }, m.sourceFreshness[id], { status: 'unavailable_in_run' });
+  }
   m.checkpoint = null;
   m.nextPlannedTool = null;
   m.awaitingSources = _ids(o.blockedSources, 20);

@@ -89,6 +89,18 @@ describe('buildProposals', () => {
     expect(rows.length).toBeLessThanOrEqual(20);
   });
 
+  it('an inference that also cites timeline / prior-conclusion text is tagged derived_ai; structured-only keeps its source', () => {
+    expect(['derived_ai', 'prior_conclusion']).toContain(tl[0].trust);
+    const out2 = { generatedBy: 'ai', inferences: output.inferences.concat([
+      { statement: 'Turbo was ordered before the repair resumed', confidence: 0.7, evidenceIds: [stage.evidenceId, tl[0].evidenceId] },
+    ]) };
+    const rows = timeline.buildProposals({ rec, items, output: out2, published: {}, hiddenSigs: [], runId: 'r1', now: NOW });
+    const d = rows.find((r) => r.description === 'Turbo was ordered before the repair resumed');
+    expect(d).toMatchObject({ source: 'derived_ai', evidence_ref: tl[0].evidenceId, basis: 'inferred' });
+    expect(rows.find((r) => r.description === 'Repair resumed after the parts arrived').source).toBe('decisiv');
+    expect(rows.some((r) => /Circular/.test(r.description))).toBe(false);
+  });
+
   it('the same evidence twice gives the same fingerprints (deduplicated)', () => {
     const a = timeline.buildProposals({ rec, items: items.concat(items), output, runId: 'r1', now: NOW });
     const b = timeline.buildProposals({ rec, items, output, runId: 'r2', now: NOW + 3600e3 });

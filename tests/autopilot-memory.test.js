@@ -94,6 +94,19 @@ describe('recordTool / conclude', () => {
     expect(m.awaitingSources).toEqual(['decisiv']);
     expect(m.checkpoint).toBe(null);
     expect(m.recommendation).toEqual({ hash: 'abc', actions: 0, approvals: 0 });
+    expect(m.sourceFreshness.decisiv.status).toBe('unavailable_in_run');
+    expect(m.sourceFreshness.aap_cache.status).toBe('ok');
+  });
+
+  it('a source blocked during the run is tagged unavailable_in_run over its plan status, timestamps kept', () => {
+    const m = M.conclude(M.init(rec, null), {
+      runId: 'run_2', at: T0, blockedSources: ['dtna'],
+      sourceStatus: { dtna: 'cache_only:live_disabled_v1', aap_cache: { status: 'ok', retrievedAt: T0, newestObservedAt: T0 - 1000 } },
+    });
+    expect(m.sourceFreshness.dtna).toEqual({ newestObservedAt: null, retrievedAt: null, status: 'unavailable_in_run' });
+    expect(m.sourceFreshness.aap_cache).toEqual({ newestObservedAt: T0 - 1000, retrievedAt: T0, status: 'ok' });
+    const m2 = M.conclude(M.init(rec, null), { at: T0, blockedSources: ['aap_cache'], sourceStatus: { aap_cache: { status: 'ok', retrievedAt: T0 } } });
+    expect(m2.sourceFreshness.aap_cache).toEqual({ newestObservedAt: null, retrievedAt: T0, status: 'unavailable_in_run' });
   });
 });
 

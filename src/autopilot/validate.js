@@ -21,7 +21,7 @@
  */
 
 const untrusted = require('../email-intel/untrusted');
-const { ACTION_CLASSES, WRITE_ACTION_CLASSES } = require('./constants');
+const { ACTION_CLASSES, WRITE_ACTION_CLASSES, localDate } = require('./constants');
 
 const TOP_KEYS = Object.freeze([
   'schemaVersion', 'summary', 'confirmedFacts', 'inferences', 'stageStall', 'missingInfo', 'conflicts',
@@ -58,6 +58,27 @@ function _enum(v, list) { const s = String(v == null ? '' : v).trim().toLowerCas
 function _arr(v) { return Array.isArray(v) ? v : []; }
 function _flags(it) { return Array.isArray(it && it.flags) ? it.flags : (typeof (it && it.flags) === 'string' ? it.flags.split(',') : []); }
 const DERIVED_TRUST = new Set(['derived_ai', 'prior_conclusion']);
+const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
+const US_DATE_RE = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g;
+
+// ISO dates a cited item carries: in its value (ISO or M/D/YYYY) and its observation day.
+function _itemDates(it) {
+  const out = new Set();
+  const v = it && it.value;
+  const s = v != null && typeof v === 'object' ? JSON.stringify(v) : String(v == null ? '' : v);
+  for (const m of s.match(ISO_DATE_RE) || []) out.add(m);
+  for (const m of s.matchAll(US_DATE_RE)) out.add(m[3] + '-' + m[1].padStart(2, '0') + '-' + m[2].padStart(2, '0'));
+  if (it && Number.isFinite(it.observedAt)) out.add(localDate(it.observedAt));
+  return out;
+}
+// True when the statement names an ISO date that none of the cited items carries.
+function _dateMismatch(statement, its) {
+  const want = String(statement || '').match(ISO_DATE_RE) || [];
+  if (!want.length) return false;
+  const have = new Set();
+  for (const i of its) for (const d of _itemDates(i)) have.add(d);
+  return want.some((d) => !have.has(d));
+}
 
 function validateAiOutput(data, pack) {
   const warnings = [];
@@ -117,10 +138,11 @@ function validateAiOutput(data, pack) {
     const allDerived = its.every((i) => DERIVED_TRUST.has(i.trust));
     const canonicalOnly = its.every((i) => _flags(i).includes('canonical_derived'));
     const timelineOnly = its.every((i) => i.source === 'timeline');
-    if (allUntrusted || allStale || inConflict || allDerived || canonicalOnly || timelineOnly) {
+    const dateMismatch = _dateMismatch(f.statement, its);
+    if (allUntrusted || allStale || inConflict || allDerived || canonicalOnly || timelineOnly || dateMismatch) {
       warnings.push('downgraded_fact');
       const why = inConflict ? 'in conflict' : (timelineOnly ? 'timeline text only' : (allDerived ? 'AI-written or a prior conclusion'
-        : (canonicalOnly ? 'canonical status only' : (allUntrusted ? 'untrusted text' : 'stale'))));
+        : (canonicalOnly ? 'canonical status only' : (allUntrusted ? 'untrusted text' : (allStale ? 'stale' : 'missing the date the statement names')))));
       inferences.push({ statement: f.statement, reasoning: 'Downgraded from a confirmed fact: the cited evidence is ' + why + '.', confidence: 0.5, evidenceIds: f.evidenceIds });
     } else {
       confirmedFacts.push(f);
@@ -142,6 +164,7 @@ function validateAiOutput(data, pack) {
     confidence: _conf(ss.confidence),
     evidenceIds: ids(ss.evidenceIds),
   };
+  if (stageStall.stalled !== null && !stageStall.evidenceIds.length) { stageStall.stalled = null; warnings.push('uncited_stage_stall'); }
   const missingInfo = _arr(data.missingInfo).filter(_obj).slice(0, 20).map((m) => ({
     item: _str(m.item, 200), whyNeeded: _str(m.whyNeeded, 200), likelySource: _enum(m.likelySource, LIKELY),
   }));
@@ -150,6 +173,7 @@ function validateAiOutput(data, pack) {
   }));
   const rp = _obj(data.responsibleParty) ? data.responsibleParty : {};
   const responsibleParty = { party: _enum(rp.party, PARTIES), evidenceIds: ids(rp.evidenceIds) };
+  if (responsibleParty.party !== 'unknown' && !responsibleParty.evidenceIds.length) { responsibleParty.party = 'unknown'; warnings.push('uncited_party'); }
   const urgency = URGENCY.includes(data.urgency) ? data.urgency : 'normal';
   const nr = Number(data.nextReviewInHours);
   const nextReviewInHours = Number.isFinite(nr) ? Math.min(72, Math.max(1, nr)) : 24;

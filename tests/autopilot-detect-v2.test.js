@@ -136,3 +136,15 @@ describe('equipment sweep (AC-5)', () => {
     expect(F.cs.getCase(id).case).toMatchObject({ state: 'PAUSED', pause_reason: 'type_unverified' });
   });
 });
+
+describe('etaStatus: no ETA provided is never a verified ETA', () => {
+  const { etaStatus } = require('../src/autopilot/detect');
+  const ref = Date.parse('2026-11-26T12:00:00');
+  it('no source date -> NOT_PROVIDED with no date; a negated ETC -> NEGATED with no date', () => {
+    const none = etaStatus({}, [], '2026-11-26', ref);
+    expect(none).toMatchObject({ status: 'NOT_PROVIDED', date: null, source: null });
+    const neg = etaStatus({ _factEtc: { state: 'none', negated: true } }, [], '2026-11-26', ref);
+    expect(neg).toMatchObject({ status: 'NEGATED', date: null });
+    for (const e of [none, neg]) expect(e.status).not.toBe('VERIFIED_OVERDUE');
+  });
+});

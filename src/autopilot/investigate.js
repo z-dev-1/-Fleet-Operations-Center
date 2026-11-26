@@ -38,7 +38,7 @@ const fingerprint = require('./fingerprint');
 const resolution = require('./resolution');
 const { analyze, trivial } = require('./analyze');
 const { buildPrompt } = require('./prompt');
-const { validateAiOutput } = require('./validate');
+const { validateAiOutput, hasSourceSupport } = require('./validate');
 const { deterministicRecommendation } = require('./fallback');
 const { buildConflicts, needsReview } = require('./conflicts');
 const { scoreV2 } = require('./priority');
@@ -534,8 +534,10 @@ async function runInvestigation(caseId, deps) {
             if (aborted()) return onAbort();
             if (r && r.ok) {
               v = validateAiOutput(r.data, pack);
-              ctx.aiStatus = v.ok ? 'ok' : 'invalid';
-              warnings = v.warnings || [];
+              // Same rule as the multi-turn final: a final citing only derived items is not accepted.
+              const supported = v.ok && hasSourceSupport(v.output, pack);
+              ctx.aiStatus = supported ? 'ok' : 'invalid';
+              warnings = (v.warnings || []).concat(v.ok && !supported ? ['circular_only'] : []);
             } else if (r && r.error === 'reason-timeout') ctx.aiStatus = 'timeout';
             else if (r && (r.error === 'unparseable' || r.error === 'missing-array')) ctx.aiStatus = 'invalid';
             else ctx.aiStatus = 'unavailable';
@@ -556,7 +558,8 @@ async function runInvestigation(caseId, deps) {
         }
         output = Object.assign({}, output, { missingInfo: mi });
       }
-      if (hasTools && mc && Array.isArray(mc.groups) && mc.groups.length) output = _discloseConflicts(output, mc.groups);
+      const cg = hasTools ? mc : pack.conflicts;
+      if (cg && Array.isArray(cg.groups) && cg.groups.length) output = _discloseConflicts(output, cg.groups);
       try {
         cs.writeCheckpoint(runId, {
           step: 'analysis_done', fp, output, aiStatus: ctx.aiStatus, generatedBy: output.generatedBy, aiLane: ctx.aiLane,

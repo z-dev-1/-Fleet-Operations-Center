@@ -96,6 +96,22 @@ describe('multi-turn run through runInvestigation', () => {
     expect(steps(caseId)).toEqual([]);
   });
 
+  it('V1 path: a final citing only derived (canonical) items is invalid (circular_only), deterministic output kept', async () => {
+    s.world.isolated = false;
+    s.world.canonical = () => ({ status: 'in_repair' });
+    const { caseId } = F.seedCase();
+    let canonId = null;
+    const reason = F.okReason((o) => {
+      canonId = (/\[(ev_[a-f0-9_]+)\] canonical status/.exec(o.prompt) || [])[1] || null;
+      return { confirmedFacts: [{ statement: 'x', evidenceIds: [canonId] }], inferences: [], responsibleParty: { party: 'vendor', evidenceIds: [canonId] }, recommendedActions: [], actionsRequiringApproval: [] };
+    });
+    const r = await inv(caseId, { reason });
+    expect(canonId).toMatch(/^ev_/);
+    expect(reason.calls.length).toBe(1);
+    expect(r.aiStatus).toBe('invalid');
+    expect(caseOf(caseId).ai_findings.generatedBy).toBe('deterministic');
+  });
+
   it('lane lost before turn 2 -> fallback, ai_pending_reason unavailable, ai_investigated_at set (turn 1 answered)', async () => {
     const { caseId } = F.seedCase();
     const reason = F.fakePlanner([() => { s.world.isolated = false; return turn([tool('dtna_case')]); }, finalFrom]);
@@ -237,6 +253,22 @@ describe('AC-37: a conflict only a tool revealed is disclosed', () => {
     const id = liveDecisivId(caseId);
     expect(c.ai_findings.conflicts.some((x) => x.evidenceIds.includes(id))).toBe(true);
     expect(conflictRecord(caseId)).toContain('cf_repairStatus');
+  });
+
+  it('V1 AI final with no tool items: a base-pack conflict group the AI omitted is disclosed', async () => {
+    s.world.isolated = false;
+    s.world.docs.decisivCaseCache['21350186'].stage = 'diagnosis';
+    const { caseId } = F.seedCase();
+    const r = await inv(caseId, { reason: F.okReason() });
+    expect(r.aiStatus).toBe('ok');
+    const groups = F.cs.getRecord(caseId).record.conflicts;
+    expect(groups.length).toBeGreaterThan(0);
+    const c = caseOf(caseId);
+    expect(c.ai_findings.generatedBy).toBe('ai');
+    for (const g of groups) {
+      const ids = g.positions.map((p) => p.evidenceId).filter(Boolean);
+      expect(c.ai_findings.conflicts.some((x) => JSON.stringify(x.evidenceIds) === JSON.stringify(ids)), g.group).toBe(true);
+    }
   });
 });
 
