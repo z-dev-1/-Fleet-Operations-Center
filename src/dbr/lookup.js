@@ -342,7 +342,7 @@ function _fhMd(ymd) {
 }
 // Missed ETC: the count comes from the (bare) cell; the "why" lines come from the cell when it
 // has them (legacy / edited), else from row.missedWhy. note = the override marker text when an
-// extracted miss overrode a saved "No ETC" note (computed cell only).
+// extracted miss overrode a saved note ("No ETC" or a dated note; computed cell only).
 function _fhMissed(row) {
   const raw = _fhCell(row, 'missedEtc');
   const lines = raw.split('\n');
@@ -355,7 +355,7 @@ function _fhMissed(row) {
     why = mw.map((w) => '\u2022 ' + String(w.unit || '?') + ' (ETC ' + _fhMd(w.date) + '): ' + String(w.why || '')).join('\n');
   }
   const ov = row && Array.isArray(row.userEtcOverrides) ? row.userEtcOverrides : [];
-  const note = !edited && ov.length ? ' (' + ov.map((o) => String(o.unit || '?')).join(', ') + ' overrode the saved "No ETC" note)' : '';
+  const note = !edited && ov.length ? ' (' + ov.map((o) => String(o.unit || '?')).join(', ') + ' overrode the saved note)' : '';
   return { count, why, note };
 }
 function _fhUnits(row, limit) {

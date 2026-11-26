@@ -1010,11 +1010,13 @@ function _factEtc(fs) {
     statedAt: ent ? ent.statedAt || null : (negated ? ce.statedAt || null : null),
     snippet: ent ? ent.snippet || '' : '',
     negated, reason: c.reason || null,
-    // Additive Fleet Health fields (design §3.4, DR2-4); the keys above are unchanged.
-    structuredMiss: etc.structuredExplicitMiss
-      ? { date: etc.structuredExplicitMiss.date, at: etc.structuredExplicitMiss.at || null, snippet: etc.structuredExplicitMiss.snippet || null } : null,
-    passedHead: etc.passedHead ? Object.assign({}, etc.passedHead) : null,
   };
+  // Additive Fleet Health fields (design §3.4, DR2-4); the keys above are unchanged. Set only
+  // when present, so rows without them keep the same _factEtc (and autopilot fingerprint).
+  if (etc.structuredExplicitMiss) {
+    out.structuredMiss = { date: etc.structuredExplicitMiss.date, at: etc.structuredExplicitMiss.at || null, snippet: etc.structuredExplicitMiss.snippet || null };
+  }
+  if (etc.passedHead) out.passedHead = Object.assign({}, etc.passedHead);
   // Relay history ETC revisions (only when the WR's history has any ETC field).
   const h = fs.history;
   if (h && h.etc.available) {

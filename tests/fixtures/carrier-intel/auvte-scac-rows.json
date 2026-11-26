@@ -2275,8 +2275,6 @@
         "snippet": "Expected completion date time: 2026-11-17T17:00:00.000Z",
         "negated": false,
         "reason": null,
-        "structuredMiss": null,
-        "passedHead": null,
         "slip": {
           "count": 11,
           "seq": [
@@ -3123,8 +3121,6 @@
         "snippet": "Expected completion date time: 2026-11-17T17:00:00.000Z",
         "negated": false,
         "reason": null,
-        "structuredMiss": null,
-        "passedHead": null,
         "slip": {
           "count": 13,
           "seq": [
@@ -3813,8 +3809,6 @@
         "snippet": "Expected completion date time: 2026-11-18T17:00:00.000Z",
         "negated": false,
         "reason": null,
-        "structuredMiss": null,
-        "passedHead": null,
         "slip": {
           "count": 11,
           "seq": [
@@ -4030,9 +4024,7 @@
         "statedAt": null,
         "snippet": "",
         "negated": false,
-        "reason": null,
-        "structuredMiss": null,
-        "passedHead": null
+        "reason": null
       },
       "_factPartsWhy": "",
       "_factEstimateWhy": ""

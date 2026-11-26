@@ -451,6 +451,15 @@ describe('sheet composer (design §3.8, FEAT-003)', () => {
     expect(one([{ equipmentId: 'X1', vendor: 'COX', savedRepairStatus: 'Vehicle arrived' }]).cells.vendor1pDetails).toBe('COX: X1 \u2014 awaiting diagnosis.');
   });
 
+  it('a rejected estimate reads "estimate rejected" in 1P Details and Estimate Details (no contradiction in one row)', () => {
+    const r = one([{ equipmentId: 'X1', vendor: 'TA', savedRepairStatus: 'Awaiting estimate', serviceState: 'Estimate rejected' }]);
+    expect(r.cells.estimateYN).toBe('Y');
+    expect(r.cells.vendor1pDetails).toMatch(/\u2014 estimate rejected\.$/);
+    expect(r.cells.estimateDetails).toMatch(/\u2014 estimate rejected\.$/);
+    for (const id of SHEET_IDS) expect(r.cells[id], id).not.toMatch(/awaiting estimate/);
+    expect(one([{ equipmentId: 'X1', vendor: 'TA', savedRepairStatus: 'Awaiting estimate' }]).cells.vendor1pDetails).toBe('TA: X1 \u2014 awaiting estimate.');
+  });
+
   it('group order (count desc, max days desc, label asc), unit order and the , / and joins', () => {
     const r = one([
       { equipmentId: 'A1', vendor: 'Amerit', savedRepairStatus: 'Repair in progress', workDuration: '30d' },

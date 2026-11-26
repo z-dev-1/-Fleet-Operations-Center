@@ -451,6 +451,7 @@ function _withFactEtc(res, win, field, r, today) {
     out = {
       state: 'missed', date: ph.date, source: 'extracted', snippet: fe.snippet ? _snippet(fe.snippet, 0) : '',
       explicitMissDate: null, viaPassedHead: true, statedDay: _localDay(ph.statedAt) || null,
+      passedSource: _str(ph.source).trim() || null,
       overrode: { field: res.source, was: 'none', userSnippet: res.snippet },
     };
   }
@@ -563,7 +564,10 @@ function _undercutHit(line, etcDate, today) {
     _UNDERCUT_P3_G.lastIndex = 0;
     let m;
     while ((m = _UNDERCUT_P3_G.exec(line))) {
-      if (_datesIn(m[0], today).every((d) => d === etcDate)) return true;
+      // The keyword belongs to the last ETC/ETR token of the match ("Old ETR 11/24 and ETR 11/25 at risk").
+      const toks = [...m[0].matchAll(/\b(?:ETC|ETR)\b/g)];
+      const tail = m[0].slice(toks.length ? toks[toks.length - 1].index : 0);
+      if (_datesIn(tail, today).every((d) => d === etcDate)) return true;
     }
   }
   return false;
@@ -971,7 +975,11 @@ function _statusPhrase(u) {
   if (!st) return 'status not set';
   const n = st.toLowerCase();
   if (STATUS_PHRASES[n]) return STATUS_PHRASES[n];
-  if (ESTIMATE_STATUSES.includes(n)) return !u.barriers.includes('estimate') && u.estApproved ? 'estimate approved' : 'awaiting estimate';
+  if (ESTIMATE_STATUSES.includes(n)) {
+    // A rejected estimate reads the same in every cell of the row (1P/OEM Details and Estimate Details).
+    if (u.kinds && u.kinds.estimate === 'rejected') return 'estimate rejected';
+    return !u.barriers.includes('estimate') && u.estApproved ? 'estimate approved' : 'awaiting estimate';
+  }
   return n.length <= 30 && /^[a-z ]+$/i.test(n) ? n : 'open';
 }
 function _summary(units) {
@@ -1262,6 +1270,12 @@ function _missedWhy(u) {
   else why = e.snippet ? "'" + e.snippet + "'" : '(no verified reason)';
   return { unit: u.id, date: e.date || null, why: (why + _slipSuffix(e.slip)).replace(/\s*\n\s*/g, ' '), overrode: e.overrode || null };
 }
+// Evidence of a Q9 flip for the override marker: 'ETR 11/23 passed (relay, stated 11/21)'.
+function _passedHeadText(e) {
+  if (!e || !e.viaPassedHead || !e.date) return '';
+  const extra = [e.passedSource, e.statedDay ? 'stated ' + _md(e.statedDay) : ''].filter(Boolean).join(', ');
+  return 'ETR ' + _md(e.date) + ' passed' + (extra ? ' (' + extra + ')' : '');
+}
 // '; ETC moved N× (M/D→M/D→…)' from Relay history (last 6 dates); '' without slips.
 function _slipSuffix(slip) {
   if (!slip || !(slip.count > 0)) return '';
@@ -1333,7 +1347,7 @@ function buildFleetDbr(rows, opts = {}) {
     }
     const missedWhy = etcBuckets.missed.map(_missedWhy);
     const userEtcOverrides = etcBuckets.missed.filter((u) => u.etc.overrode).map((u) => ({
-      unit: u.id, date: u.etc.date || null, userSnippet: u.etc.overrode.userSnippet || '', extractedSnippet: u.etc.snippet || '',
+      unit: u.id, date: u.etc.date || null, userSnippet: u.etc.overrode.userSnippet || '', extractedSnippet: u.etc.snippet || _passedHeadText(u.etc),
     }));
     const etcInvariant = etcBuckets.today.length + etcBuckets.none.length + etcBuckets.missed.length === p.down;
     const common = commonRepairs(p.downRows, today);

@@ -389,6 +389,20 @@ describe('Fleet Health formatter: stale label (FEAT-004, design §3.13)', () => 
     }
   });
 
+  it('the Missed line override note does not claim "No ETC" for a Path-B override of a dated note', () => {
+    const { makeUnit } = require('./fixtures/fleet-dbr/make-rows');
+    const miss = { date: '2026-11-05', kind: 'repairCompletion', state: 'missed', explicitMissDate: '2026-11-05', source: 'relay',
+      statedAt: '2026-11-06T15:00:00Z', snippet: 'missed the ETC of 11/05', negated: false, reason: null };
+    const built = F.buildFleetDbr([makeUnit({ equipmentId: 'P1', _factsOn: true, canonicalNextStep: 'ETC 11/30', _factEtc: miss })], { today: '2026-11-10' });
+    built.builtAt = '2026-11-10T15:31:00.000Z';
+    built.fleetSyncedAt = SYNC;
+    expect(built.rows[0].units[0].etc.overrode).toMatchObject({ field: 'canonicalNextStep', was: 'future' });
+    const model = F.applyOverlays(built, { today: '2026-11-10', flags: { aiDraft: false } });
+    const text = lookup.formatFleetHealth({ model, kind: 'domicile', code: 'TST1', now: at(5) });
+    expect(text).toContain('P1 overrode the saved note)');
+    expect(text).not.toContain('"No ETC" note');
+  });
+
   it('the QuickSight label keeps its 4 h threshold and wording', async () => {
     const at3h = new Date(Date.parse(META.syncedAt) + 3 * 3600000 + 60000);
     const at5h = new Date(Date.parse(META.syncedAt) + 5 * 3600000 + 60000);

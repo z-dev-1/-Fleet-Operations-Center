@@ -249,7 +249,7 @@ describe('D5 Path-B provenance and the user Q9 rule', () => {
     const c = F.parseEtc(on({ canonicalNextStep: 'ETC 11/30', _factEtc: miss }), T25);
     expect(c.overrode).toEqual({ field: 'canonicalNextStep', was: 'future', userSnippet: 'ETC 11/30' });
   });
-  it('Q9: saved "No ETC" + a passed extracted ETC (passedHead) -> Missed with the override marker', () => {
+  it('Q9: saved "No ETC" + a passed extracted ETC (passedHead) -> Missed with the override marker', async () => {
     const row = on({ equipmentId: 'Q1', savedNotes: '11/22 - No ETC', _factEtc: fe({ passedHead: passed }) });
     const r = F.parseEtc(row, T25);
     expect(r).toMatchObject({ state: 'missed', date: '2026-11-23', source: 'extracted', explicitMissDate: null, viaPassedHead: true });
@@ -258,7 +258,12 @@ describe('D5 Path-B provenance and the user Q9 rule', () => {
     const built = F.buildFleetDbr([row], { today: T25 }).rows[0];
     expect(built.cells.missedEtc).toBe('1');
     expect(built.units[0].etc.overrode).toBeTruthy();
-    expect(built.userEtcOverrides).toEqual([{ unit: 'Q1', date: '2026-11-23', userSnippet: '11/22 - No ETC', extractedSnippet: '' }]);
+    expect(built.userEtcOverrides).toEqual([{ unit: 'Q1', date: '2026-11-23', userSnippet: '11/22 - No ETC', extractedSnippet: 'ETR 11/23 passed (relay, stated 11/21)' }]);
+    // The marker title names the saved note and the passed ETR that caused the flip.
+    const L = await import('../renderer/src/js/views/fleet-dbr-logic.js');
+    const mark = L.markHtml(built, 'missedEtc');
+    expect(mark).toContain('overrode the saved note');
+    expect(mark).toContain("Relay/offsite: &#39;ETR 11/23 passed (relay, stated 11/21)&#39;");
   });
   it('Q9 other side: a passed ETR with no "No ETC" note and no marker -> none, missDowngraded, no overrode', () => {
     const r = F.parseEtc(on({ _factEtc: fe({ passedHead: passed }) }), T25);
@@ -317,6 +322,12 @@ describe('countedEtc (design §3.2)', () => {
     expect(bucket(rev)).toMatchObject({ bucket: 'today' });
     const risk = on({ repairTimeline: '11/25 - ETR 11/25 at risk', _factEtc: relayToday() });
     expect(bucket(risk)).toMatchObject({ bucket: 'none', reason: 'newer-negation' });
+  });
+  it('DR2-3: one pattern-3 window spanning two ETR mentions reads the keyword against the last token', () => {
+    const two = on({ repairTimeline: '11/25 - Old ETR 11/24 and ETR 11/25 at risk', _factEtc: relayToday() });
+    expect(bucket(two)).toMatchObject({ bucket: 'none', reason: 'newer-negation' });
+    const older = on({ repairTimeline: '11/25 - ETR 11/25 and ETR 11/24 missed', _factEtc: relayToday() });
+    expect(bucket(older)).toMatchObject({ bucket: 'today' });
   });
   it('(b) parts-wait / parts-ok', () => {
     expect(bucket(on({ partsStatus: 'ordered', partsEta: '2026-11-18', _factEtc: relayToday() }))).toMatchObject({ bucket: 'none', reason: 'parts-wait' });

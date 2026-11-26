@@ -212,8 +212,14 @@ describe('FEAT-002 additive fields: structuredMiss and passedHead (counted uncha
     expect(Date.parse(etc.passedHead.statedAt)).toBe(Date.parse('2026-11-05T15:00:00Z'));
     const row = { equipmentId: 'P1', relayFacts: rf };
     F.refreshRowFacts(row, ON, '2026-11-11');
-    expect(row._factEtc).toMatchObject({ state: 'none', date: null, source: null, statedAt: null, negated: false, structuredMiss: null });
+    expect(row._factEtc).toMatchObject({ state: 'none', date: null, source: null, statedAt: null, negated: false });
+    expect('structuredMiss' in row._factEtc).toBe(false);
     expect(row._factEtc.passedHead).toMatchObject({ date: '2026-11-07' });
+    // No null keys on rows without the additive fields (autopilot fingerprint stays unchanged).
+    const plain = { equipmentId: 'P2', relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC 11/20')]) };
+    F.refreshRowFacts(plain, ON, '2026-11-11');
+    expect(Object.keys(plain._factEtc)).not.toContain('structuredMiss');
+    expect(Object.keys(plain._factEtc)).not.toContain('passedHead');
     expect(DBR.parseEtc(row, '2026-11-11')).toMatchObject({ state: 'none', missDowngraded: true, passedDate: '2026-11-07' });
     expect(fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC 11/11')]) }).etc.passedHead).toBeNull();
     expect(fsOf({ relayFacts: relayOf([c('2026-11-09T15:00:00Z', 'fasuser1', 'ETC 11/20')]) }).etc.passedHead).toBeNull();
