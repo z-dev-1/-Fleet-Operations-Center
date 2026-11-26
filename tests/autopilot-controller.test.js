@@ -396,7 +396,7 @@ describe('master OFF and supervisor disabled (AC-18, AC-19)', () => {
     const st = env.ap.status();
     expect(st.worker).toMatchObject({ name: 'autopilot' });
     expect(st.counts.open).toBe(1);
-    expect(st.ai).toMatchObject({ today: 1, cap: 48, outcomes: { ok: 1 }, lanes: { isolated: 1 }, isolatedAvailable: true, cost: 'not reported by AI lanes' });
+    expect(st.ai).toMatchObject({ today: 1, cap: 1000, outcomes: { ok: 1 }, lanes: { isolated: 1 }, isolatedAvailable: true, cost: 'not reported by AI lanes' });
     expect(st.supervisorEnvOverride).toBe(null);
     expect(st.lastTick.outcome).toBe('ok');
   });

@@ -56,7 +56,7 @@ const SCOPE_MODES = Object.freeze(['fleet', 'filter']);
 
 const INT_FIELDS = Object.freeze({
   oosDays: { min: 1, max: 60 },
-  maxCasesPerTick: { min: 1, max: 5 },
+  maxCasesPerTick: { min: 1, max: 20 },
   intervalMs: { min: 60000, max: 3600000 },
   dailyCap: { min: 0, max: 5000 },
 });
@@ -98,10 +98,10 @@ const DEFAULTS = Object.freeze({
   equipment: EQUIPMENT,
   oosDays: 3,
   intervalMs: 300000,
-  maxCasesPerTick: 1,
-  dailyCap: 48,
+  maxCasesPerTick: 3,
+  dailyCap: 1000,
   features: Object.freeze(FEATURE_KEYS.reduce((o, k) => { o[k] = true; return o; }, {})),
-  ai: Object.freeze({ dailyCap: 48, turnTimeoutMs: 60000, yieldToHighPriority: true }),
+  ai: Object.freeze({ dailyCap: 1000, turnTimeoutMs: 60000, yieldToHighPriority: true }),
   complexityTiers: DEFAULT_TIERS,
   tools: Object.freeze({ timeoutMs: 20000 }),
   authorizedTokens: Object.freeze([]),
@@ -243,7 +243,7 @@ function resolveAutopilotConfig(settings, env) {
   const features = {};
   for (const k of FEATURE_KEYS) features[k] = typeof fs[k] === 'boolean' ? fs[k] : DEFAULTS.features[k];
 
-  // ai.dailyCap <-> legacy dailyCap (§3.2): ai.dailyCap, else a valid legacy dailyCap, else 48.
+  // ai.dailyCap <-> legacy dailyCap (§3.2): ai.dailyCap, else a valid legacy dailyCap, else 1000.
   const aiSrc = _isObj(ap.ai) ? ap.ai : {};
   const ai = {
     dailyCap: _inRange(AI_FIELDS.dailyCap, aiSrc.dailyCap) ? aiSrc.dailyCap : ints.dailyCap,

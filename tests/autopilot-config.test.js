@@ -30,9 +30,9 @@ describe('resolveAutopilotConfig', () => {
     expect(c.scope.allUnits).toBe(true);
     expect(c.scope.units).toEqual(['322283', '321185', '321364', 'FLD260703', '39582', '39351', '321963', '321838', 'B13014', 'B62059', 'IND260261', '9010424']);
     expect(c.oosDays).toBe(3);
-    expect(c.maxCasesPerTick).toBe(1);
+    expect(c.maxCasesPerTick).toBe(3);
     expect(c.intervalMs).toBe(300000);
-    expect(c.dailyCap).toBe(48);
+    expect(c.dailyCap).toBe(1000);
     expect(Object.values(c.features).every((v) => v === true)).toBe(true);
     expect(c.features.liveReads).toBe(true);
     expect(Object.values(c.writes).every((v) => v === false)).toBe(true);
@@ -49,12 +49,12 @@ describe('resolveAutopilotConfig', () => {
     expect(ap({ oosDays: 60 }).oosDays).toBe(60);
     expect(ap({ oosDays: '5' }).oosDays).toBe(3);
     expect(ap({ oosDays: 2.5 }).oosDays).toBe(3);
-    expect(ap({ maxCasesPerTick: 6 }).maxCasesPerTick).toBe(1);
+    expect(ap({ maxCasesPerTick: 21 }).maxCasesPerTick).toBe(3);
     expect(ap({ maxCasesPerTick: 5 }).maxCasesPerTick).toBe(5);
     expect(ap({ intervalMs: 59999 }).intervalMs).toBe(300000);
     expect(ap({ intervalMs: 3600000 }).intervalMs).toBe(3600000);
     expect(ap({ dailyCap: 0 }).dailyCap).toBe(0);
-    expect(ap({ dailyCap: 5001 }).dailyCap).toBe(48);
+    expect(ap({ dailyCap: 5001 }).dailyCap).toBe(1000);
     expect(ap({ dailyCap: 5000 }).dailyCap).toBe(5000);
     expect(ap({ runState: 'bogus' }).runState).toBe('running');
     expect(ap({ runState: 'stopped' }).runState).toBe('stopped');
@@ -189,8 +189,8 @@ describe('V2 defaults (AC-1)', () => {
       oosInvestigation: true, longDwellInvestigation: true, evidenceCollection: true, aiInvestigation: true,
       multiTurn: true, timelineProposals: true, localHistory: true, liveReads: true,
     });
-    expect(c.ai).toEqual({ dailyCap: 48, turnTimeoutMs: 60000, yieldToHighPriority: true });
-    expect(c.dailyCap).toBe(48);
+    expect(c.ai).toEqual({ dailyCap: 1000, turnTimeoutMs: 60000, yieldToHighPriority: true });
+    expect(c.dailyCap).toBe(1000);
     expect(c.complexityTiers).toEqual({
       simple: { maxModelTurns: 2, maxToolCalls: 3, maxElapsedMs: 120000, maxEvidenceBytes: 24000 },
       standard: { maxModelTurns: 4, maxToolCalls: 6, maxElapsedMs: 240000, maxEvidenceBytes: 48000 },
@@ -200,7 +200,7 @@ describe('V2 defaults (AC-1)', () => {
     expect(c.queue).toEqual({ maxConcurrent: 2, maxStartsPerTick: 4, maxQueued: 5000, agingBoostPerHour: 2, agingBoostCap: 40 });
     expect(c.intervalMs).toBe(300000);
     expect(c.oosDays).toBe(3);
-    expect(c.maxCasesPerTick).toBe(1);
+    expect(c.maxCasesPerTick).toBe(3);
     expect(Object.values(c.writes).every((v) => v === false)).toBe(true);
     expect(c.authorizedTokens).toEqual(['ABE40', 'EWR45', 'PHL40', 'AVP40', 'AUVTE01']);
     expect(c.warnings).toEqual([]);
@@ -244,7 +244,7 @@ describe('V2 resolution rules (§3.2, §3.3)', () => {
       tools: { timeoutMs: 4999 },
       queue: { maxConcurrent: 5, maxStartsPerTick: 21, maxQueued: 99, agingBoostPerHour: 11, agingBoostCap: 61 },
     });
-    expect(c.ai).toEqual({ dailyCap: 48, turnTimeoutMs: 60000, yieldToHighPriority: true });
+    expect(c.ai).toEqual({ dailyCap: 1000, turnTimeoutMs: 60000, yieldToHighPriority: true });
     expect(c.complexityTiers.simple).toEqual({ maxModelTurns: 2, maxToolCalls: 3, maxElapsedMs: 120000, maxEvidenceBytes: 24000 });
     expect(c.complexityTiers.complex.maxToolCalls).toBe(20);
     expect(c.tools.timeoutMs).toBe(20000);
@@ -258,10 +258,10 @@ describe('V2 resolution rules (§3.2, §3.3)', () => {
   it('aliases: legacy dailyCap feeds ai.dailyCap; legacy maxCasesPerTick feeds queue.maxStartsPerTick', () => {
     expect(ap({ dailyCap: 300 })).toMatchObject({ dailyCap: 300, ai: { dailyCap: 300 } });
     expect(ap({ dailyCap: 300, ai: { dailyCap: 10 } })).toMatchObject({ dailyCap: 10, ai: { dailyCap: 10 } });
-    expect(ap({ dailyCap: 9999 }).ai.dailyCap).toBe(48);
+    expect(ap({ dailyCap: 9999 }).ai.dailyCap).toBe(1000);
     expect(ap({ maxCasesPerTick: 5 }).queue.maxStartsPerTick).toBe(5);
     expect(ap({ maxCasesPerTick: 5, queue: { maxStartsPerTick: 12 } }).queue.maxStartsPerTick).toBe(12);
-    expect(ap({ maxCasesPerTick: 6 }).queue.maxStartsPerTick).toBe(4);
+    expect(ap({ maxCasesPerTick: 21 }).queue.maxStartsPerTick).toBe(4);
   });
 
   it('authorizedTokens: settings.domiciles normalized (trim, upper, pattern, dedupe, <= 100); missing / empty -> DEFAULT_DOMICILES', () => {
