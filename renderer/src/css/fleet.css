@@ -1500,6 +1500,12 @@ th.sortable.sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--acc
   height: 100%;
   overflow: hidden;
 }
+/* Amber fleet-data alert (partial data / AAP refresh failing); red stale lives in VIEW_CSS. */
+.view--dbr .fdbr-banner--partial {
+  border-color: #f0a800;
+  background: rgba(240, 168, 0, 0.08);
+  font-weight: 600;
+}
 
 /* ── Header ──────────────────────────────────────────────────── */
 .an-header {

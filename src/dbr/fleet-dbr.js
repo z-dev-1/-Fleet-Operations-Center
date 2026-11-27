@@ -1350,6 +1350,8 @@ function buildFleetDbr(rows, opts = {}) {
       unit: u.id, date: u.etc.date || null, userSnippet: u.etc.overrode.userSnippet || '', extractedSnippet: u.etc.snippet || _passedHeadText(u.etc),
     }));
     const etcInvariant = etcBuckets.today.length + etcBuckets.none.length + etcBuckets.missed.length === p.down;
+    // Down units with no ETC evidence text yet (deep-scan has not hydrated them): marker only, counts unchanged.
+    const evidenceGaps = p.downRows.filter((r) => !ETC_SOURCES.some((f) => _str(r[f]).trim()) && !_str(r.fullConversation).trim()).length;
     const common = commonRepairs(p.downRows, today);
     const yn = { common: common.yn };
     for (const rule of BARRIER_RULES) yn[rule.id] = hits[rule.id] ? 'Y' : 'N';
@@ -1379,7 +1381,7 @@ function buildFleetDbr(rows, opts = {}) {
       key: p.key, domicile: p.domicile, scac: p.scac,
       pair: { total: p.total, down: p.down }, domicileStats, scacStats,
       cells, units, common: rowCommon,
-      missedWhy, userEtcOverrides, etcInvariant,
+      missedWhy, userEtcOverrides, etcInvariant, evidenceGaps,
       unitsHash: unitsHash(p.downRows), evidenceHash: evidenceHash(p.downRows),
     });
   }
@@ -1451,6 +1453,9 @@ function applyOverlays(built, overlays = {}) {
       draft = staleReason
         ? { state: 'stale', draftedAt: d.draftedAt || null, staleReason }
         : { state: 'ok', draftedAt: d.draftedAt || null };
+      // Data-as-of the draft was written from (additive v3 fields; absent on older drafts).
+      if (typeof d.dataAsOf === 'string' && d.dataAsOf) draft.dataAsOf = d.dataAsOf;
+      if (typeof d.dataStatus === 'string' && d.dataStatus) draft.dataStatus = d.dataStatus;
       if (!staleReason) {
         const sh = _plain(d.sheet);
         for (const id of DRAFT_SHEET_IDS) {
@@ -1488,6 +1493,7 @@ function applyOverlays(built, overlays = {}) {
     conflicts: b.conflicts || [],
     builtAt: b.builtAt || null,
     fleetSyncedAt: b.fleetSyncedAt || null,
+    dataFreshness: b.dataFreshness && typeof b.dataFreshness === 'object' ? b.dataFreshness : null,
     columns: COLUMNS,
     fasName, fasNameSource,
     rosterLoaded, userName: fasName,

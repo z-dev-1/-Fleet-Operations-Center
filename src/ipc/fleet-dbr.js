@@ -11,7 +11,7 @@
  *   fleet-dbr:draft         ({ key })             -> { ok, key, cells, sources, flags, disagreements, etcUnits, etcDisagreements,
  *                                                      etcOverrides, provenance, unverifiedNames, unboundDates, coverageFilled,
  *                                                      unitNotes, sheet, sheetDrops, sheetSkipped,
- *                                                      dropped, rounds, reviewSkipped, mode, draftedAt, saved, model?,
+ *                                                      dropped, rounds, reviewSkipped, mode, draftedAt, dataAsOf, dataStatus, saved, model?,
  *                                                      fasActions, support } | { ok:false, code }
  *   fleet-dbr:save-edit     ({ key, col, value }) -> { ok } | { ok:false, code }
  *   fleet-dbr:reset-row     ({ key })             -> { ok } | { ok:false, code }
@@ -27,6 +27,10 @@
  * `version: 3` { unitNotes (drill-down bullets), sheet (cells that passed validateSheet, the only
  * cells applyOverlays may overlay), sheetDrops, sheetSkipped, ... }; older drafts are 'format'-stale.
  * The model carries rosterExact-based FAS Name / row.mine (seams _o.fasForExact, _o.rosterSize).
+ * Freshness: the snapshot is stamped with dataFreshness (dbr/fleet-dbr-freshness assess: data-as-of
+ * = health/fleet-freshness lastOkAt, the last real AAP build; fleetData.syncedAt only as a
+ * 'sync-stamp' fallback) and every read re-assesses it (seam _o.fleetFreshness -> snapshot | null).
+ * A stored v3 draft records dataAsOf / dataStatus (the data it was drafted from).
  *
  * Edits are day-scoped (read side: edits.day !== today -> no per-cell edits; write side:
  * rows reset on the first write of a new day). The FAS name override persists across days.
@@ -40,6 +44,7 @@ const { handle } = require('./_safe');
 const { FleetError, ConfigError } = require('../utils/errors');
 const log = require('../utils/logger')('fleet-dbr');
 const dbr = require('../dbr/fleet-dbr');
+const freshness = require('../dbr/fleet-dbr-freshness');
 
 const MAX_KEY = 80;
 const MAX_VALUE = 16000;
@@ -215,6 +220,10 @@ function _getFleet() {
   if (ld && Array.isArray(ld.rows) && ld.rows.length) return ld;
   return _store().load('fleetData', {}) || {};
 }
+// Current health/fleet-freshness snapshot (last real AAP build) or null. Seam: _o.fleetFreshness.
+function _ffSnapshot() {
+  try { return _o.fleetFreshness ? _o.fleetFreshness() : freshness.readFleetFreshness(); } catch (_) { return null; }
+}
 function _fasFor(scac, domicile) {
   try {
     const fn = _o.fasFor || require('../orcha/fas/roster-lookup').fasFor;
@@ -304,6 +313,8 @@ function _model(snap, today, flags) {
   const built = {
     day: snap.day, fleetCount: snap.fleetCount || 0, downCount: snap.downCount || 0,
     rows: snap.rows, conflicts: snap.conflicts || [], builtAt: snap.builtAt || null, fleetSyncedAt: snap.fleetSyncedAt || null,
+    // Re-assessed at read time: same data-as-of the snapshot was built from, age vs now.
+    dataFreshness: freshness.reassess(snap.dataFreshness, { ffSnapshot: _ffSnapshot(), now: _now(), fallbackAsOf: snap.fleetSyncedAt || null }),
   };
   return dbr.applyOverlays(built, {
     edits: rowsEdits, drafts: _plain(snap.drafts), fasNameOverride: edits.fasName,
@@ -337,12 +348,16 @@ function _buildLocal(f) {
   const snap = {
     version: SNAPSHOT_VERSION, day: today, builtAt: _now().toISOString(),
     fleetSyncedAt: (fleet && (fleet.syncedAt || fleet.scrapedAt)) || null,
+    dataFreshness: freshness.assess({ fleet, ffSnapshot: _ffSnapshot(), now: _now() }),
     fleetCount: built.fleetCount, downCount: built.downCount,
     rows: built.rows, conflicts: built.conflicts, drafts,
   };
   const saved = _save(SNAP, snap);
   const model = _model(snap, today, f);
-  log.info('[fleet-dbr] build', { rows: built.rows.length, down: built.downCount, conflicts: built.conflicts.length, ms: Date.now() - t0 });
+  log.info('[fleet-dbr] build', {
+    rows: built.rows.length, down: built.downCount, conflicts: built.conflicts.length,
+    freshness: snap.dataFreshness.status, asOfSource: snap.dataFreshness.dataAsOfSource, ms: Date.now() - t0,
+  });
   return { res: { ok: true, model, saved }, rows };
 }
 
@@ -499,6 +514,10 @@ const handlers = {
     }
 
     const draftedAt = _now().toISOString();
+    // The data-as-of the draft was written from (the snapshot's AAP build) and its status then.
+    const df = freshness.reassess(snap.dataFreshness, { ffSnapshot: _ffSnapshot(), now: _now(), fallbackAsOf: snap.fleetSyncedAt || null });
+    const dataAsOf = df.dataAsOf;
+    const dataStatus = df.status;
     const fasTagged = calls.reduce((m, c) => Math.max(m, (c && c.fasTagged) || 0), 0);
     const arr = (v) => (Array.isArray(v) ? v : []);
     const view = {
@@ -515,7 +534,7 @@ const handlers = {
     const out = Object.assign({ ok: true, key }, view, {
       unitNotes, sheet, sheetDrops, sheetSkipped,
       dropped: res.dropped || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null, mode: res.mode,
-      draftedAt, saved: false, fasActions: view.cells.fasActions, support: view.cells.support,
+      draftedAt, dataAsOf, dataStatus, saved: false, fasActions: view.cells.fasActions, support: view.cells.support,
     });
     const cur = _snapshot(today);
     const i = cur ? cur.rows.findIndex((r) => r && r.key === key) : -1;
@@ -539,7 +558,7 @@ const handlers = {
         dropped: res.dropped || 0, dropReasons: _plain(res.dropReasons), mode: res.mode, calls: res.calls || 0,
         mapRetries: res.mapRetries || 0, rounds: res.rounds || 0, reviewSkipped: res.reviewSkipped || null,
         identity: { alias: !!fasAlias, names: fasNames.length, fasTagged },
-        draftedAt, unitsHash: freshRow.unitsHash, evidenceHash: freshRow.evidenceHash,
+        draftedAt, dataAsOf, dataStatus, unitsHash: freshRow.unitsHash, evidenceHash: freshRow.evidenceHash,
       });
       out.saved = _save(SNAP, cur);
       out.model = _model(cur, today, f);

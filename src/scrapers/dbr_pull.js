@@ -5,7 +5,8 @@
  * The scheduler's DBR slot and "Pull DBR now" call pullFleetHealth(), which:
  *   1. rebuilds today's Fleet Health snapshot from stored fleet data
  *      (ipc/fleet-dbr buildNow — the same build as the DBR tab's Build button)
- *   2. gates on freshness: the fleet data must have synced TODAY (local day),
+ *   2. gates on freshness: model.dataFreshness.status must be 'fresh' (the panel's rule: data as
+ *      of the last real AAP build is from today and at most 120 min old, rows match that build),
  *      else the caller blocks and the recovery sweep retries
  *   3. AI-drafts the rows with units down that have no current draft
  *      (ipc/fleet-dbr draftPending — the DBR tab's draft handler, one row at a time)
@@ -70,7 +71,8 @@ function _localDay(v) {
 /**
  * pullFleetHealth({ fleetDbr?, now? }) ->
  *   { ok:true, fresh:true, rowCount, downRows, drafts, data:{ dataAsOf, builtAt } }  -> done
- *   { ok:false, stale:true, dataAsOf }   -> fleet data not synced today (or none yet) -> caller retries
+ *   { ok:false, stale:true, dataAsOf }   -> fleet data not fresh (or none yet) -> caller retries
+ * dataAsOf is an ISO time (or null).
  *   { ok:false, error }                  -> Fleet Health off / build failed
  */
 async function pullFleetHealth(deps = {}) {
@@ -87,10 +89,23 @@ async function pullFleetHealth(deps = {}) {
   }
   const model = res.model || {};
   const syncedAt = model.fleetSyncedAt || null;
-  const day = syncedAt ? _localDay(syncedAt) : null;
-  if (!day || day !== _localDay(now)) {
-    logger.info('[DBR] Fleet Health pull: fleet data last synced ' + (day || 'unknown') + ', not today -> stale, will retry');
-    return { ok: false, stale: true, dataAsOf: day };
+  const df = model.dataFreshness && typeof model.dataFreshness === 'object' ? model.dataFreshness : null;
+  // Same 'fresh' status the DBR panel shows (data-as-of = last real AAP build). No stamp, or no
+  // build ever recorded and no time at all (status unknown on a sync stamp): the old same-day rule.
+  let fresh;
+  let asOf;
+  if (df && !(df.status === 'unknown' && df.dataAsOfSource === 'sync-stamp')) {
+    fresh = df.status === 'fresh';
+    asOf = df.dataAsOf || null;
+  } else {
+    const day = syncedAt ? _localDay(syncedAt) : null;
+    fresh = !!day && day === _localDay(now);
+    asOf = day ? new Date(syncedAt).toISOString() : null;
+  }
+  if (!fresh) {
+    logger.info('[DBR] Fleet Health pull: fleet data as of ' + (asOf || 'unknown') + ' is '
+      + ((df && df.status) || 'not today') + (df && df.reasons && df.reasons.length ? ' (' + df.reasons.join(', ') + ')' : '') + ' -> stale, will retry');
+    return { ok: false, stale: true, dataAsOf: asOf };
   }
   let drafts;
   try { drafts = await fdbr.draftPending(); }
@@ -99,7 +114,7 @@ async function pullFleetHealth(deps = {}) {
   const downRows = rows.filter((r) => r && r.pair && r.pair.down > 0).length;
   logger.info('[DBR] Fleet Health pull complete — ' + rows.length + ' rows, ' + downRows + ' with units down, drafts '
     + (drafts && drafts.ok ? drafts.drafted + '/' + drafts.eligible : (drafts && drafts.code) || 'skipped'));
-  return { ok: true, fresh: true, rowCount: rows.length, downRows, drafts, data: { dataAsOf: day, builtAt: model.builtAt || null } };
+  return { ok: true, fresh: true, rowCount: rows.length, downRows, drafts, data: { dataAsOf: asOf, builtAt: model.builtAt || null } };
 }
 
 module.exports = {

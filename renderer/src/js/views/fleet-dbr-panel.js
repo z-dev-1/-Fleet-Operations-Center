@@ -9,7 +9,9 @@
  *   never change. "AI" text markers, editable cells stay editable, nothing is sent anywhere.
  * - Copy (rows / with header / fill columns / row) writes the golden sheet format
  *   (L.sheetTsv); the copy-scope select picks "My pairs with units down" (default) or
- *   "All visible rows". A stale-fleet-data alert re-renders every 60 s while open.
+ *   "All visible rows". A fleet-data alert (red stale / amber partial or AAP refresh failing,
+ *   data-as-of = the last AAP build, model.dataFreshness) re-renders every 60 s while open.
+ *   The automatic draft pass runs only on fresh data; manual drafts on non-fresh data are badged.
  *   The only thing that leaves the panel is the clipboard on an explicit Copy.
  * - Accessible dialog: Escape / × / backdrop close, focus returns to the opener.
  *
@@ -32,6 +34,7 @@ const COPY_SCOPE_KEY = 'fleetDbr__copyScope';
 const BUILD_TIMEOUT_MS = 60000;
 // Banner + status line (fleet data age) re-render while the panel is open.
 const FRESH_TICK_MS = 60000;
+const DRAFTS_PAUSED = 'AI drafts paused \u2014 fleet data is stale';
 
 // Persisted copy scope: 'visible' or 'mine' (anything else -> 'mine').
 function _readCopyScope(storage) {
@@ -261,7 +264,7 @@ function createController(deps) {
   function renderBanner() {
     if (!bannerEl) return;
     const fresh = st.status === 'ready' && st.model ? L.freshness(st.model, now()) : null;
-    const staleHtml = fresh ? L.staleBannerHtml(fresh) : '';
+    const staleHtml = fresh ? L.staleBannerHtml(fresh, now()) : '';
     let rest;
     if (st.refreshing) rest = L.refreshingBannerHtml();
     else if (st.refreshFailed) rest = L.fallbackBannerHtml(st.refreshFailed.builtAt);
@@ -331,6 +334,19 @@ function createController(deps) {
         if (!(await build())) return;
       }
     } else if (!(await build())) return;
+    autoDrafts();
+  }
+
+  // The automatic draft pass (open / build / SCAC change) runs only on fresh fleet data. When the
+  // data is stale, partial or of unknown age it is skipped with a note; ✨ Draft all and ↻ Redraft
+  // still work (those rows get a "drafted on stale data" badge).
+  function autoDrafts() {
+    if (!st.model) return;
+    const f = L.freshness(st.model, now());
+    if (f.status !== 'fresh') {
+      if (st.aiDraft && !String(st.note || '').includes(DRAFTS_PAUSED)) note([st.note, DRAFTS_PAUSED].filter(Boolean).join(' \u00b7 '));
+      return;
+    }
     startDrafts(null);
   }
 
@@ -514,6 +530,8 @@ function createController(deps) {
     row.unboundDates = arr(res.unboundDates);
     row.reviewSkipped = typeof res.reviewSkipped === 'string' ? res.reviewSkipped : null;
     row.draft = { state: 'ok', draftedAt: res.draftedAt || null };
+    if (typeof res.dataAsOf === 'string' && res.dataAsOf) row.draft.dataAsOf = res.dataAsOf;
+    if (typeof res.dataStatus === 'string' && res.dataStatus) row.draft.dataStatus = res.dataStatus;
   }
 
   function stopDrafts() {
@@ -540,7 +558,7 @@ function createController(deps) {
       return false;
     });
     renderFrame(focusScac); renderTable(); renderStatus();
-    if (!st.stopped) startDrafts(null);
+    if (!st.stopped) autoDrafts();
     pump();
   }
 
@@ -650,8 +668,13 @@ function createController(deps) {
     // The pasted text is unchanged; the note tells the user what was copied and what needs a look.
     const scope = kind === 'mine' ? ' (your pairs with units down)' : (kind === 'visible' ? ' (all visible rows)' : '');
     let text = 'Copied ' + rows.length + (rows.length === 1 ? ' row' : ' rows') + scope;
+    // Status of the copied data (as of the last AAP build); the copied text never changes.
     const fresh = L.freshness(m, now());
-    if (fresh.stale) text += fresh.label ? ' \u00b7 \u26a0 fleet data is ' + fresh.label + ' old' : ' \u00b7 \u26a0 fleet sync time unknown';
+    const asOf = L.fmtClock(fresh.dataAsOf);
+    const asOfNote = asOf ? ' (as of ' + asOf + ')' : '';
+    if (fresh.stale) text += fresh.label ? ' \u00b7 \u26a0 fleet data is ' + fresh.label + ' old' + asOfNote : ' \u00b7 \u26a0 fleet sync time unknown';
+    else if (fresh.status === 'partial') text += ' \u00b7 \u26a0 fleet data partial' + asOfNote;
+    if (fresh.refreshFailed) text += ' \u00b7 \u26a0 AAP refresh failing since ' + (L.fmtClock(fresh.lastFailAt) || 'unknown');
     if (m.flags && m.flags.aiDraft) {
       const auto = rows.filter((r) => r && r.pair && r.pair.down > 0 && (!r.draft || r.draft.state !== 'ok')).length;
       if (auto) text += ' \u00b7 ' + auto + (auto === 1 ? ' row uses' : ' rows use') + ' auto text (AI draft pending)';
@@ -675,7 +698,7 @@ function createController(deps) {
     const key = el.dataset.key;
     switch (el.dataset.fdbrAction) {
       case 'close': close(); return;
-      case 'build': return build().then((ok) => { if (ok) startDrafts(null); });
+      case 'build': return build().then((ok) => { if (ok) autoDrafts(); });
       case 'draft-all': startDrafts(st.model ? L.eligibleForAutoDraft(st.model, { includeEvidenceStale: true, hideZero: st.hideZero, scacs: st.scacs }) : null); return;
       case 'scac-all': applyScacs([]); return;
       case 'stop': stopDrafts(); return;

@@ -26,15 +26,44 @@ describe('dbr_pull.pullFleetHealth', () => {
     const f = fake({ ok: true, model: model(new Date(2026, 10, 24, 7, 30).toISOString()) });
     const r = await dbr.pullFleetHealth({ fleetDbr: f, now: NOW });
     expect(r).toMatchObject({ ok: true, fresh: true, rowCount: 2, downRows: 1, drafts: { drafted: 1, eligible: 1 } });
-    expect(r.data.dataAsOf).toBe('2026-11-24');
+    expect(r.data.dataAsOf).toBe(new Date(2026, 10, 24, 7, 30).toISOString());
     expect(f.buildNow).toHaveBeenCalledTimes(1);
     expect(f.draftPending).toHaveBeenCalledTimes(1);
   });
 
   it('fleet last synced yesterday: stale, no drafts', async () => {
     const f = fake({ ok: true, model: model(new Date(2026, 10, 23, 18, 0).toISOString()) });
-    expect(await dbr.pullFleetHealth({ fleetDbr: f, now: NOW })).toEqual({ ok: false, stale: true, dataAsOf: '2026-11-23' });
+    expect(await dbr.pullFleetHealth({ fleetDbr: f, now: NOW })).toEqual({ ok: false, stale: true, dataAsOf: new Date(2026, 10, 23, 18, 0).toISOString() });
     expect(f.draftPending).not.toHaveBeenCalled();
+  });
+
+  // Gate = model.dataFreshness.status (the panel's rule), not the re-stamped fleetSyncedAt.
+  const withFreshness = (syncedAt, df) => Object.assign(model(syncedAt), { dataFreshness: df });
+  it('syncedAt today but lastOkAt (last AAP build) yesterday: stale, no drafts, dataAsOf = the build time', async () => {
+    const asOf = new Date(2026, 10, 23, 18, 3).toISOString();
+    const f = fake({ ok: true, model: withFreshness(new Date(2026, 10, 24, 8, 55).toISOString(),
+      { v: 1, status: 'stale', reasons: ['not-today'], dataAsOf: asOf, dataAsOfSource: 'fleet-build' }) });
+    expect(await dbr.pullFleetHealth({ fleetDbr: f, now: NOW })).toEqual({ ok: false, stale: true, dataAsOf: asOf });
+    expect(f.draftPending).not.toHaveBeenCalled();
+  });
+
+  it('a partial status blocks too; fresh status completes with the build time as dataAsOf', async () => {
+    const asOf = new Date(2026, 10, 24, 8, 30).toISOString();
+    const synced = new Date(2026, 10, 24, 8, 55).toISOString();
+    const p = fake({ ok: true, model: withFreshness(synced, { v: 1, status: 'partial', reasons: ['rows-differ-from-last-build'], dataAsOf: asOf, dataAsOfSource: 'fleet-build' }) });
+    expect(await dbr.pullFleetHealth({ fleetDbr: p, now: NOW })).toEqual({ ok: false, stale: true, dataAsOf: asOf });
+    const ok = fake({ ok: true, model: withFreshness(synced, { v: 1, status: 'fresh', reasons: [], dataAsOf: asOf, dataAsOfSource: 'fleet-build' }) });
+    const r = await dbr.pullFleetHealth({ fleetDbr: ok, now: NOW });
+    expect(r).toMatchObject({ ok: true, fresh: true, data: { dataAsOf: asOf } });
+  });
+
+  it('status unknown on a sync stamp (no build recorded): the old same-day rule on fleetSyncedAt', async () => {
+    const df = { v: 1, status: 'unknown', reasons: [], dataAsOf: null, dataAsOfSource: 'sync-stamp' };
+    const today = new Date(2026, 10, 24, 7, 0).toISOString();
+    const r = await dbr.pullFleetHealth({ fleetDbr: fake({ ok: true, model: withFreshness(today, df) }), now: NOW });
+    expect(r).toMatchObject({ ok: true, fresh: true, data: { dataAsOf: today } });
+    const y = new Date(2026, 10, 23, 7, 0).toISOString();
+    expect(await dbr.pullFleetHealth({ fleetDbr: fake({ ok: true, model: withFreshness(y, df) }), now: NOW })).toEqual({ ok: false, stale: true, dataAsOf: y });
   });
 
   it('no fleet data yet: stale (the sweep retries)', async () => {

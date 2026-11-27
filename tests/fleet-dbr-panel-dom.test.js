@@ -666,6 +666,37 @@ describe('copy scope, copy note, freshness (FEAT-004)', () => {
     expect(both.indexOf('fdbr-banner--stale')).toBeLessThan(both.indexOf('Fleet data updated'));
   });
 
+  it('D3: stale data -> no auto-draft pass on open, a paused note; Draft all still drafts and the badge says stale data', async () => {
+    const t = setup({ getModel: modelWith(), nowMs: SYNC_MS + 121 * 60000 });
+    await t.ctl.open(); await flush();
+    expect(api.draft).not.toHaveBeenCalled();
+    expect(part(t, 'fdbr-status').textContent).toContain('AI drafts paused \u2014 fleet data is stale');
+    expect(part(t, 'fdbr-banner').innerHTML).toContain('fdbr-banner--stale');
+    // Rebuild on stale data still builds (D2) and still skips the auto pass.
+    await overlayOf(t).emit('click', act('build')); await flush();
+    expect(api.build).toHaveBeenCalledTimes(1);
+    expect(api.draft).not.toHaveBeenCalled();
+    // Manual Draft all works; a draft stored with dataStatus 'stale' shows the badge.
+    const stored = {};
+    api.draft = vi.fn(async (p) => {
+      stored[p.key] = v3d(p.key, { support: 'None' }, { dataStatus: 'stale', dataAsOf: BUILT.fleetSyncedAt });
+      return { ok: true, key: p.key, model: modelWith(stored) };
+    });
+    await overlayOf(t).emit('click', act('draft-all')); await flush();
+    expect(api.draft).toHaveBeenCalled();
+    expect(part(t, 'fdbr-table').innerHTML).toContain('drafted on stale data');
+  });
+  it('D3: partial data (main dataFreshness) also pauses the auto pass; fresh data drafts as before', async () => {
+    const partial = modelWith();
+    partial.dataFreshness = { v: 1, status: 'partial', reasons: ['rows-differ-from-last-build'], dataAsOf: BUILT.fleetSyncedAt, dataAsOfSource: 'fleet-build', rowCount: 9, lastOkCount: 10 };
+    const t = setup({ getModel: partial });
+    await t.ctl.open(); await flush();
+    expect(api.draft).not.toHaveBeenCalled();
+    expect(part(t, 'fdbr-banner').innerHTML).toContain('fdbr-banner--partial');
+    const f = setup({ getModel: modelWith() });
+    await f.ctl.open(); await flush();
+    expect(api.draft).toHaveBeenCalled();
+  });
   it('the freshness tick is cleared on close', async () => {
     const live = new Map();
     let seq = 0;

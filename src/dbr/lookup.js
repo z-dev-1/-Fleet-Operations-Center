@@ -328,10 +328,14 @@ function _fhSub(text, maxLines, cap) {
 }
 function _fhBuiltLabel(model, now) {
   const m = model || {};
-  let s = 'Built ' + (_ptStamp(m.builtAt, true) || 'time unknown') + ' from fleet sync ' + (_ptStamp(m.fleetSyncedAt, true) || 'time unknown');
-  const t = _date(m.fleetSyncedAt);
+  // Same data-as-of as the DBR panel: the last real AAP build (dataFreshness), else the sync stamp.
+  const df = m.dataFreshness && typeof m.dataFreshness === 'object' ? m.dataFreshness : null;
+  const build = !!(df && df.dataAsOf && df.dataAsOfSource === 'fleet-build');
+  const asOf = (df && df.dataAsOf) || m.fleetSyncedAt || null;
+  let s = 'Built ' + (_ptStamp(m.builtAt, true) || 'time unknown') + (build ? ' from fleet data as of ' : ' from fleet sync ') + (_ptStamp(asOf, true) || 'time unknown');
+  const t = _date(asOf);
   const n = _date(now);
-  if (m.fleetSyncedAt && t && n && n - t > FH_STALE_SYNC_MS) {
+  if (asOf && t && n && n - t > FH_STALE_SYNC_MS) {
     s += ' \u26A0 fleet data ' + Math.floor((n - t) / 3600000) + 'h old \u2014 sync before submitting';
   }
   return s;

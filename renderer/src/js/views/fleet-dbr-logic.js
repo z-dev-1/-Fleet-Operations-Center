@@ -150,25 +150,89 @@ function _ageLabel(min) {
   return h ? h + 'h ' + (m % 60) + 'm' : m + 'm';
 }
 
-// -> { ageMin, stale, label, syncedAt }: stale when the fleet sync time is missing/invalid or
-// more than FRESH_MAX_MS before nowMs.
+const _localDay = (ms) => { const d = new Date(ms); return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); };
+// Main's partial reason codes (src/dbr/fleet-dbr-freshness.js); the age rules are recomputed here.
+const PARTIAL_REASONS = ['rows-differ-from-last-build', 'payload-stale-flag', 'payload-partial'];
+
+// The data-as-of time is model.dataFreshness.dataAsOf (the last real AAP build, stamped in main),
+// else model.fleetSyncedAt (older snapshots / no build recorded: source 'sync-stamp'). The age
+// rules run here against nowMs so the banner keeps aging between pushes; partial and
+// refresh-failed come from main.
+// -> { status: 'fresh'|'stale'|'partial'|'unknown', reasons, stale (stale or unknown), ageMin,
+//      label, syncedAt (= dataAsOf, kept for older callers), dataAsOf, source, sameDay,
+//      lastFailAt, lastFailCode, rowCount, lastOkCount, refreshFailed }
 export function freshness(model, nowMs) {
-  const syncedAt = (model && model.fleetSyncedAt) || null;
-  const t = Date.parse(syncedAt);
-  if (!syncedAt || !Number.isFinite(t)) return { ageMin: null, stale: true, label: '', syncedAt: null };
-  const ms = Math.max(0, (Number(nowMs) || 0) - t);
+  const df = model && model.dataFreshness && typeof model.dataFreshness === 'object' ? model.dataFreshness : null;
+  const asOf = (df && df.dataAsOf) || (model && model.fleetSyncedAt) || null;
+  const source = df && df.dataAsOf && df.dataAsOfSource === 'fleet-build' ? 'fleet-build' : 'sync-stamp';
+  const mainReasons = df && Array.isArray(df.reasons) ? df.reasons : [];
+  const t = Date.parse(asOf);
+  const base = {
+    source, lastFailAt: (df && df.lastFailAt) || null, lastFailCode: (df && df.lastFailCode) || null,
+    rowCount: df ? df.rowCount : null, lastOkCount: df ? df.lastOkCount : null,
+    refreshFailed: mainReasons.includes('last-refresh-failed'),
+  };
+  if (!asOf || !Number.isFinite(t)) {
+    return Object.assign(base, { status: 'unknown', reasons: [], ageMin: null, stale: true, label: '', syncedAt: null, dataAsOf: null, sameDay: false });
+  }
+  const now = Number(nowMs) || 0;
+  const ms = Math.max(0, now - t);
   const ageMin = Math.floor(ms / 60000);
-  return { ageMin, stale: ms > FRESH_MAX_MS, label: _ageLabel(ageMin), syncedAt };
+  const sameDay = _localDay(t) === _localDay(now);
+  const reasons = [];
+  if (!sameDay) reasons.push('not-today');
+  if (ms > FRESH_MAX_MS) reasons.push('age>120m');
+  const partial = mainReasons.filter((r) => PARTIAL_REASONS.includes(r));
+  const status = reasons.length ? 'stale' : (partial.length ? 'partial' : 'fresh');
+  reasons.push(...partial);
+  if (base.refreshFailed) reasons.push('last-refresh-failed');
+  return Object.assign(base, { status, reasons, ageMin, stale: status === 'stale', label: _ageLabel(ageMin), syncedAt: asOf, dataAsOf: asOf, sameDay });
 }
 
-// The stale-data alert ('' when fresh).
-export function staleBannerHtml(fresh) {
+// "AAP build 07:42" / "last sync 07:42" (+ " yesterday" / " on 11/23" when not today).
+function _asOfText(f, nowMs) {
+  const what = f.source === 'fleet-build' ? 'AAP build ' : 'last sync ';
+  let day = '';
+  if (f.sameDay === false && Number.isFinite(nowMs)) {
+    const t = Date.parse(f.dataAsOf);
+    const y = new Date(nowMs); y.setDate(y.getDate() - 1);
+    const d = new Date(t);
+    day = _localDay(t) === _localDay(y.getTime()) ? ' yesterday' : ' on ' + (d.getMonth() + 1) + '/' + d.getDate();
+  }
+  return what + (_hhmm(f.dataAsOf) || 'unknown') + day;
+}
+
+// The fleet-data alert: red when stale / unknown, amber when partial or the AAP refresh is
+// failing, '' when fresh. nowMs (optional) adds "yesterday" / "on M/D" to a not-today time.
+export function staleBannerHtml(fresh, nowMs) {
   const f = fresh || {};
-  if (!f.stale) return '';
-  const text = f.label
-    ? '\u26a0 Fleet data is ' + f.label + ' old (last sync ' + (_hhmm(f.syncedAt) || 'unknown') + '). Sync, then \u21ba Rebuild before you copy for SharePoint.'
-    : '\u26a0 Fleet sync time unknown \u2014 sync before copying.';
-  return '<div class="fdbr-banner fdbr-banner--stale" role="alert">' + esc(text) + '</div>';
+  const failing = f.refreshFailed
+    ? 'AAP refresh failing since ' + (_hhmm(f.lastFailAt) || 'unknown') + (f.lastFailCode ? ' (' + f.lastFailCode + ')' : '')
+    : '';
+  if (f.stale) {
+    let text = f.label
+      ? '\u26a0 Fleet data is ' + f.label + ' old (' + _asOfText(f, nowMs) + '). Sync, then \u21ba Rebuild before you copy for SharePoint.'
+      : '\u26a0 Fleet sync time unknown \u2014 sync before copying.';
+    if (failing) text += ' ' + failing + '.';
+    return '<div class="fdbr-banner fdbr-banner--stale" role="alert">' + esc(text) + '</div>';
+  }
+  if (f.status !== 'partial' && !failing) return '';
+  const bits = [];
+  if (failing) bits.push(failing + ' \u2014 showing the ' + (_hhmm(f.dataAsOf) || 'last') + ' build');
+  const r = Array.isArray(f.reasons) ? f.reasons : [];
+  if (r.includes('rows-differ-from-last-build')) {
+    bits.push('fleet data has ' + (Number(f.rowCount) || 0) + ' units but the last AAP build had ' + (Number(f.lastOkCount) || 0));
+  }
+  if (r.includes('payload-stale-flag') || r.includes('payload-partial')) bits.push('the last sync marked the fleet data partial');
+  const tail = f.status === 'partial' ? ' \u2014 sync, then \u21ba Rebuild before you copy for SharePoint.' : '';
+  return '<div class="fdbr-banner fdbr-banner--partial" role="alert">' + esc('\u26a0 ' + bits.join(' \u00b7 ') + tail) + '</div>';
+}
+
+// Row lines under the drill-down: units with no ETC evidence text yet (main row.evidenceGaps).
+export function evidenceGapHtml(row) {
+  const n = Number(row && row.evidenceGaps) || 0;
+  if (n <= 0) return '';
+  return '<span class="fdbr-mark fdbr-mark--warn">' + esc('\u26a0 ' + n + ' unit(s) not hydrated yet \u2014 ETC may be NO ETC by default') + '</span>';
 }
 
 // ── SCAC filter ─────────────────────────────────────────────────────────────
@@ -318,10 +382,13 @@ export function statusLine(model, opts = {}) {
   const parts = [];
   const built = _hhmm(model.builtAt);
   if (built) {
-    const synced = _hhmm(model.fleetSyncedAt);
-    // opts.nowMs given -> the fleet data age: "Built 13:05 from fleet sync 11:56 (3h 9m old)".
-    const fresh = synced && opts && Number.isFinite(opts.nowMs) ? freshness(model, opts.nowMs) : null;
-    parts.push('Built ' + built + (synced ? ' from fleet sync ' + synced : '') + (fresh && fresh.label ? ' (' + fresh.label + ' old)' : ''));
+    // Data-as-of = the last AAP build ("from fleet data as of 12:58"); without a recorded build,
+    // the sync stamp ("from fleet sync 11:56"). opts.nowMs given -> the age: "(3h 9m old)".
+    const f0 = freshness(model, Number.isFinite(opts && opts.nowMs) ? opts.nowMs : 0);
+    const asOf = _hhmm(f0.dataAsOf);
+    const fresh = asOf && opts && Number.isFinite(opts.nowMs) ? f0 : null;
+    const from = f0.source === 'fleet-build' ? ' from fleet data as of ' : ' from fleet sync ';
+    parts.push('Built ' + built + (asOf ? from + asOf : '') + (fresh && fresh.label ? ' (' + fresh.label + ' old)' : ''));
   }
   if (model.day) parts.push(model.day);
   if (sel.length) {
@@ -481,7 +548,15 @@ export function badgeHtml(row, status) {
   if (s.state === 'error') return '<span class="fdbr-badge fdbr-badge--warn">\u26a0 ' + esc(s.code || 'failed') + '</span>';
   const d = (row && row.draft && row.draft.state) || 'none';
   if (d === 'stale') return '<span class="fdbr-badge fdbr-badge--warn">\u26a0 AI draft out of date \u2014 showing auto text</span>';
-  if (d === 'ok') return '<span class="fdbr-badge fdbr-badge--ok">\u2713 AI draft</span>';
+  if (d === 'ok') {
+    // A draft written while the fleet data was not fresh (main stored dataStatus / dataAsOf on it).
+    const ds = row.draft.dataStatus;
+    if (ds && ds !== 'fresh') {
+      const t = _hhmm(row.draft.dataAsOf);
+      return '<span class="fdbr-badge fdbr-badge--warn">' + esc('\u26a0 AI draft \u2014 drafted on stale data' + (t ? ' (as of ' + t + ')' : '')) + '</span>';
+    }
+    return '<span class="fdbr-badge fdbr-badge--ok">\u2713 AI draft</span>';
+  }
   return '';
 }
 
@@ -561,7 +636,7 @@ export function tableHtml(model, opts = {}) {
       + (aiDraft && _down(r) > 0 ? btn('redraft', '\u2728 Redraft', 'Redraft AI cells for') : '')
       + btn('reset-row', '\u21ba Reset row', 'Reset edits for')
       + btn('copy-row', '\ud83d\udccb Copy row', 'Copy row (1P Vendor Barrier Y/N onward) for')
-      + '</div><span data-fdbr-badge="' + esc(r.key) + '">' + badgeHtml(r, rowStatus[r.key]) + '</span></td>';
+      + '</div>' + evidenceGapHtml(r) + '<span data-fdbr-badge="' + esc(r.key) + '">' + badgeHtml(r, rowStatus[r.key]) + '</span></td>';
     return '<tr data-key="' + esc(r.key) + '">' + tds + ui + '</tr>';
   }).join('');
   return '<table class="dc-table fdbr-table">' + head + '<tbody>' + body + '</tbody></table>';
@@ -633,6 +708,7 @@ export const PANEL_CSS = `
     #dbr-overlay .fdbr-badge--ok { color: #3fb950; }
     #dbr-overlay .fdbr-banner { margin: 0 18px 6px; padding: 6px 10px; font-size: 11px; border: 1px solid #f0a800; border-radius: 4px; }
     #dbr-overlay .fdbr-banner--stale { border-color: #f85149; font-weight: 600; }
+    #dbr-overlay .fdbr-banner--partial { border-color: #f0a800; background: rgba(240, 168, 0, 0.08); font-weight: 600; }
     #dbr-overlay .fdbr-status { font-size: 11px; color: var(--mut, #888); padding: 0 18px 6px; min-height: 14px; }
     #dbr-overlay .fdbr-scac { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; border: 1px solid var(--border, #444); border-radius: 4px; padding: 2px 8px; margin: 0; font-size: 11px; }
     #dbr-overlay .fdbr-scac legend { padding: 0 4px; font-size: 10px; color: var(--mut, #888); }

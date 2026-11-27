@@ -593,6 +593,55 @@ describe('freshness / stale banner / status age (AC12)', () => {
     expect(L.statusLine(m, { nowMs: SYNC + 189 * 60000 })).toMatch(/^Built \d\d:\d\d from fleet sync \d\d:\d\d \(3h 9m old\)/);
     expect(L.statusLine(m)).not.toContain(' old)');
   });
+
+  // model.dataFreshness (main): data-as-of = the last AAP build, never the re-stamped sync time.
+  const BUILD = SYNC - 60 * 60000; // AAP build 1 h before the (re-stamped) sync
+  const df = (over = {}) => Object.assign({ v: 1, status: 'fresh', reasons: [], dataAsOf: new Date(BUILD).toISOString(), dataAsOfSource: 'fleet-build', rowCount: 10, lastOkCount: 10 }, over);
+  it('freshness reads dataFreshness.dataAsOf before fleetSyncedAt and recomputes the age', () => {
+    const m = { ...model(), dataFreshness: df() };
+    expect(L.freshness(m, SYNC + 30 * 60000)).toMatchObject({ status: 'fresh', ageMin: 90, source: 'fleet-build', stale: false });
+    // fleetSyncedAt is only 61 min old but the AAP build is 121 min old -> stale.
+    expect(L.freshness(m, SYNC + 61 * 60000)).toMatchObject({ status: 'stale', stale: true, ageMin: 121 });
+    expect(L.freshness(m, SYNC + 61 * 60000).reasons).toContain('age>120m');
+  });
+  it('freshness: a build from yesterday is stale (not-today) even when it is under 2 h old', () => {
+    const lateBuild = new Date(2026, 10, 9, 23, 30).getTime();
+    const m = { ...model(), fleetSyncedAt: new Date(2026, 10, 10, 0, 20).toISOString(), dataFreshness: df({ dataAsOf: new Date(lateBuild).toISOString() }) };
+    const f = L.freshness(m, new Date(2026, 10, 10, 0, 30).getTime());
+    expect(f).toMatchObject({ status: 'stale', sameDay: false });
+    expect(f.reasons).toEqual(['not-today']);
+    const h = L.staleBannerHtml(f, new Date(2026, 10, 10, 0, 30).getTime());
+    expect(h).toContain('fdbr-banner--stale');
+    expect(h).toContain('(AAP build 23:30 yesterday)');
+  });
+  it('staleBannerHtml red names the AAP build time; partial and refresh-failed are amber', () => {
+    const m = { ...model(), dataFreshness: df() };
+    const red = L.staleBannerHtml(L.freshness(m, BUILD + 189 * 60000));
+    expect(red).toContain('\u26a0 Fleet data is 3h 9m old (AAP build ' + L.fmtClock(new Date(BUILD).toISOString()) + '). Sync, then \u21ba Rebuild before you copy for SharePoint.');
+    const part = L.staleBannerHtml(L.freshness({ ...m, dataFreshness: df({ status: 'partial', reasons: ['rows-differ-from-last-build'], rowCount: 8 }) }, BUILD + 10 * 60000));
+    expect(part).toContain('class="fdbr-banner fdbr-banner--partial" role="alert"');
+    expect(part).toContain('fleet data has 8 units but the last AAP build had 10');
+    const failAt = new Date(BUILD + 5 * 60000).toISOString();
+    const fail = L.staleBannerHtml(L.freshness({ ...m, dataFreshness: df({ reasons: ['last-refresh-failed'], lastFailAt: failAt, lastFailCode: 'AUTH' }) }, BUILD + 10 * 60000));
+    expect(fail).toContain('fdbr-banner--partial');
+    expect(fail).toContain('\u26a0 AAP refresh failing since ' + L.fmtClock(failAt) + ' (AUTH) \u2014 showing the ' + L.fmtClock(new Date(BUILD).toISOString()) + ' build');
+    expect(L.staleBannerHtml(L.freshness(m, BUILD + 10 * 60000))).toBe('');
+    expect(L.PANEL_CSS).toContain('.fdbr-banner--partial');
+    expect(L.VIEW_CSS).toContain('#view-dbr .fdbr-banner--partial');
+  });
+  it('statusLine: "from fleet data as of" the AAP build when dataFreshness has one', () => {
+    const m = { ...model(), dataFreshness: df() };
+    expect(L.statusLine(m, { nowMs: BUILD + 7 * 60000 })).toMatch(/^Built \d\d:\d\d from fleet data as of \d\d:\d\d \(7m old\)/);
+    expect(L.statusLine(m, { nowMs: BUILD + 7 * 60000 })).toContain('as of ' + L.fmtClock(new Date(BUILD).toISOString()));
+  });
+  it('badge: an ok draft written on non-fresh data says so; evidence gap marker on the row', () => {
+    const asOf = new Date(BUILD).toISOString();
+    expect(L.badgeHtml({ draft: { state: 'ok', dataStatus: 'stale', dataAsOf: asOf } })).toContain('\u26a0 AI draft \u2014 drafted on stale data (as of ' + L.fmtClock(asOf) + ')');
+    expect(L.badgeHtml({ draft: { state: 'ok', dataStatus: 'fresh', dataAsOf: asOf } })).toContain('\u2713 AI draft');
+    expect(L.badgeHtml({ draft: { state: 'ok' } })).toContain('\u2713 AI draft');
+    expect(L.evidenceGapHtml({ evidenceGaps: 2 })).toContain('\u26a0 2 unit(s) not hydrated yet \u2014 ETC may be NO ETC by default');
+    expect(L.evidenceGapHtml({ evidenceGaps: 0 })).toBe('');
+  });
 });
 
 describe('override marker, counts marker, drill-down lines, badge (AC7, AC13)', () => {

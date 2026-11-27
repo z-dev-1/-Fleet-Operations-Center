@@ -83,6 +83,8 @@ function reset(over = {}) {
     userAlias: (...a) => userAlias(...a),
     aliasNow: over.aliasNow || (() => clock.t),
     aliasSleep: over.aliasSleep || (() => new Promise((r) => setTimeout(r, 1))),
+    // health/fleet-freshness snapshot seam (null = no AAP build recorded -> sync-stamp fallback).
+    fleetFreshness: () => (typeof over.fleetFreshness === 'function' ? over.fleetFreshness() : null),
   };
   if (!over.realAsk) o.ask = (...a) => ask(...a);
   ipc._resetForTests(o);
@@ -116,6 +118,50 @@ describe('flags', () => {
     expect(await call('status')).toEqual({ ok: true, enabled: true, aiDraft: true });
     flags = { enabled: true, aiDraft: false };
     expect(await call('status')).toEqual({ ok: true, enabled: true, aiDraft: false });
+  });
+});
+
+describe('data freshness (data-as-of = last AAP build, not the re-stamped syncedAt)', () => {
+  const okAt = (h, m, day = 10) => new Date(2026, 10, day, h, m, 0).getTime();
+  it('build stamps snap.dataFreshness from lastOkAt; the model carries it', async () => {
+    let ff = { lastOkAt: okAt(10, 0), lastOkCount: freshFleet().rows.length, lastFailAt: null, buildInFlight: false };
+    reset({ fleetFreshness: () => ff });
+    const r = await call('build');
+    expect(r.model.dataFreshness).toMatchObject({ status: 'fresh', dataAsOf: new Date(okAt(10, 0)).toISOString(), dataAsOfSource: 'fleet-build' });
+    expect(store.data.fleetDbrSnapshot.dataFreshness).toMatchObject({ v: 1, status: 'fresh', dataAsOfSource: 'fleet-build' });
+    expect(store.data.fleetDbrSnapshot.fleetSyncedAt).toBe('2026-11-10T10:00:00Z'); // kept for isFleetNewer
+    // A refresh failure after the build shows up on the next get (re-assessed at read time).
+    ff = Object.assign({}, ff, { lastFailAt: okAt(10, 20), lastFailCode: 'AUTH' });
+    const g = await call('get');
+    expect(g.model.dataFreshness.status).toBe('fresh');
+    expect(g.model.dataFreshness.reasons).toContain('last-refresh-failed');
+    expect(g.model.dataFreshness.dataAsOf).toBe(new Date(okAt(10, 0)).toISOString());
+  });
+  it('syncedAt today but lastOkAt yesterday -> stale; the build still happens (no block)', async () => {
+    reset({ fleetFreshness: () => ({ lastOkAt: okAt(18, 3, 9), lastOkCount: freshFleet().rows.length }) });
+    const r = await call('build');
+    expect(r.ok).toBe(true);
+    expect(r.model.dataFreshness).toMatchObject({ status: 'stale', dataAsOfSource: 'fleet-build' });
+    expect(r.model.dataFreshness.reasons).toContain('not-today');
+  });
+  it('no build recorded -> sync-stamp fallback on fleetData.syncedAt', async () => {
+    const r = await call('build');
+    expect(r.model.dataFreshness).toMatchObject({ dataAsOf: new Date('2026-11-10T10:00:00Z').toISOString(), dataAsOfSource: 'sync-stamp' });
+  });
+  it('rows differ from the last build count -> partial', async () => {
+    reset({ fleetFreshness: () => ({ lastOkAt: okAt(10, 0), lastOkCount: 5 }) });
+    const r = await call('build');
+    expect(r.model.dataFreshness).toMatchObject({ status: 'partial', reasons: ['rows-differ-from-last-build'], lastOkCount: 5 });
+  });
+  it('a stored draft records dataAsOf / dataStatus; the model row draft carries them', async () => {
+    reset({ fleetFreshness: () => ({ lastOkAt: okAt(7, 0), lastOkCount: freshFleet().rows.length }) });
+    await call('build');
+    const r = await call('draft', { key: ROC_KEY });
+    expect(r.ok).toBe(true);
+    const asOf = new Date(okAt(7, 0)).toISOString();
+    expect(r).toMatchObject({ dataAsOf: asOf, dataStatus: 'stale' });
+    expect(store.data.fleetDbrSnapshot.drafts[ROC_KEY]).toMatchObject({ version: F.DRAFT_VERSION, dataAsOf: asOf, dataStatus: 'stale' });
+    expect(rowOf(r.model, ROC_KEY).draft).toMatchObject({ state: 'ok', dataAsOf: asOf, dataStatus: 'stale' });
   });
 });
 

@@ -999,6 +999,14 @@ function _closeCbOverlay() {
   if (ov) ov.style.display = 'none';
 }
 
+// DBR pull dataAsOf (ISO time of the last AAP build) -> local "M/D HH:MM"; other strings as-is.
+function _asOfLabel(v) {
+  if (!v) return '?';
+  const d = /T\d/.test(String(v)) ? new Date(v) : null;
+  if (!d || isNaN(d.getTime())) return String(v);
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
 async function _runDbrNow() {
   await _guard(async () => {
     _toast('info', 'DBR pull started (Fleet Health build + AI drafts)...');
@@ -1011,7 +1019,7 @@ async function _runDbrNow() {
       msg = 'Fleet Health: ' + (x.rowCount != null ? x.rowCount + ' rows' : 'built')
         + (x.downRows != null ? ', ' + x.downRows + ' with units down' : '')
         + (x.drafts ? ', ' + x.drafts.drafted + '/' + x.drafts.eligible + ' AI drafts' + (x.drafts.failed ? ' (' + x.drafts.failed + ' failed)' : '') : '');
-    } else if (x.state === 'not-ready') msg = 'Fleet Health: waiting for today\'s fleet sync (last ' + (x.dataAsOf || '?') + ') \u2014 will retry';
+    } else if (x.state === 'not-ready') msg = 'Fleet Health: waiting for today\'s fleet sync (last ' + _asOfLabel(x.dataAsOf) + ') \u2014 will retry';
     else if (x.state === 'skipped') msg = 'Fleet Health: ' + x.skipped;
     else if (x.state === 'failed' || x.state === 'error') msg = 'Fleet Health: failed' + (x.error ? ' (' + x.error + ')' : (x.failed ? ' (' + x.failed + ')' : ''));
     else msg = 'Fleet Health: ' + x.state;
