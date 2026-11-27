@@ -132,6 +132,8 @@ async function _tickFleet() {
     const now = new Date().toISOString();
     const out = { rows, count: rows.length, unavailableCount: ds.unavailableCount, scrapedAt: now, syncedAt: now, stale: false, source: 'aap-api-standby' };
     store.save('fleetData', out);              // shared key → auto-published if leader (Stage 9)
+    // Same last-good-build record the primary loaders keep; an empty build is not a good one.
+    if (rows.length) { try { require('../health/fleet-freshness').recordBuildOk({ count: rows.length }); } catch (_) {} }
     _lastTick.fleet = { at: now, units: rows.length };
     logger.info('[standby-daemon] fleet refresh: ' + rows.length + ' units');
   } catch (e) { logger.warn('[standby-daemon] fleet refresh error: ' + e.message); }
