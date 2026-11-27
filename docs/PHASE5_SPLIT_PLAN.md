@@ -1,6 +1,7 @@
 # Phase 5: Monolith Split Plan
 
 ## Status: Reference files extracted, wiring deferred to live-test session
+> **Update (dead-code batch 1):** the never-wired `src/scrapers/relay/*.js` (4 files) and `renderer/src/js/views/unit-detail/*.js` (3 files) extracts were removed. They were stale, unimported copies; the live code is still `src/scrapers/relay.js` and `renderer/src/js/views/unit-detail.js`. Recover them from git history if a split is attempted.
 
 ## Why deferred:
 - All 4 monoliths use shared closures (local variables referenced across functions)

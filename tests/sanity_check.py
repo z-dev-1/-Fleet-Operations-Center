@@ -43,7 +43,6 @@ SPU    = f'{BASE}/src/scrapers/sharepoint_push.js'
 AAP_SC = f'{BASE}/src/scrapers/aap.js'
 DN_SC  = f'{BASE}/src/scrapers/daily_notes.js'
 SL_SC  = f'{BASE}/src/scrapers/setLifecycle.js'
-PW_SC  = f'{BASE}/src/scrapers/pw_scraper.js'
 AAG_SC = f'{BASE}/src/scrapers/aap_adaptive_agent.js'
 AE_SC  = f'{BASE}/src/scrapers/aap_autofill_engine.js'
 AUTH_SC = f'{BASE}/src/scrapers/auth.js'
@@ -94,7 +93,6 @@ spu  = read(SPU)
 aap_s = read(AAP_SC)
 dn_s  = read(DN_SC)
 sl_s  = read(SL_SC)
-pw_s  = read(PW_SC)
 aag_s = read(AAG_SC)
 ae_s  = read(AE_SC)
 auth_s = read(AUTH_SC)
@@ -773,8 +771,6 @@ chk('S5-M2: getRelayData catch logs warn',                      "[DailyNotes] ge
 chk('S5-M2: no silent bare catch(e){} remaining in daily_notes','} catch (e) {}' not in dn_s)
 # setLifecycle.js — M-3
 chk('S5-M3: selector loop catch logs console.warn',             "OPTION_SELECTORS loop error" in sl_s)
-# pw_scraper.js — L-1
-chk('S5-L1: force-1000 catch logs warn',                        "Force-1000 rows failed" in pw_s)
 # aap_adaptive_agent.js — L-3
 chk('S5-L3: PAGE_LOAD_TIMEOUT_MS constant defined',             'PAGE_LOAD_TIMEOUT_MS = 15_000' in aag_s)
 # Strip comment lines before checking for inline 15000
