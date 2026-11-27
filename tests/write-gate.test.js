@@ -22,9 +22,12 @@ function memStore() {
   };
 }
 
-let apiPost, logs, store, notify, nowMs, win, sent;
+const WO = '9f9f9f9f-aaaa-bbbb-cccc-ddddeeeeffff';
+let apiPost, getService, getUserDetails, logs, store, notify, nowMs, win, sent;
 function setup(over = {}) {
   apiPost = vi.fn(async () => ({ ok: true }));
+  getService = vi.fn(async (id) => ({ id, workOrders: [{ id: WO }] }));
+  getUserDetails = vi.fn(async () => ({ userName: 'fakeuser' }));
   logs = [];
   store = memStore();
   notify = vi.fn();
@@ -32,7 +35,7 @@ function setup(over = {}) {
   sent = [];
   win = { isDestroyed: () => false, webContents: { send: vi.fn((ch, data) => sent.push({ ch, data })) } };
   gate._setDepsForTest(Object.assign({
-    apiPost, store, notify, now: () => nowMs, log: (m) => logs.push(m), flags: { requireApproval: true },
+    apiPost, getService, getUserDetails, store, notify, now: () => nowMs, log: (m) => logs.push(m), flags: { requireApproval: true },
   }, over));
   gate.setWindowGetter(null);
 }
@@ -96,9 +99,12 @@ describe('interactive prompt', () => {
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
     const [path, body] = apiPost.mock.calls[0];
-    expect(path).toBe('/api/v1/addComment');
-    expect(body).toEqual({ workRequestId: WR, text: TEXT, internalOnly: true, externalConsumers: [] });
-    expect(req.preview.endsWith('\n' + body.text)).toBe(true);
+    expect(path).toBe('/api/v1/workOrder/addComment');
+    expect(body).toEqual({ id: WO, comment: {
+      timestamp: '2026-11-10T12:00:00.000Z', text: TEXT, createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+    } });
+    expect(getService).toHaveBeenCalledWith(WR);
+    expect(req.preview.endsWith('\n' + body.comment.text)).toBe(true);
     expect(gate.list().items.find((i) => i.id === r.id).state).toBe('sent');
   });
 
@@ -110,8 +116,8 @@ describe('interactive prompt', () => {
     gate.respond(sent[0].data.id, true);
     await p;
     const body = apiPost.mock.calls[0][1];
-    expect(body.text).toHaveLength(2000);
-    expect(sent[0].data.preview.endsWith('\n' + body.text)).toBe(true);
+    expect(body.comment.text).toHaveLength(2000);
+    expect(sent[0].data.preview.endsWith('\n' + body.comment.text)).toBe(true);
   });
 
   it('no answer within APPROVAL_WAIT_MS -> skipped, 0 sends', async () => {
@@ -141,7 +147,7 @@ describe('non-interactive queue', () => {
     const a = await gate.approve(r.id);
     expect(a.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
-    expect(apiPost.mock.calls[0][1].text).toBe(TEXT);
+    expect(apiPost.mock.calls[0][1].comment.text).toBe(TEXT);
     const again = await gate.approve(r.id);
     expect(again.ok).toBe(false);
     expect(apiPost).toHaveBeenCalledTimes(1);
@@ -206,6 +212,24 @@ describe('approvedBy / requireApproval false', () => {
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
     expect(sent).toHaveLength(0);
+  });
+
+  it('WR with no work order -> /workRequest/addComment with id = the service id', async () => {
+    setup({ getService: vi.fn(async (id) => ({ id, workOrders: [] })) });
+    const r = await gate.requestWrite(spec({ approvedBy: 'x' }));
+    expect(r.outcome).toBe('sent');
+    const [path, body] = apiPost.mock.calls[0];
+    expect(path).toBe('/api/v1/workRequest/addComment');
+    expect(body.id).toBe(WR);
+    expect(body.comment).toMatchObject({ text: TEXT, createdBy: 'fakeuser', internalOnly: true, externalConsumers: [] });
+  });
+
+  it('unresolved AAP user -> send-failed, nothing posted', async () => {
+    setup({ getUserDetails: vi.fn(async () => ({})) });
+    const r = await gate.requestWrite(spec({ approvedBy: 'x' }));
+    expect(r.outcome).toBe('send-failed');
+    expect(r.error).toMatch(/user alias/);
+    expect(apiPost).not.toHaveBeenCalled();
   });
 
   it('send failure -> send-failed', async () => {

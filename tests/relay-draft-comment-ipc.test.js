@@ -35,6 +35,7 @@ const aap = require('../src/scrapers/aap_api');
 const draft = require('../src/writes/relay-comment-draft');
 
 const WR = '0a1b2c3d-1111-2222-3333-444455556666';
+const WO = '9f9f9f9f-aaaa-bbbb-cccc-ddddeeeeffff';
 const ROW = {
   equipmentId: 'B62020', workRequestId: WR, vendor: 'Cox', created: '2026-11-09T12:00:00.000Z',
   savedNotes: '11/13 - called Cox for ETA',
@@ -222,7 +223,8 @@ describe('aiDrafted reaches the approval gate; approval stays mandatory', () => 
     spies.requestWrite.mockRestore();
     spies.addNote.mockRestore();
     const apiPost = vi.fn(async () => ({ ok: true }));
-    gate._setDepsForTest({ apiPost, store: memStore(), flags: { requireApproval: true }, log: () => {}, notify: () => {} });
+    gate._setDepsForTest({ apiPost, store: memStore(), flags: { requireApproval: true }, log: () => {}, notify: () => {},
+      getService: async (id) => ({ id, workOrders: [{ id: WO }] }), getUserDetails: async () => ({ userName: 'fakeuser' }) });
     gate.setWindowGetter(() => win);
     return apiPost;
   }
@@ -253,7 +255,9 @@ describe('aiDrafted reaches the approval gate; approval stays mandatory', () => 
     await handlers['relayWrites:respond']({}, sent[0].d.id, true);
     expect((await p).outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
-    expect(apiPost).toHaveBeenCalledWith('/api/v1/addComment', { workRequestId: WR, text: 'FAS called Cox on 11/13 for an ETA.', internalOnly: true, externalConsumers: [] });
+    expect(apiPost).toHaveBeenCalledWith('/api/v1/workOrder/addComment', { id: WO, comment: {
+      timestamp: expect.any(String), text: 'FAS called Cox on 11/13 for an ETA.', createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+    } });
   });
 
   it('without aiDrafted the gate still gets aiDrafted:false', async () => {

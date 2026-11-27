@@ -251,6 +251,9 @@ function _requestScript(method, url, bodyLiteral) {
             var txt = xhr.responseText || '';
             var json = null;
             try { json = JSON.parse(txt); } catch (e) {}
+            // Status 0 at readyState 4: no readable response (blocked, reset or a
+            // cross-origin redirect). This fires before onerror/ontimeout, so mark it here.
+            if (xhr.status === 0) { resolve({ ok: false, status: 0, transport: true, responseURL: xhr.responseURL || '' }); return; }
             var okStatus = xhr.status >= 200 && xhr.status < 300;
             // On error, always include the FULL raw body (not just when json is
             // null) so structured error detail (errors[], cause, fieldName)
@@ -300,6 +303,12 @@ async function _request(method, path, body, opts) {
           throw Object.assign(new Error('AAP API ' + r.status + ' (session rejected)'), { code: 'MIDWAY_SESSION_INVALID' });
         }
         if (r && r.timeout && !warm) _noteTimeout();
+        // Same code (AAP_API_ERROR): _validateAssetFleetIds keys on it to drop a failing id.
+        if (r && r.transport) {
+          const p = String(path).replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+          throw Object.assign(new Error('AAP returned no response for ' + String(method).toUpperCase() + ' ' + p +
+            ' (blocked or redirected) - reads are working, so this is not a VPN or sign-in problem.'), { code: 'AAP_API_ERROR', status: 0 });
+        }
         throw Object.assign(new Error('AAP API ' + (r && r.status) + ': ' + detail), { code: 'AAP_API_ERROR', status: r && r.status });
       }
       if (!warm) {

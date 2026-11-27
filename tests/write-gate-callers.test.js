@@ -141,6 +141,11 @@ describe('PACCAR / Volvo SR notes', () => {
 
 describe('relay reconcile', () => {
   const apply = require('../src/scrapers/relay_reconcile_apply');
+  const WO = '9f9f9f9f-aaaa-bbbb-cccc-ddddeeeeffff';
+  const mockReads = () => {
+    vi.spyOn(aap, 'getService').mockResolvedValue({ id: WR, workOrders: [{ id: WO }] });
+    vi.spyOn(aap, 'getUserDetails').mockResolvedValue({ userName: 'fakeuser' });
+  };
   const CFG_AUTO = { enabled: true, autoPostToRelay: true, staleDays: 3, minConfidence: 0.5, maxUnitsPerSync: 8 };
   const decision = () => ({
     equipmentId: 'B62020', _workRequestId: WR, relayHasLatest: false,
@@ -160,21 +165,25 @@ describe('relay reconcile', () => {
 
   it('MODE A with settings.writes.requireApproval false -> posted via apiPost', async () => {
     store.save('settings', { writes: { requireApproval: false } });
+    mockReads();
     const spy = vi.spyOn(aap, 'apiPost').mockResolvedValue({ ok: true });
     const res = await apply.applyReconcile(decision(), { cfg: CFG_AUTO });
     expect(res.posts.find((p) => p.kind === 'gap-fill').action).toBe('posted');
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][0]).toBe('/api/v1/addComment');
+    expect(spy.mock.calls[0][0]).toBe('/api/v1/workOrder/addComment');
   });
 
   it('confirmPending -> exactly one send with the staged text unchanged', async () => {
+    mockReads();
     const spy = vi.spyOn(aap, 'apiPost').mockResolvedValue({ ok: true });
     await apply.applyReconcile(decision(), { cfg: CFG_AUTO });
     const item = apply.loadPending().items.find((i) => i.kind === 'gap-fill' && i.state === 'pending');
     const r = await apply.confirmPending(item.id);
     expect(r.ok).toBe(true);
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][1]).toEqual({ workRequestId: WR, text: item.text, internalOnly: true, externalConsumers: [] });
+    expect(spy.mock.calls[0][1]).toEqual({ id: WO, comment: {
+      timestamp: expect.any(String), text: item.text, createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+    } });
     expect(logs.some((l) => /approved kind=addComment origin=relay-reconcile .*by=relay-reconcile-overlay/.test(l))).toBe(true);
     expect(sesFetch).not.toHaveBeenCalled();
   });

@@ -1,6 +1,6 @@
 // tests/aap-write-transport.test.js — the two Relay write transports that used to 403
 // (cookie-only electron session fetch) now go through the working aap_api transport and
-// the write-approval gate: addConversationNote -> apiPost('/api/v1/addComment'),
+// the write-approval gate: addConversationNote -> apiPost('/api/v1/workOrder/addComment'),
 // createWorkRequest -> aap_api.createWorkOrder({confirmVendor:true}); the createWorkOrder
 // commit guard sends nothing to /createRepair unless the gate approves.
 // The AAP backend is a fake browser_provider; electron is a stub whose session fetch is a
@@ -53,7 +53,8 @@ const fakeProvider = {
       const url = m[2].replace('https://aap-na.corp.amazon.com', '');
       calls.push(m[1] + ' ' + url);
       const json = BACKEND(m[1], url);
-      if (json && json.__fail) return { ok: false, status: json.__fail, text: 'err' };
+      if (json && json.__transport) return { ok: false, status: 0, transport: true, responseURL: '' };
+      if (json && json.__fail != null) return { ok: false, status: json.__fail, text: 'err' };
       return { ok: true, status: 200, json };
     },
   }),
@@ -91,13 +92,24 @@ const baseOpts = (o = {}) => Object.assign({
 }, o);
 
 describe('addConversationNote', () => {
-  it('approved -> one apiPost(/api/v1/addComment) with the exact body; session fetch never used', async () => {
+  it('approved -> one apiPost(/api/v1/workOrder/addComment) with the nested body; session fetch never used', async () => {
+    const WO = '9f9f9f9f-aaaa-bbbb-cccc-ddddeeeeffff';
+    const svc = vi.spyOn(aap, 'getService').mockResolvedValue({ id: WR, workOrders: [{ id: WO }] });
+    vi.spyOn(aap, 'getUserDetails').mockResolvedValue({ userName: 'fakeuser' });
     const spy = vi.spyOn(aap, 'apiPost').mockResolvedValue({ ok: true });
     const r = await cwr.addConversationNote('https://aap-na.corp.amazon.com/v2/service/' + WR, 'Parts ETA 11/12', { origin: 'test', approvedBy: 'unit-test' });
     expect(r.ok).toBe(true);
     expect(r.outcome).toBe('sent');
+    expect(svc).toHaveBeenCalledWith(WR);
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith('/api/v1/addComment', { workRequestId: WR, text: 'Parts ETA 11/12', internalOnly: true, externalConsumers: [] });
+    const [p, body] = spy.mock.calls[0];
+    expect(p).toBe('/api/v1/workOrder/addComment');
+    expect(Object.keys(body).sort()).toEqual(['comment', 'id']);
+    expect(body.id).toBe(WO);
+    expect(body.comment).toEqual({
+      timestamp: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/),
+      text: 'Parts ETA 11/12', createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+    });
     expect(sesFetch).not.toHaveBeenCalled();
   });
 
@@ -109,6 +121,28 @@ describe('addConversationNote', () => {
     expect(spy).not.toHaveBeenCalled();
     expect(calls).toHaveLength(0);
     expect(sesFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('HTTP 0 error message', () => {
+  it('the in-page script marks status 0 at readyState 4 as a transport failure', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/scrapers/aap_api.js'), 'utf8');
+    expect(src).toContain("if (xhr.status === 0) { resolve({ ok: false, status: 0, transport: true, responseURL: xhr.responseURL || '' }); return; }");
+  });
+
+  it('a transport marker -> clear message, code stays AAP_API_ERROR, status 0', async () => {
+    BACKEND = () => ({ __transport: true });
+    const err = await aap.apiPost('/api/v1/workOrder/addComment', { id: 'x' }).catch((e) => e);
+    expect(err.code).toBe('AAP_API_ERROR');
+    expect(err.status).toBe(0);
+    expect(err.message).toBe('AAP returned no response for POST /api/v1/workOrder/addComment (blocked or redirected) - reads are working, so this is not a VPN or sign-in problem.');
+  });
+
+  it('a plain status-0 result without the marker keeps the old message', async () => {
+    BACKEND = () => ({ __fail: 0 });
+    const err = await aap.apiPost('/api/v1/x', {}).catch((e) => e);
+    expect(err.code).toBe('AAP_API_ERROR');
+    expect(err.message).toBe('AAP API 0: err');
   });
 });
 
@@ -240,6 +274,12 @@ describe('static write-path scan', () => {
   it("the literal '/addComment' appears only in src/writes/write-gate.js", () => {
     const hits = files.filter((f) => fs.readFileSync(f, 'utf8').includes('/addComment')).map(rel);
     expect(hits).toEqual(['src/writes/write-gate.js']);
+  });
+
+  it("write-gate posts to '/api/v1/workOrder/addComment' and never the unserved '/api/v1/addComment'", () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/writes/write-gate.js'), 'utf8');
+    expect(src).toContain("'/api/v1/workOrder/addComment'");
+    expect(src).not.toContain("'/api/v1/addComment'");
   });
 
   it('aap_create_wr.js has no session fetch and no aapFetch', () => {

@@ -40,7 +40,11 @@ const APPROVAL_WAIT_MS = 5 * 60 * 1000;
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_ITEMS = 200;
 const MEMORY_ONLY_BYTES = 2 * 1024 * 1024;
-const ADD_COMMENT_PATH = '/api/v1/addComment';
+// AAP's own comment box (its cached web bundle) posts { id, comment:{...} } to
+// /workOrder/addComment with id = the service's first workOrders[].id, and to
+// /workRequest/addComment with id = the service id when the WR has no work order yet.
+const WORK_ORDER_ADD_COMMENT_PATH = '/api/v1/workOrder/addComment';
+const WORK_REQUEST_ADD_COMMENT_PATH = '/api/v1/workRequest/addComment';
 const COMMENT_MAX = 2000;
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
@@ -333,19 +337,45 @@ function previewOf(kind, payload, meta) {
   return lines.join('\n');
 }
 
+// ── addComment request (resolved at send time, after approval) ──────────────
+function _json(v) {
+  if (typeof v === 'string') { try { return JSON.parse(v); } catch (_) { return null; } }
+  return v;
+}
+// Reads only: the service aggregate (which work order to comment on) and the
+// signed-in AAP user (createdBy). The stored payload and preview are unchanged.
+// Every comment is internal-only: no caller asks for a vendor-facing comment.
+async function _buildAddCommentRequest(payload) {
+  const wr = _str(payload.workRequestId);
+  if (!wr) throw new Error('addComment: no workRequestId');
+  const getService = _deps.getService || ((id) => _api().getService(id));
+  const getUser = _deps.getUserDetails || (() => _api().getUserDetails());
+  const svc = _json(await getService(wr)) || {};
+  const u = _json(await getUser()) || {};
+  // Same lookup as aap_api._userAlias (the escalation write's createdBy).
+  const alias = u.userName || u.alias || u.login;
+  const createdBy = typeof alias === 'string' ? alias.trim() : '';
+  if (!createdBy) throw new Error('Could not resolve the AAP user alias; nothing was sent');
+  const wos = (Array.isArray(svc.workOrders) ? svc.workOrders : []).filter((w) => w && w.id);
+  const comment = {
+    timestamp: new Date(_now()).toISOString(),
+    text: _str(payload.text).slice(0, COMMENT_MAX),
+    createdBy,
+    internalOnly: true,
+    externalConsumers: [],
+  };
+  if (wos.length) return { path: WORK_ORDER_ADD_COMMENT_PATH, body: { id: _str(wos[0].id), comment } };
+  return { path: WORK_REQUEST_ADD_COMMENT_PATH, body: { id: _str(svc.id) || wr, comment } };
+}
+
 // ── send (the only network path) ────────────────────────────────────────────
 async function _send(f, payload) {
   try {
     if (f.kind === 'addComment') {
-      const body = {
-        workRequestId: payload.workRequestId,
-        text: _str(payload.text).slice(0, COMMENT_MAX),
-        internalOnly: true,
-        externalConsumers: [],
-      };
-      const post = _deps.apiPost || ((path, b) => _api().apiPost(path, b));
-      const result = await post(ADD_COMMENT_PATH, body);
-      _logLine('sent', f, 'len=' + body.text.length);
+      const { path, body } = await _buildAddCommentRequest(payload);
+      const post = _deps.apiPost || ((p, b) => _api().apiPost(p, b));
+      const result = await post(path, body);
+      _logLine('sent', f, 'len=' + body.comment.text.length + ' target=' + (path === WORK_ORDER_ADD_COMMENT_PATH ? 'workOrder' : 'workRequest'));
       return { ok: true, outcome: 'sent', id: f.id, result: result == null ? null : result };
     }
     if (f.kind === 'updateEscalations') {

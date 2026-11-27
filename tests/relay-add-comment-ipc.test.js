@@ -35,6 +35,7 @@ const win = { isDestroyed: () => false, webContents: { send: vi.fn((ch, d) => se
 require('../src/ipc/relay-writes').registerRelayWritesIPC({ getMainWindow: () => win });
 
 const WR = '0a1b2c3d-1111-2222-3333-444455556666';
+const WO = '9f9f9f9f-aaaa-bbbb-cccc-ddddeeeeffff';
 const flush = () => new Promise((r) => setImmediate(r));
 function memStore() {
   const data = {};
@@ -89,7 +90,8 @@ describe('relay:add-comment goes through the write gate', () => {
   function setupGate() {
     const apiPost = vi.fn(async () => ({ ok: true }));
     const directPost = vi.spyOn(aap, 'apiPost').mockResolvedValue({ ok: true });
-    gate._setDepsForTest({ apiPost, store: memStore(), flags: { requireApproval: true }, log: () => {}, notify: () => {} });
+    gate._setDepsForTest({ apiPost, store: memStore(), flags: { requireApproval: true }, log: () => {}, notify: () => {},
+      getService: async (id) => ({ id, workOrders: [{ id: WO }] }), getUserDetails: async () => ({ userName: 'fakeuser' }) });
     gate.setWindowGetter(() => win);
     return { apiPost, directPost };
   }
@@ -118,7 +120,9 @@ describe('relay:add-comment goes through the write gate', () => {
     const r = await p;
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
-    expect(apiPost).toHaveBeenCalledWith('/api/v1/addComment', { workRequestId: WR, text: 'Parts ETA 11/12', internalOnly: true, externalConsumers: [] });
+    expect(apiPost).toHaveBeenCalledWith('/api/v1/workOrder/addComment', { id: WO, comment: {
+      timestamp: expect.any(String), text: 'Parts ETA 11/12', createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+    } });
     expect(directPost).not.toHaveBeenCalled();
   });
 
