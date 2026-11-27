@@ -45,6 +45,7 @@ function _title(kind) {
   if (kind === 'dtnaComment') return 'Approve DTNA comment (dealer-visible)';
   if (kind === 'dtnaChatter') return 'Approve DTNA Chatter post (dealer-visible)';
   if (kind === 'dtnaStage') return 'Approve DTNA stage change (dealer-visible)';
+  if (kind === 'decisivReply') return 'Approve Decisiv reply (dealer + Amazon visible)';
   if (kind === 'updateEscalations') return 'Approve Relay escalation';
   if (kind === 'setLifecycle') return 'Approve AAP lifecycle change';
   return kind === 'createWorkOrder' ? 'Approve Relay work request' : 'Approve Relay comment';

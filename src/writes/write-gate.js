@@ -26,6 +26,10 @@
  * same / earlier / unknown target stage is refused before anything is staged.
  * dtnaChatter (a post to the DTNA case Chatter feed, src/dtna/writes.js postApprovedChatter) is
  * dealer-visible and in EXTERNAL_KINDS too, gated exactly like dtnaComment.
+ * decisivReply (a reply on a Decisiv case notes thread, src/writes/decisiv-reply.js
+ * postApproved) goes to the dealer AND Amazon staff. It is in DECISIV_KINDS and
+ * gets the same always-approve treatment as EXTERNAL_KINDS; the newest note id
+ * is looked up at send time, after approval.
  *
  * The preview is built from the stored payload only, and approve(id) sends that
  * same stored payload once, so the text shown is the text sent.
@@ -65,10 +69,14 @@ function commentVisibilityFields(v) {
 }
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
-const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage', 'dtnaChatter'];
+const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage', 'dtnaChatter', 'decisivReply'];
 // Dealer-visible writes outside Relay: ALWAYS approved by the user on the exact content.
 // settings.writes.requireApproval === false and approvedBy never bypass these.
 const EXTERNAL_KINDS = new Set(['dtnaComment', 'dtnaStage', 'dtnaChatter']);
+// Decisiv writes (dealer + Amazon staff visible): same always-approve rule.
+const DECISIV_KINDS = new Set(['decisivReply']);
+function _isExternal(kind) { return EXTERNAL_KINDS.has(kind) || DECISIV_KINDS.has(kind); }
+const DECISIV_RECIPIENTS_MAX = 50;
 const DTNA_CASE_URL = 'https://dtna.my.site.com/Servicetracker/s/case/';
 
 let _deps = {};
@@ -131,12 +139,14 @@ function _textLen(kind, payload) {
   if (!payload) return 0;
   if (kind === 'updateEscalations') return _str(payload.comment).length;
   if (kind === 'setLifecycle' || kind === 'dtnaStage') return 0;
+  if (kind === 'decisivReply') return _str(payload.text).length;
   return (kind === 'addComment' || kind === 'dtnaComment' || kind === 'dtnaChatter') ? _str(payload.text).length : _str(payload.comments).trim().length;
 }
 function _target(kind, payload, spec) {
   if (kind === 'addComment' || kind === 'updateEscalations') return _str(payload.workRequestId);
   if (kind === 'setLifecycle') return _str(payload.aaid || payload.assetUrl || payload.equipmentId);
   if (kind === 'dtnaComment' || kind === 'dtnaStage' || kind === 'dtnaChatter') return _str(payload.caseId);
+  if (kind === 'decisivReply') return _str(payload.caseId);
   return _str(payload.aaid || payload.assetUrl || spec.unit);
 }
 // Dedup key for a work-order write: the fields that define WHAT is requested.
@@ -212,6 +222,25 @@ function _normalizePayload(kind, payload) {
       fromStage: _str(p.fromStage),
       toStage: _str(p.toStage),
       repairOrderNo: _str(p.repairOrderNo),
+    };
+  }
+  if (kind === 'decisivReply') {
+    const seen = new Set();
+    const recipients = [];
+    for (const r of (Array.isArray(p.recipients) ? p.recipients : [])) {
+      const id = _str(r && r.id).trim().toLowerCase();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      recipients.push({ id, name: _str(r && r.name).trim().slice(0, 120) });
+      if (recipients.length >= DECISIV_RECIPIENTS_MAX) break;
+    }
+    return {
+      unitId: _str(p.unitId),
+      caseId: _str(p.caseId),
+      estimateId: _str(p.estimateId),
+      srUrl: _str(p.srUrl),
+      text: _str(p.text).slice(0, COMMENT_MAX),
+      recipients,
     };
   }
   if (kind === 'setLifecycle') {
@@ -300,6 +329,21 @@ function previewOf(kind, payload, meta) {
     lines.push('Repair order: ' + (_str(p.repairOrderNo) || '(none)'));
     lines.push('Visibility: VISIBLE TO THE DEALER (DTNA)');
     lines.push('Origin: ' + (m.origin || 'unknown'));
+    return lines.join('\n');
+  }
+  if (kind === 'decisivReply') {
+    const rs = Array.isArray(p.recipients) ? p.recipients : [];
+    lines.push('Decisiv write: reply on the case notes thread');
+    lines.push('Unit: ' + (m.unit || _str(p.unitId) || '-'));
+    lines.push('Decisiv case: ' + _str(p.caseId) + ' (estimate ' + _str(p.estimateId) + ')  ' + _str(p.srUrl));
+    lines.push('Replies to: the newest note on the estimate, looked up when you approve');
+    lines.push('Visibility: VISIBLE TO THE DEALER AND AMAZON STAFF (Decisiv, public)');
+    lines.push('Recipients (' + rs.length + '):');
+    for (const r of rs) lines.push('  - ' + (_str(r && r.name) || _str(r && r.id)));
+    lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
+    lines.push('Origin: ' + (m.origin || 'unknown'));
+    lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
+    lines.push(_str(p.text));
     return lines.join('\n');
   }
   if (kind === 'setLifecycle') {
@@ -392,9 +436,51 @@ async function _buildAddCommentRequest(payload) {
   return { path: WORK_REQUEST_ADD_COMMENT_PATH, body: { id: _str(svc.id) || wr, comment } };
 }
 
+// ── decisivReply request (resolved at send time, after approval) ────────────
+// Read only: the estimate's activity_logs feed, for the newest note id (rule in
+// src/writes/decisiv-reply.js pickLatestNote). The stored payload is unchanged.
+async function _buildDecisivReplyRequest(payload) {
+  const dr = require('./decisiv-reply');
+  const latest = _deps.decisivLatestNote || ((p) => dr.latestNoteId(p));
+  const r = await latest({ estimateId: payload.estimateId, srUrl: payload.srUrl });
+  if (!r || !r.ok) throw Object.assign(new Error('no note to reply to'), { code: _str((r && r.code) || 'DECISIV_NO_NOTE') });
+  const { path, body } = dr.buildReplyRequest(payload, r.noteId);
+  return { path, body, noteId: _str(r.noteId) };
+}
+function _decisivCode(c) {
+  const s = _str(c).replace(/[^A-Z0-9_]/g, '').slice(0, 40);
+  return /^DECISIV_/.test(s) ? s : 'DECISIV_INTERNAL';
+}
+
 // ── send (the only network path) ────────────────────────────────────────────
 async function _send(f, payload) {
   try {
+    if (f.kind === 'decisivReply') {
+      let req;
+      try { req = await _buildDecisivReplyRequest(payload); } catch (e) {
+        const code = _decisivCode(e && e.code);
+        _logLine('send-failed', f, 'error=' + code);
+        return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
+      }
+      // Single-use token: src/writes/decisiv-reply.js postApproved refuses a write without it.
+      const token = {};
+      _tokens.add(token);
+      let r;
+      try {
+        const post = _deps.decisivPost || ((u, p, b, t) => require('./decisiv-reply').postApproved(u, p, b, t));
+        r = await post(payload.srUrl, req.path, req.body, token);
+      } finally {
+        _tokens.delete(token);
+      }
+      if (r && r.ok) {
+        const n = r.json && Array.isArray(r.json.notes) && r.json.notes[0] ? r.json.notes[0] : null;
+        _logLine('sent', f, 'len=' + _textLen(f.kind, payload) + ' recipients=' + req.body.note.recipients.length + ' target=decisiv');
+        return { ok: true, outcome: 'sent', id: f.id, result: { noteId: req.noteId, replyNoteId: n && n.id != null ? _str(n.id) : '' } };
+      }
+      const code = _decisivCode(r && r.code);
+      _logLine('send-failed', f, 'error=' + code);
+      return { ok: false, outcome: 'send-failed', id: f.id, result: null, error: code };
+    }
     if (f.kind === 'addComment') {
       const { path, body } = await _buildAddCommentRequest(payload);
       const post = _deps.apiPost || ((p, b) => _api().apiPost(p, b));
@@ -495,14 +581,15 @@ async function _send(f, payload) {
     return { ok: false, outcome: 'send-failed', id: f.id, result: result || null, error: err };
   } catch (e) {
     // A DTNA failure never carries an error message (it could echo request or response content).
-    const err = EXTERNAL_KINDS.has(f.kind) ? 'DTNA_INTERNAL' : ((e && e.message) || String(e));
+    const err = EXTERNAL_KINDS.has(f.kind) ? 'DTNA_INTERNAL'
+      : (DECISIV_KINDS.has(f.kind) ? 'DECISIV_INTERNAL' : ((e && e.message) || String(e)));
     _logLine('send-failed', f, 'error=' + _str(err).slice(0, 120));
     return { ok: false, outcome: 'send-failed', id: f.id, error: err };
   }
 }
 
 // Where a write goes, for the "nothing was sent to …" messages.
-function _dest(kind) { return EXTERNAL_KINDS.has(kind) ? 'DTNA' : 'Relay'; }
+function _dest(kind) { return EXTERNAL_KINDS.has(kind) ? 'DTNA' : (DECISIV_KINDS.has(kind) ? 'Decisiv' : 'Relay'); }
 
 function isApprovalToken(token) {
   if (!token || typeof token !== 'object' || !_tokens.has(token)) return false;
@@ -647,7 +734,7 @@ async function requestWrite(spec) {
 
   let flags;
   try { flags = _flags() || {}; } catch (_) { flags = {}; }
-  const external = EXTERNAL_KINDS.has(kind);
+  const external = _isExternal(kind);
   if (flags.requireApproval === false && !external) {
     _logLine('approved', f, 'by=setting-requireApproval-false');
     return _send(f, payload);
@@ -745,6 +832,7 @@ module.exports = {
   setWindowGetter,
   isApprovalToken,
   EXTERNAL_KINDS,
+  DECISIV_KINDS,
   APPROVAL_WAIT_MS,
   PENDING_TTL_MS,
   COMMENT_MAX,

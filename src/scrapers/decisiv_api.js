@@ -37,7 +37,11 @@
  * contacts / apiGet). The one exception is withWindow(), which hands the warm
  * authenticated window to a caller — src/vendors/volvo/api.js uses it to read
  * the Request Service form and, ONLY after the operator clicks Approve in the
- * review modal, POST the new service request.
+ * review modal, POST the new service request. apiPostForCase() is the other:
+ * it is called ONLY by src/writes/decisiv-reply.js postApproved(), after the
+ * write gate (src/writes/write-gate.js kind 'decisivReply') has the user's
+ * approval of the exact reply text and recipients. This module never requires
+ * anything under src/writes/.
  */
 
 const { BrowserWindow } = require('electron');
@@ -683,10 +687,90 @@ async function withWindow(urlOrVendor, fn) {
   });
 }
 
+// ── Case-page landing GET / POST (Decisiv reply, src/writes/decisiv-reply.js) ──
+// apiGet() / withWindow() land on /fleet, which PACCAR (paccarpg) forwards to
+// pssmfleet, so they cannot reach paccarpg. These land on the case page itself
+// (srUrl = https://<known host>/fleet/estimates/<id>), same window, same lock,
+// same CSRF token and auto-login as every other call here.
+const _CASE_PAGE_RE = /^\/fleet\/estimates\/\d+(?:\/)?$/;
+function _caseOrigin(srUrl) {
+  let u;
+  try { u = new URL(String(srUrl || '')); } catch (_) { u = null; }
+  if (!u || u.protocol !== 'https:' || !KNOWN_HOST_RE.test(u.host) || !_CASE_PAGE_RE.test(u.pathname)) {
+    throw Object.assign(new Error('not a Decisiv case page URL'), { code: 'DECISIV_NO_ORIGIN' });
+  }
+  return u.protocol + '//' + u.host;
+}
+
+// Same in-page fetch as _fetchScript, but a JSON POST. Runs inside the
+// authenticated window so the session cookies + Rails CSRF token authorize it.
+function _postScript(url, token, body) {
+  return `(async function () {
+    return await new Promise(function (resolve) {
+      try {
+        fetch(${JSON.stringify(url)}, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Content-Type': 'application/json;charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRF-Token': ${JSON.stringify(token || '')}
+          },
+          body: ${JSON.stringify(JSON.stringify(body == null ? {} : body))}
+        }).then(function (r) {
+          return r.text().then(function (txt) {
+            var json = null; try { json = JSON.parse(txt); } catch (e) {}
+            resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, json: json, text: json ? null : String(txt).slice(0, 1000) });
+          });
+        }).catch(function (e) { resolve({ ok: false, status: 0, error: String(e && e.message || e) }); });
+      } catch (e) { resolve({ ok: false, status: -1, error: e.message }); }
+    });
+  })();`;
+}
+
+// Core POST: same as _apiGet (lock, window, token, error codes). Never retried,
+// because a retry could post a duplicate reply.
+async function _apiPost(origin, path, body, landingUrl) {
+  return _withLock(async () => {
+    const win = await _ensureWindow(origin, landingUrl);
+    const token = _tokens[origin] || '';
+    const url = path.startsWith('http') ? path : (origin + path);
+    const r = await win.webContents.executeJavaScript(_postScript(url, token, body), true);
+    _scheduleTeardown(origin);
+    if (!r || !r.ok) {
+      if (r && (r.status === 401 || r.status === 403)) {
+        delete _tokens[origin];
+        throw Object.assign(new Error('Decisiv API ' + r.status + ' (session/token rejected)'), { code: 'DECISIV_SESSION_INVALID' });
+      }
+      throw Object.assign(new Error('Decisiv API POST ' + (r && r.status)), { code: 'DECISIV_API_ERROR', status: r && r.status });
+    }
+    return r.json;
+  });
+}
+
+// Test seam: replaces the windowed POST for apiPostForCase.
+let _apiPostForTest = null;
+function _setApiPostForTest(fn) { _apiPostForTest = typeof fn === 'function' ? fn : null; }
+
+/** GET a Decisiv JSON path from the case page's window. Throws coded errors. */
+async function apiGetForCase(srUrl, path) {
+  const origin = _caseOrigin(srUrl);
+  return _get(origin, path, srUrl);
+}
+
+/** POST JSON from the case page's window. Throws coded errors. Gated caller only. */
+async function apiPostForCase(srUrl, path, body) {
+  const origin = _caseOrigin(srUrl);
+  return (_apiPostForTest || _apiPost)(origin, path, body, srUrl);
+}
+
 module.exports = {
   HOSTS, originFor,
   getActivityLogs, getEstimateContacts, getEstimateComments, getEstimateDetail,
   apiGet, withWindow,
+  // case-page landing GET / POST (POST only from src/writes/decisiv-reply.js)
+  apiGetForCase, apiPostForCase,
   getCaseStatus, summarizeCaseStatus, getCaseStatusSummary, STAGES,
   getCasePage,
   formatActivityLogs,
@@ -695,4 +779,5 @@ module.exports = {
   dispose,
   // exported for tests
   _plain, _noteDate, _landingUrl, _caseUrl, _setApiGetForTest, _setPageGetForTest,
+  _setApiPostForTest, _postScript,
 };

@@ -700,6 +700,143 @@ export async function openLifecycleModal(unit, deps) {
   });
 }
 
+// ── Decisiv reply (PACCAR case notes, dealer + Amazon visible) ──────────────
+// Shown only when the unit has a linked PACCAR Decisiv estimate URL. The roster
+// is the case roster (main: decisiv:reply-roster). No recipient is checked by
+// default: the user picks every person who gets the reply. Posting goes through
+// window.relayWrites.decisivReply -> write-gate 'decisivReply' -> approval modal.
+const DECISIV_REPLY_HOST_RE = /^(?:paccarpg|pssmfleet)\.decisiv\.net$/i;
+const DECISIV_REPLY_ERRORS = {
+  DECISIV_NO_SUBCASE: 'No dealer case roster found for this estimate; nothing can be sent.',
+  DECISIV_CASE_AMBIGUOUS: 'More than one dealer case is linked to this estimate; nothing can be sent.',
+  DECISIV_SESSION_INVALID: 'The Decisiv session is not signed in. Open the case in the app and try again.',
+  DECISIV_BAD_REF: 'This unit has no usable Decisiv case link.',
+  DECISIV_NO_ORIGIN: 'This unit has no usable Decisiv case link.',
+  DECISIV_CASE_CHANGED: 'The Decisiv case changed since the roster loaded; nothing was sent.',
+  DECISIV_RECIPIENT_UNKNOWN: 'A selected recipient is no longer on the case roster; nothing was sent.',
+  DECISIV_NO_RECIPIENTS: 'Pick at least one recipient.',
+  DECISIV_NO_NOTE: 'The case has no note to reply to; nothing was sent.',
+};
+function _decisivErr(code) {
+  return DECISIV_REPLY_ERRORS[code] || ('Decisiv roster failed: ' + (code || 'unknown'));
+}
+
+export function decisivReplyRefOf(unit) {
+  const vw = vendorWoOf(unit || {}, unit || {});
+  if (!vw || vw.kind !== 'decisiv' || !vw.id) return null;
+  let u;
+  try { u = new URL(vw.url); } catch (_) { return null; }
+  if (u.protocol !== 'https:' || !DECISIV_REPLY_HOST_RE.test(u.hostname)) return null;
+  return { estimateId: String(vw.id), srUrl: u.protocol + '//' + u.hostname.toLowerCase() + '/fleet/estimates/' + vw.id };
+}
+
+export function decisivReplyButtonHtml(unit) {
+  const ref = decisivReplyRefOf(unit);
+  if (!ref) return '';
+  return '<div class="dp-ra-row">' +
+    '<button type="button" class="dp-escalate__btn dp-ra-btn" data-ra-decisiv-reply="' + escAttr(ref.estimateId) + '">\u21A9 Reply to dealer (Decisiv)</button>' +
+  '</div>';
+}
+
+function _isAmazonGroup(c) {
+  return /amazon/i.test(String(c.subGroup || '')) || String(c.filterName || '') === 'fleet_dealer';
+}
+
+export function decisivRecipientListHtml(contacts) {
+  const list = Array.isArray(contacts) ? contacts.filter((c) => c && c.id) : [];
+  if (!list.length) return '<p class="ra-hint">No contacts on this case roster.</p>';
+  const groups = new Map();
+  list.forEach((c) => {
+    const g = String(c.subGroup || '').trim() || '(no group)';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(c);
+  });
+  return [...groups.keys()].sort((a, b) => a.localeCompare(b)).map((g) => {
+    const items = groups.get(g);
+    const tag = items.some(_isAmazonGroup) ? 'Amazon staff' : 'Dealer / OEM';
+    return '<fieldset class="ra-dr-group"><legend>' + escAttr(g) + ' <span class="ra-hint">(' + tag + ')</span></legend>' +
+      items.map((c) => {
+        const label = String(c.name || '') + ' \u2014 ' + (String(c.jobRole || '').trim() || '\u2014') + ' \u2014 ' + (String(c.subGroup || '').trim() || '\u2014');
+        return '<label class="ra-dr-item"><input type="checkbox" data-dr-id="' + escAttr(c.id) + '"> ' + escAttr(label) + '</label>';
+      }).join('') +
+    '</fieldset>';
+  }).join('');
+}
+
+export function decisivReplyModalBody({ caseId, estimateId, contacts } = {}) {
+  return '<div class="ra-modal ra-modal--dr">' +
+    '<div>Decisiv case <b>' + escAttr(caseId) + '</b> \u00B7 estimate ' + escAttr(estimateId) + '</div>' +
+    '<p class="ra-hint">Replies to the newest note on the case. Every checked person gets the reply; none are checked by default.</p>' +
+    '<div id="ra-dr-list" class="ra-dr-list">' + decisivRecipientListHtml(contacts) + '</div>' +
+    '<div class="ra-hint"><span id="ra-dr-selected">0</span> selected</div>' +
+    '<textarea id="ra-dr-text" class="dp-escalate__comment" maxlength="' + ESC_MAX + '" rows="6" aria-label="Decisiv reply" placeholder="Reply to the dealer"></textarea>' +
+    '<div class="dp-escalate__row"><span id="ra-dr-count" class="dp-escalate__count">0/' + ESC_MAX + '</span></div>' +
+    '<p class="ra-hint">Visible to the dealer and Amazon staff. You approve the exact text and recipients before anything is sent.</p>' +
+  '</div>';
+}
+
+export async function openDecisivReplyModal(unit, ref, deps) {
+  const d = _deps(deps);
+  const u = unit || {};
+  const r0 = ref || decisivReplyRefOf(u);
+  if (!r0) { d.toast.show('error', _decisivErr('DECISIV_BAD_REF')); return; }
+  if (!d.bridge || typeof d.bridge.decisivReplyRoster !== 'function') { d.toast.show('error', 'Decisiv reply bridge unavailable.'); return; }
+  d.toast.show('info', 'Loading the Decisiv case roster\u2026', 3000);
+  let roster;
+  try { roster = await d.bridge.decisivReplyRoster({ estimateId: r0.estimateId, srUrl: r0.srUrl, unit: u.equipmentId }); }
+  catch (e) { roster = { ok: false, code: (e && e.message) || 'unknown' }; }
+  if (!roster || !roster.ok) { d.toast.show('error', _decisivErr(roster && (roster.code || roster.error))); return; }
+  const caseId = String(roster.caseId || '');
+  const contacts = Array.isArray(roster.contacts) ? roster.contacts : [];
+  let q = () => null;
+  let qa = () => [];
+  let sending = false;
+
+  const checkedIds = () => Array.prototype.filter.call(qa('[data-dr-id]') || [], (b) => b.checked)
+    .map((b) => b.getAttribute('data-dr-id'));
+
+  async function submit() {
+    const ids = checkedIds();
+    const ta = q('#ra-dr-text');
+    const text = String((ta && ta.value) || '').trim();
+    if (!ids.length) { d.toast.show('warn', 'Pick at least one recipient.'); return; }
+    if (!text) { d.toast.show('warn', 'Write a reply first.'); return; }
+    if (text.length > ESC_MAX) { d.toast.show('warn', 'Reply must be ' + ESC_MAX + ' characters or fewer.'); return; }
+    if (sending) return;
+    sending = true;
+    d.modal.close();
+    d.toast.show('info', 'Waiting for your approval\u2026', 3000);
+    let r;
+    try {
+      r = await d.bridge.decisivReply({ unit: u.equipmentId, estimateId: r0.estimateId, srUrl: r0.srUrl, caseId, text, recipients: ids });
+    } catch (e) { r = { ok: false, error: e && e.message }; }
+    const o = outcomeMessage(r, 'Decisiv reply');
+    if (r && r.outcome === 'sent') o.text = 'Reply posted to Decisiv case ' + caseId + ' for ' + ids.length + ' recipient(s).';
+    else if (r && r.outcome === 'send-failed' && r.code && DECISIV_REPLY_ERRORS[r.code]) o.text = 'Decisiv reply failed: ' + DECISIV_REPLY_ERRORS[r.code];
+    else if (r && !r.ok && !r.outcome && r.code) o.text = _decisivErr(r.code);
+    d.toast.show(o.level, o.text);
+  }
+
+  d.modal.show({
+    title: 'Reply to dealer \u2014 Decisiv case ' + caseId,
+    width: 600,
+    body: decisivReplyModalBody({ caseId, estimateId: r0.estimateId, contacts }),
+    actions: [
+      { label: 'Cancel', cls: '', onClick: () => d.modal.close() },
+      { label: 'Stage reply', cls: 'primary', onClick: () => submit() },
+    ],
+    onMount(panel) {
+      q = (s) => (panel && panel.querySelector ? panel.querySelector(s) : null);
+      qa = (s) => (panel && panel.querySelectorAll ? panel.querySelectorAll(s) : []);
+      _wireCount(q('#ra-dr-text'), q('#ra-dr-count'));
+      const sel = q('#ra-dr-selected');
+      Array.prototype.forEach.call(qa('[data-dr-id]') || [], (b) => {
+        b.addEventListener('change', () => { if (sel) sel.textContent = String(checkedIds().length); });
+      });
+    },
+  });
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 export function wireRelayActions(root, unit, deps) {
   if (!root || typeof root.querySelectorAll !== 'function') return;
@@ -716,6 +853,9 @@ export function wireRelayActions(root, unit, deps) {
   });
   Array.prototype.forEach.call(root.querySelectorAll('[data-ra-comment]') || [], (b) => {
     b.addEventListener('click', () => run(() => openCommentModal(unit, b.getAttribute('data-ra-comment'), d)));
+  });
+  Array.prototype.forEach.call(root.querySelectorAll('[data-ra-decisiv-reply]') || [], (b) => {
+    b.addEventListener('click', () => run(() => openDecisivReplyModal(unit, decisivReplyRefOf(unit), d)));
   });
   const lc = typeof root.querySelector === 'function' ? root.querySelector('#dp-lc-change') : null;
   if (lc) lc.addEventListener('click', () => run(() => openLifecycleModal(unit, d)));

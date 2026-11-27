@@ -58,6 +58,23 @@ describe('approval titles', () => {
     expect(respond.mock.calls[0][1]).toBe(false);
   });
 
+  it('a Decisiv reply says it is dealer + Amazon visible and the preview lists the recipient names', async () => {
+    respond.mockClear();
+    expect(titleFor('decisivReply')).toBe('Approve Decisiv reply (dealer + Amazon visible)');
+    const { createRequire } = await import('node:module');
+    const gate = createRequire(import.meta.url)('../src/writes/write-gate.js');
+    const preview = gate.previewOf('decisivReply', { unitId: 'U100', caseId: '1000002', estimateId: '1000001',
+      srUrl: 'https://paccarpg.decisiv.net/fleet/estimates/1000001', text: 'Any ETA?',
+      recipients: [{ id: '00000000-0000-4000-8000-000000000001', name: 'Dealer Writer A' }] }, { unit: 'U100', origin: 'unit-detail-decisiv' });
+    C.showRequest({ id: 'id-dr', kind: 'decisivReply', preview, aiDrafted: null });
+    const pre = /<pre class="rwa-preview"[^>]*>([\s\S]*?)<\/pre>/.exec(M.state.opts.body);
+    expect(pre[1]).toContain('Decisiv case: 1000002');
+    expect(pre[1]).toContain('  - Dealer Writer A');
+    expect(pre[1]).toContain('Any ETA?');
+    M.state.opts.actions.find((a) => a.label === 'Cancel').onClick();
+    expect(respond.mock.calls.every((c) => c[1] === false)).toBe(true);
+  });
+
   it('a DTNA comment says it is dealer-visible', () => {
     respond.mockClear();
     expect(titleFor('dtnaComment')).toBe('Approve DTNA comment (dealer-visible)');

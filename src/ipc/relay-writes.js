@@ -27,6 +27,12 @@
  *                                    setLifecycle kind; CONFIRM_REQUIRED unless confirmed===true
  *   relay:lifecycle-options ({ fleetId })
  *                                 -> { ok, states, reasons } read-only, END_OF_LIFE never listed
+ *   decisiv:reply-roster ({ estimateId, srUrl })
+ *                                 -> { ok, caseId, estimateId, contacts:[{ id, name, jobRole, subGroup, filterName }] }
+ *                                    read-only PACCAR case roster (writes/decisiv-reply)
+ *   decisiv:reply ({ unit, estimateId, srUrl, caseId, text, recipients:[ids] })
+ *                                 -> { ok, outcome, id, code? } reply to the newest case note via
+ *                                    the gate's decisivReply kind (interactive, always approved)
  *
  * Main -> renderer: 'relayWrites:approval-request' { id, kind, preview, aiDrafted },
  * 'relayWrites:updated' { items }.
@@ -36,6 +42,7 @@ const logger = require('../utils/logger')('ipc:relay-writes');
 const { handle, requireString, requireStringMax, requireObject } = require('./_safe');
 const { ConfigError } = require('../utils/errors');
 const writeGate = require('../writes/write-gate');
+const decisivReply = require('../writes/decisiv-reply');
 
 const WR_UUID_RE = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/i;
 
@@ -162,6 +169,60 @@ function registerRelayWritesIPC(ctx) {
       fromState: payload.fromState == null ? '' : String(payload.fromState),
     });
   });
+  // ── Decisiv reply (dealer + Amazon staff visible) ─────────────────────────
+  // The estimate id must match the case URL; main re-reads the case roster on
+  // post, so the CASE id, recipient ids and recipient names come from Decisiv,
+  // never from the renderer. Posting goes through the gate's decisivReply kind.
+  const decisivRef = (p) => {
+    const ref = decisivReply.replyRefFromUrl(p && p.srUrl);
+    if (!ref || String((p && p.estimateId) || '') !== ref.estimateId) return null;
+    return ref;
+  };
+  handle('decisiv:reply-roster', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    const ref = decisivRef(payload);
+    if (!ref) return { ok: false, code: 'DECISIV_BAD_REF' };
+    const r = await decisivReply.loadCaseRoster(ref);
+    if (!r || !r.ok) return { ok: false, code: String((r && r.code) || 'DECISIV_API_ERROR').slice(0, 40) };
+    return {
+      ok: true, caseId: r.caseId, estimateId: ref.estimateId,
+      contacts: r.contacts.map((c) => ({ id: c.id, name: c.name, jobRole: c.jobRole, subGroup: c.subGroup, filterName: c.filterName })),
+    };
+  });
+  handle('decisiv:reply', async (_e, payload) => {
+    requireObject(payload, 'payload');
+    const ref = decisivRef(payload);
+    if (!ref) return { ok: false, code: 'DECISIV_BAD_REF' };
+    const text = requireStringMax(payload.text, 'text', writeGate.COMMENT_MAX);
+    const raw = Array.isArray(payload.recipients) ? payload.recipients : [];
+    const ids = [...new Set(raw.map((x) => String((x && typeof x === 'object') ? x.id : x).trim().toLowerCase()))];
+    if (!ids.length || ids.length > decisivReply.MAX_RECIPIENTS || ids.some((id) => !decisivReply.UUID_RE.test(id))) {
+      return { ok: false, code: 'DECISIV_NO_RECIPIENTS' };
+    }
+    const roster = await decisivReply.loadCaseRoster(ref);
+    if (!roster || !roster.ok) return { ok: false, code: String((roster && roster.code) || 'DECISIV_API_ERROR').slice(0, 40) };
+    if (String(payload.caseId || '') !== roster.caseId) return { ok: false, code: 'DECISIV_CASE_CHANGED' };
+    const byId = new Map(roster.contacts.map((c) => [c.id, c]));
+    if (ids.some((id) => !byId.has(id))) return { ok: false, code: 'DECISIV_RECIPIENT_UNKNOWN' };
+    const unit = String(payload.unit || '').slice(0, 40);
+    const r = await writeGate.requestWrite({
+      kind: 'decisivReply',
+      payload: {
+        unitId: unit, caseId: roster.caseId, estimateId: ref.estimateId, srUrl: ref.srUrl, text,
+        recipients: ids.map((id) => ({ id, name: byId.get(id).name })),
+      },
+      origin: 'unit-detail-decisiv',
+      unit,
+      interactive: true,
+    });
+    const out = { ok: !!(r && r.ok), outcome: String((r && r.outcome) || 'send-failed'), id: (r && r.id) || null };
+    if (r && !r.ok && typeof r.error === 'string') {
+      if (/^DECISIV_[A-Z0-9_]{1,40}$/.test(r.error)) out.code = r.error;
+      else out.error = r.error.slice(0, 200);
+    }
+    return out;
+  });
+
   // Read-only: lifecycle states (END_OF_LIFE never offered) + supported reasons.
   handle('relay:lifecycle-options', async (_e, payload) => {
     const fleetId = payload && typeof payload === 'object' && payload.fleetId ? String(payload.fleetId) : '';

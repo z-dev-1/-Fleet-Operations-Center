@@ -28,7 +28,7 @@ import toast         from '../components/toast.js';
 import { redactForSharing } from '../util/redact.js';
 import { pmOverdueDays } from '../util/pm-overdue.js';
 import modal         from '../components/modal.js';
-import { wrCardActionRowHtml, headerLifecycleButtonHtml, wireRelayActions } from './relay-actions.js';
+import { wrCardActionRowHtml, headerLifecycleButtonHtml, wireRelayActions, decisivReplyButtonHtml } from './relay-actions.js';
 import { dtnaPostButtonHtml } from './dtna-actions.js';
 import { dtnaStageButtonHtml } from './dtna-stage-actions.js';
 import { isSafeHistoryUrl, isAmazonHost as _isAmazonHost, isSafeIdLinkUrl, wireIdLinks, vendorWoOf } from './id-links.js';
@@ -2284,6 +2284,7 @@ export function renderRepairPane(unit){
         (unit.completed?'<span>Closed '+fmtDate(unit.completed)+'</span>':'')+
       '</div>':'')+
       wrCardActionRowHtml(unit)+
+      decisivReplyButtonHtml(unit)+
     '</div>';
   } else {
     woCard='<div class="dp-empty-state"><span class="dp-empty-state__icon">\ud83d\udcc2</span>No Relay WR data</div>';

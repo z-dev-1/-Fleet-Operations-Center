@@ -228,3 +228,39 @@ describe('decisiv_api: getCasePage', () => {
     await expect(api.getCasePage('21383146')).resolves.toEqual({ ok: false, code: 'DECISIV_API_ERROR' });
   });
 });
+
+describe('decisiv_api — case-page landing GET / POST (decisiv reply)', () => {
+  const SR = 'https://paccarpg.decisiv.net/fleet/estimates/1000001';
+  afterEach(() => { api._setApiGetForTest(null); api._setApiPostForTest(null); });
+  it('apiGetForCase lands on the case page of the same host', async () => {
+    const calls = [];
+    api._setApiGetForTest(async (o, p, l) => { calls.push([o, p, l]); return [{ id: 'x' }]; });
+    expect(await api.apiGetForCase(SR, '/mobilecomm/api/x.json?a=1')).toEqual([{ id: 'x' }]);
+    expect(calls).toEqual([['https://paccarpg.decisiv.net', '/mobilecomm/api/x.json?a=1', SR]]);
+  });
+  it('apiPostForCase passes origin, exact path, body and landing = srUrl', async () => {
+    const calls = [];
+    api._setApiPostForTest(async (o, p, b, l) => { calls.push([o, p, b, l]); return { notes: [] }; });
+    const body = { note: { note: 'hi' }, reply_to_id: '5000001' };
+    await api.apiPostForCase(SR, '/mobilecomm/api/estimates/1000001/notes/5000001/reply.json', body);
+    expect(calls).toEqual([['https://paccarpg.decisiv.net', '/mobilecomm/api/estimates/1000001/notes/5000001/reply.json', body, SR]]);
+  });
+  it('a non case-page or unknown-host URL throws DECISIV_NO_ORIGIN without a request', async () => {
+    let called = false;
+    api._setApiGetForTest(async () => { called = true; });
+    api._setApiPostForTest(async () => { called = true; });
+    for (const bad of ['', 'paccar', 'https://paccarpg.decisiv.net/fleet', 'https://evil.example/fleet/estimates/1',
+      'http://paccarpg.decisiv.net/fleet/estimates/1', 'https://paccarpg.decisiv.net/fleet/estimates/abc']) {
+      await expect(api.apiPostForCase(bad, '/p', {})).rejects.toMatchObject({ code: 'DECISIV_NO_ORIGIN' });
+      await expect(api.apiGetForCase(bad, '/p')).rejects.toMatchObject({ code: 'DECISIV_NO_ORIGIN' });
+    }
+    expect(called).toBe(false);
+  });
+  it('_postScript is a POST with the JSON body and the CSRF token header', () => {
+    const s = api._postScript('https://paccarpg.decisiv.net/p', 'TOKEN_SYNTH', { a: 1, b: 'x' });
+    expect(s).toContain("method: 'POST'");
+    expect(s).toContain("'X-CSRF-Token': \"TOKEN_SYNTH\"");
+    expect(s).toContain('Content-Type');
+    expect(s).toContain(JSON.stringify(JSON.stringify({ a: 1, b: 'x' })));
+  });
+});

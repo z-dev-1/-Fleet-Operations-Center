@@ -732,3 +732,142 @@ describe('dtnaStage (dealer-visible forward-only DTNA stage change, Phase C)', (
     expect(logs.join('\n')).not.toContain('secret');
   });
 });
+
+describe('decisivReply (Decisiv case reply, dealer + Amazon visible)', () => {
+  const EST = '1000001';
+  const CASE = '1000002';
+  const SR = 'https://paccarpg.decisiv.net/fleet/estimates/' + EST;
+  const cid = (n) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
+  const RTEXT = 'Please share the ETA for this unit. SENTINEL_DECISIV_TEXT';
+  const PAY = { unitId: 'U100', caseId: CASE, estimateId: EST, srUrl: SR, text: RTEXT,
+    recipients: [{ id: cid(1), name: 'Dealer Writer A' }, { id: cid(2), name: 'Amazon Staff B' }] };
+  const EXPECTED_BODY = {
+    note: {
+      recipients: [
+        { to_recipient_uuid: cid(1), to_user_id: cid(1), to_group_id: -1 },
+        { to_recipient_uuid: cid(2), to_user_id: cid(2), to_group_id: -1 },
+      ],
+      draft: false, public: true, note: RTEXT,
+    },
+    reply_to_id: '5000003', subject_id: 1000002, group_id: -1,
+  };
+  let decisivPost, decisivLatestNote;
+  function dsetup(over = {}) {
+    decisivPost = vi.fn(async () => ({ ok: true, json: { notes: [{ id: 5000099 }] } }));
+    decisivLatestNote = vi.fn(async () => ({ ok: true, noteId: '5000003' }));
+    setup(Object.assign({ decisivPost, decisivLatestNote }, over));
+  }
+  const dspec = (o = {}) => Object.assign({ kind: 'decisivReply', origin: 'unit-detail-decisiv', unit: 'U100', payload: PAY, interactive: true }, o);
+
+  it('the preview lists every recipient name, the case, the unit and the exact text', () => {
+    const pv = gate.previewOf('decisivReply', PAY, { unit: 'U100', origin: 'unit-detail-decisiv' });
+    expect(pv).toContain('Decisiv write: reply on the case notes thread');
+    expect(pv).toContain('Unit: U100');
+    expect(pv).toContain('Decisiv case: ' + CASE + ' (estimate ' + EST + ')  ' + SR);
+    expect(pv).toContain('VISIBLE TO THE DEALER AND AMAZON STAFF');
+    expect(pv).toContain('Recipients (2):');
+    expect(pv).toContain('  - Dealer Writer A');
+    expect(pv).toContain('  - Amazon Staff B');
+    expect(pv).toContain('Text (exact, ' + RTEXT.length + ' chars):\n' + RTEXT);
+  });
+
+  it('interactive deny -> 0 POSTs, nothing was sent to Decisiv', async () => {
+    dsetup();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec());
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].data.kind).toBe('decisivReply');
+    expect(sent[0].data.preview).toContain('Amazon Staff B');
+    gate.respond(sent[0].data.id, false);
+    const r = await p;
+    expect(r.outcome).toBe('skipped-not-approved');
+    expect(r.error).toContain('nothing was sent to Decisiv');
+    expect(decisivPost).not.toHaveBeenCalled();
+    expect(decisivLatestNote).not.toHaveBeenCalled();
+  });
+
+  it('grant -> exactly 1 POST with the exact nested body and the resolved latest note id', async () => {
+    dsetup();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec());
+    await flush();
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r.ok).toBe(true);
+    expect(r.outcome).toBe('sent');
+    expect(r.result).toEqual({ noteId: '5000003', replyNoteId: '5000099' });
+    expect(decisivLatestNote).toHaveBeenCalledWith({ estimateId: EST, srUrl: SR });
+    expect(decisivPost).toHaveBeenCalledTimes(1);
+    const [u, path, body, token] = decisivPost.mock.calls[0];
+    expect(u).toBe(SR);
+    expect(path).toBe('/mobilecomm/api/estimates/1000001/notes/5000003/' + 'reply.json');
+    expect(body).toEqual(EXPECTED_BODY);
+    expect(token && typeof token).toBe('object');
+    expect(gate.isApprovalToken(token)).toBe(false);   // single use, gone after the send
+  });
+
+  it('requireApproval:false and approvedBy still prompt; 0 sends until approved', async () => {
+    dsetup({ flags: { requireApproval: false } });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec({ approvedBy: 'some-ui' }));
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(decisivPost).not.toHaveBeenCalled();
+    expect(logs.some((l) => l.includes('approvedBy-ignored'))).toBe(true);
+    gate.respond(sent[0].data.id, false);
+    expect((await p).outcome).toBe('skipped-not-approved');
+    expect(decisivPost).not.toHaveBeenCalled();
+  });
+
+  it('non-interactive -> pending-approval, nothing was sent to Decisiv', async () => {
+    dsetup();
+    const r = await gate.requestWrite(dspec({ interactive: false }));
+    expect(r.outcome).toBe('pending-approval');
+    expect(r.error).toContain('nothing was sent to Decisiv');
+    expect(decisivPost).not.toHaveBeenCalled();
+  });
+
+  it('latest-note failure -> send-failed with its code, 0 POSTs', async () => {
+    dsetup({ decisivLatestNote: vi.fn(async () => ({ ok: false, code: 'DECISIV_NO_NOTE' })) });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec());
+    await flush();
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r.outcome).toBe('send-failed');
+    expect(r.error).toBe('DECISIV_NO_NOTE');
+    expect(decisivPost).not.toHaveBeenCalled();
+  });
+
+  it('a POST failure -> send-failed with a sanitized DECISIV_* code', async () => {
+    dsetup({ decisivPost: vi.fn(async () => ({ ok: false, code: 'DECISIV_SESSION_INVALID' })) });
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec());
+    await flush();
+    gate.respond(sent[0].data.id, true);
+    const r = await p;
+    expect(r.outcome).toBe('send-failed');
+    expect(r.error).toBe('DECISIV_SESSION_INVALID');
+  });
+
+  it('logs never contain the text, names or recipient ids', async () => {
+    dsetup();
+    gate.setWindowGetter(() => win);
+    const p = gate.requestWrite(dspec());
+    await flush();
+    gate.respond(sent[0].data.id, true);
+    await p;
+    const all = logs.join('\n');
+    expect(all).toContain('kind=decisivReply');
+    expect(all).toContain('recipients=2 target=decisiv');
+    expect(all).not.toContain('SENTINEL_DECISIV_TEXT');
+    expect(all).not.toContain('Dealer Writer A');
+    expect(all).not.toContain(cid(1));
+  });
+
+  it('EXTERNAL_KINDS is still the 3 DTNA kinds; decisivReply is in DECISIV_KINDS', () => {
+    expect([...gate.EXTERNAL_KINDS]).toEqual(['dtnaComment', 'dtnaStage', 'dtnaChatter']);
+    expect([...gate.DECISIV_KINDS]).toEqual(['decisivReply']);
+  });
+});

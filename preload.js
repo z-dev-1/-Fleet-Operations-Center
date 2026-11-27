@@ -204,6 +204,9 @@ expose('relayWrites', {
   changeLifecycle:  (p) => ipcRenderer.invoke('relay:change-lifecycle', p || {}),
   lifecycleOptions: (a) => ipcRenderer.invoke('relay:lifecycle-options', a || {}),
   draftAction:      (p) => ipcRenderer.invoke('relay:draft-action', p || {}),
+  // Decisiv reply (PACCAR case notes; dealer + Amazon visible). Post is gated in main.
+  decisivReplyRoster: (p) => ipcRenderer.invoke('decisiv:reply-roster', p || {}),
+  decisivReply:       (p) => ipcRenderer.invoke('decisiv:reply', p || {}),
 });
 
 // ── Long Dwell Units (Analytics tab) ──────────────────────────────────────
