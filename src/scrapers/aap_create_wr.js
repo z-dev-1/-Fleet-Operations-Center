@@ -186,7 +186,9 @@ async function createWorkRequest(payload, unit, log, gateOpts) {
  * addConversationNote(wrIdOrUrl, text, gateOpts) — post an internal comment on
  * a Relay WR. The send (the addComment POST over the working AAP transport)
  * happens only inside the write-approval gate. gateOpts: { origin, unit,
- * interactive, approvedBy, aiDrafted }. Returns { ok, outcome, error }.
+ * interactive, approvedBy, aiDrafted, visibility }. visibility ('internal' |
+ * 'vendor' | 'vendor_carrier') is set only by the unit-detail composer; without
+ * it the comment is internal only. Returns { ok, outcome, error }.
  */
 async function addConversationNote(wrIdOrUrl, text, gateOpts) {
   if (!wrIdOrUrl || !text) return { ok: false, error: 'missing args' };
@@ -198,7 +200,10 @@ async function addConversationNote(wrIdOrUrl, text, gateOpts) {
     const r = await require('../writes/write-gate').requestWrite({
       kind: 'addComment',
       workRequestId: String(workRequestId),
-      payload: { workRequestId: String(workRequestId), text: String(text) },
+      // visibility: only the unit-detail composer sets it; absent = internal only.
+      payload: g.visibility == null
+        ? { workRequestId: String(workRequestId), text: String(text) }
+        : { workRequestId: String(workRequestId), text: String(text), visibility: g.visibility },
       origin: g.origin || 'addConversationNote',
       unit: g.unit || '',
       interactive: g.interactive === true,

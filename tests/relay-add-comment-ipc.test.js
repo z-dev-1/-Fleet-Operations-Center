@@ -53,8 +53,18 @@ describe('relay:add-comment forwards to addConversationNote', () => {
     const spy = vi.spyOn(createWr, 'addConversationNote').mockResolvedValue({ ok: true, outcome: 'sent' });
     const r = await handlers['relay:add-comment']({}, { workRequestId: WR, text: '  hi  ', unit: 'B62020' });
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith(WR, 'hi', { origin: 'unit-detail', unit: 'B62020', interactive: true, aiDrafted: false });
+    expect(spy).toHaveBeenCalledWith(WR, 'hi', { origin: 'unit-detail', unit: 'B62020', interactive: true, aiDrafted: false, visibility: 'vendor' });
     expect(r).toEqual({ ok: true, outcome: 'sent' });
+  });
+
+  it('visibility: known values pass through; missing or unknown -> vendor, never carrier', async () => {
+    const spy = vi.spyOn(createWr, 'addConversationNote').mockResolvedValue({ ok: true, outcome: 'sent' });
+    const cases = [['internal', 'internal'], ['vendor', 'vendor'], ['vendor_carrier', 'vendor_carrier'],
+      [undefined, 'vendor'], ['', 'vendor'], ['CARRIER', 'vendor'], ['carrier', 'vendor'], [['CARRIER'], 'vendor'], [{ carrier: true }, 'vendor']];
+    for (const [i, [input, want]] of cases.entries()) {
+      await handlers['relay:add-comment']({}, { workRequestId: WR, text: 'x', unit: 'B1', visibility: input });
+      expect(spy.mock.calls[i][2].visibility).toBe(want);
+    }
   });
 
   it('resolves the WR id from serviceUrl when workRequestId is absent', async () => {
@@ -103,7 +113,7 @@ describe('relay:add-comment goes through the write gate', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].ch).toBe('relayWrites:approval-request');
     expect(sent[0].d.preview).toContain('Parts ETA 11/12');
-    expect(sent[0].d.preview).toContain('Visibility: internal-only');
+    expect(sent[0].d.preview).toContain('Visible to: Vendor');
     expect((await handlers['relayWrites:respond']({}, sent[0].d.id, false)).ok).toBe(true);
     const r = await p;
     expect(r.ok).toBe(false);
@@ -112,7 +122,7 @@ describe('relay:add-comment goes through the write gate', () => {
     expect(directPost).not.toHaveBeenCalled();
   });
 
-  it('approved -> exactly one internal addComment send', async () => {
+  it('approved, no visibility chosen -> exactly one Vendor addComment send', async () => {
     const { apiPost, directPost } = setupGate();
     const p = handlers['relay:add-comment']({}, { workRequestId: WR, text: 'Parts ETA 11/12', unit: 'B62020' });
     await flush();
@@ -121,9 +131,32 @@ describe('relay:add-comment goes through the write gate', () => {
     expect(r.outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
     expect(apiPost).toHaveBeenCalledWith('/api/v1/workOrder/addComment', { id: WO, comment: {
-      timestamp: expect.any(String), text: 'Parts ETA 11/12', createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+      timestamp: expect.any(String), text: 'Parts ETA 11/12', createdBy: 'fakeuser', internalOnly: false, externalConsumers: ['VENDOR'],
     } });
     expect(directPost).not.toHaveBeenCalled();
+  });
+
+  it('the chosen visibility flows request -> preview -> on-send body', async () => {
+    const want = {
+      internal: ['Visible to: Internal only', true, []],
+      vendor: ['Visible to: Vendor', false, ['VENDOR']],
+      vendor_carrier: ['Visible to: Vendor + Carrier', false, ['CARRIER', 'VENDOR']],
+      bogus: ['Visible to: Vendor', false, ['VENDOR']],
+    };
+    for (const [vis, [line, internalOnly, ext]] of Object.entries(want)) {
+      sent.length = 0;
+      const { apiPost } = setupGate();
+      const p = handlers['relay:add-comment']({}, { workRequestId: WR, text: 'Parts ETA ' + vis, unit: 'B62020', visibility: vis });
+      await flush();
+      expect(sent[0].d.preview).toContain(line);
+      if (vis !== 'vendor_carrier') expect(sent[0].d.preview).not.toContain('Carrier');
+      await handlers['relayWrites:respond']({}, sent[0].d.id, true);
+      expect((await p).outcome).toBe('sent');
+      const body = apiPost.mock.calls[0][1];
+      expect(body.comment.internalOnly).toBe(internalOnly);
+      expect(body.comment.externalConsumers).toEqual(ext);
+      expect(body.comment.createdBy).toBe('fakeuser');
+    }
   });
 
   it('the IPC module never calls the AAP transport directly', () => {

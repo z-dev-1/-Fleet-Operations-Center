@@ -46,6 +46,23 @@ const MEMORY_ONLY_BYTES = 2 * 1024 * 1024;
 const WORK_ORDER_ADD_COMMENT_PATH = '/api/v1/workOrder/addComment';
 const WORK_REQUEST_ADD_COMMENT_PATH = '/api/v1/workRequest/addComment';
 const COMMENT_MAX = 2000;
+// Who can see a Relay comment. Values match AAP's own work-order comments.
+// CARRIER is only ever sent when the user picked 'vendor_carrier' in the composer.
+const COMMENT_VISIBILITY = Object.freeze({
+  internal:       Object.freeze({ label: 'Internal only',    internalOnly: true,  externalConsumers: Object.freeze([]) }),
+  vendor:         Object.freeze({ label: 'Vendor',           internalOnly: false, externalConsumers: Object.freeze(['VENDOR']) }),
+  vendor_carrier: Object.freeze({ label: 'Vendor + Carrier', internalOnly: false, externalConsumers: Object.freeze(['CARRIER', 'VENDOR']) }),
+});
+// A known visibility key, else the fallback. The fallback can never be carrier.
+function commentVisibility(v, fallback) {
+  if (typeof v === 'string' && Object.prototype.hasOwnProperty.call(COMMENT_VISIBILITY, v)) return v;
+  return fallback === 'internal' ? 'internal' : 'vendor';
+}
+// The AAP comment fields for a visibility key (fresh array per call).
+function commentVisibilityFields(v) {
+  const c = COMMENT_VISIBILITY[commentVisibility(v, 'internal')];
+  return { internalOnly: c.internalOnly, externalConsumers: c.externalConsumers.slice() };
+}
 const SERVICE_URL = 'https://aap-na.corp.amazon.com/v2/service/';
 const STORE_KEY = 'relayWritesPending';
 const KINDS = ['addComment', 'createWorkOrder', 'updateEscalations', 'setLifecycle', 'dtnaComment', 'dtnaStage', 'dtnaChatter'];
@@ -154,7 +171,14 @@ function _logLine(event, f, extra) {
 function _normalizePayload(kind, payload) {
   const p = (payload && typeof payload === 'object') ? payload : {};
   if (kind === 'addComment') {
-    return { workRequestId: _str(p.workRequestId), text: _str(p.text).slice(0, COMMENT_MAX) };
+    const out = { workRequestId: _str(p.workRequestId), text: _str(p.text).slice(0, COMMENT_MAX) };
+    // No visibility = a caller that never chose one (reconcile, vendor SR notes, items
+    // staged before the composer had the control): internal only, as before. A present
+    // but unknown value falls back to Vendor, never Carrier. Internal is left out of the
+    // stored payload so those callers' pending items keep their shape and dedup hash.
+    const vis = p.visibility == null || p.visibility === '' ? 'internal' : commentVisibility(p.visibility, 'vendor');
+    if (vis !== 'internal') out.visibility = vis;
+    return out;
   }
   if (kind === 'updateEscalations') {
     const strs = (v) => (Array.isArray(v) ? v : []).map(_str);
@@ -212,10 +236,11 @@ function previewOf(kind, payload, meta) {
   const lines = [];
   if (kind === 'addComment') {
     const wr = _str(p.workRequestId);
-    lines.push('Relay write: add internal comment to a work request');
+    const vis = commentVisibility(p.visibility, 'internal');
+    lines.push('Relay write: add ' + (vis === 'internal' ? 'internal ' : '') + 'comment to a work request');
     lines.push('Unit: ' + (m.unit || '-'));
     lines.push('Relay WR: ' + wr + '  ' + SERVICE_URL + wr);
-    lines.push('Visibility: internal-only');
+    lines.push('Visible to: ' + COMMENT_VISIBILITY[vis].label);
     lines.push('AI-drafted: ' + _aiLabel(m.aiDrafted));
     lines.push('Origin: ' + (m.origin || 'unknown'));
     lines.push('Text (exact, ' + _str(p.text).length + ' chars):');
@@ -344,7 +369,7 @@ function _json(v) {
 }
 // Reads only: the service aggregate (which work order to comment on) and the
 // signed-in AAP user (createdBy). The stored payload and preview are unchanged.
-// Every comment is internal-only: no caller asks for a vendor-facing comment.
+// internalOnly / externalConsumers come from the stored (previewed) visibility.
 async function _buildAddCommentRequest(payload) {
   const wr = _str(payload.workRequestId);
   if (!wr) throw new Error('addComment: no workRequestId');
@@ -361,8 +386,7 @@ async function _buildAddCommentRequest(payload) {
     timestamp: new Date(_now()).toISOString(),
     text: _str(payload.text).slice(0, COMMENT_MAX),
     createdBy,
-    internalOnly: true,
-    externalConsumers: [],
+    ...commentVisibilityFields(payload.visibility),
   };
   if (wos.length) return { path: WORK_ORDER_ADD_COMMENT_PATH, body: { id: _str(wos[0].id), comment } };
   return { path: WORK_REQUEST_ADD_COMMENT_PATH, body: { id: _str(svc.id) || wr, comment } };
@@ -724,5 +748,8 @@ module.exports = {
   APPROVAL_WAIT_MS,
   PENDING_TTL_MS,
   COMMENT_MAX,
+  COMMENT_VISIBILITY,
+  commentVisibility,
+  commentVisibilityFields,
   _setDepsForTest,
 };

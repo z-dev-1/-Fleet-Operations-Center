@@ -171,6 +171,9 @@ describe('relay reconcile', () => {
     expect(res.posts.find((p) => p.kind === 'gap-fill').action).toBe('posted');
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0]).toBe('/api/v1/workOrder/addComment');
+    // Reconcile never chooses a visibility: its posts stay internal only, never CARRIER.
+    expect(spy.mock.calls[0][1].comment).toMatchObject({ internalOnly: true, externalConsumers: [] });
+    expect(JSON.stringify(spy.mock.calls[0][1])).not.toContain('CARRIER');
   });
 
   it('confirmPending -> exactly one send with the staged text unchanged', async () => {

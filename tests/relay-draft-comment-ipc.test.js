@@ -240,7 +240,7 @@ describe('aiDrafted reaches the approval gate; approval stays mandatory', () => 
     expect(sent[0].ch).toBe('relayWrites:approval-request');
     expect(sent[0].d.aiDrafted).toBe(true);
     expect(sent[0].d.preview).toContain('AI-drafted: yes');
-    expect(sent[0].d.preview).toContain('Visibility: internal-only');
+    expect(sent[0].d.preview).toContain('Visible to: Vendor');
     await handlers['relayWrites:respond']({}, sent[0].d.id, false);
     const r = await p;
     expect(r.outcome).toBe('skipped-not-approved');
@@ -248,7 +248,7 @@ describe('aiDrafted reaches the approval gate; approval stays mandatory', () => 
     expect(spies.apiPost).not.toHaveBeenCalled();
   });
 
-  it('approved -> exactly one internal addComment', async () => {
+  it('approved -> exactly one Vendor addComment (the composer default)', async () => {
     const apiPost = setupGate();
     const p = handlers['relay:add-comment']({}, { workRequestId: WR, text: 'FAS called Cox on 11/13 for an ETA.', unit: 'B62020', aiDrafted: true });
     await flush();
@@ -256,7 +256,7 @@ describe('aiDrafted reaches the approval gate; approval stays mandatory', () => 
     expect((await p).outcome).toBe('sent');
     expect(apiPost).toHaveBeenCalledTimes(1);
     expect(apiPost).toHaveBeenCalledWith('/api/v1/workOrder/addComment', { id: WO, comment: {
-      timestamp: expect.any(String), text: 'FAS called Cox on 11/13 for an ETA.', createdBy: 'fakeuser', internalOnly: true, externalConsumers: [],
+      timestamp: expect.any(String), text: 'FAS called Cox on 11/13 for an ETA.', createdBy: 'fakeuser', internalOnly: false, externalConsumers: ['VENDOR'],
     } });
   });
 

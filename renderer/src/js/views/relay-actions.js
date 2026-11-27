@@ -42,6 +42,20 @@ export const COMMENT_TEMPLATES = Object.freeze([
   { id: 'free-form', label: 'Free-form' },
 ]);
 export const ESC_MAX = 2000;
+// Who sees the comment in Relay. Main maps these (write-gate COMMENT_VISIBILITY) and
+// treats a missing or unknown value as Vendor. Vendor is the default; Carrier never is.
+export const COMMENT_VISIBILITY_OPTIONS = Object.freeze([
+  { id: 'internal', label: 'Internal only' },
+  { id: 'vendor', label: 'Vendor' },
+  { id: 'vendor_carrier', label: 'Vendor + Carrier' },
+]);
+export const COMMENT_VISIBILITY_DEFAULT = 'vendor';
+function _visibilityOf(v) {
+  return COMMENT_VISIBILITY_OPTIONS.some((o) => o.id === v) ? v : COMMENT_VISIBILITY_DEFAULT;
+}
+function _visibilityLabel(v) {
+  return COMMENT_VISIBILITY_OPTIONS.find((o) => o.id === _visibilityOf(v)).label;
+}
 
 const HVE_KEY = 'MCS_HIGH_VALUE_ESTIMATE';
 const REACT_KEY = 'MCS_REACTIVATION';
@@ -264,12 +278,16 @@ export function commentModalBody({ vendorWo } = {}) {
     '<label>Template <select id="ra-cm-template" class="detail-panel__select">' +
       COMMENT_TEMPLATES.map((t) => '<option value="' + escAttr(t.id) + '">' + escAttr(t.label) + '</option>').join('') +
     '</select></label>' +
-    '<textarea id="ra-cm-text" class="dp-escalate__comment" maxlength="' + ESC_MAX + '" rows="7" aria-label="Internal Relay comment" placeholder="Internal comment for the Relay WR"></textarea>' +
+    '<label>Visible to <select id="ra-cm-visibility" class="detail-panel__select">' +
+      COMMENT_VISIBILITY_OPTIONS.map((o) => '<option value="' + escAttr(o.id) + '"' +
+        (o.id === COMMENT_VISIBILITY_DEFAULT ? ' selected' : '') + '>' + escAttr(o.label) + '</option>').join('') +
+    '</select></label>' +
+    '<textarea id="ra-cm-text" class="dp-escalate__comment" maxlength="' + ESC_MAX + '" rows="7" aria-label="Relay comment" placeholder="Comment for the Relay WR"></textarea>' +
     '<div class="dp-escalate__row"><button type="button" id="ra-cm-draft" class="dp-escalate__btn dp-ra-btn">Draft with AI</button>' +
       '<span id="ra-cm-count" class="dp-escalate__count">0/' + ESC_MAX + '</span></div>' +
     '<div id="ra-stale" class="ra-stale" role="status"></div>' +
     '<div id="ra-fills" class="ra-fill-note"></div>' +
-    '<p class="ra-hint">Posts an INTERNAL comment (internal only, not shared with the vendor).</p>' +
+    '<p class="ra-hint">Vendor is the default. Internal only keeps the comment inside Amazon; Vendor + Carrier also shares it with the carrier.</p>' +
     NOTE_APPROVE +
   '</div>';
 }
@@ -575,15 +593,17 @@ export async function openCommentModal(unit, wrId, deps) {
     sending = true;
     d.modal.close();
     d.toast.show('info', 'Waiting for your approval\u2026', 3000);
+    const visibility = _visibilityOf((q('#ra-cm-visibility') || {}).value);
     let r;
     try {
       r = aiDrafted
-        ? await d.bridge.addComment(wrId, text, u.equipmentId, { aiDrafted: true })
-        : await d.bridge.addComment(wrId, text, u.equipmentId);
+        ? await d.bridge.addComment(wrId, text, u.equipmentId, { aiDrafted: true, visibility })
+        : await d.bridge.addComment(wrId, text, u.equipmentId, { visibility });
     } catch (e) { r = { ok: false, error: e && e.message }; }
     const o = outcomeMessage(r, 'Relay comment');
     if (r && r.outcome === 'sent') {
-      o.text = 'Internal comment posted to Relay WR ' + String(wrId || '').slice(0, 8) + '. It appears in the Relay conversation after the next refresh.';
+      o.text = 'Comment posted to Relay WR ' + String(wrId || '').slice(0, 8) + ' (visible to: ' + _visibilityLabel(visibility) +
+        '). It appears in the Relay conversation after the next refresh.';
     }
     d.toast.show(o.level, o.text);
   }

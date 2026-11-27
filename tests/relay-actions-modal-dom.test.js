@@ -44,7 +44,7 @@ const LABELS = ['FAS', 'MCS Lead', 'MCS High Value Estimate', 'MCS Reactivation'
   'Document Request', 'MCS Recovery SIM Post Repair', 'MCS Carrier Update Request'];
 const SELECTORS = ['#ra-esc-target', '#ra-esc-hve', '#ra-esc-reactivation-hint', '#ra-esc-amount', '#ra-esc-reason',
   '#ra-esc-draft', '#ra-esc-count', '#ra-stale', '#ra-fills', '#ra-cm-template', '#ra-cm-text', '#ra-cm-draft',
-  '#ra-cm-count', '#ra-lc-state', '#ra-lc-reason'];
+  '#ra-cm-count', '#ra-cm-visibility', '#ra-lc-state', '#ra-lc-reason'];
 
 function el() {
   return {
@@ -59,6 +59,7 @@ function mkPanel(removeVals) {
   const map = {};
   SELECTORS.forEach((s) => { map[s] = el(); });
   map['#ra-esc-amount'].value = '0';
+  map['#ra-cm-visibility'].value = 'vendor';   // the body's selected option
   const chips = (removeVals || []).map((v) => { const b = el(); b.attrs['data-ra-remove'] = v; return b; });
   return { map, chips, querySelector: (s) => map[s] || null, querySelectorAll: (s) => (s === '[data-ra-remove]' ? chips : []) };
 }
@@ -261,7 +262,7 @@ describe('comment modal', () => {
   it('offers the 3 templates; Offsite Update draft uses draftAction; submit posts via bridge.addComment only', async () => {
     await openCm();
     expect(fakeModal.st.opts.title).toBe('Add Relay comment \u2014 WR 0a1b2c3d');
-    expect(optionTexts(fakeModal.st.opts.body)).toEqual(['Offsite Update', 'Update Request', 'Free-form']);
+    expect(optionTexts(fakeModal.st.opts.body)).toEqual(['Offsite Update', 'Update Request', 'Free-form', 'Internal only', 'Vendor', 'Vendor + Carrier']);
     window.relayWrites.draftAction.mockImplementation(async () => ({ ok: true, draft: 'OFFSITE - RUSH - 322168 - <FILL: component>',
       placeholders: ['component'], freshness: { warnings: [] } }));
     await choose('#ra-cm-template', 'offsite-update');
@@ -271,7 +272,7 @@ describe('comment modal', () => {
     expect(q('#ra-cm-text').value).toBe('OFFSITE - RUSH - 322168 - <FILL: component>');
     await action('Submit comment').onClick();
     expect(fakeModal.close.mock.invocationCallOrder[0]).toBeLessThan(window.relayWrites.addComment.mock.invocationCallOrder[0]);
-    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'OFFSITE - RUSH - 322168 - <FILL: component>', '322168', { aiDrafted: true });
+    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'OFFSITE - RUSH - 322168 - <FILL: component>', '322168', { aiDrafted: true, visibility: 'vendor' });
     expect(window.relayWrites.escalate).not.toHaveBeenCalled();
     expect(window.aapApi.updateEscalations).not.toHaveBeenCalled();
   });
@@ -283,7 +284,7 @@ describe('comment modal', () => {
     await openCm();
     await type('#ra-cm-text', 'parts eta 11/20');
     await action('Submit comment').onClick();
-    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'parts eta 11/20', '322168');
+    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'parts eta 11/20', '322168', { visibility: 'vendor' });
   });
   it('Free-form draft reuses draftComment, caps it (keeping URLs) and shows a local freshness warning', async () => {
     await openCm();
@@ -316,6 +317,58 @@ describe('comment modal', () => {
     expect(q('#ra-stale').textContent).toContain('No Relay conversation loaded');
     expect(ra.wrUnitOf(u, SEC)).toMatchObject({ workRequestId: SEC, vendor: 'Volvo' });
     expect(ra.wrUnitOf(u, UNIT.workRequestId)).toBe(u);
+  });
+  it('Visible to: renders Vendor selected by default; the chosen value reaches bridge.addComment', async () => {
+    await openCm();
+    const body = fakeModal.st.opts.body;
+    expect(body).toContain('<select id="ra-cm-visibility"');
+    expect(body).toContain('<option value="vendor" selected>Vendor</option>');
+    expect(body).toContain('<option value="internal">Internal only</option>');
+    expect(body).toContain('<option value="vendor_carrier">Vendor + Carrier</option>');
+    expect((body.match(/ selected>/g) || []).length).toBe(1);
+    expect(ra.COMMENT_VISIBILITY_DEFAULT).toBe('vendor');
+    for (const v of ['internal', 'vendor_carrier', 'vendor']) {
+      window.relayWrites.addComment.mockClear();
+      await openCm();
+      await type('#ra-cm-text', 'parts eta 11/20');
+      await choose('#ra-cm-visibility', v);
+      await action('Submit comment').onClick();
+      expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'parts eta 11/20', '322168', { visibility: v });
+    }
+    // An unknown value in the control is sent as Vendor, never Carrier.
+    window.relayWrites.addComment.mockClear();
+    await openCm();
+    await type('#ra-cm-text', 'x');
+    q('#ra-cm-visibility').value = 'CARRIER';
+    await action('Submit comment').onClick();
+    expect(window.relayWrites.addComment.mock.calls[0][3]).toEqual({ visibility: 'vendor' });
+    expect(toast.show.mock.calls.at(-1)[1]).toContain('visible to: Vendor');
+  });
+  it('Visible to: renders Vendor selected by default; the chosen value reaches bridge.addComment', async () => {
+    await openCm();
+    const body = fakeModal.st.opts.body;
+    expect(body).toContain('<select id="ra-cm-visibility"');
+    expect(body).toContain('<option value="vendor" selected>Vendor</option>');
+    expect(body).toContain('<option value="internal">Internal only</option>');
+    expect(body).toContain('<option value="vendor_carrier">Vendor + Carrier</option>');
+    expect((body.match(/ selected>/g) || []).length).toBe(1);
+    expect(ra.COMMENT_VISIBILITY_DEFAULT).toBe('vendor');
+    for (const v of ['internal', 'vendor_carrier', 'vendor']) {
+      window.relayWrites.addComment.mockClear();
+      await openCm();
+      await type('#ra-cm-text', 'parts eta 11/20');
+      await choose('#ra-cm-visibility', v);
+      await action('Submit comment').onClick();
+      expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'parts eta 11/20', '322168', { visibility: v });
+    }
+    // An unknown value in the control is sent as Vendor, never Carrier.
+    window.relayWrites.addComment.mockClear();
+    await openCm();
+    await type('#ra-cm-text', 'x');
+    q('#ra-cm-visibility').value = 'CARRIER';
+    await action('Submit comment').onClick();
+    expect(window.relayWrites.addComment.mock.calls[0][3]).toEqual({ visibility: 'vendor' });
+    expect(toast.show.mock.calls.at(-1)[1]).toContain('visible to: Vendor');
   });
   it('empty text is refused', async () => {
     await openCm();
@@ -504,7 +557,7 @@ describe('auto-draft on select (drafts only, never sends)', () => {
     expectNoWrites();
     window.relayWrites.addComment.mockImplementation(async () => ({ ok: true, outcome: 'sent' }));
     await action('Submit comment').onClick();
-    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'OFFSITE EST SUBMITTED - <FILL: vendor>', '322168', { aiDrafted: true });
+    expect(window.relayWrites.addComment).toHaveBeenCalledWith(WR, 'OFFSITE EST SUBMITTED - <FILL: vendor>', '322168', { aiDrafted: true, visibility: 'vendor' });
     expect(fakeModal.close.mock.invocationCallOrder[0]).toBeLessThan(window.relayWrites.addComment.mock.invocationCallOrder[0]);
   });
 

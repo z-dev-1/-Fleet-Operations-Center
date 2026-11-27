@@ -7,9 +7,11 @@
  *   relayWrites:approve (id)      -> send the stored payload once
  *   relayWrites:reject  (id)      -> never sent
  *   relayWrites:respond (id, ok)  -> answer a live 'relayWrites:approval-request' prompt
- *   relay:add-comment ({ workRequestId | serviceUrl, text, unit, aiDrafted })
- *                                 -> internal Relay WR comment via
- *                                    aap_create_wr.addConversationNote (gated, interactive)
+ *   relay:add-comment ({ workRequestId | serviceUrl, text, unit, aiDrafted, visibility })
+ *                                 -> Relay WR comment via
+ *                                    aap_create_wr.addConversationNote (gated, interactive);
+ *                                    visibility 'internal' | 'vendor' | 'vendor_carrier',
+ *                                    missing or unknown -> 'vendor'
  *   relay:draft-comment ({ workRequestId | serviceUrl, unit })
  *                                 -> { ok, aiDrafted, draft, noUpdate, dropped, droppedCount }
  *                                    AI gap draft (writes/relay-comment-draft); never sends
@@ -67,6 +69,8 @@ function registerRelayWritesIPC(ctx) {
       unit: String(payload.unit || '').slice(0, 40),
       interactive: true,
       aiDrafted: payload.aiDrafted === true,
+      // The composer's audience; missing or unknown -> Vendor (never Carrier).
+      visibility: writeGate.commentVisibility(payload.visibility, 'vendor'),
     });
   });
   // AI draft for the compose box. Returns text only; nothing is sent from here

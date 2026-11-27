@@ -93,7 +93,7 @@ describe('interactive prompt', () => {
     expect(req.aiDrafted).toBe(true);
     expect(req.preview).toContain('AI-drafted: yes');
     expect(req.preview).toContain('https://aap-na.corp.amazon.com/v2/service/' + WR);
-    expect(req.preview).toContain('Visibility: internal-only');
+    expect(req.preview).toContain('Visible to: Internal only');
     gate.respond(req.id, true);
     const r = await p;
     expect(r.outcome).toBe('sent');
@@ -132,6 +132,59 @@ describe('interactive prompt', () => {
     expect(gate.respond(r.id, true).ok).toBe(false);
     expect((await gate.approve(r.id)).ok).toBe(false);
     expect(apiPost).not.toHaveBeenCalled();
+  });
+});
+
+describe('comment visibility', () => {
+  it('commentVisibilityFields maps the three choices to AAP values (exact order)', () => {
+    expect(gate.commentVisibilityFields('internal')).toEqual({ internalOnly: true, externalConsumers: [] });
+    expect(gate.commentVisibilityFields('vendor')).toEqual({ internalOnly: false, externalConsumers: ['VENDOR'] });
+    expect(gate.commentVisibilityFields('vendor_carrier')).toEqual({ internalOnly: false, externalConsumers: ['CARRIER', 'VENDOR'] });
+    // A fresh array each call: mutating it cannot change the table.
+    gate.commentVisibilityFields('vendor').externalConsumers.push('CARRIER');
+    expect(gate.commentVisibilityFields('vendor').externalConsumers).toEqual(['VENDOR']);
+  });
+
+  it('an unknown value never yields carrier', () => {
+    for (const v of [undefined, null, '', 'CARRIER', 'carrier', 'Vendor + Carrier', 'vendor_carrier ', ['CARRIER'], {}, 1, 'toString', '__proto__']) {
+      expect(gate.commentVisibility(v, 'vendor')).toBe('vendor');
+      expect(gate.commentVisibility(v, 'internal')).toBe('internal');
+      expect(gate.commentVisibility(v, 'vendor_carrier')).toBe('vendor');
+      expect(gate.commentVisibilityFields(v).externalConsumers).not.toContain('CARRIER');
+    }
+  });
+
+  it('stored payload -> preview "Visible to:" -> on-send body, per choice', async () => {
+    const want = {
+      internal: ['Internal only', true, []],
+      vendor: ['Vendor', false, ['VENDOR']],
+      vendor_carrier: ['Vendor + Carrier', false, ['CARRIER', 'VENDOR']],
+      CARRIER: ['Vendor', false, ['VENDOR']],
+    };
+    for (const [vis, [label, internalOnly, ext]] of Object.entries(want)) {
+      setup();
+      gate.setWindowGetter(() => win);
+      const p = gate.requestWrite(spec({ interactive: true, payload: { workRequestId: WR, text: TEXT, visibility: vis } }));
+      await flush();
+      expect(sent[0].data.preview).toContain('\nVisible to: ' + label + '\n');
+      gate.respond(sent[0].data.id, true);
+      expect((await p).outcome).toBe('sent');
+      expect(apiPost.mock.calls[0][1].comment).toMatchObject({ internalOnly, externalConsumers: ext, createdBy: 'fakeuser' });
+    }
+  });
+
+  it('a payload with no visibility (reconcile, vendor SR notes) stays internal only with the old stored shape', async () => {
+    const r = await gate.requestWrite(spec());
+    expect(store.data.relayWritesPending.items[0].payload).toEqual({ workRequestId: WR, text: TEXT });
+    expect(store.data.relayWritesPending.items[0].preview).toContain('Visible to: Internal only');
+    await gate.approve(r.id);
+    expect(apiPost.mock.calls[0][1].comment).toMatchObject({ internalOnly: true, externalConsumers: [] });
+  });
+
+  it('the same text with a different visibility is a different pending write', async () => {
+    const a = await gate.requestWrite(spec({ payload: { workRequestId: WR, text: TEXT, visibility: 'vendor' } }));
+    const b = await gate.requestWrite(spec({ payload: { workRequestId: WR, text: TEXT, visibility: 'vendor_carrier' } }));
+    expect(b.id).not.toBe(a.id);
   });
 });
 
@@ -222,6 +275,14 @@ describe('approvedBy / requireApproval false', () => {
     expect(path).toBe('/api/v1/workRequest/addComment');
     expect(body.id).toBe(WR);
     expect(body.comment).toMatchObject({ text: TEXT, createdBy: 'fakeuser', internalOnly: true, externalConsumers: [] });
+  });
+
+  it('createdBy is the signed-in AAP user resolved at send time, not a fixed name', async () => {
+    const user = vi.fn(async () => ({ userName: 'synthuser2' }));
+    setup({ getUserDetails: user });
+    await gate.requestWrite(spec({ approvedBy: 'x', payload: { workRequestId: WR, text: TEXT, visibility: 'vendor' } }));
+    expect(user).toHaveBeenCalledTimes(1);
+    expect(apiPost.mock.calls[0][1].comment.createdBy).toBe('synthuser2');
   });
 
   it('unresolved AAP user -> send-failed, nothing posted', async () => {
