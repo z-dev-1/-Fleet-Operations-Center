@@ -1401,7 +1401,13 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
           const _offsiteCleared = [];
           let _relayCacheForOffsite = {};
           try { _relayCacheForOffsite = store.load('relayCache', {}) || {}; } catch (_) {}
+          // Per-unit patch of only the hydrate-owned fields this loop changed;
+          // the save below overlays them onto the CURRENT stored rows.
+          const _hydOverlay = require('./hydrate-overlay');
+          const _hydPatches = new Map();
           for (const r of downRows) {
+            const _hb = _hydOverlay.snapshotOwned(r);
+            let _clr = false;
             try {
               // api.refreshUnit() returns the mapped row directly. It calls
               // getAsset(), which carries maintenanceScheduleStatuses — so this
@@ -1446,7 +1452,7 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                   if (frUrl) {
                     // Current WR names an offsite. If it's a DIFFERENT link than the
                     // row had, drop the old link's dealer notes before taking the new one.
-                    if (rowUrl && rowUrl !== frUrl) clearOffsite(r);
+                    if (rowUrl && rowUrl !== frUrl) { clearOffsite(r); _clr = true; }
                     for (const k of ['offsiteShopEventUrl', 'savedOffsiteUrl', 'offsiteShopEvent', 'asistSrUrl', 'asistLabel', 'asistSource']) {
                       if (fr[k] != null && fr[k] !== '' && fr[k] !== '--') r[k] = fr[k];
                     }
@@ -1466,16 +1472,24 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
                       if (!r._offsiteWrId) r._offsiteWrId = r.workRequestId;
                     } else {
                       clearOffsite(r);
+                      _clr = true;
                       _offsiteCleared.push(r.equipmentId + ' (' + base.replace(/^https?:\/\//, '') + ')');
                     }
                   }
                 }
               }
+              const _p = _hydOverlay.capturePatch(_hb, r, { ownerWr: (fr && fr.workRequestId) || r.workRequestId, offsiteCleared: _clr });
+              if (_p) _hydPatches.set(String(r.equipmentId), _p);
             } catch (_) { /* skip this unit */ }
           }
           // Persist + push the hydrated rows NOW (PM pills + conversations) so the
           // saved fleetData + table reflect them even before the AI timeline
           // finishes. (The deep-scan below only pushData()s; it doesn't save.)
+          // ROLLBACK FIX: the save overlays ONLY the fields the hydrate changed
+          // onto the CURRENT stored rows (by equipmentId, WR-level fields same WR
+          // only), so a newer build / PM fill / Uptake re-merge saved during the
+          // loop is kept. The start-time `payload.rows` stay the deep-scan's
+          // working set and are no longer saved wholesale.
           try {
             // FIX (2026-10-28): `payload` was loaded BEFORE the 15-min stage
             // refresh may have saved newer Volvo/PACCAR stages (322504 "no
@@ -1490,10 +1504,21 @@ function _getAuthSupervisor() { try { return require('../auth/midway-health-supe
               const _xf = require('../config/perf-flags').loadExtract();
               if (_xf.enabled) require('../repair-intel/wo-facts').refreshFleetFacts(payload.rows || [], _xf);
             } catch (e) { logger.warn('[data-source] hydrate fact refresh skipped: ' + e.message); }
-            payload.syncedAt = new Date().toISOString();
-            store.save('fleetData', payload);
-            if (ctx) ctx.lastData = payload;
-            pushData(payload);
+            const _saved = _hydOverlay.saveHydrateOverlay({
+              store,
+              patches: _hydPatches,
+              now: Date.now,
+              refreshFacts: (rs) => {
+                try {
+                  const _xf2 = require('../config/perf-flags').loadExtract();
+                  if (_xf2.enabled) require('../repair-intel/wo-facts').refreshFleetFacts(rs, _xf2);
+                } catch (e) { logger.warn('[data-source] hydrate store fact refresh skipped: ' + e.message); }
+              },
+            });
+            if (_saved) {
+              if (ctx) ctx.lastData = _saved;
+              pushData(_saved);
+            }
           } catch (_) {}
           if (_offsiteCleared.length) {
             logger.info('[offsite] cleared ' + _offsiteCleared.length + ' offsite link(s) not tied to the unit\u2019s current WR: ' + _offsiteCleared.join(', '));
