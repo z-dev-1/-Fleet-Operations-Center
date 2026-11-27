@@ -129,13 +129,17 @@ describe('window/index.js call sites (static, AC27 bulk + hydrate + PM fill)', (
     expect(src).toContain("'pmADue','washDue','apuDue','svrDue','stateInspDue','r360Due','semiannualLiftDue','pmSchedule'");
     expect(src).toContain('const blankV = (v) => blank(v) || (Array.isArray(v) && !v.length);');
   });
-  it('hydrate: copies the WR keys for the same WR and refreshes after overlayDeepScanFields, before the save', () => {
+  it('hydrate: copies the WR keys for the same WR, refreshes after overlayDeepScanFields, and the store copy is refreshed inside the overlay save', () => {
     expect(src).toContain("for (const k of ['relayFacts', 'relayFactsWr', 'createdBy', 'needBy', 'alternativeId', 'cause', 'correction', 'totalCost', 'salesforceCase', 'salesforceCaseUrl'])");
     const ov = src.indexOf("overlayDeepScanFields(payload.rows || [], _cur);");
     const refresh = src.indexOf("refreshFleetFacts(payload.rows || [], _xf)", ov);
-    const save = src.indexOf("store.save('fleetData', payload);", ov);
+    const save = src.indexOf('saveHydrateOverlay(', ov);
+    const storeRefresh = src.indexOf('refreshFleetFacts(rs, _xf2)', save);
+    const saveEnd = src.indexOf('if (_saved) {', save);
     expect(refresh).toBeGreaterThan(ov);
     expect(save).toBeGreaterThan(refresh);
+    expect(storeRefresh).toBeGreaterThan(save);
+    expect(saveEnd).toBeGreaterThan(storeRefresh);
   });
   it('PM fill: {all, now}, extended _hasPm, refreshRowFacts per overlaid row before the save', () => {
     expect(src).toContain("mapper.pmDueFields(full, xf.enabled ? { all: true, now: Date.now() } : undefined)");
