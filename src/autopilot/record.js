@@ -7,6 +7,11 @@
  *        repair_phase, root_cause, blocker, responsible_party, last_verified_update_at,
  *        last_verified_update_source, parts_eta, repair_eta, confidence, ai_status, investigated_at, record_json }
  *
+ * blocker precedence: 'ready_pending_closeout' (deterministic output on a closeout analysis whose
+ * published groups are all cf_status) > the AI stall stage (parts / estimate_approval / scheduling)
+ * when the AI stall cites >= 1 non-derived item > memory.confirmedBlocker > analysis.blockers[0].
+ * responsible_party (one value, also written to ap_case): the output party when not unknown and
+ * cited; else the analysis party when not unknown and cited; else 'unknown' (null with neither).
  * root_cause is set only from a validated AI output that cites at least one non-derived item;
  * otherwise null. confidence is the mean confidence of the cited items, null for fallback output.
  * record_json holds every column plus WO refs, episode, actions (text and class only), proposal ids,
@@ -15,6 +20,7 @@
  */
 
 const { LIMITS, REASONS: R, normUnit } = require('./constants');
+const { closeoutApplies, CLOSEOUT_BLOCKER } = require('./analyze');
 
 const TEXT_MAX = 300;
 const DERIVED_TRUST = new Set(['derived_ai', 'prior_conclusion']);
@@ -55,6 +61,22 @@ function _rootCause(output, analysis, byId) {
   return _str(best.statement, TEXT_MAX);
 }
 
+const STAGE_BLOCKER = Object.freeze({ parts: 'parts', approval: 'estimate_approval', scheduling: 'scheduling' });
+
+// The AI stall stage as a blocker code, only when the stall cites at least one non-derived item.
+function _aiBlocker(output, byId) {
+  if (!_obj(output) || output.generatedBy !== 'ai' || !_obj(output.stageStall)) return null;
+  const ss = output.stageStall;
+  if (ss.stalled !== true || !Object.prototype.hasOwnProperty.call(STAGE_BLOCKER, ss.stage)) return null;
+  return _arr(ss.evidenceIds).some((id) => _nonDerived(byId.get(id))) ? STAGE_BLOCKER[ss.stage] : null;
+}
+
+function _cited(p) { return _arr(p && p.evidenceIds).some((id) => typeof id === 'string' && id); }
+
+function _groupsOf(conflicts) {
+  return conflicts && Array.isArray(conflicts.groups) ? conflicts.groups : (Array.isArray(conflicts) ? conflicts : []);
+}
+
 function _woRefs(rec) {
   const set = _parse(rec.wo_set_json !== undefined ? rec.wo_set_json : rec.wo_set);
   if (Array.isArray(set)) {
@@ -92,9 +114,15 @@ function buildRecord(input) {
 
   const reasons = _arr(a.reasons);
   const oos = reasons.includes(R.OOS) ? 'OOS' : (row.lifecycleState != null ? _str(row.lifecycleState, 40) || null : null);
-  const blocker = (mem.confirmedBlocker && mem.confirmedBlocker.code) || _arr(a.blockers)[0] || null;
-  const outParty = out && out.responsibleParty && out.responsibleParty.party;
-  const party = outParty && outParty !== 'unknown' ? outParty : (a.responsibleParty || null);
+  const co = !isAi && out && out.generatedBy === 'deterministic' ? closeoutApplies(a, _groupsOf(i.conflicts || (i.pack && i.pack.conflicts))) : null;
+  const blocker = (co && CLOSEOUT_BLOCKER) || _aiBlocker(out, byId)
+    || (mem.confirmedBlocker && mem.confirmedBlocker.code) || _arr(a.blockers)[0] || null;
+  const outRp = out && _obj(out.responsibleParty) ? out.responsibleParty : null;
+  const outParty = outRp && outRp.party;
+  let party;
+  if (outParty && outParty !== 'unknown' && _cited(outRp)) party = outParty;
+  else if (a.responsibleParty && a.responsibleParty !== 'unknown' && _cited({ evidenceIds: a.responsiblePartyEvidenceIds })) party = a.responsibleParty;
+  else party = outParty || a.responsibleParty ? 'unknown' : null;
   const lvu = a.lastVendorUpdate || null;
   const parts = items.filter((it) => it.field === 'partsEta' && it.trust === 'structured')
     .sort((x, y) => (Number(y.observedAt) || 0) - (Number(x.observedAt) || 0))[0];
@@ -133,6 +161,9 @@ function buildRecord(input) {
   const action = (x) => ({ action: _str(x && x.action, TEXT_MAX), actionClass: _str(x && x.actionClass, 40) });
   const body = Object.assign({}, cols, {
     repairEtaStatus: eta.status || null,
+    subState: co ? co.subState : null,
+    closeable: !!co,
+    closeoutEvidenceIds: co ? _arr(co.evidenceIds).slice(0, 20) : [],
     episodeKey: rec.episode_key || null,
     woRefs: _woRefs(rec),
     recommendedActions: _arr(out && out.recommendedActions).slice(0, 20).map(action),

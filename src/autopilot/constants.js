@@ -26,6 +26,9 @@ const STATES = Object.freeze({
   NEEDS_REVIEW: 'NEEDS_REVIEW',
 });
 
+// Record-level label only; never a case state, never opens or closes a case.
+const SUB_STATES = Object.freeze({ READY_PENDING_CLOSEOUT: 'READY_PENDING_CLOSEOUT' });
+
 const REASONS = Object.freeze({
   OOS: 'OOS',
   DWELL_EXCEEDED: 'DWELL_EXCEEDED',
@@ -298,7 +301,7 @@ class ApError extends Error {
 }
 
 module.exports = {
-  STATES, REASONS, SAFETY_LIFECYCLE_REASONS, SOURCES, ACTION_CLASSES, WRITE_ACTION_CLASSES,
+  STATES, SUB_STATES, REASONS, SAFETY_LIFECYCLE_REASONS, SOURCES, ACTION_CLASSES, WRITE_ACTION_CLASSES,
   AUTHORITATIVE_ETC_SOURCES, isAuthoritativeEtcTag, AUTH_DOWN, WATCHED_KEYS,
   LIMITS, RETENTION, OPERATIONAL_CADENCE, CONFLICT_FIELDS, ERROR_CODES,
   normUnit, unitIndex, UNIT_KEY_OF, localDate, woSetOf, ApError,

@@ -11,9 +11,15 @@
  *   inferences       none; stageStall { stalled:null, reasoning:'not assessed (AI unavailable)' }
  *   actions          rule templates per reason code, filled only with structured values
  * Every approval action carries requiresApproval:true and executed:false.
+ *
+ * Repair complete, awaiting return tow / case close-out (analysis.closeout, analyze.js): the
+ * REPAIRED_UNVERIFIED actions become the specific close-out steps (check Active in AAP, return
+ * tow, lifecycle, RelayGarage close-out), the ETC request and "Repair ETC" missing info are
+ * dropped, and the summary / stageStall say closeable, not stalled. Suggestions only.
  */
 
 const { REASONS: R, WRITE_ACTION_CLASSES, OPERATIONAL_CADENCE } = require('./constants');
+const { closeoutApplies } = require('./analyze');
 
 const DAY = 86400000;
 const FACT_MAX = 10;
@@ -61,6 +67,9 @@ function deterministicRecommendation(analysis, pack, opts) {
   const eta = a.eta || {};
   const etaDate = _date(eta.date);
   const etaSource = eta.source ? _flat(eta.source, 40) : 'unknown source';
+  const co = closeoutApplies(a, a.conflictGroups);
+  const coSince = co && Number.isFinite(co.readySince) ? new Date(co.readySince).toISOString().slice(0, 10) : 'an unknown date';
+  const coSrcs = co ? co.readySources.join(' and ') : '';
 
   const facts = [];
   for (const it of _structuredItems(pack)) {
@@ -81,11 +90,20 @@ function deterministicRecommendation(analysis, pack, opts) {
   } else if (has(R.ETA_PAST_UNVERIFIED)) {
     push(_action('verify_in_system', 'Verify the ETC; ' + (etaDate || 'a date') + ' per ' + etaSource + ' has passed (not verified).',
       'The ETC date passed but its source is not authoritative.', 'fleet', _ids(etcItem)));
-  } else if (has(R.ETA_NOT_PROVIDED)) {
+  } else if (has(R.ETA_NOT_PROVIDED) && !co) {
     push(_action('vendor_follow_up', 'Ask ' + dealer + ' for an ETC; none is recorded in any source.',
       'No ETC date exists for a down unit.', 'fleet', _ids(life)));
   }
-  if (has(R.REPAIRED_UNVERIFIED)) {
+  if (co) {
+    push(_action('verify_in_system', 'Repair complete: ' + coSrcs + ' report ready since ' + coSince + '. Check whether the unit went Active in AAP; this case is closeable, not a stalled repair.',
+      'Two systems report the repair done while AAP still shows Unavailable; AAP lags.', 'fleet', co.evidenceIds));
+    push(_action('vendor_follow_up', 'Arrange the return tow from ' + dealer + ' to the yard if it is not already scheduled.',
+      'The repair is done; the unit has to come back before the case can close.', 'fleet', co.evidenceIds));
+    push(_action('lifecycle_change', 'Set the unit Active in AAP once it is back; ' + coSrcs + ' report ready since ' + coSince + ' while AAP shows Unavailable.',
+      'Only a person can change the lifecycle; Autopilot never does.', 'fleet', co.evidenceIds));
+    push(_action('wo_update', 'Close out the RelayGarage case for this repair once the unit is Active in AAP.',
+      'The repair is complete; the open case is the last step.', 'fleet', co.evidenceIds));
+  } else if (has(R.REPAIRED_UNVERIFIED)) {
     const ready = _structuredItems(pack).find((i) => i.conflictField === 'repairStatus' && String(i.value).toLowerCase() === 'ready')
       || _find(pack, 'canonical', 'status');
     const since = ready && ready.observedAt != null ? new Date(ready.observedAt).toISOString().slice(0, 10) : 'an unknown date';
@@ -136,7 +154,7 @@ function deterministicRecommendation(analysis, pack, opts) {
   }
 
   const missingInfo = [];
-  if (eta.status === 'NOT_PROVIDED' || has(R.ETA_NOT_PROVIDED)) missingInfo.push({ item: 'Repair ETC', whyNeeded: 'No ETC date exists in any source.', likelySource: 'vendor' });
+  if (!co && (eta.status === 'NOT_PROVIDED' || has(R.ETA_NOT_PROVIDED))) missingInfo.push({ item: 'Repair ETC', whyNeeded: 'No ETC date exists in any source.', likelySource: 'vendor' });
   if (has(R.DOWN_SINCE_UNKNOWN)) missingInfo.push({ item: 'Down-since date', whyNeeded: 'Days down could not be computed.', likelySource: 'aap' });
 
   const conflicts = groups.map((g) => ({
@@ -148,8 +166,13 @@ function deterministicRecommendation(analysis, pack, opts) {
   // A party with no supporting item is reported as unknown.
   const rpIds = (Array.isArray(a.responsiblePartyEvidenceIds) ? a.responsiblePartyEvidenceIds : []).filter(Boolean).slice(0, 20);
 
-  const summary = 'Unit ' + (a.unitId || '?') + ': ' + (reasons.join(', ') || 'no reasons') +
+  const summary = 'Unit ' + (a.unitId || '?') + ': ' +
+    (co ? 'repair complete, awaiting return tow / case close-out (closeable, not a stalled repair); ready per ' + coSrcs + ' since ' + coSince + ', AAP still Unavailable; ' : '') +
+    (reasons.join(', ') || 'no reasons') +
     (a.daysDown != null ? '; ' + (Math.round(a.daysDown * 10) / 10) + ' days down' : '') + '; ETC ' + (eta.status || 'NOT_PROVIDED') + '.';
+  const stageStall = co
+    ? { stalled: false, stage: 'ready', reasoning: 'Repair complete per ' + coSrcs + '; awaiting return tow and case close-out.', confidence: 0, evidenceIds: co.evidenceIds.slice() }
+    : { stalled: null, stage: 'unknown', reasoning: 'not assessed (AI unavailable)', confidence: 0, evidenceIds: [] };
 
   return {
     schemaVersion: 1,
@@ -157,7 +180,7 @@ function deterministicRecommendation(analysis, pack, opts) {
     summary: _clip(summary, 400),
     confirmedFacts: facts,
     inferences: [],
-    stageStall: { stalled: null, stage: 'unknown', reasoning: 'not assessed (AI unavailable)', confidence: 0, evidenceIds: [] },
+    stageStall,
     missingInfo,
     conflicts,
     responsibleParty: { party: rpIds.length ? (a.responsibleParty || 'unknown') : 'unknown', evidenceIds: rpIds },

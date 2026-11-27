@@ -11,12 +11,21 @@
  *   trivial(analysis) -> boolean
  *     REPAIRED_UNVERIFIED with no conflict group other than cf_status and no
  *     untrusted text newer than the newest structured update.
+ *   analysis.closeout -> { subState:'READY_PENDING_CLOSEOUT', readySources[], readySince, evidenceIds[] } | null
+ *     Repair complete, awaiting return tow / case close-out. Set only when all hold:
+ *     REPAIRED_UNVERIFIED and no WAITING_PARTS / WAITING_ESTIMATE_APPROVAL / AWAITING_SCHEDULING /
+ *     DOWN_SINCE_UNKNOWN; conflict groups non-empty and all cf_status; no newer untrusted text;
+ *     every structured AAP lifecycleState is Unavailable; every aap_cache offsiteStage is ready;
+ *     >= 1 decisiv stage / dtna offsiteStage item and every one is ready, observed at or after
+ *     down_since; canonical status is ready_for_pickup; no used item carries wo_association_mismatch.
+ *     Anything else is null (today's status_conflict output). Freshness is not a gate.
+ *   closeoutApplies(analysis, groups) -> analysis.closeout when every published group is cf_status, else null
  *
  * Only structured values feed the analysis. Untrusted text is counted, never read.
  */
 
-const { REASONS: R } = require('./constants');
-const { needsReview } = require('./conflicts');
+const { REASONS: R, SUB_STATES } = require('./constants');
+const { needsReview, normalizeConflictValue } = require('./conflicts');
 const { newestVendorUpdate, newestLoggedUpdate, toMs } = require('./updates');
 
 const PARTIES = Object.freeze(['vendor', 'dealer', 'dsp_carrier', 'amazon_fleet', 'parts_supplier', 'unknown']);
@@ -29,6 +38,43 @@ const BLOCKER_OF = Object.freeze({
   [R.UPDATE_STALE]: 'stale_updates',
   [R.STATUS_CONFLICT]: 'status_conflict',
 });
+
+const CLOSEOUT_BLOCKER = 'ready_pending_closeout';
+const CLOSEOUT_EXCLUDED = Object.freeze([R.WAITING_PARTS, R.WAITING_ESTIMATE_APPROVAL, R.AWAITING_SCHEDULING, R.DOWN_SINCE_UNKNOWN]);
+
+function _onlyStatus(groups) {
+  return Array.isArray(groups) && groups.length > 0 && groups.every((g) => g && g.group === 'cf_status');
+}
+
+function _closeout(items, groups, reasons, untrustedNewer, downSince) {
+  if (!reasons.includes(R.REPAIRED_UNVERIFIED) || CLOSEOUT_EXCLUDED.some((c) => reasons.includes(c))) return null;
+  if (!_onlyStatus(groups) || untrustedNewer || !Number.isFinite(downSince)) return null;
+  const pick = (pairs) => items.filter((i) => i && i.trust === 'structured' && pairs.some(([s, f]) => i.source === s && i.field === f));
+  const lifes = pick([['aap_cache', 'lifecycleState'], ['aap_live', 'lifecycleState']]);
+  const mirror = pick([['aap_cache', 'offsiteStage']]);
+  const dealers = pick([['decisiv', 'stage'], ['dtna', 'offsiteStage']]);
+  const canon = pick([['canonical', 'status']]);
+  const used = lifes.concat(mirror, dealers, canon);
+  if (used.some((i) => (i.flags || []).includes('wo_association_mismatch'))) return null;
+  const stageOf = (i) => normalizeConflictValue('repairStatus', i.value, { source: i.source });
+  if (!lifes.length || !lifes.every((i) => normalizeConflictValue('lifecycleState', i.value) === 'Unavailable')) return null;
+  if (!mirror.length || !mirror.every((i) => stageOf(i) === 'ready')) return null;
+  if (!dealers.length || !dealers.every((i) => stageOf(i) === 'ready' && Number.isFinite(i.observedAt) && i.observedAt >= downSince)) return null;
+  if (!canon.length || !canon.every((i) => String(i.value).trim().toLowerCase() === 'ready_for_pickup')) return null;
+  const readySources = ['aap_cache offsiteStage'];
+  for (const d of dealers) { const s = d.source + ' ' + d.field; if (!readySources.includes(s)) readySources.push(s); }
+  return {
+    subState: SUB_STATES.READY_PENDING_CLOSEOUT,
+    readySources,
+    readySince: Math.min(...dealers.map((d) => d.observedAt)),
+    evidenceIds: [...new Set(used.map((i) => i.evidenceId).filter((id) => typeof id === 'string' && id))].slice(0, 20),
+  };
+}
+
+function closeoutApplies(analysis, groups) {
+  const co = analysis && analysis.closeout;
+  return co && _onlyStatus(groups) ? co : null;
+}
 
 function _codes(reasons) {
   return (reasons || []).map((r) => (r && typeof r === 'object' ? r.code : r)).filter(Boolean);
@@ -98,6 +144,7 @@ function analyze(pack, caseRec, opts) {
   const newestStructured = structuredAts.length ? Math.max(...structuredAts) : null;
   const newestUntrusted = untrustedAts.length ? Math.max(...untrustedAts) : null;
   const untrustedNewer = newestUntrusted != null && (newestStructured == null || newestUntrusted > newestStructured);
+  const closeout = _closeout(items, groups, reasons, untrustedNewer, c.down_since);
 
   return {
     unitId: c.unit_id || null,
@@ -116,6 +163,7 @@ function analyze(pack, caseRec, opts) {
     conflictGroups: groups,
     needsReviewConflict: needsReview(groups),
     untrustedNewer,
+    closeout,
   };
 }
 
@@ -131,4 +179,4 @@ function needsAi(input) {
   return i.aiInvestigation === true && i.fp !== i.aiFp && !trivial(i.analysis);
 }
 
-module.exports = { analyze, trivial, needsAi, PARTIES, BLOCKER_OF };
+module.exports = { analyze, trivial, needsAi, closeoutApplies, PARTIES, BLOCKER_OF, CLOSEOUT_BLOCKER };

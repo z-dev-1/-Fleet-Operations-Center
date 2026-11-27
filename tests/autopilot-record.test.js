@@ -77,6 +77,76 @@ describe('buildRecord', () => {
     expect(r.record_json.sourceFreshness.dtna).toEqual({ newestObservedAt: null, retrievedAt: null, status: 'unavailable_in_run' });
   });
 
+  // Change 3: blocker precision (321185: deterministic 'stale_updates' vs the cited AI 'parts').
+  const svc = col.add('aap_cache', 'serviceState', 'Waiting on Parts', { row: {}, buildAtMs: NOW }, { sourceRef: 'row/serviceState' });
+  const memStale = { confirmedBlocker: { code: 'stale_updates' } };
+  const a321185 = Object.assign({}, analysis, { reasons: ['OOS', 'UPDATE_STALE', 'AWAITING_SCHEDULING'], blockers: ['stale_updates', 'scheduling'] });
+  const stall = (stalled, stg, ids) => ({ stageStall: { stalled, stage: stg, reasoning: 'r', confidence: 0.7, evidenceIds: ids } });
+
+  it('a cited AI stall stage that disagrees wins over memory and the reason-code blocker', () => {
+    const r = buildRecord({ rec, analysis: a321185, memory: memStale, output: aiOut([svc.evidenceId], stall(true, 'parts', [svc.evidenceId, tl.evidenceId])), pack, now: NOW });
+    expect(r.blocker).toBe('parts');
+    const appr = buildRecord({ rec, analysis: a321185, memory: memStale, output: aiOut([svc.evidenceId], stall(true, 'approval', [svc.evidenceId])), pack, now: NOW });
+    expect(appr.blocker).toBe('estimate_approval');
+  });
+
+  it('an uncited or unsupported AI stall never overrides the deterministic blocker', () => {
+    const keep = (output, mem) => buildRecord({ rec, analysis: a321185, memory: mem, output, pack, now: NOW }).blocker;
+    expect(keep(aiOut([svc.evidenceId], stall(true, 'parts', [tl.evidenceId, canon.evidenceId])), memStale)).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], stall(true, 'parts', [])), memStale)).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], stall(true, 'parts', ['ev_missing'])), {})).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], stall(true, 'repair', [svc.evidenceId])), memStale)).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], stall(false, 'parts', [svc.evidenceId])), memStale)).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], Object.assign({ generatedBy: 'deterministic' }, stall(true, 'parts', [svc.evidenceId]))), memStale)).toBe('stale_updates');
+    expect(keep(aiOut([svc.evidenceId], stall(true, 'parts', [tl.evidenceId])), {})).toBe('stale_updates');
+  });
+
+  // Change 1: the close-out label on the record.
+  const cfStatus = { groups: [{ group: 'cf_status', fields: ['lifecycleState', 'repairStatus'], positions: [], authorityWinner: null, informational: true }] };
+  const coAnalysis = Object.assign({}, analysis, {
+    reasons: ['OOS', 'STATUS_CONFLICT', 'REPAIRED_UNVERIFIED'], blockers: ['status_conflict'], repairPhase: 'ready_for_pickup',
+    closeout: { subState: 'READY_PENDING_CLOSEOUT', readySources: ['aap_cache offsiteStage', 'decisiv stage'], readySince: NOW - 86400e3, evidenceIds: [stage.evidenceId, canon.evidenceId] },
+  });
+  const coPack = { items: col.items, conflicts: cfStatus };
+  const detOut = (extra) => aiOut([stage.evidenceId], Object.assign({ generatedBy: 'deterministic' }, extra || {}));
+
+  it('deterministic output on a close-out analysis -> ready_pending_closeout, closeable, phase unchanged', () => {
+    const r = buildRecord({ rec, analysis: coAnalysis, output: detOut(), pack: coPack, conflicts: cfStatus, now: NOW });
+    expect(r.blocker).toBe('ready_pending_closeout');
+    expect(r.repair_phase).toBe('ready_for_pickup');
+    expect(r.record_json).toMatchObject({ subState: 'READY_PENDING_CLOSEOUT', closeable: true, closeoutEvidenceIds: [stage.evidenceId, canon.evidenceId] });
+  });
+
+  it('no close-out label for AI output or a non-cf_status published group', () => {
+    const ai = buildRecord({ rec, analysis: coAnalysis, output: aiOut([stage.evidenceId]), pack: coPack, conflicts: cfStatus, now: NOW });
+    expect(ai.blocker).toBe('status_conflict');
+    expect(ai.record_json).toMatchObject({ subState: null, closeable: false, closeoutEvidenceIds: [] });
+    const mixed = { groups: cfStatus.groups.concat([{ group: 'cf_dealerName', fields: ['dealerName'], positions: [], authorityWinner: null }]) };
+    const m = buildRecord({ rec, analysis: coAnalysis, output: detOut(), pack: { items: col.items, conflicts: mixed }, conflicts: mixed, now: NOW });
+    expect(m.blocker).toBe('status_conflict');
+    expect(m.record_json.closeable).toBe(false);
+  });
+
+  it('a pre-change analysis shape (no closeout, no party evidence ids) still builds a record', () => {
+    const old = { reasons: ['OOS', 'STATUS_CONFLICT'], daysDown: 3, repairPhase: 'ready_for_pickup', blockers: ['status_conflict'], responsibleParty: 'dealer', eta: { status: 'NOT_PROVIDED' } };
+    const r = buildRecord({ rec, analysis: old, output: detOut({ responsibleParty: { party: 'unknown', evidenceIds: [] } }), pack, now: NOW });
+    expect(r.blocker).toBe('status_conflict');
+    expect(r.responsible_party).toBe('unknown');
+    expect(r.record_json).toMatchObject({ subState: null, closeable: false });
+  });
+
+  // Change 2: one responsible party.
+  it('responsible party: cited output party wins; else cited analysis party; else unknown', () => {
+    const party = (outRp, a) => buildRecord({ rec, analysis: Object.assign({}, analysis, a), output: aiOut([stage.evidenceId], { responsibleParty: outRp }), pack, now: NOW }).responsible_party;
+    const aCited = { responsibleParty: 'parts_supplier', responsiblePartyEvidenceIds: [parts.evidenceId] };
+    expect(party({ party: 'dealer', evidenceIds: [stage.evidenceId] }, aCited)).toBe('dealer');
+    expect(party({ party: 'unknown', evidenceIds: [] }, aCited)).toBe('parts_supplier');
+    expect(party({ party: 'unknown', evidenceIds: [] }, { responsibleParty: 'parts_supplier', responsiblePartyEvidenceIds: [] })).toBe('unknown');
+    expect(party({ party: 'dealer', evidenceIds: [] }, aCited)).toBe('parts_supplier');
+    expect(party({ party: 'dealer', evidenceIds: [] }, { responsibleParty: 'parts_supplier' })).toBe('unknown');
+    expect(party(undefined, { responsibleParty: undefined })).toBe(null);
+  });
+
   it('no ETA provided is never stored as a repair ETA', () => {
     const a = Object.assign({}, analysis, { eta: { status: 'NOT_PROVIDED', date: null } });
     const r = buildRecord({ rec, analysis: a, output: aiOut([stage.evidenceId]), pack, now: NOW });

@@ -593,7 +593,6 @@ async function runInvestigation(caseId, deps) {
       recommendation_hash: hash,
       eta_json: analysis.eta,
       blockers_json: analysis.blockers,
-      responsible_party: analysis.responsibleParty,
       repair_phase: analysis.repairPhase,
       last_vendor_update_at: analysis.lastVendorUpdate ? analysis.lastVendorUpdate.at : null,
       last_vendor_update_source: analysis.lastVendorUpdate ? analysis.lastVendorUpdate.source : null,
@@ -649,6 +648,8 @@ async function runInvestigation(caseId, deps) {
       rec, row, analysis, output, agent: agentInfo, memory: mem, proposals, pack: { items: merged, conflicts: mergedConflicts },
       conflicts: mergedConflicts, sourceStatus: pack.sourceStatus, aiStatus: ctx.aiStatus, now: t,
     });
+    // One responsible party: the case row shows the published record's party.
+    f.responsible_party = record.responsible_party;
 
     const reasonCode = to === S.NEEDS_REVIEW
       ? (analysis.needsReviewConflict ? 'authority_tie' : (streak >= LIMITS.aiRejectStreak ? 'ai_rejected' : heldReview))

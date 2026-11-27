@@ -177,6 +177,65 @@ describe('AI outcome mapping and ai_fp / ai_retry_at', () => {
     expect(c.recommendation.actionsRequiringApproval.map((a) => a.actionClass)).toContain('lifecycle_change');
   });
 
+  // Change 1 integration: offsite stage ready + dtna ready + canonical ready_for_pickup + AAP Unavailable.
+  const closeoutWorld = () => {
+    const since = new Date(s.ck.now() - 2 * F.DAY).toISOString();
+    s.world.rows[0] = F.baseRow({ offsiteStage: 'ready', offsiteStageSince: since, repairEtc: '', repairEtcSource: '', lifecycleReason: '' });
+    s.world.dtna['322283'] = [{ caseId: 'c1', unitId: '322283', offsiteStage: 'ready', stageSince: since, pulledAt: s.ck.now() - H }];
+    s.world.canonical = () => ({ status: 'ready_for_pickup' });
+    return F.seedCase('322283', { reasons: [{ code: 'OOS' }, { code: 'STATUS_CONFLICT' }, { code: 'REPAIRED_UNVERIFIED' }], openedBy: 'hard_condition' });
+  };
+
+  it('repair complete, awaiting return tow -> ready_pending_closeout record, close-out approvals, no AI call', async () => {
+    const { caseId } = closeoutWorld();
+    const r = await inv(caseId);
+    expect(r.aiStatus).toBe('not_needed');
+    expect(s.reason.calls.length).toBe(0);
+    const c = caseOf(caseId);
+    expect(c.repair_phase).toBe('ready_for_pickup');
+    const cls = c.recommendation.actionsRequiringApproval.map((a) => a.actionClass);
+    expect(cls).toEqual(expect.arrayContaining(['vendor_follow_up', 'lifecycle_change', 'wo_update']));
+    for (const a of c.recommendation.actionsRequiringApproval) expect(a).toMatchObject({ requiresApproval: true, executed: false });
+    expect(c.ai_findings.summary).toMatch(/closeable, not a stalled repair/);
+    const rec = F.cs.getRecord(caseId);
+    expect(rec.blocker).toBe('ready_pending_closeout');
+    expect(rec.record).toMatchObject({ subState: 'READY_PENDING_CLOSEOUT', closeable: true });
+    expect(c.responsible_party).toBe(rec.responsible_party);
+  });
+
+  it('a stored pre-change record shape loads, and the next run rewrites it with the close-out label', async () => {
+    const { caseId } = closeoutWorld();
+    const t = s.ck.now();
+    expect(F.cs.leaseRun(caseId, 'old#run', t + 600000, { now: t })).toBe(true);
+    F.cs.transition(caseId, 'INVESTIGATING', { now: t, leaseOwner: 'old#run' });
+    const runId = F.cs.openRun({ caseId, trigger: 'new', now: t });
+    const old = { case_id: caseId, unit_id: '322283', schema_version: 1, oos_status: 'OOS', repair_phase: 'ready_for_pickup', blocker: 'status_conflict',
+      responsible_party: 'dealer', ai_status: 'not_needed', investigated_at: t };
+    F.cs.persistRun(caseId, runId, { lease_owner: null, lease_until: null, responsible_party: 'amazon_fleet' }, 'MONITORING',
+      { leaseOwner: 'old#run', run: { outcome: 'recommendation' }, record: Object.assign({}, old, { record_json: Object.assign({ repairEtaStatus: 'NOT_PROVIDED', woRefs: [] }, old) }), now: t });
+    const loaded = F.cs.getRecord(caseId);
+    expect(loaded).toMatchObject({ blocker: 'status_conflict', responsible_party: 'dealer' });
+    expect(loaded.record.subState).toBe(undefined);
+    expect(caseOf(caseId).responsible_party).toBe('amazon_fleet');
+    s.ck.advance(H);
+    requeue(caseId);
+    await inv(caseId, { trigger: 'manual' });
+    const rec = F.cs.getRecord(caseId);
+    expect(rec.blocker).toBe('ready_pending_closeout');
+    expect(rec.record.closeable).toBe(true);
+    expect(caseOf(caseId).responsible_party).toBe(rec.responsible_party);
+  });
+
+  it('case row party equals the published record party (cited AI party wins over the analysis party)', async () => {
+    const { caseId } = F.seedCase();
+    const r = await inv(caseId);
+    expect(r.aiStatus).toBe('ok');
+    const c = caseOf(caseId);
+    expect(c.ai_findings.responsibleParty.party).toBe('vendor');
+    expect(c.responsible_party).toBe('vendor');
+    expect(F.cs.getRecord(caseId).responsible_party).toBe('vendor');
+  });
+
   it('unchanged evidence before ai_retry_at -> unchanged; after it -> exactly one AI call', async () => {
     s.reason = reasonResult({ ok: false, error: 'reason-timeout' });
     const { caseId } = F.seedCase();
