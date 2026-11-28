@@ -708,8 +708,8 @@ export async function openLifecycleModal(unit, deps) {
 // window.relayWrites.decisivReply -> write-gate 'decisivReply' -> approval modal.
 const DECISIV_REPLY_HOST_RE = /^(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net$/i;
 const DECISIV_REPLY_ERRORS = {
-  DECISIV_NO_SUBCASE: 'No dealer case roster found for this estimate; nothing can be sent.',
-  DECISIV_CASE_AMBIGUOUS: 'More than one dealer case is linked to this estimate; nothing can be sent.',
+  DECISIV_NO_ROSTER: 'No dealer case roster found for this estimate; nothing can be sent.',
+  DECISIV_ROSTER_TOO_BROAD: 'Decisiv returned the whole dealer directory instead of this case\'s roster; nothing can be sent.',
   DECISIV_SESSION_INVALID: 'The Decisiv session is not signed in. Open the case in the app and try again.',
   DECISIV_BAD_REF: 'This unit has no usable Decisiv case link.',
   DECISIV_NO_ORIGIN: 'This unit has no usable Decisiv case link.',

@@ -158,7 +158,7 @@ describe('submit', () => {
   });
 
   it('a roster failure shows the toast and opens no modal', async () => {
-    const d = deps({ decisivReplyRoster: vi.fn(async () => ({ ok: false, code: 'DECISIV_NO_SUBCASE' })) });
+    const d = deps({ decisivReplyRoster: vi.fn(async () => ({ ok: false, code: 'DECISIV_NO_ROSTER' })) });
     await ra.openDecisivReplyModal(UNIT, ra.decisivReplyRefOf(UNIT), d);
     expect(fakeModal.show).not.toHaveBeenCalled();
     expect(toast.show).toHaveBeenLastCalledWith('error', 'No dealer case roster found for this estimate; nothing can be sent.');

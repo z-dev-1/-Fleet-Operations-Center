@@ -1,7 +1,7 @@
 // tests/decisiv-reply.test.js — src/writes/decisiv-reply.js: the exact nested
-// reply body, N contacts -> N recipients, the case-roster path (CASE id,
-// filter=subcase_dealer, group_id=-1), CASE id derivation, latest-note
-// selection, and the approval-token check. Plus static guards: the reply path
+// reply body, N contacts -> N recipients, the case-roster path (estimate id,
+// filter=subcase_dealer then dealer, group_id=-1), the full-directory guard,
+// latest-note selection, and the approval-token check. Plus static guards: the reply path
 // and the case POST helper live only where they should, and no automated
 // path (autopilot, scheduler, dbr, health, asana, ai) can stage a Decisiv reply.
 // Synthetic ids and names only; every network call is a mock.
@@ -19,10 +19,18 @@ const SR = 'https://paccarpg.decisiv.net/fleet/estimates/' + EST;
 const cid = (n) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
 const contact = (n, o = {}) => Object.assign({ id: cid(n), name: 'Contact ' + n, email: 'c' + n + '@example.test', job_role: 'Role ' + n,
   sub_group: n % 2 ? 'Dealer Group A' : 'Amazon Staff Group', pinned: true, filter_name: n % 2 ? 'dealer' : 'fleet_dealer' }, o);
-const GROUPS = [
-  { name: 'Fleet', value: -2, options: { estimate_id: Number(EST), filter: 'fleet_dealer' } },
-  { name: 'Dealer case', value: -1, options: { estimate_id: Number(CASE), filter: 'subcase_dealer' } },
-];
+const many = (n, from = 1) => Array.from({ length: n }, (_, i) => contact(from + i));
+// apiGetForCase mock answering per filter: { subcase_dealer: [...] | Error, dealer: [...] | Error }.
+const rosterApi = (byFilter) => ({
+  getEstimateContacts: vi.fn(async () => { throw new Error('groups endpoint must not be called'); }),
+  apiGetForCase: vi.fn(async (_u, p) => {
+    const f = /[?&]filter=([a-z_]+)&/.exec(p)[1];
+    const v = byFilter[f];
+    if (v instanceof Error) throw v;
+    return v === undefined ? [] : v;
+  }),
+});
+const filterOf = (call) => /[?&]filter=([a-z_]+)&/.exec(call[1])[1];
 
 afterEach(() => { dr._setDepsForTest({}); });
 
@@ -73,10 +81,12 @@ describe('buildReplyRequest', () => {
 });
 
 describe('paths and refs', () => {
-  it('the roster path uses the CASE id with filter=subcase_dealer and group_id=-1', () => {
-    const p = dr.rosterPath(CASE);
-    expect(p).toBe('/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=1000002&group_id=-1&filter=subcase_dealer&mobile=false');
-    expect(p).not.toMatch(/filter=(dealer|fleet_dealer)&/);
+  it('the roster path takes the id and one of the two filters, with group_id=-1 and mobile=false', () => {
+    expect(dr.rosterPath(EST, 'subcase_dealer')).toBe('/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=1000001&group_id=-1&filter=subcase_dealer&mobile=false');
+    expect(dr.rosterPath(EST, 'dealer')).toBe('/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=1000001&group_id=-1&filter=dealer&mobile=false');
+    expect(() => dr.rosterPath(EST, 'fleet_dealer')).toThrow();
+    expect(() => dr.rosterPath(EST)).toThrow();
+    expect([...dr.ROSTER_FILTERS]).toEqual(['subcase_dealer', 'dealer']);
   });
   it('the feed path is activity_logs page 1, 50 per page (not notes.json)', () => {
     expect(dr.activityPath(EST)).toBe('/mobilecomm/api/estimates/1000001/activity_logs?page=1&per_page=50');
@@ -91,20 +101,6 @@ describe('paths and refs', () => {
     expect(dr.replyRefFromUrl('https://dtna.my.site.com/Servicetracker/s/case/500x')).toBe(null);
     expect(dr.replyRefFromUrl('http://paccarpg.decisiv.net/fleet/estimates/7')).toBe(null);
     expect(dr.replyRefFromUrl('')).toBe(null);
-  });
-});
-
-describe('deriveCaseId', () => {
-  it('found: options.estimate_id of the subcase_dealer group', () => {
-    expect(dr.deriveCaseId(GROUPS)).toEqual({ ok: true, caseId: CASE });
-  });
-  it('missing -> DECISIV_NO_SUBCASE', () => {
-    expect(dr.deriveCaseId([GROUPS[0]])).toEqual({ ok: false, code: 'DECISIV_NO_SUBCASE' });
-    expect(dr.deriveCaseId(null)).toEqual({ ok: false, code: 'DECISIV_NO_SUBCASE' });
-  });
-  it('several distinct ids -> DECISIV_CASE_AMBIGUOUS; duplicates of one id are fine', () => {
-    expect(dr.deriveCaseId([...GROUPS, { options: { estimate_id: CASE, filter: 'subcase_dealer' } }])).toEqual({ ok: true, caseId: CASE });
-    expect(dr.deriveCaseId([...GROUPS, { options: { estimate_id: 1000009, filter: 'subcase_dealer' } }])).toEqual({ ok: false, code: 'DECISIV_CASE_AMBIGUOUS' });
   });
 });
 
@@ -163,32 +159,68 @@ describe('pickLatestNote (synthetic activity_logs)', () => {
 });
 
 describe('loadCaseRoster / latestNoteId (mocked transport)', () => {
-  it('derives the CASE id and sends it (not the estimate id) to the roster GET', async () => {
-    const api = {
-      getEstimateContacts: vi.fn(async () => GROUPS),
-      apiGetForCase: vi.fn(async () => [contact(1), contact(2)]),
-    };
+  it('subcase_dealer case (like the captured Volvo case): the estimate id goes straight to the roster GET, no groups call', async () => {
+    const api = rosterApi({ subcase_dealer: [contact(1), contact(2)], dealer: many(3, 10) });
     dr._setDepsForTest({ api });
     const r = await dr.loadCaseRoster({ estimateId: EST, srUrl: SR });
-    expect(api.getEstimateContacts).toHaveBeenCalledWith(EST, { srUrl: SR });
+    expect(api.getEstimateContacts).not.toHaveBeenCalled();
     expect(api.apiGetForCase).toHaveBeenCalledTimes(1);
     const [u, p] = api.apiGetForCase.mock.calls[0];
     expect(u).toBe(SR);
-    expect(p).toContain('estimate_id=' + CASE + '&group_id=-1&filter=subcase_dealer&mobile=false');
-    expect(p).not.toContain('estimate_id=' + EST);
-    expect(r.ok).toBe(true);
-    expect(r.caseId).toBe(CASE);
-    expect(r.contacts.map((c) => c.id)).toEqual([cid(1), cid(2)]);
+    expect(p).toBe('/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=' + EST + '&group_id=-1&filter=subcase_dealer&mobile=false');
+    expect(r).toEqual({ ok: true, caseId: EST, filter: 'subcase_dealer', contacts: dr.normalizeRoster([contact(1), contact(2)]) });
   });
-  it('no subcase group -> DECISIV_NO_SUBCASE and no roster GET', async () => {
-    const api = { getEstimateContacts: vi.fn(async () => [GROUPS[0]]), apiGetForCase: vi.fn() };
+  it('dealer case (like the captured filter=dealer case): subcase_dealer empty -> falls back to filter=dealer', async () => {
+    const api = rosterApi({ subcase_dealer: [], dealer: [contact(3), contact(4), contact(5)] });
     dr._setDepsForTest({ api });
-    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_NO_SUBCASE' });
-    expect(api.apiGetForCase).not.toHaveBeenCalled();
+    const r = await dr.loadCaseRoster({ estimateId: EST, srUrl: SR });
+    expect(api.apiGetForCase.mock.calls.map(filterOf)).toEqual(['subcase_dealer', 'dealer']);
+    expect(api.apiGetForCase.mock.calls[1][1]).toBe('/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=' + EST + '&group_id=-1&filter=dealer&mobile=false');
+    expect(r.ok).toBe(true);
+    expect(r.caseId).toBe(EST);
+    expect(r.filter).toBe('dealer');
+    expect(r.contacts.map((c) => c.id)).toEqual([cid(3), cid(4), cid(5)]);
   });
-  it('a transport error never throws', async () => {
-    dr._setDepsForTest({ api: { getEstimateContacts: async () => { throw Object.assign(new Error('x'), { code: 'DECISIV_SESSION_INVALID' }); } } });
+  it('a subcase_dealer transport error falls back to dealer', async () => {
+    const api = rosterApi({ subcase_dealer: Object.assign(new Error('x'), { code: 'DECISIV_API_ERROR' }), dealer: [contact(1)] });
+    dr._setDepsForTest({ api });
+    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toMatchObject({ ok: true, caseId: EST, filter: 'dealer' });
+  });
+  it('a full-directory-sized list loses to the other filter\'s smaller case roster', async () => {
+    const api = rosterApi({ subcase_dealer: many(212), dealer: many(30, 300) });
+    dr._setDepsForTest({ api });
+    const r = await dr.loadCaseRoster({ estimateId: EST, srUrl: SR });
+    expect(r.ok).toBe(true);
+    expect(r.filter).toBe('dealer');
+    expect(r.contacts).toHaveLength(30);
+    expect(r.contacts[0].id).toBe(cid(300));
+  });
+  it('a list at the threshold is a case roster; one above it is not', async () => {
+    dr._setDepsForTest({ api: rosterApi({ subcase_dealer: many(dr.DIRECTORY_SIZE) }) });
+    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toMatchObject({ ok: true, filter: 'subcase_dealer' });
+    dr._setDepsForTest({ api: rosterApi({ subcase_dealer: many(dr.DIRECTORY_SIZE + 1) }) });
+    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_ROSTER_TOO_BROAD' });
+  });
+  it('only directory-sized lists -> DECISIV_ROSTER_TOO_BROAD, never presented as the case roster', async () => {
+    dr._setDepsForTest({ api: rosterApi({ subcase_dealer: many(212), dealer: many(212) }) });
+    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_ROSTER_TOO_BROAD' });
+  });
+  it('both filters empty -> DECISIV_NO_ROSTER (fails closed)', async () => {
+    const api = rosterApi({ subcase_dealer: [], dealer: { contacts: [] } });
+    dr._setDepsForTest({ api });
+    expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_NO_ROSTER' });
+    expect(api.apiGetForCase).toHaveBeenCalledTimes(2);
+  });
+  it('a transport error on both filters never throws and returns its code', async () => {
+    const e = Object.assign(new Error('x'), { code: 'DECISIV_SESSION_INVALID' });
+    dr._setDepsForTest({ api: rosterApi({ subcase_dealer: e, dealer: e }) });
     expect(await dr.loadCaseRoster({ estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_SESSION_INVALID' });
+  });
+  it('the roster id is the id that becomes subject_id in the reply body', async () => {
+    dr._setDepsForTest({ api: rosterApi({ dealer: [contact(1)] }) });
+    const r = await dr.loadCaseRoster({ estimateId: EST, srUrl: SR });
+    const { body } = dr.buildReplyRequest({ caseId: r.caseId, estimateId: EST, text: 'x', recipients: r.contacts }, '5000001');
+    expect(body.subject_id).toBe(Number(EST));
   });
   it('latestNoteId reads activity_logs page 1 / 50 and picks the newest', async () => {
     const api = { getActivityLogs: vi.fn(async () => ({ notes: [{ id: 5000001, created_at: '11/10/26 10:28 am EST' }, { id: 5000002, created_at: '11/11/26 10:28 am EST' }] })) };

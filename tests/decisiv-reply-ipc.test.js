@@ -35,10 +35,10 @@ const win = { isDestroyed: () => false, webContents: { send: vi.fn((ch, d) => se
 require('../src/ipc/relay-writes').registerRelayWritesIPC({ getMainWindow: () => win });
 
 const EST = '1000001';
-const CASE = '1000002';
+// The roster id (and reply subject_id) is the estimate id itself.
+const CASE = EST;
 const SR = 'https://paccarpg.decisiv.net/fleet/estimates/' + EST;
 const cid = (n) => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
-const GROUPS = [{ name: 'Dealer case', value: -1, options: { estimate_id: Number(CASE), filter: 'subcase_dealer' } }];
 const ROSTER = [
   { id: cid(1), name: 'Dealer Writer A', email: 'a@example.test', job_role: 'Service Advisor', sub_group: 'Dealer Group A', filter_name: 'dealer' },
   { id: cid(2), name: 'Amazon Staff B', email: 'b@example.test', job_role: 'Fleet Support', sub_group: 'Amazon Staff Group', filter_name: 'fleet_dealer' },
@@ -50,7 +50,7 @@ function memStore() {
 }
 function mockApi(over = {}) {
   const api = Object.assign({
-    getEstimateContacts: vi.fn(async () => GROUPS),
+    getEstimateContacts: vi.fn(async () => { throw new Error('groups endpoint must not be called'); }),
     apiGetForCase: vi.fn(async () => ROSTER),
     getActivityLogs: vi.fn(async () => ({ notes: [{ id: 5000001, created_at: '11/10/26 10:28 am EST' }, { id: 5000002, created_at: '11/11/26 9:00 am EST' }] })),
     apiPostForCase: vi.fn(async () => ({ notes: [{ id: 5000050 }] })),
@@ -88,7 +88,8 @@ describe('decisiv:reply-roster', () => {
       { id: cid(2), name: 'Amazon Staff B', jobRole: 'Fleet Support', subGroup: 'Amazon Staff Group', filterName: 'fleet_dealer' },
     ]);
     expect(JSON.stringify(r)).not.toContain('@');
-    expect(api.apiGetForCase.mock.calls[0][1]).toContain('estimate_id=' + CASE + '&group_id=-1&filter=subcase_dealer');
+    expect(api.apiGetForCase.mock.calls[0][1]).toContain('estimate_id=' + EST + '&group_id=-1&filter=subcase_dealer&mobile=false');
+    expect(api.getEstimateContacts).not.toHaveBeenCalled();
   });
 
   it('a Volvo (volvopg.asist) estimate URL is accepted like PACCAR', async () => {
@@ -100,9 +101,18 @@ describe('decisiv:reply-roster', () => {
     expect(api.apiGetForCase).toHaveBeenCalledTimes(1);
   });
 
-  it('no subcase group -> DECISIV_NO_SUBCASE', async () => {
-    mockApi({ getEstimateContacts: vi.fn(async () => []) });
-    expect(await handlers['decisiv:reply-roster']({}, { estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_NO_SUBCASE' });
+  it('filter=dealer roster is used when subcase_dealer is empty', async () => {
+    const api = mockApi({ apiGetForCase: vi.fn(async (_u, p) => (p.includes('filter=dealer&') ? ROSTER : [])) });
+    const r = await handlers['decisiv:reply-roster']({}, { estimateId: EST, srUrl: SR });
+    expect(r.ok).toBe(true);
+    expect(r.caseId).toBe(EST);
+    expect(r.contacts.map((c) => c.id)).toEqual([cid(1), cid(2)]);
+    expect(api.apiGetForCase).toHaveBeenCalledTimes(2);
+  });
+
+  it('both filters empty -> DECISIV_NO_ROSTER', async () => {
+    mockApi({ apiGetForCase: vi.fn(async () => []) });
+    expect(await handlers['decisiv:reply-roster']({}, { estimateId: EST, srUrl: SR })).toEqual({ ok: false, code: 'DECISIV_NO_ROSTER' });
   });
 });
 
@@ -179,7 +189,7 @@ describe('decisiv:reply', () => {
     expect(u).toBe(SR);
     expect(pth).toBe('/mobilecomm/api/estimates/' + EST + '/notes/5000002/reply.json');
     expect(body.reply_to_id).toBe('5000002');
-    expect(body.subject_id).toBe(1000002);
+    expect(body.subject_id).toBe(Number(EST));
     expect(body.note.recipients).toHaveLength(2);
   });
 });

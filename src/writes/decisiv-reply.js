@@ -7,27 +7,37 @@
  *
  * Endpoints (live DevTools captures on volvopg.asist.decisiv.net; same API on PACCAR):
  *   roster  GET  /mobilecomm/api/contacts/estimate_contacts_for_group.json
- *                ?estimate_id={CASE_ID}&group_id=-1&filter=subcase_dealer&mobile=false
+ *                ?estimate_id={ID}&group_id=-1&filter={subcase_dealer|dealer}&mobile=false
  *   feed    GET  /mobilecomm/api/estimates/{ESTIMATE_ID}/activity_logs?page=1&per_page=50
  *   reply   POST /mobilecomm/api/estimates/{ESTIMATE_ID}/notes/{NOTE_ID}/reply.json
  *
- * ESTIMATE id vs CASE id:
+ * Roster id and filter:
  *   - The app stores the ESTIMATE id: the /fleet/estimates/<id> number of the
  *     unit's Decisiv URL (offsiteShopEventUrl / savedOffsiteUrl / asistSrUrl,
- *     renderer id-links.js vendorWoOf). It goes in the feed and reply paths.
- *   - The CASE id (reply body subject_id, roster estimate_id param) is NOT
- *     stored anywhere. It is derived from estimate_contacts.json (recipient
- *     groups { name, value, options:{ estimate_id, filter } }): the CASE id is
- *     options.estimate_id of the group whose options.filter is 'subcase_dealer'.
- *     That matches the captured roster URL triple (estimate_id, group_id=-1,
- *     filter=subcase_dealer). Fails closed: no such group -> DECISIV_NO_SUBCASE,
- *     several distinct ids -> DECISIV_CASE_AMBIGUOUS; nothing can be staged.
+ *     renderer id-links.js vendorWoOf). It goes in the feed and reply paths,
+ *     and it is also the roster estimate_id param and the reply body
+ *     subject_id (the "caseId" of loadCaseRoster). The Decisiv UI passes the
+ *     page's own id to the roster call; no other source of a separate case id
+ *     exists in the API responses the app reads (estimate detail and
+ *     activity_logs carry none; estimate_contacts.json groups have no
+ *     subcase_dealer entry), so no derivation step is done.
+ *   - The filter varies by case ('subcase_dealer' on some, 'dealer' on others).
+ *     loadCaseRoster tries subcase_dealer first (narrower case roster), then
+ *     dealer, and takes the first non-empty list that is not directory-sized
+ *     (> DIRECTORY_SIZE entries, which is what a wrong id/filter returns: the
+ *     whole dealer directory, ~212 people). Both empty -> DECISIV_NO_ROSTER;
+ *     only directory-sized lists -> DECISIV_ROSTER_TOO_BROAD. Nothing can be
+ *     staged in either case.
  *
  * Logs carry codes and counts only, never text, names, emails or UUIDs.
  */
 
 const ROSTER_GROUP_ID = -1;
-const ROSTER_FILTER = 'subcase_dealer';
+// Tried in this order; the first one that yields a case-sized roster wins.
+const ROSTER_FILTERS = Object.freeze(['subcase_dealer', 'dealer']);
+// A list longer than this is taken as the full dealer directory, not a case
+// roster. Live: case rosters ~35 people, the full directory 212.
+const DIRECTORY_SIZE = 120;
 // Volvo (volvopg.asist) and PACCAR (pssmfleet, paccarpg) run the identical Decisiv
 // API; the reply/roster/notes endpoints were captured on Volvo. Matches decisiv_api.js KNOWN_HOST_RE.
 const REPLY_HOST_RE = /^(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net$/i;
@@ -68,13 +78,11 @@ function replyRefFromUrl(url) {
   if (!m) return null;
   return { estimateId: m[1], srUrl: u.protocol + '//' + u.host.toLowerCase() + '/fleet/estimates/' + m[1] };
 }
-function groupsPath(estimateId) {
-  return '/mobilecomm/api/contacts/estimate_contacts.json?estimate_id=' + encodeURIComponent(String(estimateId)) + '&exclude_recipients=true&mobile=false';
-}
-// estimate_id here is the CASE id (subject_id), not the estimate id.
-function rosterPath(caseId) {
+// estimate_id here is the roster id, which is also the reply's subject_id.
+function rosterPath(caseId, filter) {
+  if (!ROSTER_FILTERS.includes(filter)) throw Object.assign(new Error('decisivReply: bad roster filter'), { code: 'DECISIV_BAD_REF' });
   return '/mobilecomm/api/contacts/estimate_contacts_for_group.json?estimate_id=' + encodeURIComponent(String(caseId)) +
-    '&group_id=' + ROSTER_GROUP_ID + '&filter=' + ROSTER_FILTER + '&mobile=false';
+    '&group_id=' + ROSTER_GROUP_ID + '&filter=' + filter + '&mobile=false';
 }
 function activityPath(estimateId) {
   return '/mobilecomm/api/estimates/' + encodeURIComponent(String(estimateId)) + '/activity_logs?page=1&per_page=50';
@@ -83,25 +91,13 @@ function replyPath(estimateId, noteId) {
   return '/mobilecomm/api/estimates/' + encodeURIComponent(String(estimateId)) + '/notes/' + encodeURIComponent(String(noteId)) + '/reply.json';
 }
 
-// ── CASE id from the estimate's recipient groups ────────────────────────────
-function deriveCaseId(groups) {
-  const list = Array.isArray(groups) ? groups : [];
-  const ids = new Set();
-  for (const g of list) {
-    const o = g && g.options && typeof g.options === 'object' ? g.options : null;
-    if (!o || String(o.filter || '') !== ROSTER_FILTER) continue;
-    const id = _digits(o.estimate_id);
-    if (id) ids.add(id);
-  }
-  if (ids.size === 0) return { ok: false, code: 'DECISIV_NO_SUBCASE' };
-  if (ids.size > 1) return { ok: false, code: 'DECISIV_CASE_AMBIGUOUS' };
-  return { ok: true, caseId: [...ids][0] };
-}
-
 // ── roster ──────────────────────────────────────────────────────────────────
+function _rosterList(arr) {
+  return Array.isArray(arr) ? arr : (arr && Array.isArray(arr.contacts) ? arr.contacts : []);
+}
 /** [{ id, name, jobRole, subGroup, filterName }] — no email or phone kept. */
 function normalizeRoster(arr) {
-  const list = Array.isArray(arr) ? arr : (arr && Array.isArray(arr.contacts) ? arr.contacts : []);
+  const list = _rosterList(arr);
   const out = [];
   const seen = new Set();
   for (const c of list) {
@@ -203,23 +199,37 @@ function buildReplyRequest(payload, noteId) {
 }
 
 // ── reads (never throw) ─────────────────────────────────────────────────────
-/** { ok, caseId, contacts } | { ok:false, code }. Roster GET uses the CASE id. */
+async function _fetchRoster(srUrl, id, filter) {
+  try {
+    const list = _rosterList(await _api().apiGetForCase(srUrl, rosterPath(id, filter)));
+    return { ok: true, filter, total: list.length, contacts: normalizeRoster(list) };
+  } catch (e) {
+    return { ok: false, filter, code: _code(e) };
+  }
+}
+
+/**
+ * { ok, caseId, filter, contacts } | { ok:false, code }. caseId is the estimate
+ * id: it is the roster estimate_id param and becomes the reply's subject_id.
+ * Tries ROSTER_FILTERS in order; the first non-empty, case-sized list wins.
+ */
 async function loadCaseRoster({ estimateId, srUrl } = {}) {
   const est = _digits(estimateId);
   if (!est || !srUrl) return { ok: false, code: 'DECISIV_BAD_REF' };
-  try {
-    const groups = await _api().getEstimateContacts(est, { srUrl });
-    const c = deriveCaseId(groups);
-    if (!c.ok) { _log('[decisiv-reply] roster: ' + c.code); return c; }
-    const raw = await _api().apiGetForCase(srUrl, rosterPath(c.caseId));
-    const contacts = normalizeRoster(raw);
-    _log('[decisiv-reply] roster ok contacts=' + contacts.length);
-    return { ok: true, caseId: c.caseId, contacts };
-  } catch (e) {
-    const code = _code(e);
-    _log('[decisiv-reply] roster failed: ' + code);
-    return { ok: false, code };
+  const tried = [];
+  for (const filter of ROSTER_FILTERS) {
+    const r = await _fetchRoster(srUrl, est, filter);
+    tried.push(r);
+    _log('[decisiv-reply] roster ' + filter + ': ' + (r.ok ? 'total=' + r.total : r.code));
+    if (r.ok && r.contacts.length && r.total <= DIRECTORY_SIZE) {
+      return { ok: true, caseId: est, filter, contacts: r.contacts };
+    }
   }
+  let code = 'DECISIV_NO_ROSTER';
+  if (tried.some((r) => r.ok && r.contacts.length)) code = 'DECISIV_ROSTER_TOO_BROAD';
+  else { const err = tried.find((r) => !r.ok); if (err) code = err.code; }
+  _log('[decisiv-reply] roster failed: ' + code);
+  return { ok: false, code };
 }
 
 /** { ok, noteId } | { ok:false, code } — the newest note on the estimate's feed. */
@@ -250,9 +260,9 @@ async function postApproved(srUrl, path, body, token) {
 function _setDepsForTest(d) { _deps = d || {}; }
 
 module.exports = {
-  ROSTER_GROUP_ID, ROSTER_FILTER, REPLY_HOST_RE, MAX_RECIPIENTS, UUID_RE,
-  replyRefFromUrl, groupsPath, rosterPath, activityPath, replyPath,
-  deriveCaseId, normalizeRoster, parseNoteTime, pickLatestNote, buildReplyRequest,
+  ROSTER_GROUP_ID, ROSTER_FILTERS, DIRECTORY_SIZE, REPLY_HOST_RE, MAX_RECIPIENTS, UUID_RE,
+  replyRefFromUrl, rosterPath, activityPath, replyPath,
+  normalizeRoster, parseNoteTime, pickLatestNote, buildReplyRequest,
   loadCaseRoster, latestNoteId, postApproved,
   _setDepsForTest,
 };
