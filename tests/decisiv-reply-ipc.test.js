@@ -63,12 +63,13 @@ const post = (o = {}) => Object.assign({ unit: 'U100', estimateId: EST, srUrl: S
 afterEach(() => { sent.length = 0; gate._setDepsForTest({}); gate.setWindowGetter(() => win); dr._setDepsForTest({}); vi.restoreAllMocks(); });
 
 describe('decisiv:reply-roster', () => {
-  it('a bad URL, a mismatched id or a Volvo host is refused with no network', async () => {
+  it('a bad URL, a mismatched id or a non-Decisiv host is refused with no network', async () => {
     const api = mockApi();
     for (const p of [
       { estimateId: EST, srUrl: 'https://evil.example/fleet/estimates/' + EST },
       { estimateId: '999', srUrl: SR },
-      { estimateId: EST, srUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/' + EST },
+      { estimateId: EST, srUrl: 'https://dtna.my.site.com/fleet/estimates/' + EST },
+      { estimateId: EST, srUrl: 'http://volvopg.asist.decisiv.net/fleet/estimates/' + EST },
       { estimateId: EST },
     ]) {
       expect(await handlers['decisiv:reply-roster']({}, p)).toEqual({ ok: false, code: 'DECISIV_BAD_REF' });
@@ -88,6 +89,15 @@ describe('decisiv:reply-roster', () => {
     ]);
     expect(JSON.stringify(r)).not.toContain('@');
     expect(api.apiGetForCase.mock.calls[0][1]).toContain('estimate_id=' + CASE + '&group_id=-1&filter=subcase_dealer');
+  });
+
+  it('a Volvo (volvopg.asist) estimate URL is accepted like PACCAR', async () => {
+    const api = mockApi();
+    const r = await handlers['decisiv:reply-roster']({}, { estimateId: EST, srUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/' + EST });
+    expect(r.ok).toBe(true);
+    expect(r.caseId).toBe(CASE);
+    expect(r.contacts.length).toBe(2);
+    expect(api.apiGetForCase).toHaveBeenCalledTimes(1);
   });
 
   it('no subcase group -> DECISIV_NO_SUBCASE', async () => {
@@ -116,7 +126,7 @@ describe('decisiv:reply', () => {
     const api = mockApi();
     expect((await handlers['decisiv:reply']({}, post({ recipients: [] }))).code).toBe('DECISIV_NO_RECIPIENTS');
     expect((await handlers['decisiv:reply']({}, post({ recipients: ['x'] }))).code).toBe('DECISIV_NO_RECIPIENTS');
-    expect((await handlers['decisiv:reply']({}, post({ srUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/' + EST }))).code).toBe('DECISIV_BAD_REF');
+    expect((await handlers['decisiv:reply']({}, post({ srUrl: 'https://dtna.my.site.com/fleet/estimates/' + EST }))).code).toBe('DECISIV_BAD_REF');
     expect((await handlers['decisiv:reply']({}, post({ text: '   ' }))).ok).toBe(false);
     expect(api.apiPostForCase).not.toHaveBeenCalled();
   });

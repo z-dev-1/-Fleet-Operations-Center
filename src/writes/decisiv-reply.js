@@ -1,11 +1,11 @@
 'use strict';
 /**
- * writes/decisiv-reply.js — Decisiv (PACCAR) case-notes reply with a recipient
+ * writes/decisiv-reply.js — Decisiv (Volvo/PACCAR) case-notes reply with a recipient
  * picker. Pure builders, the case-roster / latest-note reads, and the one
  * token-checked POST. Staged and approved through src/writes/write-gate.js
  * kind 'decisivReply'; nothing here posts without a live approval token.
  *
- * Endpoints (live DevTools captures on paccarpg.decisiv.net):
+ * Endpoints (live DevTools captures on volvopg.asist.decisiv.net; same API on PACCAR):
  *   roster  GET  /mobilecomm/api/contacts/estimate_contacts_for_group.json
  *                ?estimate_id={CASE_ID}&group_id=-1&filter=subcase_dealer&mobile=false
  *   feed    GET  /mobilecomm/api/estimates/{ESTIMATE_ID}/activity_logs?page=1&per_page=50
@@ -28,8 +28,9 @@
 
 const ROSTER_GROUP_ID = -1;
 const ROSTER_FILTER = 'subcase_dealer';
-// Reply and roster endpoints were captured on PACCAR only. Add a host here to enable more.
-const REPLY_HOST_RE = /^(?:paccarpg|pssmfleet)\.decisiv\.net$/i;
+// Volvo (volvopg.asist) and PACCAR (pssmfleet, paccarpg) run the identical Decisiv
+// API; the reply/roster/notes endpoints were captured on Volvo. Matches decisiv_api.js KNOWN_HOST_RE.
+const REPLY_HOST_RE = /^(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net$/i;
 const MAX_RECIPIENTS = 50;
 const MAX_ROSTER = 200;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -84,7 +84,10 @@ describe('paths and refs', () => {
   it('replyRefFromUrl: PACCAR estimate URLs only', () => {
     expect(dr.replyRefFromUrl(SR + '?tab=notes')).toEqual({ estimateId: EST, srUrl: SR });
     expect(dr.replyRefFromUrl('https://pssmfleet.decisiv.net/fleet/estimates/7')).toEqual({ estimateId: '7', srUrl: 'https://pssmfleet.decisiv.net/fleet/estimates/7' });
-    expect(dr.replyRefFromUrl('https://volvopg.asist.decisiv.net/fleet/estimates/7')).toBe(null);
+    expect(dr.replyRefFromUrl('https://volvopg.asist.decisiv.net/fleet/estimates/7')).toEqual({ estimateId: '7', srUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/7' });
+    expect(dr.replyRefFromUrl('https://evil.example/fleet/estimates/7')).toBe(null);
+    expect(dr.replyRefFromUrl('https://volvopg.asist.decisiv.net.evil.example/fleet/estimates/7')).toBe(null);
+    expect(dr.replyRefFromUrl('http://volvopg.asist.decisiv.net/fleet/estimates/7')).toBe(null);
     expect(dr.replyRefFromUrl('https://dtna.my.site.com/Servicetracker/s/case/500x')).toBe(null);
     expect(dr.replyRefFromUrl('http://paccarpg.decisiv.net/fleet/estimates/7')).toBe(null);
     expect(dr.replyRefFromUrl('')).toBe(null);

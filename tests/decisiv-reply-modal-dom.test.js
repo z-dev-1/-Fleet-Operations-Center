@@ -79,10 +79,15 @@ beforeEach(() => {
 });
 
 describe('Reply to dealer button', () => {
-  it('is hidden without a URL, for a DTNA case and for a Volvo URL; shown for a PACCAR estimate', () => {
+  it('is hidden without a URL, for a DTNA case and for a non-Decisiv host; shown for a PACCAR or Volvo estimate', () => {
     expect(ra.decisivReplyButtonHtml({ equipmentId: 'U1' })).toBe('');
     expect(ra.decisivReplyButtonHtml({ equipmentId: 'U1', dtnaCaseNumber: '123', offsiteShopEventUrl: 'https://dtna.my.site.com/Servicetracker/s/case/500gx000002E4U5AAK/detail' })).toBe('');
-    expect(ra.decisivReplyButtonHtml({ equipmentId: 'U1', offsiteShopEventUrl: 'https://volvopg.asist.decisiv.net/fleet/estimates/' + EST })).toBe('');
+    expect(ra.decisivReplyButtonHtml({ equipmentId: 'U1', offsiteShopEventUrl: 'https://evil.example/fleet/estimates/' + EST })).toBe('');
+    expect(ra.decisivReplyButtonHtml({ equipmentId: 'U1', offsiteShopEventUrl: 'http://volvopg.asist.decisiv.net/fleet/estimates/' + EST })).toBe('');
+    const VOLVO_SR = 'https://volvopg.asist.decisiv.net/fleet/estimates/' + EST;
+    const volvoUnit = { equipmentId: 'U2', offsiteShopEventUrl: VOLVO_SR };
+    expect(ra.decisivReplyButtonHtml(volvoUnit)).toContain('data-ra-decisiv-reply="' + EST + '"');
+    expect(ra.decisivReplyRefOf(volvoUnit)).toEqual({ estimateId: EST, srUrl: VOLVO_SR });
     const html = ra.decisivReplyButtonHtml(UNIT);
     expect(html).toContain('data-ra-decisiv-reply="' + EST + '"');
     expect(html).toContain('Reply to dealer (Decisiv)');

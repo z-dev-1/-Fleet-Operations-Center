@@ -700,12 +700,13 @@ export async function openLifecycleModal(unit, deps) {
   });
 }
 
-// ── Decisiv reply (PACCAR case notes, dealer + Amazon visible) ──────────────
-// Shown only when the unit has a linked PACCAR Decisiv estimate URL. The roster
+// ── Decisiv reply (Volvo/PACCAR case notes, dealer + Amazon visible) ─────────
+// Shown only when the unit has a linked Volvo or PACCAR Decisiv estimate URL
+// (same Decisiv API on all three hosts). The roster
 // is the case roster (main: decisiv:reply-roster). No recipient is checked by
 // default: the user picks every person who gets the reply. Posting goes through
 // window.relayWrites.decisivReply -> write-gate 'decisivReply' -> approval modal.
-const DECISIV_REPLY_HOST_RE = /^(?:paccarpg|pssmfleet)\.decisiv\.net$/i;
+const DECISIV_REPLY_HOST_RE = /^(?:volvopg\.asist|pssmfleet|paccarpg)\.decisiv\.net$/i;
 const DECISIV_REPLY_ERRORS = {
   DECISIV_NO_SUBCASE: 'No dealer case roster found for this estimate; nothing can be sent.',
   DECISIV_CASE_AMBIGUOUS: 'More than one dealer case is linked to this estimate; nothing can be sent.',
